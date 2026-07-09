@@ -1,0 +1,6 @@
+a = "Hello"
+b = {
+	name = "C"
+	age = 44
+}
+c = 27
