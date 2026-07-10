@@ -65,7 +65,8 @@ impl ImageMap {
 async fn amain() {
     let mut layout = ui::Engine::default();
 
-    let font = mq::load_ttf_font("assets/fonts/default.ttf").await.unwrap();
+    let mut font = mq::load_ttf_font("assets/fonts/default.ttf").await.unwrap();
+    font.set_filter(mq::FilterMode::Linear);
 
     let mut images = ImageMap::default();
     let test_image = {
@@ -83,6 +84,9 @@ async fn amain() {
         mq::clear_background(mq::BLACK);
 
         let output = build_ui(&mut layout, &font, test_image, background);
+        if !output.duplicate_ids().is_empty() {
+            eprintln!("duplicate element ids: {:?}", output.duplicate_ids());
+        }
         render_ui_commands(output.commands(), &font, &images);
 
         if mq::is_key_pressed(mq::KeyCode::Escape) {
@@ -385,10 +389,11 @@ fn build_ui<'a>(
                                 .border(2.0, outline)
                                 .corner_radius(10.0),
                             |ui| {
-                                for index in 0..12 {
+                                for index in 0..12u32 {
                                     let label = format!("Row {index:02}");
                                     ui.add_with(
                                         ui::ElementConf::default()
+                                            .id(("scroll-row", index))
                                             .width(ui::LogicalSize::Grow)
                                             .height(ui::LogicalSize::Pixels(26.0))
                                             .padding(ui::Padding::symmetric(10.0, 0.0))

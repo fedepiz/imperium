@@ -14,6 +14,7 @@ use arena::{AVec, Arena};
 pub struct Output<'a> {
     commands: &'a [DrawCommand<'a>],
     is_pointer_over_ui: bool,
+    duplicate_ids: &'a [ElementId],
 }
 
 impl<'a> Output<'a> {
@@ -23,6 +24,15 @@ impl<'a> Output<'a> {
 
     pub fn is_pointer_over_ui(self) -> bool {
         self.is_pointer_over_ui
+    }
+
+    /// Ids declared by more than one element this frame, once per extra
+    /// occurrence. Duplicates corrupt everything keyed on identity — sense,
+    /// hover, scroll state — so treat any entry as a bug in the UI
+    /// declaration. Also fires on the (vanishingly rare) hash collision
+    /// between distinct names.
+    pub fn duplicate_ids(self) -> &'a [ElementId] {
+        self.duplicate_ids
     }
 }
 
@@ -91,8 +101,6 @@ impl Engine {
             };
             build(&mut ui);
         }
-        // TODO: Validate duplicate explicit IDs here and return structured
-        // layout diagnostics alongside the command stream.
 
         measure_text_elements(arena, &mut nodes, text_measurements, &measure_text, false);
         measure_elements(&mut nodes);
@@ -103,7 +111,8 @@ impl Engine {
         nodes[0].bounds = input.bounds;
         arrange_children(0, &mut nodes);
 
-        record_bounds(0, UNCLIPPED, &nodes, current_bounds);
+        let mut duplicate_ids = AVec::new_in(arena);
+        record_bounds(0, UNCLIPPED, &nodes, current_bounds, &mut duplicate_ids);
 
         for state in scroll_states.values_mut() {
             state.live = false;
@@ -171,6 +180,7 @@ impl Engine {
         Output {
             commands: commands.into_slice(),
             is_pointer_over_ui,
+            duplicate_ids: duplicate_ids.into_slice(),
         }
     }
 
@@ -318,6 +328,13 @@ impl ElementId {
         Self(hash.max(1))
     }
 
+    /// A name plus a counter, for elements declared in loops:
+    /// `.id(("row", index))`. Distinct from `named(name)` and from every
+    /// other index.
+    pub fn indexed(name: &str, index: u32) -> Self {
+        Self::named(name).child(index)
+    }
+
     fn child(self, index: u32) -> Self {
         let hash = self
             .0
@@ -330,6 +347,12 @@ impl ElementId {
 impl From<&str> for ElementId {
     fn from(value: &str) -> Self {
         Self::named(value)
+    }
+}
+
+impl From<(&str, u32)> for ElementId {
+    fn from((name, index): (&str, u32)) -> Self {
+        Self::indexed(name, index)
     }
 }
 
@@ -1562,12 +1585,15 @@ fn align_offset(align: Align, available: f32, occupied: f32) -> f32 {
 }
 
 /// Records every element's on-screen bounds for next frame's `Sense` and
-/// wheel targeting, shrunk to what clipping actually leaves visible.
+/// wheel targeting, shrunk to what clipping actually leaves visible. An
+/// insert that displaces a previous entry means two elements share an id;
+/// each extra occurrence is reported as a duplicate.
 fn record_bounds(
     parent: usize,
     clip: Rectangle,
     nodes: &[Element<'_>],
     bounds: &mut BTreeMap<ElementId, Rectangle>,
+    duplicates: &mut AVec<'_, ElementId>,
 ) {
     let mut child = nodes[parent].first_child;
     while child != 0 {
@@ -1575,8 +1601,16 @@ fn record_bounds(
         // Floating elements escape ancestor clipping.
         let clip = if node.floating { UNCLIPPED } else { clip };
         let visible = node.bounds.intersect(clip);
-        bounds.insert(node.id, visible);
-        record_bounds(child, if node.clip { visible } else { clip }, nodes, bounds);
+        if bounds.insert(node.id, visible).is_some() {
+            duplicates.push(node.id);
+        }
+        record_bounds(
+            child,
+            if node.clip { visible } else { clip },
+            nodes,
+            bounds,
+            duplicates,
+        );
         child = node.next_sibling;
     }
 }
@@ -2847,14 +2881,81 @@ mod tests {
             Color::rgba(1.0, 0.0, 0.0, 0.5)
         );
         // Fully faded: no image command at all, background still draws.
-        assert!(!commands
-            .commands
-            .iter()
-            .any(|command| command.id == ElementId::named("gone")
-                && command.kind == DrawKind::Image));
+        assert!(!commands.commands.iter().any(
+            |command| command.id == ElementId::named("gone") && command.kind == DrawKind::Image
+        ));
         assert_eq!(
             command_kind(commands, "gone", DrawKind::Rectangle).color,
             BLUE
         );
+    }
+
+    #[test]
+    fn duplicate_ids_are_reported() {
+        let mut engine = Engine::default();
+        let square = || {
+            ElementConf::default()
+                .id("dup")
+                .width(LogicalSize::Pixels(10.0))
+                .height(LogicalSize::Pixels(10.0))
+        };
+
+        let output = engine.layout(
+            input(100.0, 100.0),
+            |_, _, _| V2::default(),
+            |ui| {
+                ui.add(square());
+                ui.add(square().id("unique"));
+                ui.add(square());
+            },
+        );
+        assert_eq!(output.duplicate_ids(), [ElementId::named("dup")]);
+
+        let clean = engine.layout(
+            input(100.0, 100.0),
+            |_, _, _| V2::default(),
+            |ui| {
+                ui.add(square());
+                ui.add(square().id("unique"));
+            },
+        );
+        assert!(clean.duplicate_ids().is_empty());
+    }
+
+    #[test]
+    fn indexed_ids_are_distinct_and_stable() {
+        assert_ne!(ElementId::indexed("row", 0), ElementId::indexed("row", 1));
+        assert_ne!(ElementId::indexed("row", 0), ElementId::named("row"));
+
+        let mut engine = Engine::default();
+        let build = |ui: &mut Ui<'_, '_>| {
+            for index in 0..3u32 {
+                ui.add(
+                    ElementConf::default()
+                        .id(("row", index))
+                        .width(LogicalSize::Grow)
+                        .height(LogicalSize::Pixels(20.0))
+                        .background(RED),
+                );
+            }
+        };
+
+        let first = engine.layout(input(100.0, 100.0), |_, _, _| V2::default(), build);
+        assert!(first.duplicate_ids().is_empty());
+
+        // Row 1 spans y = 20..40; the id is stable across frames, so it
+        // senses under the pointer on the second frame.
+        let mut probe = input(100.0, 100.0);
+        probe.mouse_pos = V2 { x: 50.0, y: 30.0 };
+        let mut hovered = false;
+        let _ = engine.layout(
+            probe,
+            |_, _, _| V2::default(),
+            |ui| {
+                hovered = ui.hovered(("row", 1));
+                build(ui);
+            },
+        );
+        assert!(hovered);
     }
 }
