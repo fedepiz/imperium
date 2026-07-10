@@ -8,7 +8,6 @@ panel = {
 	x_pos = 0.5
 	y_pos = 0.5
 
-	# 92% of the screen, but never wider than 760 px
 	width = 92%
 	max_width = 760
 
@@ -71,7 +70,7 @@ panel = {
 	list = {
 		id = "demo_rows"
 		width = grow
-		height = 120
+		height = 180
 		scrollable = yes
 		background = dark
 		background_image = widget

@@ -175,8 +175,6 @@ fn build_ui<'a, 'f>(
             y: mouse_y,
         },
         mouse_pressed: mq::is_mouse_button_pressed(mq::MouseButton::Left),
-        mouse_down: mq::is_mouse_button_down(mq::MouseButton::Left),
-        mouse_released: mq::is_mouse_button_released(mq::MouseButton::Left),
         wheel: layout::V2 {
             x: wheel_x,
             y: wheel_y,

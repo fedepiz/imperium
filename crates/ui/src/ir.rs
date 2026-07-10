@@ -97,7 +97,7 @@ pub struct UiNode<'a> {
     pub next_sibling: u32,
     /// Button action id / list binding id / template element id.
     pub id: Text<'a>,
-    /// Label text / button text / panel title.
+    /// Label text / button text.
     pub text: Text<'a>,
     /// Floating containers: position as a fraction of the parent (the
     /// screen for top-level panels). 0 = flush left/top, 0.5 = centered,
@@ -275,6 +275,10 @@ const CONTAINER_PROPS: [&str; 19] = [
     "id",
 ];
 
+// TODO: Lints. Beyond per-key validation, warn about whole-node mistakes
+// that today fail silently on screen — e.g. `scrollable = yes` with a `Fit`
+// scroll axis and no `max_*` bound (never scrolls), a `list` id with no
+// matching data, or a `$VAR` no binding ever provides.
 struct Compiler<'a> {
     arena: &'a Arena,
     nodes: AVec<'a, UiNode<'a>>,
@@ -552,10 +556,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn panel(&mut self, src: &tabula::Node, path: &str, top_level: bool) -> u32 {
-        self.check_keys(src, path, &[&CONTAINER_PROPS, &["title"]], true);
+        self.check_keys(src, path, &[&CONTAINER_PROPS], true);
         let mut node = UiNode {
             kind: NodeKind::Panel,
-            text: self.text(src.get_text("title")),
             // Unlike rows, panels stack vertically unless told otherwise.
             direction: Direction::TopToBottom,
             ..UiNode::default()
@@ -746,7 +749,7 @@ mod tests {
         let arena = Arena::new();
         let module = compile(
             &arena,
-            "panel = { x_pos = 0.1 y_pos = 0.5 title = \"Hi\" border = yes \
+            "panel = { x_pos = 0.1 y_pos = 0.5 border = yes \
              direction = horizontal width = 120 label = \"a\" }",
         );
         assert!(module.errors.is_empty());
@@ -758,7 +761,6 @@ mod tests {
         assert_eq!((panel.x_pos, panel.y_pos), (0.1, 0.5));
         assert_eq!(panel.width, pixels(120.0));
         assert_eq!(panel.direction, Direction::LeftToRight);
-        assert_eq!(panel.text.segs[0].literal, "Hi");
 
         let label = node(&module, panel.first_child);
         assert_eq!(label.kind, NodeKind::Label);
@@ -950,7 +952,7 @@ mod tests {
     #[test]
     fn recovers_around_parse_errors() {
         let arena = Arena::new();
-        let module = compile(&arena, "panel = { title = \"ok\" ");
+        let module = compile(&arena, "panel = { label = \"ok\" ");
         assert!(!module.errors.is_empty());
         assert_eq!(node(&module, module.roots()).kind, NodeKind::Panel);
     }

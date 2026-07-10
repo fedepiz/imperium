@@ -8,8 +8,8 @@
 use arena::{AString, AVec, Arena};
 
 use crate::layout::{
-    self as ui, Align, Anchor, Color, Direction, ElementConf, ElementId, LogicalSize, Padding,
-    TextConf, V2,
+    self as ui, Align, Color, Direction, ElementConf, ElementId, LogicalSize, Padding, TextConf,
+    V2,
 };
 use crate::ir::{LabelStyle, NodeKind, Row, Size, SizeKind, Text, UiData, UiModule, UiNode};
 
@@ -29,7 +29,6 @@ pub struct Style {
     pub button_background: Color,
     pub button_hover: Color,
     pub tooltip_background: Color,
-    pub title_size: u16,
     pub heading_size: u16,
     pub section_size: u16,
     pub text_size: u16,
@@ -50,7 +49,6 @@ impl Default for Style {
             button_background: Color::rgba(0.08, 0.68, 0.72, 1.0),
             button_hover: Color::rgba(0.16, 0.86, 0.90, 1.0),
             tooltip_background: Color::rgba(0.02, 0.03, 0.05, 0.95),
-            title_size: 20,
             heading_size: 28,
             section_size: 13,
             text_size: 16,
@@ -247,7 +245,9 @@ fn tooltip(ctx: &Ctx<'_>, ui: &mut ui::Ui<'_, '_>, text: Text<'_>) {
     let text = resolve(ctx, text);
     ui.add_with(
         ElementConf::default()
-            .floating(Anchor::TopCenter, Anchor::BottomCenter)
+            // Bottom-center of the bubble pinned above the element's
+            // top-center.
+            .floating_at(V2 { x: 0.5, y: 0.0 }, V2 { x: 0.5, y: 1.0 })
             .float_offset(0.0, -8.0)
             .z_index(10)
             .padding(Padding::symmetric(10.0, 6.0))
@@ -285,18 +285,9 @@ fn panel(ctx: &mut Ctx<'_>, module: &UiModule<'_>, ui: &mut ui::Ui<'_, '_>, node
     if node.scrollable || !node.tooltip.is_empty() {
         let id = element_id(ctx, &node, "__script_panel");
         conf = conf.id(id);
-        hovered = ui.hovered(id);
+        hovered = ui.sense(id).hovered;
     }
     ui.add_with(conf, |ui| {
-        if !node.text.is_empty() {
-            let title = resolve(ctx, node.text);
-            ui.add(ElementConf::text(
-                TextConf::default()
-                    .text(title)
-                    .size(style.title_size)
-                    .color(style.ink),
-            ));
-        }
         walk(ctx, module, ui, node.first_child);
         if hovered && !node.tooltip.is_empty() {
             tooltip(ctx, ui, node.tooltip);
@@ -430,7 +421,7 @@ fn list(ctx: &mut Ctx<'_>, module: &UiModule<'_>, ui: &mut ui::Ui<'_, '_>, node:
     // Stable id keeps the engine's scroll state across frames.
     let id = element_id(ctx, &node, "__script_list");
     let conf = container_conf(ctx, &list_node, None).id(id);
-    let hovered = ui.hovered(id);
+    let hovered = ui.sense(id).hovered;
     let rows = ctx
         .data
         .lists

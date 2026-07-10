@@ -184,9 +184,6 @@ impl Engine {
         }
     }
 
-    pub fn clear_text_cache(&mut self) {
-        self.text_measurements.clear();
-    }
 }
 
 /// Persistent scroll state for one clipping element, carried across frames
@@ -237,14 +234,11 @@ pub struct Input {
     pub mouse_pos: V2,
     /// The primary button went down this frame.
     pub mouse_pressed: bool,
-    /// The primary button is currently held.
-    pub mouse_down: bool,
-    /// The primary button came up this frame.
-    pub mouse_released: bool,
     /// Scroll delta for this frame; positive `y` (wheel up) scrolls back
     /// toward the start of the content.
     pub wheel: V2,
-    // TODO: Add drag, touch, and pointer-capture state.
+    // TODO: Add held/released buttons, drag, touch, and pointer-capture
+    // state when something consumes them.
 }
 
 #[derive(Clone, Copy, PartialEq, PartialOrd, Default, Debug)]
@@ -419,36 +413,6 @@ pub enum Align {
     Start,
     Center,
     End,
-}
-
-/// A point on a rectangle, for pinning floating elements.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum Anchor {
-    #[default]
-    TopLeft,
-    TopCenter,
-    TopRight,
-    CenterLeft,
-    Center,
-    CenterRight,
-    BottomLeft,
-    BottomCenter,
-    BottomRight,
-}
-
-fn anchor_factors(anchor: Anchor) -> V2 {
-    let (x, y) = match anchor {
-        Anchor::TopLeft => (0.0, 0.0),
-        Anchor::TopCenter => (0.5, 0.0),
-        Anchor::TopRight => (1.0, 0.0),
-        Anchor::CenterLeft => (0.0, 0.5),
-        Anchor::Center => (0.5, 0.5),
-        Anchor::CenterRight => (1.0, 0.5),
-        Anchor::BottomLeft => (0.0, 1.0),
-        Anchor::BottomCenter => (0.5, 1.0),
-        Anchor::BottomRight => (1.0, 1.0),
-    };
-    V2 { x, y }
 }
 
 #[derive(Clone, Copy, PartialEq, PartialOrd, Default, Debug)]
@@ -658,12 +622,6 @@ impl<'a> ElementConf<'a> {
         self
     }
 
-    /// Clips children and text to this element's bounds.
-    pub fn clip(mut self, clip: bool) -> Self {
-        self.clip = clip;
-        self
-    }
-
     /// Makes this element a scroll region on the given axes; scrolling
     /// implies clipping. Give the element a non-`Fit` size on a scrolling
     /// axis — `Fit` grows to the content, leaving nothing to scroll.
@@ -674,21 +632,17 @@ impl<'a> ElementConf<'a> {
         self
     }
 
-    /// Removes the element from its parent's flow and pins `self_anchor` on
-    /// this element to `parent_anchor` on the parent's final bounds instead.
-    /// Floating elements take no flow space, escape ancestor clipping, and
-    /// draw above the normal tree ordered by `z_index`. `Grow` and `Parent`
-    /// sizes resolve against the parent's outer bounds, so a `Grow` float
-    /// declared at the top level covers the whole viewport (a modal).
-    pub fn floating(self, parent_anchor: Anchor, self_anchor: Anchor) -> Self {
-        self.floating_at(anchor_factors(parent_anchor), anchor_factors(self_anchor))
-    }
-
-    /// [`floating`](Self::floating) with anchors as fractional factors of
-    /// each rectangle instead of the nine named points: `{0.5, 0.5}` is the
-    /// center, `{1.0, 0.0}` the top-right. Pinning the same factor on both
-    /// rectangles gives CSS background-position semantics — 0.0 flush left,
-    /// 0.5 centered, 1.0 flush right, 0.1 inset by 10% of the slack.
+    /// Removes the element from its parent's flow and pins the point at
+    /// `self_factors` on this element to the point at `parent_factors` on
+    /// the parent's final bounds instead: `{0.0, 0.0}` is the top-left of a
+    /// rectangle, `{0.5, 0.5}` the center, `{1.0, 0.0}` the top-right.
+    /// Pinning the same factor on both rectangles gives CSS
+    /// background-position semantics — 0.0 flush left, 0.5 centered, 1.0
+    /// flush right, 0.1 inset by 10% of the slack. Floating elements take
+    /// no flow space, escape ancestor clipping, and draw above the normal
+    /// tree ordered by `z_index`. `Grow` and `Parent` sizes resolve against
+    /// the parent's outer bounds, so a `Grow` float declared at the top
+    /// level covers the whole viewport (a modal).
     pub fn floating_at(mut self, parent_factors: V2, self_factors: V2) -> Self {
         self.floating = true;
         self.anchor_parent = parent_factors;
@@ -847,9 +801,6 @@ impl<'arena, 'frame> Ui<'arena, 'frame> {
 
     /// Whether the pointer was over this element last frame. Shorthand for
     /// `sense(id).hovered`.
-    pub fn hovered(&self, id: impl Into<ElementId>) -> bool {
-        self.sense(id).hovered
-    }
 
     /// The element's interaction state, judged against last frame's clipped
     /// bounds (one frame of latency). Queryable before the element is
@@ -1149,10 +1100,6 @@ impl TextCache {
         let previous = self.generation;
         self.generation = self.generation.wrapping_add(1);
         self.entries.retain(|_, entry| entry.generation == previous);
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
     }
 
     fn measure<M, T>(
@@ -2346,7 +2293,7 @@ mod tests {
     }
 
     #[test]
-    fn text_measurements_are_cached_until_cleared() {
+    fn text_measurements_are_cached_generationally() {
         let mut engine = Engine::default();
         let calls = Cell::new(0usize);
         let measure = |text: &str, _: FontId, _: u16| {
@@ -2372,12 +2319,15 @@ mod tests {
         let _ = engine.layout(input(100.0, 100.0), &measure, build);
         let first_frame_calls = calls.get();
         assert!(first_frame_calls > 0);
+        // A hit every frame keeps the entries alive: no re-measuring.
         let _ = engine.layout(input(100.0, 100.0), &measure, build);
         assert_eq!(calls.get(), first_frame_calls);
 
-        engine.clear_text_cache();
+        // One frame without the text evicts its entries; declaring it
+        // again measures from scratch.
+        let _ = engine.layout(input(100.0, 100.0), &measure, |_| {});
         let _ = engine.layout(input(100.0, 100.0), &measure, build);
-        assert!(calls.get() > first_frame_calls);
+        assert_eq!(calls.get(), first_frame_calls * 2);
     }
 
     #[test]
@@ -2625,7 +2575,7 @@ mod tests {
                         ui.add(
                             ElementConf::default()
                                 .id("float")
-                                .floating(Anchor::BottomRight, Anchor::TopLeft)
+                                .floating_at(V2 { x: 1.0, y: 1.0 }, V2 { x: 0.0, y: 0.0 })
                                 .float_offset(5.0, 7.0)
                                 .width(LogicalSize::Pixels(30.0))
                                 .height(LogicalSize::Pixels(20.0))
@@ -2674,7 +2624,7 @@ mod tests {
                 ui.add(
                     ElementConf::default()
                         .id("high")
-                        .floating(Anchor::TopLeft, Anchor::TopLeft)
+                        .floating_at(V2 { x: 0.0, y: 0.0 }, V2 { x: 0.0, y: 0.0 })
                         .z_index(2)
                         .width(LogicalSize::Pixels(10.0))
                         .height(LogicalSize::Pixels(10.0))
@@ -2683,7 +2633,7 @@ mod tests {
                 ui.add(
                     ElementConf::default()
                         .id("low")
-                        .floating(Anchor::TopLeft, Anchor::TopLeft)
+                        .floating_at(V2 { x: 0.0, y: 0.0 }, V2 { x: 0.0, y: 0.0 })
                         .z_index(1)
                         .width(LogicalSize::Pixels(10.0))
                         .height(LogicalSize::Pixels(10.0))
@@ -2728,7 +2678,7 @@ mod tests {
                     ui.add(
                         ElementConf::default()
                             .id("float")
-                            .floating(Anchor::BottomLeft, Anchor::TopLeft)
+                            .floating_at(V2 { x: 0.0, y: 1.0 }, V2 { x: 0.0, y: 0.0 })
                             .float_offset(10.0, 30.0)
                             .width(LogicalSize::Pixels(40.0))
                             .height(LogicalSize::Pixels(20.0))
@@ -2956,7 +2906,7 @@ mod tests {
             probe,
             |_, _, _| V2::default(),
             |ui| {
-                hovered = ui.hovered(("row", 1));
+                hovered = ui.sense(("row", 1)).hovered;
                 build(ui);
             },
         );
