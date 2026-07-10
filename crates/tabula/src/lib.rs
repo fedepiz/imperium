@@ -21,7 +21,7 @@
 //! Parsing never fails: [`parse`] always returns a [`ParseResult`] holding
 //! whatever tree could be recovered plus every error encountered.
 
-use arena::{AVec, Arena};
+use arena::{AString, AVec, Arena};
 
 /// What a node is. Zero value = `Atom` (with an empty `value`, that is
 /// the ZII "nothing" node).
@@ -196,8 +196,6 @@ impl<'a> ParseResult<'a> {
 }
 
 const MAX_DEPTH: u32 = 500;
-/// Past this, the source is junk; stop accumulating and finish.
-const MAX_ERRORS: usize = 100;
 
 /// Parse a whole source file. Never fails; see [`ParseResult`].
 ///
@@ -280,9 +278,6 @@ impl<'a, 's> Parser<'a, 's> {
 
     fn push_error(&mut self, error: ParseError) {
         self.errors.push(error);
-        if self.errors.len() >= MAX_ERRORS {
-            self.pos = self.text.len();
-        }
     }
 
     fn record(&mut self, kind: ErrorKind) {
@@ -393,11 +388,13 @@ impl<'a, 's> Parser<'a, 's> {
             }
             Some(b'"') => {
                 self.pos += 1;
-                let start = self.pos;
+                let mut chunk_start = self.pos;
+                let mut text = AString::new_in(self.arena);
                 let bytes = self.text.as_bytes();
                 while let Some(&b) = bytes.get(self.pos) {
                     if b == b'"' {
-                        let text = self.intern(&self.text[start..self.pos]);
+                        text.push_str(&self.text[chunk_start..self.pos]);
+                        let text = text.into_str();
                         self.pos += 1;
                         // Quoted atoms are always textual, never numbers.
                         return Ok(Node {
@@ -407,6 +404,13 @@ impl<'a, 's> Parser<'a, 's> {
                             },
                             ..Node::default()
                         });
+                    }
+                    if b == b'\\' && matches!(bytes.get(self.pos + 1), Some(b'"') | Some(b'\\')) {
+                        text.push_str(&self.text[chunk_start..self.pos]);
+                        text.push(bytes[self.pos + 1] as char);
+                        self.pos += 2;
+                        chunk_start = self.pos;
+                        continue;
                     }
                     self.pos += 1;
                 }
@@ -491,6 +495,18 @@ mod tests {
             (items[1].key, items[1].kind, items[1].value.text),
             ("", Kind::Atom, "bare string")
         );
+    }
+
+    #[test]
+    fn quoted_string_escapes() {
+        let arena = Arena::new();
+        let items = parse_one(
+            &arena,
+            r#"name = "a \"quoted\" value with \\ and \n" "escaped \"key\"" = yes"#,
+        );
+        assert_eq!(items[0].value.text, "a \"quoted\" value with \\ and \\n");
+        assert_eq!(items[1].key, "escaped \"key\"");
+        assert_eq!(items[1].value.text, "yes");
     }
 
     #[test]
