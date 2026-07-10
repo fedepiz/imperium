@@ -1,0 +1,966 @@
+//! Compiled UI descriptions: tabula source → flat IR, once per (re)load.
+//!
+//! The layout engine rebuilds every frame, so whatever describes the UI is
+//! walked every frame too. The raw tabula tree is the wrong shape for that
+//! (string key matching, `yes`/`no` atoms, number re-parsing), so [`compile`]
+//! translates it once into [`UiNode`]s: a flat, arena-resident array of fat
+//! kind-tagged structs with every field pre-parsed and every `$VAR` string
+//! pre-tokenized. The per-frame walk lives in [`crate::run`].
+//!
+//! The IR also defines the data the UI binds against ([`UiData`]): the
+//! caller fetches rows from wherever it likes and hands them over in this
+//! format, keeping the UI isolated from the rest of the game.
+
+use arena::{AVec, Arena};
+
+use crate::layout::{Align, Direction, ImageId};
+
+/// What a [`UiNode`] is. Zero value = `None`, the reserved null node.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum NodeKind {
+    #[default]
+    None,
+    /// Also `row` in the script: a row is a panel compiled with container
+    /// defaults (horizontal, transparent, no padding, grow width).
+    Panel,
+    Label,
+    Button,
+    Image,
+    List,
+    /// The stamped-out subtree of a `List`; reached only through
+    /// [`UiNode::template`], never through the sibling chain.
+    Template,
+}
+
+/// Which of the style's text roles a label renders with. The script picks
+/// one by widget key (`label`, `heading`, `section`); sizes and colors live
+/// in the style, not the script. Zero value = `Body`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LabelStyle {
+    #[default]
+    Body,
+    Heading,
+    Section,
+}
+
+/// How a script size is interpreted. Zero value = `Fit`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SizeKind {
+    /// Unset: fit content.
+    #[default]
+    Fit,
+    /// `width = 80`: fixed pixels in `value`.
+    Pixels,
+    /// `width = grow` / `width = "grow 2"`: share of the leftover space,
+    /// weight in `value`.
+    Grow,
+    /// `width = "92%"`: fraction of the parent in `value` (0.92).
+    Fraction,
+}
+
+/// A pre-parsed script size (`fit`, pixels, `grow N`, `N%`). Zero = fit.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Size {
+    pub kind: SizeKind,
+    pub value: f32,
+}
+
+/// One piece of a pre-tokenized string: either a plain literal (`var` is
+/// empty) or a `$VAR` reference, in which case `literal` keeps the source
+/// spelling (`"$NAME"`) as the fallback when the binding is missing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Seg<'a> {
+    pub literal: &'a str,
+    pub var: &'a str,
+}
+
+/// A string with its `$VAR` references found at compile time, so per-frame
+/// interpolation never rescans. Zero value = no text.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Text<'a> {
+    pub segs: &'a [Seg<'a>],
+}
+
+impl<'a> Text<'a> {
+    pub fn is_empty(&self) -> bool {
+        self.segs.is_empty()
+    }
+}
+
+/// One fat struct covers every widget; unused fields stay at their zero
+/// value. Children are index links into the module's flat node array, with
+/// `0` (the reserved null node) meaning "none".
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UiNode<'a> {
+    pub kind: NodeKind,
+    pub first_child: u32,
+    pub next_sibling: u32,
+    /// Button action id / list binding id / template element id.
+    pub id: Text<'a>,
+    /// Label text / button text / panel title.
+    pub text: Text<'a>,
+    /// Floating containers: position as a fraction of the parent (the
+    /// screen for top-level panels). 0 = flush left/top, 0.5 = centered,
+    /// 1 = flush right/bottom.
+    pub x_pos: f32,
+    pub y_pos: f32,
+    /// `floating = yes` lifts the element out of its parent's flow and
+    /// pins it at `x_pos`/`y_pos`. Always set for top-level panels.
+    pub floating: bool,
+    pub width: Size,
+    pub height: Size,
+    /// `0.0` = unconstrained.
+    pub min_width: f32,
+    pub max_width: f32,
+    pub min_height: f32,
+    pub max_height: f32,
+    pub border: bool,
+    pub scrollable: bool,
+    pub direction: Direction,
+    /// Both axes come from the single `align` key; zero = start.
+    pub align_x: Align,
+    pub align_y: Align,
+    /// Style overrides; the `_set` flags distinguish "unset, use the style"
+    /// from an explicit zero.
+    pub padding: f32,
+    pub padding_set: bool,
+    pub gap: f32,
+    pub gap_set: bool,
+    /// Palette name ("accent", "none", ...), interpolatable so rows can
+    /// bind it. Empty = the widget's default.
+    pub background: Text<'a>,
+    /// Labels: which style text role to render with.
+    pub label_style: LabelStyle,
+    /// Labels: palette name for the ink. Empty = the role's default.
+    pub color: Text<'a>,
+    /// Labels: font size override, `0` = the role's default.
+    pub text_size: u16,
+    /// Labels: wrap to the element width.
+    pub wrap: bool,
+    /// Image widgets: the image key resolved through [`UiData::images`].
+    /// Containers: background image key (tiling is the renderer's call).
+    pub image: Text<'a>,
+    /// Image widgets: palette name to tint with. Empty = untinted.
+    pub tint: Text<'a>,
+    /// Image widgets: `0.0` = fully opaque.
+    pub fade: f32,
+    /// Hover tooltip text; empty = none.
+    pub tooltip: Text<'a>,
+    /// `List` only: index of the `Template` node, `0` = none.
+    pub template: u32,
+}
+
+/// A compiled UI description plus everything wrong with it. All slices live
+/// in the arena given to [`compile`]; reload = drop that arena, re-compile.
+#[derive(Clone, Copy, Default)]
+pub struct UiModule<'a> {
+    /// Flat node array. Node 0 is the null node; the top-level panels hang
+    /// off its `first_child` chain.
+    pub nodes: &'a [UiNode<'a>],
+    /// Non-fatal validation findings (unknown keys, missing `=`, ...), as
+    /// key paths — tabula nodes carry no source positions.
+    pub warnings: &'a [&'a str],
+    pub errors: &'a [tabula::ParseError],
+}
+
+impl<'a> UiModule<'a> {
+    /// Index of the first top-level panel, `0` if there are none.
+    pub fn roots(&self) -> u32 {
+        self.nodes.first().map_or(0, |null| null.first_child)
+    }
+}
+
+/// One `$VAR` binding: `key` is the variable name without the `$`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Binding<'a> {
+    pub key: &'a str,
+    pub value: &'a str,
+}
+
+/// The bindings one stamped-out template instance interpolates from.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Row<'a> {
+    pub bindings: &'a [Binding<'a>],
+}
+
+/// The rows behind one `list`, matched to it by `id`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ListData<'a> {
+    pub id: &'a str,
+    pub rows: &'a [Row<'a>],
+}
+
+/// One image the script can reference by key (`image = { id = soldier }`),
+/// with its renderer handle and natural size.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImageData<'a> {
+    pub key: &'a str,
+    pub image: ImageId,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Everything the UI binds against this frame. The zero value is valid:
+/// every list stamps zero rows, every image reference resolves to nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UiData<'a> {
+    pub lists: &'a [ListData<'a>],
+    pub images: &'a [ImageData<'a>],
+}
+
+/// Parse and compile a UI description. Never fails: whatever could be
+/// recovered is compiled, with the rest reported in `errors`/`warnings`.
+/// The tabula tree lives in a scratch arena that dies here; only the IR
+/// (with its strings copied over) lands in `arena`.
+pub fn compile<'a>(arena: &'a Arena, source: &str) -> UiModule<'a> {
+    let scratch = Arena::new();
+    let parsed = tabula::parse(&scratch, source);
+
+    let mut compiler = Compiler {
+        arena,
+        nodes: AVec::new_in(arena),
+        warnings: AVec::new_in(arena),
+    };
+    compiler.nodes.push(UiNode::default()); // node 0: the null node
+
+    let mut last = 0usize;
+    for (index, root) in parsed.roots.iter().enumerate() {
+        let path = format!("panel #{}", index + 1);
+        if root.key != "panel" || !root.is_block() {
+            compiler.warn_misplaced(root, "top level");
+            continue;
+        }
+        let node = compiler.panel(root, &path, true);
+        if last == 0 {
+            compiler.nodes[0].first_child = node;
+        } else {
+            compiler.nodes[last].next_sibling = node;
+        }
+        last = node as usize;
+    }
+
+    UiModule {
+        nodes: compiler.nodes.into_slice(),
+        warnings: compiler.warnings.into_slice(),
+        errors: arena.alloc_slice_copy(parsed.errors),
+    }
+}
+
+/// Keys that declare child widgets rather than properties, allowed wherever
+/// widgets can nest.
+const ELEMENT_KEYS: [&str; 9] = [
+    "panel", "row", "box", "label", "heading", "section", "button", "image", "list",
+];
+
+/// Properties every container (panel, row, box, list) understands.
+const CONTAINER_PROPS: [&str; 19] = [
+    "width",
+    "height",
+    "min_width",
+    "max_width",
+    "min_height",
+    "max_height",
+    "direction",
+    "align",
+    "padding",
+    "gap",
+    "background",
+    "background_image",
+    "border",
+    "scrollable",
+    "tooltip",
+    "floating",
+    "x_pos",
+    "y_pos",
+    "id",
+];
+
+struct Compiler<'a> {
+    arena: &'a Arena,
+    nodes: AVec<'a, UiNode<'a>>,
+    warnings: AVec<'a, &'a str>,
+}
+
+impl<'a> Compiler<'a> {
+    fn push(&mut self, node: UiNode<'a>) -> u32 {
+        let index = self.nodes.len() as u32;
+        self.nodes.push(node);
+        index
+    }
+
+    fn warn(&mut self, message: &str) {
+        self.warnings.push(self.arena.alloc_str(message));
+    }
+
+    fn warn_misplaced(&mut self, node: &tabula::Node, path: &str) {
+        if node.key.is_empty() {
+            self.warn(&format!(
+                "{path}: bare value or anonymous block — missing '='?"
+            ));
+        } else {
+            self.warn(&format!("{path}: unknown key '{}'", node.key));
+        }
+    }
+
+    /// Warns about every child key that is in none of the `properties`
+    /// groups nor (when `elements` is set) a widget key.
+    fn check_keys(
+        &mut self,
+        src: &tabula::Node,
+        path: &str,
+        properties: &[&[&str]],
+        elements: bool,
+    ) {
+        for child in src.children {
+            let known = properties.iter().any(|group| group.contains(&child.key))
+                || (elements && ELEMENT_KEYS.contains(&child.key));
+            if !known {
+                self.warn_misplaced(child, path);
+            }
+        }
+    }
+
+    /// Tokenizes a source string into literal and `$VAR` segments, copying
+    /// everything into the module arena (the source dies with the scratch
+    /// arena).
+    fn text(&mut self, source: Option<&str>) -> Text<'a> {
+        let source = match source {
+            Some(source) if !source.is_empty() => source,
+            _ => return Text::default(),
+        };
+        let mut segs = AVec::new_in(self.arena);
+        let bytes = source.as_bytes();
+        let (mut pos, mut literal_start) = (0, 0);
+        while pos < bytes.len() {
+            if bytes[pos] == b'$' {
+                let name_start = pos + 1;
+                let mut name_end = name_start;
+                while name_end < bytes.len()
+                    && (bytes[name_end].is_ascii_alphanumeric() || bytes[name_end] == b'_')
+                {
+                    name_end += 1;
+                }
+                if name_end > name_start {
+                    if literal_start < pos {
+                        segs.push(Seg {
+                            literal: self.arena.alloc_str(&source[literal_start..pos]),
+                            var: "",
+                        });
+                    }
+                    segs.push(Seg {
+                        literal: self.arena.alloc_str(&source[pos..name_end]),
+                        var: self.arena.alloc_str(&source[name_start..name_end]),
+                    });
+                    pos = name_end;
+                    literal_start = name_end;
+                    continue;
+                }
+            }
+            pos += 1;
+        }
+        if literal_start < bytes.len() {
+            segs.push(Seg {
+                literal: self.arena.alloc_str(&source[literal_start..]),
+                var: "",
+            });
+        }
+        Text {
+            segs: segs.into_slice(),
+        }
+    }
+
+    fn yes(&mut self, src: &tabula::Node, key: &str, path: &str) -> bool {
+        match src.get_text(key) {
+            None => false,
+            Some("yes") => true,
+            Some("no") => false,
+            Some(other) => {
+                self.warn(&format!("{path}: '{key} = {other}' is not yes/no"));
+                false
+            }
+        }
+    }
+
+    fn direction(&mut self, src: &tabula::Node, path: &str) -> Direction {
+        match src.get_text("direction") {
+            None | Some("vertical") => Direction::TopToBottom,
+            Some("horizontal") => Direction::LeftToRight,
+            Some(other) => {
+                self.warn(&format!(
+                    "{path}: 'direction = {other}' is not vertical/horizontal"
+                ));
+                Direction::TopToBottom
+            }
+        }
+    }
+
+    /// Parses one size property: a number (pixels), `fit`, `grow`,
+    /// `grow:N` or `N%`. Absent → the caller's default stands.
+    fn size(&mut self, src: &tabula::Node, key: &str, path: &str) -> Option<Size> {
+        let value = src.get_value(key)?;
+        if value.is_number {
+            return Some(Size {
+                kind: SizeKind::Pixels,
+                value: value.number,
+            });
+        }
+        let text = value.text.trim();
+        let size = if text == "fit" {
+            Size::default()
+        } else if text == "grow" {
+            Size {
+                kind: SizeKind::Grow,
+                value: 1.0,
+            }
+        } else if let Some(weight) = text.strip_prefix("grow:") {
+            match weight.trim().parse::<f32>() {
+                Ok(weight) => Size {
+                    kind: SizeKind::Grow,
+                    value: weight,
+                },
+                Err(_) => {
+                    self.warn(&format!("{path}: '{key} = {text}' has a bad grow weight"));
+                    return None;
+                }
+            }
+        } else if let Some(percent) = text.strip_suffix('%') {
+            match percent.trim().parse::<f32>() {
+                Ok(percent) => Size {
+                    kind: SizeKind::Fraction,
+                    value: percent / 100.0,
+                },
+                Err(_) => {
+                    self.warn(&format!("{path}: '{key} = {text}' has a bad percentage"));
+                    return None;
+                }
+            }
+        } else if let Ok(pixels) = text.parse::<f32>() {
+            // Quoted numbers skip tabula's number parsing; accept them.
+            Size {
+                kind: SizeKind::Pixels,
+                value: pixels,
+            }
+        } else {
+            self.warn(&format!(
+                "{path}: '{key} = {text}' is not a number, fit, grow, grow:N or N%"
+            ));
+            return None;
+        };
+        Some(size)
+    }
+
+    /// Reads the shared container properties into `node`, leaving whatever
+    /// the caller pre-filled (the per-kind defaults) alone for absent keys.
+    fn container(&mut self, src: &tabula::Node, path: &str, node: &mut UiNode<'a>) {
+        if let Some(size) = self.size(src, "width", path) {
+            node.width = size;
+        }
+        if let Some(size) = self.size(src, "height", path) {
+            node.height = size;
+        }
+        node.min_width = src.get_number("min_width").unwrap_or(node.min_width);
+        node.max_width = src.get_number("max_width").unwrap_or(node.max_width);
+        node.min_height = src.get_number("min_height").unwrap_or(node.min_height);
+        node.max_height = src.get_number("max_height").unwrap_or(node.max_height);
+        if src.get("direction").is_some() {
+            node.direction = self.direction(src, path);
+        }
+        match src.get_text("align") {
+            None => {}
+            Some("start") => (node.align_x, node.align_y) = (Align::Start, Align::Start),
+            Some("center") => (node.align_x, node.align_y) = (Align::Center, Align::Center),
+            Some("end") => (node.align_x, node.align_y) = (Align::End, Align::End),
+            Some(other) => self.warn(&format!(
+                "{path}: 'align = {other}' is not start/center/end"
+            )),
+        }
+        if let Some(padding) = src.get_number("padding") {
+            node.padding = padding;
+            node.padding_set = true;
+        }
+        if let Some(gap) = src.get_number("gap") {
+            node.gap = gap;
+            node.gap_set = true;
+        }
+        if src.get("background").is_some() {
+            node.background = self.text(src.get_text("background"));
+        }
+        node.image = self.text(src.get_text("background_image"));
+        if src.get("border").is_some() {
+            node.border = self.yes(src, "border", path);
+        }
+        if src.get("scrollable").is_some() {
+            node.scrollable = self.yes(src, "scrollable", path);
+        }
+        node.tooltip = self.text(src.get_text("tooltip"));
+        if src.get("floating").is_some() {
+            node.floating = self.yes(src, "floating", path);
+        }
+        node.x_pos = src.get_number("x_pos").unwrap_or(node.x_pos);
+        node.y_pos = src.get_number("y_pos").unwrap_or(node.y_pos);
+        node.id = self.text(src.get_text("id"));
+    }
+
+    /// Compiles the widget children of a block into a sibling chain,
+    /// returning the first index. Property keys are skipped silently — the
+    /// caller's `check_keys` pass already vetted them.
+    fn elements(&mut self, src: &tabula::Node, path: &str) -> u32 {
+        let (mut first, mut last) = (0u32, 0u32);
+        for child in src.children {
+            let index = match child.key {
+                "panel" => self.block(child, path, "panel", Self::nested_panel),
+                "row" => self.block(child, path, "row", Self::row),
+                "box" => self.block(child, path, "box", Self::boxed),
+                "label" => self.label(child, path, LabelStyle::Body),
+                "heading" => self.label(child, path, LabelStyle::Heading),
+                "section" => self.label(child, path, LabelStyle::Section),
+                "button" => self.block(child, path, "button", Self::button),
+                "image" => self.block(child, path, "image", Self::image),
+                "list" => self.block(child, path, "list", Self::list),
+                _ => 0,
+            };
+            if index == 0 {
+                continue;
+            }
+            if first == 0 {
+                first = index;
+            } else {
+                self.nodes[last as usize].next_sibling = index;
+            }
+            last = index;
+        }
+        first
+    }
+
+    /// Runs a widget compiler on `src` if it is a block, else warns.
+    fn block(
+        &mut self,
+        src: &tabula::Node,
+        path: &str,
+        name: &str,
+        compile: fn(&mut Self, &tabula::Node, &str) -> u32,
+    ) -> u32 {
+        if !src.is_block() {
+            self.warn(&format!("{path}: '{name}' must be a {{ ... }} block"));
+            return 0;
+        }
+        compile(self, src, &format!("{path} > {name}"))
+    }
+
+    fn nested_panel(&mut self, src: &tabula::Node, path: &str) -> u32 {
+        self.panel(src, path, false)
+    }
+
+    fn panel(&mut self, src: &tabula::Node, path: &str, top_level: bool) -> u32 {
+        self.check_keys(src, path, &[&CONTAINER_PROPS, &["title"]], true);
+        let mut node = UiNode {
+            kind: NodeKind::Panel,
+            text: self.text(src.get_text("title")),
+            // Unlike rows, panels stack vertically unless told otherwise.
+            direction: Direction::TopToBottom,
+            ..UiNode::default()
+        };
+        self.container(src, path, &mut node);
+        // Top-level panels have nothing to be in flow with: always floating.
+        node.floating |= top_level;
+        let index = self.push(node);
+        self.nodes[index as usize].first_child = self.elements(src, path);
+        index
+    }
+
+    /// A `row` is a panel with container defaults: horizontal, transparent,
+    /// no padding, grow width. Pure compile-time sugar.
+    fn row(&mut self, src: &tabula::Node, path: &str) -> u32 {
+        self.check_keys(src, path, &[&CONTAINER_PROPS], true);
+        let mut node = UiNode {
+            kind: NodeKind::Panel,
+            direction: Direction::LeftToRight,
+            width: Size {
+                kind: SizeKind::Grow,
+                value: 1.0,
+            },
+            background: self.text(Some("none")),
+            padding_set: true, // padding stays 0.0
+            ..UiNode::default()
+        };
+        self.container(src, path, &mut node);
+        let index = self.push(node);
+        self.nodes[index as usize].first_child = self.elements(src, path);
+        index
+    }
+
+    /// A `box` is a pre-styled cell: it fills its slot, centers its
+    /// content and gets the accent background. Pure compile-time sugar.
+    fn boxed(&mut self, src: &tabula::Node, path: &str) -> u32 {
+        self.check_keys(src, path, &[&CONTAINER_PROPS], true);
+        let mut node = UiNode {
+            kind: NodeKind::Panel,
+            direction: Direction::TopToBottom,
+            width: Size {
+                kind: SizeKind::Grow,
+                value: 1.0,
+            },
+            height: Size {
+                kind: SizeKind::Grow,
+                value: 1.0,
+            },
+            align_x: Align::Center,
+            align_y: Align::Center,
+            background: self.text(Some("accent")),
+            ..UiNode::default()
+        };
+        self.container(src, path, &mut node);
+        let index = self.push(node);
+        self.nodes[index as usize].first_child = self.elements(src, path);
+        index
+    }
+
+    fn label(&mut self, src: &tabula::Node, path: &str, style: LabelStyle) -> u32 {
+        let node = if src.is_block() {
+            let path = &format!("{path} > label");
+            self.check_keys(
+                src,
+                path,
+                &[&["text", "size", "color", "wrap", "width", "height"]],
+                false,
+            );
+            UiNode {
+                kind: NodeKind::Label,
+                label_style: style,
+                text: self.text(src.get_text("text")),
+                text_size: src.get_number("size").unwrap_or(0.0) as u16,
+                color: self.text(src.get_text("color")),
+                wrap: self.yes(src, "wrap", path),
+                width: self.size(src, "width", path).unwrap_or_default(),
+                height: self.size(src, "height", path).unwrap_or_default(),
+                ..UiNode::default()
+            }
+        } else {
+            UiNode {
+                kind: NodeKind::Label,
+                label_style: style,
+                text: self.text(Some(src.value.text)),
+                ..UiNode::default()
+            }
+        };
+        self.push(node)
+    }
+
+    fn button(&mut self, src: &tabula::Node, path: &str) -> u32 {
+        self.check_keys(
+            src,
+            path,
+            &[&[
+                "id", "text", "width", "height", "min_width", "max_width", "min_height",
+                "max_height", "tooltip",
+            ]],
+            false,
+        );
+        let node = UiNode {
+            kind: NodeKind::Button,
+            id: self.text(src.get_text("id")),
+            text: self.text(src.get_text("text")),
+            width: self.size(src, "width", path).unwrap_or_default(),
+            height: self.size(src, "height", path).unwrap_or_default(),
+            min_width: src.get_number("min_width").unwrap_or(0.0),
+            max_width: src.get_number("max_width").unwrap_or(0.0),
+            min_height: src.get_number("min_height").unwrap_or(0.0),
+            max_height: src.get_number("max_height").unwrap_or(0.0),
+            tooltip: self.text(src.get_text("tooltip")),
+            ..UiNode::default()
+        };
+        self.push(node)
+    }
+
+    fn image(&mut self, src: &tabula::Node, path: &str) -> u32 {
+        self.check_keys(
+            src,
+            path,
+            &[&[
+                "id", "width", "height", "tint", "fade", "background", "border", "tooltip",
+            ]],
+            false,
+        );
+        let node = UiNode {
+            kind: NodeKind::Image,
+            image: self.text(src.get_text("id")),
+            width: self.size(src, "width", path).unwrap_or_default(),
+            height: self.size(src, "height", path).unwrap_or_default(),
+            tint: self.text(src.get_text("tint")),
+            fade: src.get_number("fade").unwrap_or(0.0),
+            background: self.text(src.get_text("background")),
+            border: self.yes(src, "border", path),
+            tooltip: self.text(src.get_text("tooltip")),
+            ..UiNode::default()
+        };
+        self.push(node)
+    }
+
+    fn list(&mut self, src: &tabula::Node, path: &str) -> u32 {
+        self.check_keys(src, path, &[&CONTAINER_PROPS, &["template"]], false);
+        let mut node = UiNode {
+            kind: NodeKind::List,
+            direction: Direction::TopToBottom,
+            ..UiNode::default()
+        };
+        self.container(src, path, &mut node);
+        let index = self.push(node);
+        match src.get("template") {
+            Some(template) if template.is_block() => {
+                let template_path = format!("{path} > template");
+                self.check_keys(template, &template_path, &[&["id"]], true);
+                let template_node = UiNode {
+                    kind: NodeKind::Template,
+                    id: self.text(template.get_text("id")),
+                    ..UiNode::default()
+                };
+                let template_index = self.push(template_node);
+                self.nodes[template_index as usize].first_child =
+                    self.elements(template, &template_path);
+                self.nodes[index as usize].template = template_index;
+            }
+            Some(_) => self.warn(&format!("{path}: 'template' must be a {{ ... }} block")),
+            None => self.warn(&format!("{path}: list without a template stamps nothing")),
+        }
+        index
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node<'a>(module: &UiModule<'a>, index: u32) -> UiNode<'a> {
+        module.nodes[index as usize]
+    }
+
+    fn pixels(value: f32) -> Size {
+        Size {
+            kind: SizeKind::Pixels,
+            value,
+        }
+    }
+
+    #[test]
+    fn compiles_panels_with_properties() {
+        let arena = Arena::new();
+        let module = compile(
+            &arena,
+            "panel = { x_pos = 0.1 y_pos = 0.5 title = \"Hi\" border = yes \
+             direction = horizontal width = 120 label = \"a\" }",
+        );
+        assert!(module.errors.is_empty());
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+
+        let panel = node(&module, module.roots());
+        assert_eq!(panel.kind, NodeKind::Panel);
+        assert!(panel.floating && panel.border);
+        assert_eq!((panel.x_pos, panel.y_pos), (0.1, 0.5));
+        assert_eq!(panel.width, pixels(120.0));
+        assert_eq!(panel.direction, Direction::LeftToRight);
+        assert_eq!(panel.text.segs[0].literal, "Hi");
+
+        let label = node(&module, panel.first_child);
+        assert_eq!(label.kind, NodeKind::Label);
+        assert_eq!(label.text.segs[0].literal, "a");
+        assert_eq!(label.next_sibling, 0);
+    }
+
+    #[test]
+    fn parses_logical_sizes_and_layout_properties() {
+        let arena = Arena::new();
+        let module = compile(
+            &arena,
+            "panel = { width = 92% max_width = 760 align = center padding = 22 gap = 12 \
+             row = { height = 54 \
+                 panel = { width = grow min_width = 70 tooltip = \"tip\" } \
+                 panel = { width = grow:2 background = accent } } }",
+        );
+        assert!(module.errors.is_empty());
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+
+        let panel = node(&module, module.roots());
+        assert_eq!(panel.width.kind, SizeKind::Fraction);
+        assert!((panel.width.value - 0.92).abs() < 1e-6);
+        assert_eq!(panel.max_width, 760.0);
+        assert_eq!((panel.align_x, panel.align_y), (Align::Center, Align::Center));
+        assert!(panel.padding_set && panel.padding == 22.0);
+        assert!(panel.gap_set && panel.gap == 12.0);
+
+        let row = node(&module, panel.first_child);
+        assert_eq!(row.kind, NodeKind::Panel);
+        assert_eq!(row.direction, Direction::LeftToRight);
+        assert_eq!(row.width.kind, SizeKind::Grow);
+        assert_eq!(row.height, pixels(54.0));
+        assert_eq!(row.background.segs[0].literal, "none");
+        assert!(row.padding_set && row.padding == 0.0);
+
+        let one = node(&module, row.first_child);
+        assert_eq!((one.width.kind, one.width.value), (SizeKind::Grow, 1.0));
+        assert_eq!(one.min_width, 70.0);
+        assert_eq!(one.tooltip.segs[0].literal, "tip");
+
+        let two = node(&module, one.next_sibling);
+        assert_eq!((two.width.kind, two.width.value), (SizeKind::Grow, 2.0));
+        assert_eq!(two.background.segs[0].literal, "accent");
+    }
+
+    #[test]
+    fn boxes_and_text_roles_carry_their_defaults() {
+        let arena = Arena::new();
+        let module = compile(
+            &arena,
+            "panel = { heading = \"Big\" section = \"SMALL\" \
+             box = { min_width = 70 label = \"1x\" } }",
+        );
+        assert!(module.errors.is_empty());
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+
+        let panel = node(&module, module.roots());
+        let heading = node(&module, panel.first_child);
+        assert_eq!(heading.kind, NodeKind::Label);
+        assert_eq!(heading.label_style, LabelStyle::Heading);
+
+        let section = node(&module, heading.next_sibling);
+        assert_eq!(section.label_style, LabelStyle::Section);
+
+        let cell = node(&module, section.next_sibling);
+        assert_eq!(cell.kind, NodeKind::Panel);
+        assert_eq!((cell.width.kind, cell.height.kind), (SizeKind::Grow, SizeKind::Grow));
+        assert_eq!((cell.align_x, cell.align_y), (Align::Center, Align::Center));
+        assert_eq!(cell.background.segs[0].literal, "accent");
+        assert_eq!(cell.min_width, 70.0);
+
+        let cell_label = node(&module, cell.first_child);
+        assert_eq!(cell_label.label_style, LabelStyle::Body);
+    }
+
+    #[test]
+    fn compiles_labels_images_and_floats() {
+        let arena = Arena::new();
+        let module = compile(
+            &arena,
+            "panel = { \
+             panel = { floating = yes x_pos = 1 label = { text = \"FLOATING\" size = 13 } } \
+             label = { text = \"body\" color = muted wrap = yes width = grow } \
+             image = { id = soldier width = 96 height = 48 tint = accent fade = 0.5 border = yes } }",
+        );
+        assert!(module.errors.is_empty());
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+
+        let panel = node(&module, module.roots());
+        let badge = node(&module, panel.first_child);
+        assert!(badge.floating);
+        assert_eq!((badge.x_pos, badge.y_pos), (1.0, 0.0));
+        let badge_label = node(&module, badge.first_child);
+        assert_eq!(badge_label.text_size, 13);
+
+        let body = node(&module, badge.next_sibling);
+        assert_eq!(body.kind, NodeKind::Label);
+        assert!(body.wrap);
+        assert_eq!(body.color.segs[0].literal, "muted");
+        assert_eq!(body.width.kind, SizeKind::Grow);
+
+        let image = node(&module, body.next_sibling);
+        assert_eq!(image.kind, NodeKind::Image);
+        assert_eq!(image.image.segs[0].literal, "soldier");
+        assert_eq!((image.width, image.height), (pixels(96.0), pixels(48.0)));
+        assert_eq!(image.tint.segs[0].literal, "accent");
+        assert_eq!(image.fade, 0.5);
+        assert!(image.border);
+    }
+
+    #[test]
+    fn sibling_chain_preserves_declaration_order() {
+        let arena = Arena::new();
+        let module = compile(
+            &arena,
+            "panel = { label = \"one\" button = { text = \"two\" } label = \"three\" }\n\
+             panel = { }",
+        );
+        let first_panel = node(&module, module.roots());
+        let one = node(&module, first_panel.first_child);
+        let two = node(&module, one.next_sibling);
+        let three = node(&module, two.next_sibling);
+        assert_eq!(one.kind, NodeKind::Label);
+        assert_eq!(two.kind, NodeKind::Button);
+        assert_eq!(three.kind, NodeKind::Label);
+        assert_eq!(three.next_sibling, 0);
+
+        let second_panel = node(&module, first_panel.next_sibling);
+        assert_eq!(second_panel.kind, NodeKind::Panel);
+        assert_eq!(second_panel.first_child, 0);
+    }
+
+    #[test]
+    fn tokenizes_variables() {
+        let arena = Arena::new();
+        let module = compile(
+            &arena,
+            "panel = { list = { id = l template = { id = \"element_$ID\" \
+             button = { id = \"hire $ID\" text = \"$NAME!\" } } } }",
+        );
+        let panel = node(&module, module.roots());
+        let list = node(&module, panel.first_child);
+        let template = node(&module, list.template);
+        assert_eq!(template.kind, NodeKind::Template);
+
+        let id = template.id.segs;
+        assert_eq!((id[0].literal, id[0].var), ("element_", ""));
+        assert_eq!((id[1].literal, id[1].var), ("$ID", "ID"));
+
+        let button = node(&module, template.first_child);
+        let text = button.text.segs;
+        assert_eq!((text[0].literal, text[0].var), ("$NAME", "NAME"));
+        assert_eq!((text[1].literal, text[1].var), ("!", ""));
+    }
+
+    #[test]
+    fn warns_on_unknown_keys_and_missing_equals() {
+        let arena = Arena::new();
+        let module = compile(
+            &arena,
+            "panel = { frobnicate = 3 panel { } }\nlabel = \"top level\"",
+        );
+        assert!(module.errors.is_empty());
+        let warnings = module.warnings.join("\n");
+        assert!(warnings.contains("unknown key 'frobnicate'"), "{warnings}");
+        assert!(warnings.contains("missing '='"), "{warnings}");
+        assert!(warnings.contains("unknown key 'label'"), "{warnings}");
+    }
+
+    #[test]
+    fn warns_on_bad_sizes_and_flags() {
+        let arena = Arena::new();
+        let module = compile(
+            &arena,
+            "panel = { width = wide row = { width = grow:fast floating = sideways } }",
+        );
+        let warnings = module.warnings.join("\n");
+        assert!(warnings.contains("not a number"), "{warnings}");
+        assert!(warnings.contains("not yes/no"), "{warnings}");
+        assert!(warnings.contains("bad grow weight"), "{warnings}");
+        // Bad values fall back to the defaults instead of poisoning the node.
+        let panel = node(&module, module.roots());
+        assert_eq!(panel.width, Size::default());
+        let row = node(&module, panel.first_child);
+        assert!(!row.floating);
+    }
+
+    #[test]
+    fn recovers_around_parse_errors() {
+        let arena = Arena::new();
+        let module = compile(&arena, "panel = { title = \"ok\" ");
+        assert!(!module.errors.is_empty());
+        assert_eq!(node(&module, module.roots()).kind, NodeKind::Panel);
+    }
+
+    #[test]
+    fn zii_empty_module() {
+        let arena = Arena::new();
+        let module = compile(&arena, "");
+        assert_eq!(module.roots(), 0);
+        assert!(module.errors.is_empty() && module.warnings.is_empty());
+        assert_eq!(UiModule::default().roots(), 0);
+    }
+}

@@ -1,0 +1,95 @@
+# The layout lab, as data. One centered panel stress-testing the layout
+# engine: weighted growth, size caps, images, scrolling and overflow.
+# Cosmetics (padding, gaps, fonts, colors) come from the style; the script
+# only states structure and the sizes under test.
+
+panel = {
+	# Centered on screen (fraction of the screen, 0.5 = middle)
+	x_pos = 0.5
+	y_pos = 0.5
+
+	# 92% of the screen, but never wider than 760 px
+	width = 92%
+	max_width = 760
+
+	align = center
+	border = yes
+
+	# A floating badge pinned to the panel's top-right corner
+	panel = {
+		floating = yes
+		x_pos = 1
+		background = accent
+		label = "FLOATING"
+	}
+
+	heading = "LAYOUT LAB"
+	label = "Resize to stress the constraints"
+
+	section = "WEIGHTED GROWTH  1 : 2"
+	row = {
+		height = 54
+		box = {
+			min_width = 70
+			tooltip = "Floating tooltip: 1 share"
+			label = "1x"
+		}
+		box = {
+			width = grow:2
+			min_width = 100
+			label = "2x"
+		}
+	}
+
+	section = "MAX 180 PX + WEIGHTED REST"
+	row = {
+		height = 54
+		button = {
+			id = "print Hey"
+			text = "Capped text"
+			width = grow
+			max_width = 180
+			height = grow
+		}
+		box = {
+			width = grow:2
+			min_width = 120
+			label = "remainder"
+		}
+	}
+
+	section = "IMAGE: NATURAL, STRETCHED, TINTED, FADED"
+	row = {
+		# Image keys resolve through the data the game hands the UI
+		image = { id = soldier }
+		image = { id = soldier width = 96 height = 48 border = yes }
+		image = { id = soldier tint = accent }
+		image = { id = soldier fade = 0.5 }
+	}
+
+	section = "SCROLL: WHEEL OVER THE LIST"
+	list = {
+		id = "demo_rows"
+		width = grow
+		height = 120
+		scrollable = yes
+		background = dark
+		background_image = widget
+		border = yes
+		template = {
+			# LABEL is bound per row by the data
+			panel = {
+				width = grow
+				label = "$LABEL"
+			}
+		}
+	}
+
+	section = "OVERFLOW: 280 PX EACH"
+	row = {
+		height = 54
+		box = { width = 280 min_width = 80 label = "min 80" }
+		box = { width = 280 min_width = 60 label = "min 60" }
+		box = { width = 280 min_width = 60 label = "min 60" }
+	}
+}

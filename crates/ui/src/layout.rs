@@ -451,14 +451,6 @@ fn anchor_factors(anchor: Anchor) -> V2 {
     V2 { x, y }
 }
 
-fn anchor_point(bounds: Rectangle, anchor: Anchor) -> V2 {
-    let factors = anchor_factors(anchor);
-    V2 {
-        x: bounds.x + bounds.w * factors.x,
-        y: bounds.y + bounds.h * factors.y,
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, PartialOrd, Default, Debug)]
 pub enum LogicalSize {
     #[default]
@@ -536,8 +528,8 @@ pub struct ElementConf<'a> {
     scroll_y: bool,
     floating: bool,
     z_index: i16,
-    anchor_parent: Anchor,
-    anchor_self: Anchor,
+    anchor_parent: V2,
+    anchor_self: V2,
     float_offset: V2,
     image: ImageId,
     image_source: V2,
@@ -570,8 +562,8 @@ impl Default for ElementConf<'_> {
             scroll_y: false,
             floating: false,
             z_index: 0,
-            anchor_parent: Anchor::default(),
-            anchor_self: Anchor::default(),
+            anchor_parent: V2 { x: 0.0, y: 0.0 },
+            anchor_self: V2 { x: 0.0, y: 0.0 },
             float_offset: V2 { x: 0.0, y: 0.0 },
             image: ImageId::default(),
             image_source: V2 { x: 0.0, y: 0.0 },
@@ -688,10 +680,19 @@ impl<'a> ElementConf<'a> {
     /// draw above the normal tree ordered by `z_index`. `Grow` and `Parent`
     /// sizes resolve against the parent's outer bounds, so a `Grow` float
     /// declared at the top level covers the whole viewport (a modal).
-    pub fn floating(mut self, parent_anchor: Anchor, self_anchor: Anchor) -> Self {
+    pub fn floating(self, parent_anchor: Anchor, self_anchor: Anchor) -> Self {
+        self.floating_at(anchor_factors(parent_anchor), anchor_factors(self_anchor))
+    }
+
+    /// [`floating`](Self::floating) with anchors as fractional factors of
+    /// each rectangle instead of the nine named points: `{0.5, 0.5}` is the
+    /// center, `{1.0, 0.0}` the top-right. Pinning the same factor on both
+    /// rectangles gives CSS background-position semantics — 0.0 flush left,
+    /// 0.5 centered, 1.0 flush right, 0.1 inset by 10% of the slack.
+    pub fn floating_at(mut self, parent_factors: V2, self_factors: V2) -> Self {
         self.floating = true;
-        self.anchor_parent = parent_anchor;
-        self.anchor_self = self_anchor;
+        self.anchor_parent = parent_factors;
+        self.anchor_self = self_factors;
         self
     }
 
@@ -907,8 +908,8 @@ struct Element<'a> {
     content_size: V2,
     floating: bool,
     z_index: i16,
-    anchor_parent: Anchor,
-    anchor_self: Anchor,
+    anchor_parent: V2,
+    anchor_self: V2,
     float_offset: V2,
     image: ImageId,
     image_source: V2,
@@ -1513,8 +1514,11 @@ fn arrange_children(parent_index: usize, nodes: &mut [Element<'_>]) {
                 node.max_height,
             ),
         };
-        let target = anchor_point(parent.bounds, node.anchor_parent);
-        let factors = anchor_factors(node.anchor_self);
+        let target = V2 {
+            x: parent.bounds.x + parent.bounds.w * node.anchor_parent.x,
+            y: parent.bounds.y + parent.bounds.h * node.anchor_parent.y,
+        };
+        let factors = node.anchor_self;
         nodes[child].bounds = Rectangle {
             x: target.x + node.float_offset.x - size.x * factors.x,
             y: target.y + node.float_offset.y - size.y * factors.y,
