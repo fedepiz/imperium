@@ -1,94 +1,60 @@
-# The layout lab, as data. One centered panel stress-testing the layout
-# engine: weighted growth, size caps, images, scrolling and overflow.
-# Cosmetics (padding, gaps, fonts, colors) come from the style; the script
-# only states structure and the sizes under test.
+# The game screen, as data. Press R in-game to hot-reload this file and
+# data/style.txt. (The old layout-engine stress test lives in ui_lab.txt —
+# copy it over this file to run it.)
+#
+# Sizes are cap[:weight]: elements start at their content, grow by weight
+# (default 1), and stop at the cap. `width = 200` = grow up to 200;
+# `grow` = uncapped; `fit` = weight 0; `50%` = capped at half the parent.
 
 panel = {
 	# Centered on screen (fraction of the screen, 0.5 = middle)
 	x_pos = 0.5
 	y_pos = 0.5
 
-	width = 92%
-	max_width = 760
+	width = 42%
+	min_width = 420
+	max_width = 640
 
 	align = center
 	border = yes
 
-	# A floating badge pinned to the panel's top-right corner
-	panel = {
-		floating = yes
-		x_pos = 1
-		background = accent
-		label = "FLOATING"
-	}
+	heading = "IMPERIUM"
 
-	heading = "LAYOUT LAB"
-	label = "Resize to stress the constraints"
-
-	section = "WEIGHTED GROWTH  1 : 2"
-	row = {
-		height = 54
-		box = {
-			min_width = 70
-			tooltip = "Floating tooltip: 1 share"
-			label = "1x"
-		}
-		box = {
-			width = grow:2
-			min_width = 100
-			label = "2x"
-		}
-	}
-
-	section = "MAX 180 PX + WEIGHTED REST"
-	row = {
-		height = 54
-		button = {
-			id = "print Hey"
-			text = "Capped text"
-			width = grow
-			max_width = 180
-			height = grow
-		}
-		box = {
-			width = grow:2
-			min_width = 120
-			label = "remainder"
-		}
-	}
-
-	section = "IMAGE: NATURAL, STRETCHED, TINTED, FADED"
-	row = {
-		# Image keys resolve through the data the game hands the UI
-		image = { id = soldier }
-		image = { id = soldier width = 96 height = 48 border = yes }
-		image = { id = soldier tint = accent }
-		image = { id = soldier fade = 0.5 }
-	}
-
-	section = "SCROLL: WHEEL OVER THE LIST"
+	# One-row list: the game binds $STATUS every frame.
 	list = {
-		id = "demo_rows"
+		id = "status"
 		width = grow
-		height = 180
+		template = {
+			label = "$STATUS"
+		}
+	}
+
+	section = "PEOPLE OF ROME"
+	list = {
+		id = "people"
+		width = grow
+		height = 320
+		min_height = 320
 		scrollable = yes
 		background = dark
-		background_image = widget
 		border = yes
 		template = {
-			# LABEL is bound per row by the data
 			panel = {
 				width = grow
-				label = "$LABEL"
+				height = fit
+				label = "$NAME, age $AGE"
+				button = { id = "remove $ID" text = "Remove" }
 			}
 		}
 	}
 
-	section = "OVERFLOW: 280 PX EACH"
 	row = {
-		height = 54
-		box = { width = 280 min_width = 80 label = "min 80" }
-		box = { width = 280 min_width = 60 label = "min 60" }
-		box = { width = 280 min_width = 60 label = "min 60" }
+		height = 60
+		button = {
+			id = "advance_year"
+			text = "End Year"
+			width = 200
+			height = grow
+		}
 	}
 }

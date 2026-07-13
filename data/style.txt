@@ -13,7 +13,13 @@ button_background = { 0.08 0.68 0.72 }
 button_hover = { 0.16 0.86 0.90 }
 button_border_thickness = 4
 button_border_color = { 1 1 1 }
+button_corner_radius = 10
 tooltip_background = { 0.02 0.03 0.05 0.95 }
+
+# Unsized buttons grow into these caps; 0 = uncapped. Labels have no
+# counterpart — they fit their text.
+button_width = 140
+button_height = 40
 
 # Role font sizes.
 heading_size = 32

@@ -492,6 +492,9 @@ pub struct ElementConf<'a> {
     max_width: f32,
     min_height: f32,
     max_height: f32,
+    /// Per-axis ceiling as a fraction of the parent (0 = none); combines
+    /// with the pixel `max_*` — the smaller cap wins.
+    max_fraction: V2,
     direction: Direction,
     align_x: Align,
     align_y: Align,
@@ -526,6 +529,7 @@ impl Default for ElementConf<'_> {
             max_width: 0.0,
             min_height: 0.0,
             max_height: 0.0,
+            max_fraction: V2 { x: 0.0, y: 0.0 },
             direction: Direction::default(),
             align_x: Align::default(),
             align_y: Align::default(),
@@ -583,6 +587,20 @@ impl<'a> ElementConf<'a> {
 
     pub fn max_height(mut self, height: f32) -> Self {
         self.max_height = height.max(0.0);
+        self
+    }
+
+    /// Caps the width at a fraction of the parent's inner width (outer
+    /// bounds for floating elements). `0.0` = no fractional cap.
+    pub fn max_width_fraction(mut self, fraction: f32) -> Self {
+        self.max_fraction.x = fraction.max(0.0);
+        self
+    }
+
+    /// Caps the height at a fraction of the parent's inner height (outer
+    /// bounds for floating elements). `0.0` = no fractional cap.
+    pub fn max_height_fraction(mut self, fraction: f32) -> Self {
+        self.max_fraction.y = fraction.max(0.0);
         self
     }
 
@@ -771,6 +789,7 @@ impl<'arena, 'frame> Ui<'arena, 'frame> {
             max_width: conf.max_width,
             min_height: conf.min_height,
             max_height: conf.max_height,
+            max_fraction: conf.max_fraction,
             direction: conf.direction,
             align_x: conf.align_x,
             align_y: conf.align_y,
@@ -855,6 +874,7 @@ struct Element<'a> {
     max_width: f32,
     min_height: f32,
     max_height: f32,
+    max_fraction: V2,
     direction: Direction,
     align_x: Align,
     align_y: Align,
@@ -880,7 +900,13 @@ struct Element<'a> {
     image_fade: f32,
     text_lines: &'a [TextLine<'a>],
     measured_text: V2,
+    /// What the element asks of a fit parent: content for fit and
+    /// unbounded growers, the cap for capped growers, pixels for fixed.
     intrinsic: V2,
+    /// The floor a growing element never shrinks below: unavoidable
+    /// content (text, image, the children's own floors), inside the
+    /// explicit constraints. Built bottom-up alongside `intrinsic`.
+    minimum: V2,
     resolved_main: f32,
     bounds: Rectangle,
 }
@@ -1154,6 +1180,8 @@ fn measure_elements(nodes: &mut [Element<'_>]) {
         let mut child_count = 0usize;
         let mut main = 0.0f32;
         let mut cross = 0.0f32;
+        let mut main_floor = 0.0f32;
+        let mut cross_floor = 0.0f32;
         while child != 0 {
             // Floating children take no flow space.
             if nodes[child].floating {
@@ -1161,30 +1189,49 @@ fn measure_elements(nodes: &mut [Element<'_>]) {
                 continue;
             }
             let size = nodes[child].intrinsic;
+            let floor = nodes[child].minimum;
             match node.direction {
                 Direction::LeftToRight => {
                     main += size.x;
                     cross = cross.max(size.y);
+                    main_floor += floor.x;
+                    cross_floor = cross_floor.max(floor.y);
                 }
                 Direction::TopToBottom => {
                     main += size.y;
                     cross = cross.max(size.x);
+                    main_floor += floor.y;
+                    cross_floor = cross_floor.max(floor.x);
                 }
             }
             child_count += 1;
             child = nodes[child].next_sibling;
         }
         if child_count > 1 {
-            main += node.gap * (child_count - 1) as f32;
+            let gaps = node.gap * (child_count - 1) as f32;
+            main += gaps;
+            main_floor += gaps;
         }
 
-        let content = match node.direction {
-            Direction::LeftToRight => V2 { x: main, y: cross },
-            Direction::TopToBottom => V2 { x: cross, y: main },
+        let (content, floor_content) = match node.direction {
+            Direction::LeftToRight => (
+                V2 { x: main, y: cross },
+                V2 {
+                    x: main_floor,
+                    y: cross_floor,
+                },
+            ),
+            Direction::TopToBottom => (
+                V2 { x: cross, y: main },
+                V2 {
+                    x: cross_floor,
+                    y: main_floor,
+                },
+            ),
         };
         // Text, image source size, and children all compete for the
         // element's natural content size.
-        let natural = V2 {
+        let pad = |content: V2| V2 {
             x: (node.measured_text.x.max(node.image_source.x).max(content.x)
                 + node.padding.left
                 + node.padding.right)
@@ -1194,14 +1241,29 @@ fn measure_elements(nodes: &mut [Element<'_>]) {
                 + node.padding.bottom)
                 .max(0.0),
         };
+        let natural = pad(content);
+        let unavoidable = pad(floor_content);
+        // The floor only tracks content for growing axes: fixed (pixel /
+        // fraction) axes keep their deliberate compress-to-explicit-min
+        // behavior, and fit axes already are their content.
+        let floor_axis = |size: LogicalSize, unavoidable: f32, min: f32, max: f32| match size {
+            LogicalSize::Grow | LogicalSize::GrowWeighted(_) | LogicalSize::Fit => {
+                constrain_axis(unavoidable, min, max.max(0.0))
+            }
+            LogicalSize::Pixels(_) | LogicalSize::Parent(_) => min,
+        };
+        nodes[index].minimum = V2 {
+            x: floor_axis(node.width, unavoidable.x, node.min_width, node.max_width),
+            y: floor_axis(node.height, unavoidable.y, node.min_height, node.max_height),
+        };
         nodes[index].intrinsic = V2 {
             x: constrain_axis(
-                intrinsic_axis(node.width, natural.x),
+                intrinsic_axis(node.width, natural.x, node.max_width),
                 node.min_width,
                 node.max_width,
             ),
             y: constrain_axis(
-                intrinsic_axis(node.height, natural.y),
+                intrinsic_axis(node.height, natural.y, node.max_height),
                 node.min_height,
                 node.max_height,
             ),
@@ -1209,11 +1271,23 @@ fn measure_elements(nodes: &mut [Element<'_>]) {
     }
 }
 
-fn intrinsic_axis(size: LogicalSize, natural: f32) -> f32 {
+/// What the element asks of a fit parent. A capped grower asks for its
+/// cap — it intends to grow into it — so fixed-looking sizes (`width =
+/// 180` = grow-to-180) reserve their pixels inside fit containers.
+/// Fractional caps can't be asked for here (the parent isn't sized yet),
+/// so those growers ask for their content.
+fn intrinsic_axis(size: LogicalSize, natural: f32, max: f32) -> f32 {
     match size {
         LogicalSize::Pixels(value) => value.max(0.0),
         LogicalSize::Parent(_) => 0.0,
-        LogicalSize::Fit | LogicalSize::Grow | LogicalSize::GrowWeighted(_) => natural,
+        LogicalSize::Fit => natural,
+        LogicalSize::Grow | LogicalSize::GrowWeighted(_) => {
+            if max > 0.0 {
+                natural.max(max)
+            } else {
+                natural
+            }
+        }
     }
 }
 
@@ -1249,10 +1323,10 @@ fn arrange_children(parent_index: usize, nodes: &mut [Element<'_>]) {
         }
         flow_count += 1;
         let size = if horizontal { node.width } else { node.height };
-        let (min, max) = axis_constraints(node, horizontal);
+        let (min, max) = axis_constraints(node, horizontal, available_main);
         if let Some(weight) = grow_weight(size) {
             has_grow = true;
-            grow_minimum += min;
+            grow_minimum += grow_floor(node, horizontal, min, max);
             if weight > 0.0 {
                 minimum_positive_weight = minimum_positive_weight.min(weight);
             }
@@ -1300,7 +1374,7 @@ fn arrange_children(parent_index: usize, nodes: &mut [Element<'_>]) {
                     let node = nodes[child];
                     let size = if horizontal { node.width } else { node.height };
                     if !node.floating && grow_weight(size).is_none() {
-                        let (min, _) = axis_constraints(node, horizontal);
+                        let (min, _) = axis_constraints(node, horizontal, available_main);
                         total += (node.resolved_main * scale).max(min);
                     }
                     child = node.next_sibling;
@@ -1321,7 +1395,7 @@ fn arrange_children(parent_index: usize, nodes: &mut [Element<'_>]) {
             let node = nodes[child];
             let size = if horizontal { node.width } else { node.height };
             if !node.floating && grow_weight(size).is_none() {
-                let (min, _) = axis_constraints(node, horizontal);
+                let (min, _) = axis_constraints(node, horizontal, available_main);
                 nodes[child].resolved_main = (node.resolved_main * high_scale).max(min);
                 fixed_main += nodes[child].resolved_main;
             }
@@ -1345,8 +1419,9 @@ fn arrange_children(parent_index: usize, nodes: &mut [Element<'_>]) {
                 let node = nodes[child];
                 let size = if horizontal { node.width } else { node.height };
                 if let Some(weight) = grow_weight(size).filter(|_| !node.floating) {
-                    let (min, max) = axis_constraints(node, horizontal);
-                    total += constrain_axis(weight * scale, min, max);
+                    let (min, max) = axis_constraints(node, horizontal, available_main);
+                    let floor = grow_floor(node, horizontal, min, max);
+                    total += constrain_axis(weight * scale, floor, max);
                 }
                 child = node.next_sibling;
             }
@@ -1362,8 +1437,9 @@ fn arrange_children(parent_index: usize, nodes: &mut [Element<'_>]) {
             let node = nodes[child];
             let size = if horizontal { node.width } else { node.height };
             if let Some(weight) = grow_weight(size) {
-                let (min, max) = axis_constraints(node, horizontal);
-                nodes[child].resolved_main = constrain_axis(weight * high_scale, min, max);
+                let (min, max) = axis_constraints(node, horizontal, available_main);
+                let floor = grow_floor(node, horizontal, min, max);
+                nodes[child].resolved_main = constrain_axis(weight * high_scale, floor, max);
             }
             child = node.next_sibling;
         }
@@ -1405,11 +1481,16 @@ fn arrange_children(parent_index: usize, nodes: &mut [Element<'_>]) {
         } else {
             node.intrinsic.x
         };
-        let (cross_min, cross_max) = axis_constraints(node, !horizontal);
+        let (cross_min, cross_max) = axis_constraints(node, !horizontal, available_cross);
+        let cross_floor = if grow_weight(cross_size_mode).is_some() {
+            grow_floor(node, !horizontal, cross_min, cross_max)
+        } else {
+            cross_min
+        };
         let main_size = node.resolved_main;
         let cross_size = constrain_axis(
             resolve_axis(cross_size_mode, available_cross, cross_intrinsic),
-            cross_min,
+            cross_floor,
             cross_max,
         );
         let cross_align = if horizontal {
@@ -1450,16 +1531,28 @@ fn arrange_children(parent_index: usize, nodes: &mut [Element<'_>]) {
             child = node.next_sibling;
             continue;
         }
+        let (min_x, max_x) = axis_constraints(node, true, parent.bounds.w);
+        let (min_y, max_y) = axis_constraints(node, false, parent.bounds.h);
+        let floor_x = if grow_weight(node.width).is_some() {
+            grow_floor(node, true, min_x, max_x)
+        } else {
+            min_x
+        };
+        let floor_y = if grow_weight(node.height).is_some() {
+            grow_floor(node, false, min_y, max_y)
+        } else {
+            min_y
+        };
         let size = V2 {
             x: constrain_axis(
                 resolve_axis(node.width, parent.bounds.w, node.intrinsic.x),
-                node.min_width,
-                node.max_width,
+                floor_x,
+                max_x,
             ),
             y: constrain_axis(
                 resolve_axis(node.height, parent.bounds.h, node.intrinsic.y),
-                node.min_height,
-                node.max_height,
+                floor_y,
+                max_y,
             ),
         };
         let target = V2 {
@@ -1507,12 +1600,42 @@ fn grow_weight(size: LogicalSize) -> Option<f32> {
     }
 }
 
-fn axis_constraints(node: Element<'_>, horizontal: bool) -> (f32, f32) {
-    if horizontal {
-        (node.min_width, node.max_width)
+/// The (min, max) pair for one axis, with the fractional cap resolved
+/// against the parent space this element is being laid out in.
+fn axis_constraints(node: Element<'_>, horizontal: bool, available: f32) -> (f32, f32) {
+    let (min, max, fraction) = if horizontal {
+        (node.min_width, node.max_width, node.max_fraction.x)
     } else {
-        (node.min_height, node.max_height)
+        (node.min_height, node.max_height, node.max_fraction.y)
+    };
+    let fraction_cap = if fraction > 0.0 {
+        fraction * available.max(0.0)
+    } else {
+        0.0
+    };
+    (min, combine_caps(max, fraction_cap))
+}
+
+/// Two ceilings, `0` = none each; the smaller real one wins.
+fn combine_caps(a: f32, b: f32) -> f32 {
+    match (a > 0.0, b > 0.0) {
+        (true, true) => a.min(b),
+        (true, false) => a,
+        (false, true) => b,
+        (false, false) => 0.0,
     }
+}
+
+/// The floor a growing element never shrinks below: its bottom-up
+/// minimum, kept under the (possibly fraction-resolved) cap — an explicit
+/// cap is a hard ceiling even against content.
+fn grow_floor(node: Element<'_>, horizontal: bool, min: f32, max: f32) -> f32 {
+    let minimum = if horizontal {
+        node.minimum.x
+    } else {
+        node.minimum.y
+    };
+    minimum.max(min).min(effective_max(0.0, max))
 }
 
 fn effective_max(min: f32, max: f32) -> f32 {
@@ -1929,6 +2052,107 @@ mod tests {
 
         assert!((command(commands, "fixed").bounds.w - 150.0).abs() < 0.001);
         assert_eq!(command(commands, "grow").bounds.w, 50.0);
+    }
+
+    #[test]
+    fn growing_text_never_shrinks_below_its_measure() {
+        let mut engine = Engine::default();
+        let commands = engine.layout(
+            input(200.0, 100.0),
+            |text, _| V2 {
+                x: text.len() as f32 * 10.0,
+                y: 10.0,
+            },
+            |ui| {
+                ui.add_with(
+                    ElementConf::default()
+                        .width(LogicalSize::Grow)
+                        .height(LogicalSize::Grow),
+                    |ui| {
+                        // 15 chars = 150 px of text: the greedy sibling
+                        // must not squeeze it below its measure.
+                        ui.add(
+                            ElementConf::text(TextConf::default().text("fifteen chars!!"))
+                                .id("text")
+                                .width(LogicalSize::Grow)
+                                .height(LogicalSize::Grow),
+                        );
+                        ui.add(
+                            ElementConf::default()
+                                .id("greedy")
+                                .width(LogicalSize::GrowWeighted(100.0))
+                                .height(LogicalSize::Grow)
+                                .background(BLUE),
+                        );
+                    },
+                );
+            },
+        );
+
+        assert_eq!(command(commands, "text").bounds.w, 150.0);
+        assert!((command(commands, "greedy").bounds.w - 50.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn capped_growers_reserve_their_cap_in_fit_parents() {
+        let mut engine = Engine::default();
+        let commands = engine.layout(
+            input(400.0, 400.0),
+            |_, _| V2::default(),
+            |ui| {
+                // A fit parent must allocate the grow-to-120 child its cap,
+                // like a fixed size — it intends to grow into it.
+                ui.add_with(ElementConf::default().id("fit").background(BLUE), |ui| {
+                    ui.add(
+                        ElementConf::default()
+                            .id("capped")
+                            .width(LogicalSize::Grow)
+                            .max_width(120.0)
+                            .height(LogicalSize::Pixels(10.0))
+                            .background(RED),
+                    );
+                });
+            },
+        );
+
+        assert_eq!(command(commands, "fit").bounds.w, 120.0);
+        assert_eq!(command(commands, "capped").bounds.w, 120.0);
+    }
+
+    #[test]
+    fn fractional_caps_resolve_against_the_parent() {
+        let mut engine = Engine::default();
+        let commands = engine.layout(
+            input(400.0, 100.0),
+            |_, _| V2::default(),
+            |ui| {
+                ui.add_with(
+                    ElementConf::default()
+                        .width(LogicalSize::Grow)
+                        .height(LogicalSize::Grow),
+                    |ui| {
+                        ui.add(
+                            ElementConf::default()
+                                .id("half")
+                                .width(LogicalSize::Grow)
+                                .max_width_fraction(0.5)
+                                .height(LogicalSize::Grow)
+                                .background(RED),
+                        );
+                        ui.add(
+                            ElementConf::default()
+                                .id("rest")
+                                .width(LogicalSize::Grow)
+                                .height(LogicalSize::Grow)
+                                .background(BLUE),
+                        );
+                    },
+                );
+            },
+        );
+
+        assert_eq!(command(commands, "half").bounds.w, 200.0);
+        assert_eq!(command(commands, "rest").bounds.w, 200.0);
     }
 
     #[test]

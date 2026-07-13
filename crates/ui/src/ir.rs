@@ -46,26 +46,43 @@ pub enum LabelStyle {
     Section,
 }
 
-/// How a script size is interpreted. Zero value = `Fit`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum SizeKind {
-    /// Unset: fit content.
-    #[default]
-    Fit,
-    /// `width = 80`: fixed pixels in `value`.
-    Pixels,
-    /// `width = grow` / `width = "grow 2"`: share of the leftover space,
-    /// weight in `value`.
-    Grow,
-    /// `width = "92%"`: fraction of the parent in `value` (0.92).
-    Fraction,
-}
-
-/// A pre-parsed script size (`fit`, pixels, `grow N`, `N%`). Zero = fit.
+/// A pre-parsed script size: `cap[:weight]` per axis.
+///
+/// The cap is a ceiling — pixels, `N%` of the parent, or `grow` for none;
+/// `fit` is sugar for weight 0. The weight is the element's share of the
+/// parent's leftover space, `0` meaning "fit content". Every element
+/// starts at its content floor, grows by weight, and stops at its cap.
+///
+/// Zero value = unset: the widget's default posture stands (see
+/// [`crate::run`]).
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Size {
-    pub kind: SizeKind,
-    pub value: f32,
+    /// False = the script said nothing for this axis.
+    pub set: bool,
+    /// The ceiling: pixels, or a 0..=1 fraction of the parent when
+    /// `fraction` is set. `0.0` = uncapped.
+    pub cap: f32,
+    pub fraction: bool,
+    /// Share of the parent's leftover space; `0.0` = fit content.
+    pub weight: f32,
+}
+
+impl Size {
+    /// An explicit "fill the parent" size: uncapped, weight 1.
+    pub const GROW: Size = Size {
+        set: true,
+        cap: 0.0,
+        fraction: false,
+        weight: 1.0,
+    };
+
+    /// An explicit "fit content" size: uncapped, weight 0.
+    pub const FIT: Size = Size {
+        set: true,
+        cap: 0.0,
+        fraction: false,
+        weight: 0.0,
+    };
 }
 
 /// One piece of a pre-tokenized string: either a plain literal (`var` is
@@ -516,58 +533,70 @@ impl Compiler {
         }
     }
 
-    /// Parses one size property: a number (pixels), `fit`, `grow`,
-    /// `grow:N` or `N%`. Absent → the caller's default stands.
+    /// Parses one size property: `cap[:weight]`, where the cap is a pixel
+    /// number, `N%` of the parent, or `grow` (uncapped), and `fit` is
+    /// sugar for weight 0. Absent → the caller's default stands.
     fn size(&mut self, src: &tabula::Node, key: &str, path: &str) -> Option<Size> {
         let value = src.get_value(key)?;
         if value.is_number {
+            // A bare number caps a default-weight grower.
             return Some(Size {
-                kind: SizeKind::Pixels,
-                value: value.number,
+                set: true,
+                cap: value.number.max(0.0),
+                fraction: false,
+                weight: 1.0,
             });
         }
         let text = value.text.trim();
-        let size = if text == "fit" {
-            Size::default()
-        } else if text == "grow" {
-            Size {
-                kind: SizeKind::Grow,
-                value: 1.0,
-            }
-        } else if let Some(weight) = text.strip_prefix("grow:") {
-            match weight.trim().parse::<f32>() {
-                Ok(weight) => Size {
-                    kind: SizeKind::Grow,
-                    value: weight,
-                },
-                Err(_) => {
-                    self.warn(&format!("{path}: '{key} = {text}' has a bad grow weight"));
+        let (cap_text, weight) = match text.split_once(':') {
+            None => (text, None),
+            Some((cap_text, weight_text)) => match weight_text.trim().parse::<f32>() {
+                Ok(weight) if weight >= 0.0 => (cap_text.trim(), Some(weight)),
+                _ => {
+                    self.warn(&format!("{path}: '{key} = {text}' has a bad weight"));
                     return None;
                 }
+            },
+        };
+        let mut size = if cap_text == "grow" {
+            Size::GROW
+        } else if cap_text == "fit" {
+            if weight.is_some_and(|weight| weight != 0.0) {
+                self.warn(&format!(
+                    "{path}: '{key} = {text}' — fit means weight 0; drop the weight or use a cap"
+                ));
             }
-        } else if let Some(percent) = text.strip_suffix('%') {
+            return Some(Size::FIT);
+        } else if let Some(percent) = cap_text.strip_suffix('%') {
             match percent.trim().parse::<f32>() {
                 Ok(percent) => Size {
-                    kind: SizeKind::Fraction,
-                    value: percent / 100.0,
+                    set: true,
+                    cap: (percent / 100.0).max(0.0),
+                    fraction: true,
+                    weight: 1.0,
                 },
                 Err(_) => {
                     self.warn(&format!("{path}: '{key} = {text}' has a bad percentage"));
                     return None;
                 }
             }
-        } else if let Ok(pixels) = text.parse::<f32>() {
+        } else if let Ok(pixels) = cap_text.parse::<f32>() {
             // Quoted numbers skip tabula's number parsing; accept them.
             Size {
-                kind: SizeKind::Pixels,
-                value: pixels,
+                set: true,
+                cap: pixels.max(0.0),
+                fraction: false,
+                weight: 1.0,
             }
         } else {
             self.warn(&format!(
-                "{path}: '{key} = {text}' is not a number, fit, grow, grow:N or N%"
+                "{path}: '{key} = {text}' is not a cap[:weight] — number, N%, grow or fit"
             ));
             return None;
         };
+        if let Some(weight) = weight {
+            size.weight = weight;
+        }
         Some(size)
     }
 
@@ -696,10 +725,7 @@ impl Compiler {
         let mut node = UiNode {
             kind: NodeKind::Panel,
             direction: Direction::LeftToRight,
-            width: Size {
-                kind: SizeKind::Grow,
-                value: 1.0,
-            },
+            width: Size::GROW,
             background: self.text(Some("none")),
             padding_set: true, // padding stays 0.0
             ..UiNode::default()
@@ -717,14 +743,8 @@ impl Compiler {
         let mut node = UiNode {
             kind: NodeKind::Panel,
             direction: Direction::TopToBottom,
-            width: Size {
-                kind: SizeKind::Grow,
-                value: 1.0,
-            },
-            height: Size {
-                kind: SizeKind::Grow,
-                value: 1.0,
-            },
+            width: Size::GROW,
+            height: Size::GROW,
             align_x: Align::Center,
             align_y: Align::Center,
             background: self.text(Some("accent")),
@@ -875,10 +895,13 @@ mod tests {
         (module.str(seg.literal), module.str(seg.var))
     }
 
-    fn pixels(value: f32) -> Size {
+    /// A bare-number size: default-weight grower capped at `cap`.
+    fn capped(cap: f32) -> Size {
         Size {
-            kind: SizeKind::Pixels,
-            value,
+            set: true,
+            cap,
+            fraction: false,
+            weight: 1.0,
         }
     }
 
@@ -895,7 +918,7 @@ mod tests {
         assert_eq!(panel.kind, NodeKind::Panel);
         assert!(panel.floating && panel.border);
         assert_eq!((panel.x_pos, panel.y_pos), (0.1, 0.5));
-        assert_eq!(panel.width, pixels(120.0));
+        assert_eq!(panel.width, capped(120.0));
         assert_eq!(panel.direction, Direction::LeftToRight);
 
         let label = node(&module, panel.first_child);
@@ -916,8 +939,9 @@ mod tests {
         assert!(module.warnings.is_empty(), "{:?}", module.warnings);
 
         let panel = node(&module, module.roots());
-        assert_eq!(panel.width.kind, SizeKind::Fraction);
-        assert!((panel.width.value - 0.92).abs() < 1e-6);
+        assert!(panel.width.set && panel.width.fraction);
+        assert!((panel.width.cap - 0.92).abs() < 1e-6);
+        assert_eq!(panel.width.weight, 1.0);
         assert_eq!(panel.max_width, 760.0);
         assert_eq!(
             (panel.align_x, panel.align_y),
@@ -929,19 +953,63 @@ mod tests {
         let row = node(&module, panel.first_child);
         assert_eq!(row.kind, NodeKind::Panel);
         assert_eq!(row.direction, Direction::LeftToRight);
-        assert_eq!(row.width.kind, SizeKind::Grow);
-        assert_eq!(row.height, pixels(54.0));
+        assert_eq!(row.width, Size::GROW);
+        assert_eq!(row.height, capped(54.0));
         assert_eq!(seg(&module, row.background, 0).0, "none");
         assert!(row.padding_set && row.padding == 0.0);
 
         let one = node(&module, row.first_child);
-        assert_eq!((one.width.kind, one.width.value), (SizeKind::Grow, 1.0));
+        assert_eq!(one.width, Size::GROW);
         assert_eq!(one.min_width, 70.0);
         assert_eq!(seg(&module, one.tooltip, 0).0, "tip");
 
         let two = node(&module, one.next_sibling);
-        assert_eq!((two.width.kind, two.width.value), (SizeKind::Grow, 2.0));
+        assert_eq!((two.width.cap, two.width.weight), (0.0, 2.0));
         assert_eq!(seg(&module, two.background, 0).0, "accent");
+    }
+
+    #[test]
+    fn cap_weight_grammar_covers_every_form() {
+        let module = compile(
+            "panel = { \
+             panel = { width = \"180:2\" } \
+             panel = { width = \"50%:3\" } \
+             panel = { width = \"grow:0\" } \
+             panel = { width = fit } }",
+        );
+        assert!(module.errors.is_empty());
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+
+        let root = node(&module, module.roots());
+        let capped_weighted = node(&module, root.first_child);
+        assert_eq!(
+            (capped_weighted.width.cap, capped_weighted.width.weight),
+            (180.0, 2.0)
+        );
+        let fraction = node(&module, capped_weighted.next_sibling);
+        assert!(fraction.width.fraction);
+        assert_eq!((fraction.width.cap, fraction.width.weight), (0.5, 3.0));
+        let fit_spelled = node(&module, fraction.next_sibling);
+        assert_eq!(fit_spelled.width, Size::FIT);
+        let fit = node(&module, fit_spelled.next_sibling);
+        assert_eq!(fit.width, Size::FIT);
+    }
+
+    #[test]
+    fn bad_sizes_warn_and_fall_back() {
+        let module = compile(
+            "panel = { width = \"180:x\" height = \"fit:2\" min_width = 10 \
+             panel = { width = wide } }",
+        );
+        assert!(module.errors.is_empty());
+        let warnings = module.warnings.join("\n");
+        assert!(warnings.contains("bad weight"), "{warnings}");
+        assert!(warnings.contains("fit means weight 0"), "{warnings}");
+        assert!(warnings.contains("cap[:weight]"), "{warnings}");
+
+        let panel = node(&module, module.roots());
+        assert!(!panel.width.set, "bad size falls back to unset");
+        assert_eq!(panel.height, Size::FIT, "fit:N keeps fit, drops weight");
     }
 
     #[test]
@@ -963,10 +1031,7 @@ mod tests {
 
         let cell = node(&module, section.next_sibling);
         assert_eq!(cell.kind, NodeKind::Panel);
-        assert_eq!(
-            (cell.width.kind, cell.height.kind),
-            (SizeKind::Grow, SizeKind::Grow)
-        );
+        assert_eq!((cell.width, cell.height), (Size::GROW, Size::GROW));
         assert_eq!((cell.align_x, cell.align_y), (Align::Center, Align::Center));
         assert_eq!(seg(&module, cell.background, 0).0, "accent");
         assert_eq!(cell.min_width, 70.0);
@@ -997,12 +1062,12 @@ mod tests {
         assert_eq!(body.kind, NodeKind::Label);
         assert!(body.wrap);
         assert_eq!(seg(&module, body.color, 0).0, "muted");
-        assert_eq!(body.width.kind, SizeKind::Grow);
+        assert_eq!(body.width, Size::GROW);
 
         let image = node(&module, body.next_sibling);
         assert_eq!(image.kind, NodeKind::Image);
         assert_eq!(seg(&module, image.image, 0).0, "soldier");
-        assert_eq!((image.width, image.height), (pixels(96.0), pixels(48.0)));
+        assert_eq!((image.width, image.height), (capped(96.0), capped(48.0)));
         assert_eq!(seg(&module, image.tint, 0).0, "accent");
         assert_eq!(image.fade, 0.5);
         assert!(image.border);
@@ -1062,9 +1127,9 @@ mod tests {
         let module =
             compile("panel = { width = wide row = { width = grow:fast floating = sideways } }");
         let warnings = module.warnings.join("\n");
-        assert!(warnings.contains("not a number"), "{warnings}");
+        assert!(warnings.contains("not a cap[:weight]"), "{warnings}");
         assert!(warnings.contains("not yes/no"), "{warnings}");
-        assert!(warnings.contains("bad grow weight"), "{warnings}");
+        assert!(warnings.contains("bad weight"), "{warnings}");
         // Bad values fall back to the defaults instead of poisoning the node.
         let panel = node(&module, module.roots());
         assert_eq!(panel.width, Size::default());

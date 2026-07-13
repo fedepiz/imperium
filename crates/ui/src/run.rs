@@ -6,7 +6,7 @@
 
 use arena::{AString, Arena};
 
-use crate::ir::{LabelStyle, NodeKind, Row, Size, SizeKind, Text, UiData, UiModule, UiNode};
+use crate::ir::{LabelStyle, NodeKind, Row, Size, Text, UiData, UiModule, UiNode};
 use crate::layout::{
     self as ui, Align, Color, Direction, ElementConf, ElementId, LogicalSize, Padding, TextConf, V2,
 };
@@ -80,17 +80,90 @@ fn resolve<'f>(ctx: &Ctx<'f>, text: Text) -> &'f str {
     }
 }
 
-/// A script size, mapped onto the layout engine's vocabulary.
-fn size(size: Size) -> LogicalSize {
-    match size.kind {
-        SizeKind::Fit => LogicalSize::Fit,
-        SizeKind::Pixels => LogicalSize::Pixels(size.value),
-        SizeKind::Grow if size.value != 1.0 && size.value > 0.0 => {
-            LogicalSize::GrowWeighted(size.value)
-        }
-        SizeKind::Grow => LogicalSize::Grow,
-        SizeKind::Fraction => LogicalSize::Parent(size.value),
+/// A widget's posture when the script gives no size: how eagerly it
+/// claims leftover space (0 = fit content) and its default cap (0 =
+/// uncapped).
+#[derive(Clone, Copy)]
+struct SizeDefault {
+    weight: f32,
+    cap: f32,
+}
+
+/// Containers fill their share of the parent.
+const GROW: SizeDefault = SizeDefault {
+    weight: 1.0,
+    cap: 0.0,
+};
+
+/// Floating elements and images are their content: floaters have no
+/// parent share to claim, images shouldn't silently upscale.
+const FIT: SizeDefault = SizeDefault {
+    weight: 0.0,
+    cap: 0.0,
+};
+
+/// One axis mapped onto the engine's vocabulary: the growth mode, plus
+/// the pixel and fractional caps to constrain it with.
+fn axis(size: Size, default: SizeDefault) -> (LogicalSize, f32, f32) {
+    let (cap, fraction, weight) = if size.set {
+        (size.cap, size.fraction, size.weight)
+    } else {
+        (default.cap, false, default.weight)
+    };
+    let logical = if weight == 0.0 {
+        LogicalSize::Fit
+    } else if weight == 1.0 {
+        LogicalSize::Grow
+    } else {
+        LogicalSize::GrowWeighted(weight)
+    };
+    if fraction {
+        (logical, 0.0, cap)
+    } else {
+        (logical, cap, 0.0)
     }
+}
+
+/// Applies both script axes onto the conf: the script's `cap[:weight]`
+/// when given, else the widget default. Caps combine with the explicit
+/// `min_*`/`max_*` keys — the smaller ceiling wins (the engine folds the
+/// fractional cap in the same way).
+fn sized<'a>(
+    mut conf: ElementConf<'a>,
+    node: &UiNode,
+    width: SizeDefault,
+    height: SizeDefault,
+) -> ElementConf<'a> {
+    let tighter = |a: f32, b: f32| {
+        if a > 0.0 && b > 0.0 { a.min(b) } else { a.max(b) }
+    };
+
+    let (logical, cap, fraction) = axis(node.width, width);
+    conf = conf.width(logical);
+    let max = tighter(cap, node.max_width);
+    if max > 0.0 {
+        conf = conf.max_width(max);
+    }
+    if fraction > 0.0 {
+        conf = conf.max_width_fraction(fraction);
+    }
+    if node.min_width > 0.0 {
+        conf = conf.min_width(node.min_width);
+    }
+
+    let (logical, cap, fraction) = axis(node.height, height);
+    conf = conf.height(logical);
+    let max = tighter(cap, node.max_height);
+    if max > 0.0 {
+        conf = conf.max_height(max);
+    }
+    if fraction > 0.0 {
+        conf = conf.max_height_fraction(fraction);
+    }
+    if node.min_height > 0.0 {
+        conf = conf.min_height(node.min_height);
+    }
+    conf
 }
 
 /// The container's background: empty name = the widget default, `none` (or
@@ -106,10 +179,11 @@ fn background(ctx: &Ctx<'_>, node: &UiNode, default: Option<Color>) -> Option<Co
 /// common. The caller layers on its per-kind pieces (ids, floats, rows).
 fn container_conf(ctx: &Ctx<'_>, node: &UiNode, default_bg: Option<Color>) -> ElementConf<'static> {
     let style = ctx.style;
-    let mut conf = ElementConf::default()
+    // Containers fill by default; floaters (tooltips, badges, top-level
+    // panels) have no share to claim and fit their content instead.
+    let default = if node.floating { FIT } else { GROW };
+    let mut conf = sized(ElementConf::default(), node, default, default)
         .direction(node.direction)
-        .width(size(node.width))
-        .height(size(node.height))
         .align_x(node.align_x)
         .align_y(node.align_y)
         .padding(Padding::all(if node.padding_set {
@@ -119,18 +193,6 @@ fn container_conf(ctx: &Ctx<'_>, node: &UiNode, default_bg: Option<Color>) -> El
         }))
         .gap(if node.gap_set { node.gap } else { style.gap })
         .corner_radius(style.corner_radius);
-    if node.min_width > 0.0 {
-        conf = conf.min_width(node.min_width);
-    }
-    if node.max_width > 0.0 {
-        conf = conf.max_width(node.max_width);
-    }
-    if node.min_height > 0.0 {
-        conf = conf.min_height(node.min_height);
-    }
-    if node.max_height > 0.0 {
-        conf = conf.max_height(node.max_height);
-    }
     if let Some(color) = background(ctx, node, default_bg) {
         conf = conf.background(color);
     }
@@ -264,17 +326,19 @@ fn label(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
         "" => role_color,
         name => style.color(name).unwrap_or(role_color),
     };
-    ui.add(
+    // Labels fit their text.
+    ui.add(sized(
         ElementConf::text(
             TextConf::default()
                 .text(text)
                 .size(text_size)
                 .color(color)
                 .wrap(node.wrap),
-        )
-        .width(size(node.width))
-        .height(size(node.height)),
-    );
+        ),
+        &node,
+        FIT,
+        FIT,
+    ));
 }
 
 fn button(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
@@ -289,33 +353,26 @@ fn button(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     // Sense-then-declare: style from last frame's bounds, like `sense` docs
     // describe.
     let sense = ui.sense(id);
-    let mut conf = ElementConf::default()
-        .id(id)
-        .width(size(node.width))
-        .height(size(node.height))
-        .padding(Padding::symmetric(10.0, 4.0))
-        .align_x(Align::Center)
-        .align_y(Align::Center)
-        .background(if sense.hovered {
-            style.button_hover
-        } else {
-            style.button_background
-        })
-        .corner_radius(style.corner_radius);
+    // Unsized buttons grow into the style's default button caps.
+    let default_for = |cap: f32| SizeDefault { weight: 1.0, cap };
+    let mut conf = sized(
+        ElementConf::default(),
+        &node,
+        default_for(style.button_width),
+        default_for(style.button_height),
+    )
+    .id(id)
+    .padding(Padding::symmetric(10.0, 4.0))
+    .align_x(Align::Center)
+    .align_y(Align::Center)
+    .background(if sense.hovered {
+        style.button_hover
+    } else {
+        style.button_background
+    })
+    .corner_radius(style.button_corner_radius);
     if style.button_border_thickness > 0.0 {
         conf = conf.border(style.button_border_thickness, style.button_border_color);
-    }
-    if node.min_width > 0.0 {
-        conf = conf.min_width(node.min_width);
-    }
-    if node.max_width > 0.0 {
-        conf = conf.max_width(node.max_width);
-    }
-    if node.min_height > 0.0 {
-        conf = conf.min_height(node.min_height);
-    }
-    if node.max_height > 0.0 {
-        conf = conf.max_height(node.max_height);
     }
     let text = resolve(ctx, node.text);
     ui.add_with(conf, |ui| {
@@ -339,16 +396,14 @@ fn image(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     let Some(data) = find_image(ctx, node.image) else {
         return; // unknown key: draw nothing, the module already validated
     };
-    let mut conf = ElementConf::default()
-        .image(
-            data.image,
-            V2 {
-                x: data.width,
-                y: data.height,
-            },
-        )
-        .width(size(node.width))
-        .height(size(node.height));
+    // Images default to their natural size; growing is opt-in.
+    let mut conf = sized(ElementConf::default(), &node, FIT, FIT).image(
+        data.image,
+        V2 {
+            x: data.width,
+            y: data.height,
+        },
+    );
     if let Some(color) = background(ctx, &node, None) {
         conf = conf.background(color);
     }
@@ -513,22 +568,42 @@ mod tests {
     }
 
     #[test]
-    fn logical_sizes_map_to_layout_sizes() {
-        let grow = Size {
-            kind: SizeKind::Grow,
-            value: 1.0,
+    fn sizes_map_to_engine_modes_and_caps() {
+        // Unset: the widget default posture stands.
+        assert_eq!(
+            axis(Size::default(), GROW),
+            (LogicalSize::Grow, 0.0, 0.0)
+        );
+        assert_eq!(axis(Size::default(), FIT), (LogicalSize::Fit, 0.0, 0.0));
+        assert_eq!(
+            axis(
+                Size::default(),
+                SizeDefault {
+                    weight: 1.0,
+                    cap: 140.0
+                }
+            ),
+            (LogicalSize::Grow, 140.0, 0.0)
+        );
+
+        // Explicit sizes win over the default.
+        let capped_weighted = Size {
+            set: true,
+            cap: 180.0,
+            fraction: false,
+            weight: 2.0,
         };
-        let weighted = Size {
-            kind: SizeKind::Grow,
-            value: 2.0,
-        };
+        assert_eq!(
+            axis(capped_weighted, FIT),
+            (LogicalSize::GrowWeighted(2.0), 180.0, 0.0)
+        );
         let fraction = Size {
-            kind: SizeKind::Fraction,
-            value: 0.92,
+            set: true,
+            cap: 0.92,
+            fraction: true,
+            weight: 1.0,
         };
-        assert_eq!(size(Size::default()), LogicalSize::Fit);
-        assert_eq!(size(grow), LogicalSize::Grow);
-        assert_eq!(size(weighted), LogicalSize::GrowWeighted(2.0));
-        assert_eq!(size(fraction), LogicalSize::Parent(0.92));
+        assert_eq!(axis(fraction, FIT), (LogicalSize::Grow, 0.0, 0.92));
+        assert_eq!(axis(Size::FIT, GROW), (LogicalSize::Fit, 0.0, 0.0));
     }
 }

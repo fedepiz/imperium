@@ -1,0 +1,100 @@
+# The layout lab, as data. One centered panel stress-testing the layout
+# engine: weighted growth, caps, images, scrolling and overflow.
+# Cosmetics (padding, gaps, fonts, colors) come from the style; the script
+# only states structure and the sizes under test.
+#
+# Sizes are cap[:weight]: elements start at their content floor, grow by
+# weight (default 1), and stop at the cap. `width = 180` = grow up to 180;
+# `180:2` = same cap, double share; `grow` = uncapped; `fit` = weight 0;
+# `50%` = capped at half the parent.
+
+panel = {
+	# Centered on screen (fraction of the screen, 0.5 = middle)
+	x_pos = 0.5
+	y_pos = 0.5
+
+	width = 92%
+	max_width = 760
+
+	align = center
+	border = yes
+
+	# A floating badge pinned to the panel's top-right corner
+	panel = {
+		floating = yes
+		x_pos = 1
+		background = accent
+		label = "FLOATING"
+	}
+
+	heading = "LAYOUT LAB"
+	label = "Resize to stress the constraints"
+
+	section = "WEIGHTED GROWTH  1 : 2"
+	row = {
+		height = 54
+		box = {
+			min_width = 70
+			tooltip = "Floating tooltip: 1 share"
+			label = "1x"
+		}
+		box = {
+			width = grow:2
+			min_width = 100
+			label = "2x"
+		}
+	}
+
+	section = "CAP 180 PX + WEIGHTED REST"
+	row = {
+		height = 54
+		button = {
+			id = "print Hey"
+			text = "Capped text"
+			width = 180
+			height = grow
+		}
+		box = {
+			width = grow:2
+			min_width = 120
+			label = "remainder"
+		}
+	}
+
+	section = "IMAGE: NATURAL, STRETCHED, TINTED, FADED"
+	row = {
+		# Images fit their source size unless the script sizes them.
+		# Image keys resolve through the data the game hands the UI.
+		image = { id = soldier }
+		image = { id = soldier width = 96 height = 48 border = yes }
+		image = { id = soldier tint = accent }
+		image = { id = soldier fade = 0.5 }
+	}
+
+	section = "SCROLL: WHEEL OVER THE LIST"
+	list = {
+		id = "demo_rows"
+		width = grow
+		height = 180
+		scrollable = yes
+		background = dark
+		background_image = widget
+		border = yes
+		template = {
+			# LABEL is bound per row by the data
+			panel = {
+				width = grow
+				height = fit
+				label = "$LABEL"
+			}
+		}
+	}
+
+	section = "OVERFLOW: CAPS 280, FLOORS 80/60/60"
+	row = {
+		height = 54
+		box = { width = 280 min_width = 80 label = "min 80" }
+		box = { width = 280 min_width = 60 label = "min 60" }
+		box = { width = 280 min_width = 60 label = "min 60" }
+	}
+}

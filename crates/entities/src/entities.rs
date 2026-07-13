@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use util::strings::{Span, StrBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
-pub(crate) struct EntityId {
+pub struct EntityId {
     index: u16,
     generation: u16,
 }
@@ -17,6 +17,41 @@ impl EntityId {
 
     pub fn is_valid(&self) -> bool {
         self.index != 0 && self.generation % 2 == 1
+    }
+
+    /// Packs the id into one integer, for round-tripping through flat
+    /// channels like UI action strings. The null id packs to 0.
+    pub fn to_bits(self) -> u64 {
+        (self.generation as u64) << 16 | self.index as u64
+    }
+
+    /// Inverse of [`EntityId::to_bits`]. Out-of-range bits yield the
+    /// null id, which — like any stale id — fails `is_alive` and reads
+    /// as nothing; garbage can't alias a live entity.
+    pub fn from_bits(bits: u64) -> EntityId {
+        if bits > u32::MAX as u64 {
+            return EntityId::default();
+        }
+        EntityId {
+            index: bits as u16,
+            generation: (bits >> 16) as u16,
+        }
+    }
+}
+
+/// Formats as the packed bits so ids embed directly in UI strings;
+/// [`FromStr`](core::str::FromStr) reverses the trip.
+impl core::fmt::Display for EntityId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&self.to_bits(), f)
+    }
+}
+
+impl core::str::FromStr for EntityId {
+    type Err = core::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(EntityId::from_bits(s.parse::<u64>()?))
     }
 }
 
@@ -34,8 +69,16 @@ pub struct RelationId(pub u16);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
 pub struct SetId(pub u16);
 
+/// A name handle: a span into the entity system's shared name buffer
+/// (see [`Entities::add_name`]). The buffer is append-only and never
+/// moves, so a symbol is valid for the lifetime of the `Entities` and
+/// any number of entities can share one. ZII: the zero symbol is the
+/// empty name.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Symbol(Span);
+
 #[derive(Default, Clone)]
-pub(crate) struct Definitions {
+pub struct Definitions {
     var_names: Vec<String>,
     relation_names: Vec<String>,
     set_names: Vec<String>,
@@ -112,7 +155,7 @@ impl ReverseKey {
 }
 
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
-pub(crate) struct RelationEntry {
+pub struct RelationEntry {
     pub source: EntityId,
     pub relation: RelationId,
     pub target: EntityId,
@@ -126,14 +169,15 @@ struct SetKey {
 }
 
 #[derive(Clone)]
-pub(crate) struct Entities {
+pub struct Entities {
     defs: Definitions,
     entries: Vec<EntityData>,
     free_list: Vec<u16>,
-    /// Per-slot spans into `name_buf`. Zero span = unnamed.
-    names: Vec<Span>,
-    /// One shared buffer for all entity names. Append-only: renames and
-    /// despawns leak their old bytes until `compact_names`.
+    /// Per-slot name symbols; the zero symbol = unnamed.
+    names: Vec<Symbol>,
+    /// The name vocabulary: every name ever added, append-only. It never
+    /// moves, so symbols stay valid forever. A replaced name's bytes
+    /// leak — rare (custom/generated names only) and accepted.
     name_buf: StrBuf,
     tags: BTreeMap<String, EntityId>,
     vars: Vec<f32>,
@@ -162,7 +206,7 @@ impl Entities {
             .collect();
 
         let vars = vec![0.0; Self::NUM_ENTITIES * defs.var_names.len()];
-        let names = vec![Span::default(); Self::NUM_ENTITIES];
+        let names = vec![Symbol::default(); Self::NUM_ENTITIES];
 
         Self {
             defs,
@@ -202,12 +246,19 @@ impl Entities {
 
     pub fn get_name(&self, id: EntityId) -> &str {
         assert!(self.is_alive(id));
-        self.name_buf.get(self.names[id.index as usize])
+        self.name_buf.get(self.names[id.index as usize].0)
     }
 
-    pub fn set_name(&mut self, id: EntityId, name: &str) {
+    /// Adds a name to the vocabulary, returning the symbol that names
+    /// entities with it. Adding the same text twice stores it twice —
+    /// name banks dedup by construction; don't churn this.
+    pub fn add_name(&mut self, name: &str) -> Symbol {
+        Symbol(self.name_buf.push(name))
+    }
+
+    pub fn set_name(&mut self, id: EntityId, name: Symbol) {
         assert!(self.is_alive(id));
-        self.names[id.index as usize] = self.name_buf.push(name);
+        self.names[id.index as usize] = name;
     }
 
     pub fn lookup_by_tag(&self, tag: &str) -> Option<EntityId> {
@@ -450,7 +501,7 @@ impl Entities {
                 entry.id.generation += 1;
                 self.free_list.push(id.index);
             }
-            self.names[id.index as usize] = Span::default();
+            self.names[id.index as usize] = Symbol::default();
             dead.push(id);
         }
         if dead.is_empty() {
@@ -505,19 +556,6 @@ impl Entities {
         let entries = &self.entries;
         self.tags
             .retain(|_, id| entries[id.index as usize].id == *id);
-    }
-
-    /// Rebuild the name buffer from live spans, reclaiming bytes leaked by
-    /// renames and despawns. Purely a memory optimization — call
-    /// sporadically, whenever convenient.
-    pub fn compact_names(&mut self) {
-        let mut compacted = StrBuf::default();
-        for span in &mut self.names {
-            if !span.is_empty() {
-                *span = compacted.push(self.name_buf.get(*span));
-            }
-        }
-        self.name_buf = compacted;
     }
 
     /// 0.0 means "no relation" — absent entries and zero are the same thing.
@@ -608,6 +646,26 @@ mod tests {
     }
 
     #[test]
+    fn ids_round_trip_through_bits_and_strings() {
+        let mut entities = entities();
+        let id = entities.spawn();
+
+        assert_eq!(EntityId::from_bits(id.to_bits()), id);
+        assert_eq!(id.to_string().parse::<EntityId>(), Ok(id));
+
+        // ZII: the null id is "0", both ways.
+        assert_eq!(EntityId::default().to_bits(), 0);
+        assert_eq!("0".parse::<EntityId>(), Ok(EntityId::default()));
+
+        // Garbage degrades safely: not-a-number is an error; out-of-range
+        // bits pack to the null id, which is never alive.
+        assert!("brutus".parse::<EntityId>().is_err());
+        let overflow = "99999999999999".parse::<EntityId>().unwrap();
+        assert_eq!(overflow, EntityId::default());
+        assert!(!entities.is_alive(overflow));
+    }
+
+    #[test]
     fn default_id_is_not_alive() {
         let entities = entities();
         assert!(!entities.is_alive(EntityId::default()));
@@ -682,7 +740,8 @@ mod tests {
     fn names_are_stored_by_slot_and_cleared_on_reuse() {
         let mut entities = entities();
         let first = entities.spawn();
-        entities.set_name(first, "Marcus Tullius Cicero");
+        let cicero = entities.add_name("Marcus Tullius Cicero");
+        entities.set_name(first, cicero);
         assert_eq!(entities.get_name(first), "Marcus Tullius Cicero");
 
         entities.mark_despawn(first);
@@ -691,29 +750,30 @@ mod tests {
 
         assert_eq!(first.index, replacement.index);
         assert_eq!(entities.get_name(replacement), "");
-        entities.set_name(replacement, "Gaius Julius Caesar");
+        let caesar = entities.add_name("Gaius Julius Caesar");
+        entities.set_name(replacement, caesar);
         assert_eq!(entities.get_name(replacement), "Gaius Julius Caesar");
         assert!(std::panic::catch_unwind(|| entities.get_name(first)).is_err());
     }
 
     #[test]
-    fn compact_names_reclaims_leaked_bytes() {
+    fn one_symbol_names_many_entities_and_outlives_them() {
         let mut entities = entities();
-        let kept = entities.spawn();
-        let renamed = entities.spawn();
-        let dead = entities.spawn();
-        entities.set_name(kept, "Cicero");
-        entities.set_name(renamed, "Octavianus");
-        entities.set_name(renamed, "Augustus");
-        entities.set_name(dead, "Crassus");
-        entities.mark_despawn(dead);
+        let gaius = entities.add_name("Gaius");
+        let a = entities.spawn();
+        let b = entities.spawn();
+        entities.set_name(a, gaius);
+        entities.set_name(b, gaius);
+        assert_eq!(entities.get_name(a), "Gaius");
+        assert_eq!(entities.get_name(b), "Gaius");
+        // One vocabulary entry serves both.
+        assert_eq!(entities.name_buf.len(), "Gaius".len());
+
+        entities.mark_despawn(a);
         entities.sweep();
-
-        entities.compact_names();
-
-        assert_eq!(entities.get_name(kept), "Cicero");
-        assert_eq!(entities.get_name(renamed), "Augustus");
-        assert_eq!(entities.name_buf.len(), "Cicero".len() + "Augustus".len());
+        let c = entities.spawn();
+        entities.set_name(c, gaius);
+        assert_eq!(entities.get_name(c), "Gaius");
     }
 
     #[test]

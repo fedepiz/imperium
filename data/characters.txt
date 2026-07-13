@@ -1,0 +1,48 @@
+# Starting cast for the vertical slice. Year 700 AUC (~54 BC).
+#
+# character = {
+#     id = <key other entries reference>
+#     name = <display name>
+#     age = <years>
+#     tag = <optional singleton tag, e.g. player>
+#     married = <id of spouse, declared on one side only>
+# }
+
+character = {
+	id = caesar
+	name = "Gaius Julius Caesar"
+	age = 46
+	tag = player
+	married = calpurnia
+}
+
+character = {
+	id = calpurnia
+	name = "Calpurnia Pisonis"
+	age = 30
+}
+
+character = {
+	id = crassus
+	name = "Marcus Licinius Crassus"
+	age = 61
+}
+
+character = {
+	id = pompeius
+	name = "Gnaeus Pompeius Magnus"
+	age = 52
+	married = iulia
+}
+
+character = {
+	id = iulia
+	name = "Iulia Caesaris"
+	age = 22
+}
+
+character = {
+	id = cicero
+	name = "Marcus Tullius Cicero"
+	age = 52
+}

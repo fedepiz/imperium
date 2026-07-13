@@ -73,6 +73,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "entities"
+version = "0.1.0"
+dependencies = [
+ "util",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -160,6 +167,7 @@ name = "imperium"
 version = "0.1.0"
 dependencies = [
  "arena",
+ "entities",
  "macroquad",
  "num_enum",
  "strum",

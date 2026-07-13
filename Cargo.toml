@@ -13,12 +13,14 @@ num_enum = "0.7"
 strum = { version = "0.28", features = ["derive"] }
 
 arena = { path = "crates/arena" }
+entities = { path = "crates/entities" }
 tabula = { path = "crates/tabula" }
 ui = { path = "crates/ui" }
 util = { path = "crates/util" }
 
 [dependencies]
 arena = { workspace = true }
+entities = { workspace = true }
 macroquad = { workspace = true }
 num_enum = { workspace = true }
 tabula = { workspace = true }

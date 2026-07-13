@@ -1,4 +1,3 @@
-mod entities;
 mod game;
 
 use std::collections::HashMap;
@@ -92,15 +91,24 @@ async fn amain() {
     let mut ui_module = load_ui_module();
     let mut ui_style = load_style();
 
+    let mut game = game::Game::new();
+
     loop {
         if mq::is_key_pressed(mq::KeyCode::R) {
             ui_module = load_ui_module();
             ui_style = load_style();
         }
+        if mq::is_key_pressed(mq::KeyCode::Space) {
+            game.tick_year();
+        }
 
         mq::clear_background(mq::BLACK);
         frame_arena.reset();
-        let ui_data = demo_ui_data(test_image, background);
+
+        let mut ui_data = ir::UiData::default();
+        game.fill_ui_data(&mut ui_data);
+        ui_data.add_image("soldier", test_image.id, test_image.width, test_image.height);
+        ui_data.add_image("widget", background.id, background.width, background.height);
 
         let (output, events) = build_ui(
             &mut layout,
@@ -116,7 +124,7 @@ async fn amain() {
         render_ui_commands(output, &font, &images);
 
         for action in events {
-            println!("ui action: {action}");
+            game.handle_action(&action);
         }
 
         if mq::is_key_pressed(mq::KeyCode::Escape) {
@@ -152,22 +160,6 @@ fn load_style() -> style::Style {
         eprintln!("data/style.txt: {warning}");
     }
     parsed.style
-}
-
-/// Demo rows and image bindings for the script UI, refilled every frame
-/// into the recycled buffers. Stands in for whatever the game will fetch
-/// for real.
-fn demo_ui_data(soldier: Image, widget: Image) -> ir::UiData {
-    let mut data = ir::UiData::default();
-    const ROWS: usize = 12;
-    data.begin_list("demo_rows");
-    for index in 0..ROWS {
-        data.begin_row();
-        data.bind("LABEL", &format!("Row {index:02}"));
-    }
-    data.add_image("soldier", soldier.id, soldier.width, soldier.height);
-    data.add_image("widget", widget.id, widget.width, widget.height);
-    data
 }
 
 fn build_ui<'a>(
@@ -416,21 +408,28 @@ fn draw_rounded_rectangle(bounds: layout::Rectangle, radius: f32, color: mq::Col
     }
 }
 
+/// A watertight ring of triangles between the outline and a copy inset by
+/// `width`. Per-segment thick lines overlap at every joint and gap around
+/// the corners, which shimmers; corresponding points of two concentric
+/// outlines tile exactly.
 fn draw_rounded_rectangle_lines(
     bounds: layout::Rectangle,
     radius: f32,
     width: f32,
     color: mq::Color,
 ) {
-    let points = rounded_rectangle_points(bounds, radius);
-    for index in 0..points.len() {
-        mq::draw_line(
-            points[index].x,
-            points[index].y,
-            points[(index + 1) % points.len()].x,
-            points[(index + 1) % points.len()].y,
-            width,
-            color,
-        );
+    let width = width.min(bounds.w * 0.5).min(bounds.h * 0.5);
+    let inset = layout::Rectangle {
+        x: bounds.x + width,
+        y: bounds.y + width,
+        w: bounds.w - 2.0 * width,
+        h: bounds.h - 2.0 * width,
+    };
+    let outer = rounded_rectangle_points(bounds, radius);
+    let inner = rounded_rectangle_points(inset, (radius - width).max(0.0));
+    for index in 0..outer.len() {
+        let next = (index + 1) % outer.len();
+        mq::draw_triangle(outer[index], inner[index], outer[next], color);
+        mq::draw_triangle(outer[next], inner[index], inner[next], color);
     }
 }

@@ -29,6 +29,12 @@ pub struct Style {
     /// `0.0` = borderless buttons.
     pub button_border_thickness: f32,
     pub button_border_color: Color,
+    pub button_corner_radius: f32,
+    /// Default size cap for buttons the script doesn't size: they grow
+    /// into it. `0.0` = uncapped. (Labels need no counterpart — they fit
+    /// their text.)
+    pub button_width: f32,
+    pub button_height: f32,
     pub tooltip_background: Color,
     pub heading_size: u16,
     pub section_size: u16,
@@ -52,6 +58,9 @@ impl Default for Style {
             button_hover: Color::rgba(0.16, 0.86, 0.90, 1.0),
             button_border_thickness: 0.0,
             button_border_color: Color::rgba(0.0, 0.0, 0.0, 1.0),
+            button_corner_radius: 10.0,
+            button_width: 0.0,
+            button_height: 0.0,
             tooltip_background: Color::rgba(0.02, 0.03, 0.05, 0.95),
             heading_size: 28,
             section_size: 13,
@@ -93,12 +102,15 @@ pub struct StyleModule<'a> {
 
 /// Style keys with a plain number value. Sizes are `u16` font sizes;
 /// the metrics are logical points.
-const NUMBER_KEYS: [&str; 8] = [
+const NUMBER_KEYS: [&str; 11] = [
     "heading_size",
     "section_size",
     "text_size",
     "tooltip_size",
     "button_border_thickness",
+    "button_corner_radius",
+    "button_width",
+    "button_height",
     "padding",
     "gap",
     "corner_radius",
@@ -138,6 +150,9 @@ pub fn parse<'a>(arena: &'a Arena, source: &str) -> StyleModule<'a> {
                         "text_size" => style.text_size = number as u16,
                         "tooltip_size" => style.tooltip_size = number as u16,
                         "button_border_thickness" => style.button_border_thickness = number,
+                        "button_corner_radius" => style.button_corner_radius = number,
+                        "button_width" => style.button_width = number,
+                        "button_height" => style.button_height = number,
                         "padding" => style.padding = number,
                         "gap" => style.gap = number,
                         "corner_radius" => style.corner_radius = number,
