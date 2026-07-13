@@ -1,13 +1,23 @@
-//! Compiled UI descriptions: tabula source → flat IR, once per (re)load.
+//! Compiled UI descriptions: tabula source + style → flat IR, once per
+//! (re)load.
 //!
 //! The layout engine rebuilds every frame, so whatever describes the UI is
 //! walked every frame too. The raw tabula tree is the wrong shape for that
-//! (string key matching, `yes`/`no` atoms, number re-parsing), so [`compile`]
-//! translates it once into [`UiNode`]s: a flat array of fat kind-tagged
-//! structs with every field pre-parsed and every `$VAR` string
-//! pre-tokenized. The module owns its storage outright (nodes, segs, one
-//! string buffer), so it is `'static`, `Send`, and reloaded by
-//! reassignment. The per-frame walk lives in [`crate::run`].
+//! (string key matching, `yes`/`no` atoms, number re-parsing), so
+//! [`compile`] translates it once into [`UiNode`]s: a flat array of fat
+//! structs with every field pre-parsed, every `$VAR` string pre-tokenized,
+//! and every style value baked in.
+//!
+//! There is no node "kind": widget names (`panel`, `label`, `button`, ...)
+//! are compiler vocabulary only — each one is a set of legal keys plus
+//! defaults written into the fields, and every policy decision (what may
+//! float, what a button looks like) is made here, once. The per-frame walk
+//! in [`crate::run`] is kind-blind: it applies every field of every node.
+//!
+//! The style is a compile input, not a runtime one: role sizes, paddings
+//! and palette colors land in the nodes as plain values. Only `$VAR` color
+//! names survive to run time, resolved against [`UiModule::palette`]. A
+//! style edit is a recompile, same as a script edit.
 //!
 //! The IR also defines the data the UI binds against ([`UiData`]): the
 //! caller fetches rows from wherever it likes and hands them over in this
@@ -15,36 +25,9 @@
 
 use arena::Arena;
 
-use crate::layout::{Align, Direction, ImageId};
+use crate::layout::{Align, Color, Direction, ImageId, Padding};
+use crate::style::{Palette, Style};
 use util::strings::{Span, StrBuf};
-
-/// What a [`UiNode`] is. Zero value = `None`, the reserved null node.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum NodeKind {
-    #[default]
-    None,
-    /// Also `row` in the script: a row is a panel compiled with container
-    /// defaults (horizontal, transparent, no padding, grow width).
-    Panel,
-    Label,
-    Button,
-    Image,
-    List,
-    /// The stamped-out subtree of a `List`; reached only through
-    /// [`UiNode::template`], never through the sibling chain.
-    Template,
-}
-
-/// Which of the style's text roles a label renders with. The script picks
-/// one by widget key (`label`, `heading`, `section`); sizes and colors live
-/// in the style, not the script. Zero value = `Body`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum LabelStyle {
-    #[default]
-    Body,
-    Heading,
-    Section,
-}
 
 /// A pre-parsed script size: `cap[:weight]` per axis.
 ///
@@ -53,12 +36,10 @@ pub enum LabelStyle {
 /// parent's leftover space, `0` meaning "fit content". Every element
 /// starts at its content floor, grows by weight, and stops at its cap.
 ///
-/// Zero value = unset: the widget's default posture stands (see
-/// [`crate::run`]).
+/// Zero value = fit content, uncapped. The compiler writes every node's
+/// final size — widget defaults are its policy, not the walk's.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Size {
-    /// False = the script said nothing for this axis.
-    pub set: bool,
     /// The ceiling: pixels, or a 0..=1 fraction of the parent when
     /// `fraction` is set. `0.0` = uncapped.
     pub cap: f32,
@@ -68,17 +49,15 @@ pub struct Size {
 }
 
 impl Size {
-    /// An explicit "fill the parent" size: uncapped, weight 1.
+    /// "Fill the parent": uncapped, weight 1.
     pub const GROW: Size = Size {
-        set: true,
         cap: 0.0,
         fraction: false,
         weight: 1.0,
     };
 
-    /// An explicit "fit content" size: uncapped, weight 0.
+    /// "Fit content": uncapped, weight 0 — the zero value.
     pub const FIT: Size = Size {
-        set: true,
         cap: 0.0,
         fraction: false,
         weight: 0.0,
@@ -109,63 +88,43 @@ impl Text {
     }
 }
 
+/// A script color, decided as early as possible. The interpretation: if
+/// `name` is non-empty, it is a `$VAR` palette name — interpolate it per
+/// frame and look it up in [`UiModule::palette`]; if it is empty or fails
+/// to resolve, `color` applies (literal names bake into it at compile
+/// time; for a `$VAR` it holds the widget's default). Deliberately not an
+/// enum: the variable case falls back on `color`, so the fields overlap.
+/// Zero value = no color (alpha 0), which every consumer treats as "draw
+/// nothing".
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Paint {
+    pub name: Text,
+    pub color: Color,
+}
+
+impl Paint {
+    pub fn of(color: Color) -> Paint {
+        Paint {
+            name: Text::default(),
+            color,
+        }
+    }
+}
+
 /// One fat struct covers every widget; unused fields stay at their zero
-/// value. Children are index links into the module's flat node array, with
-/// `0` (the reserved null node) meaning "none".
+/// value and the walk applies them all — there is no kind to dispatch on.
+/// Children are index links into the module's flat node array, with `0`
+/// (the reserved null node) meaning "none".
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UiNode {
-    pub kind: NodeKind,
     pub first_child: u32,
     pub next_sibling: u32,
-    /// Button action id / list binding id / template element id.
+    /// Element identity: hover/scroll state, and — with a `template` —
+    /// which data list this node stamps.
     pub id: Text,
-    /// Label text / button text.
-    pub text: Text,
-    /// Floating containers: position as a fraction of the parent (the
-    /// screen for top-level panels). 0 = flush left/top, 0.5 = centered,
-    /// 1 = flush right/bottom.
-    pub x_pos: f32,
-    pub y_pos: f32,
-    /// `floating = yes` lifts the element out of its parent's flow and
-    /// pins it at `x_pos`/`y_pos`. Always set for top-level panels.
-    pub floating: bool,
-    pub width: Size,
-    pub height: Size,
-    /// `0.0` = unconstrained.
-    pub min_width: f32,
-    pub max_width: f32,
-    pub min_height: f32,
-    pub max_height: f32,
-    pub border: bool,
-    pub scrollable: bool,
-    pub direction: Direction,
-    /// Both axes come from the single `align` key; zero = start.
-    pub align_x: Align,
-    pub align_y: Align,
-    /// Style overrides; the `_set` flags distinguish "unset, use the style"
-    /// from an explicit zero.
-    pub padding: f32,
-    pub padding_set: bool,
-    pub gap: f32,
-    pub gap_set: bool,
-    /// Palette name ("accent", "none", ...), interpolatable so rows can
-    /// bind it. Empty = the widget's default.
-    pub background: Text,
-    /// Labels: which style text role to render with.
-    pub label_style: LabelStyle,
-    /// Labels: palette name for the ink. Empty = the role's default.
-    pub color: Text,
-    /// Labels: font size override, `0` = the role's default.
-    pub text_size: u16,
-    /// Labels: wrap to the element width.
-    pub wrap: bool,
-    /// Image widgets: the image key resolved through [`UiData::images`].
-    /// Containers: background image key (tiling is the renderer's call).
-    pub image: Text,
-    /// Image widgets: palette name to tint with. Empty = untinted.
-    pub tint: Text,
-    /// Image widgets: `0.0` = fully opaque.
-    pub fade: f32,
+    /// Click action; non-empty makes the element clickable (click events,
+    /// the hover skin).
+    pub action: Text,
     /// Visibility, resolved per frame: the interpolated text must be
     /// empty or `yes` to show the element. Conditions come from data via
     /// `$VAR` (row bindings, then globals); a missing binding keeps its
@@ -173,8 +132,71 @@ pub struct UiNode {
     pub visible: Text,
     /// Hover tooltip text; empty = none.
     pub tooltip: Text,
-    /// `List` only: index of the `Template` node, `0` = none.
+
+    // The box: where the element sits and how much room it takes.
+    /// `floating = yes` lifts the element out of its parent's flow and
+    /// pins it at `x_pos`/`y_pos`. Always set for top-level panels.
+    pub floating: bool,
+    /// Floating elements: position as a fraction of the parent (the
+    /// screen for top-level panels). 0 = flush left/top, 0.5 = centered,
+    /// 1 = flush right/bottom.
+    pub x_pos: f32,
+    pub y_pos: f32,
+    pub width: Size,
+    pub height: Size,
+    /// `0.0` = unconstrained.
+    pub min_width: f32,
+    pub max_width: f32,
+    pub min_height: f32,
+    pub max_height: f32,
+    pub direction: Direction,
+    /// Both axes come from the single `align` key; zero = start.
+    pub align_x: Align,
+    pub align_y: Align,
+    pub padding: Padding,
+    pub gap: f32,
+
+    // The skin.
+    pub background: Paint,
+    /// Replaces `background` while hovered; alpha 0 = no hover skin.
+    pub hover_background: Color,
+    /// `0.0` = no border.
+    pub border_width: f32,
+    pub border_color: Color,
+    pub corner_radius: f32,
+
+    // Text content.
+    pub text: Text,
+    pub text_size: u16,
+    /// The ink; role defaults are baked in, so this is never "unset".
+    pub color: Paint,
+    /// Wrap to the element width.
+    pub wrap: bool,
+
+    // Image content: the key resolved through [`UiData::images`].
+    pub image: Text,
+    /// Alpha 0 = untinted.
+    pub tint: Paint,
+    /// `0.0` = fully opaque.
+    pub fade: f32,
+
+    // Interaction.
+    pub scroll_x: bool,
+    pub scroll_y: bool,
+    /// Subtree stamped once per row of the bound data list; `0` = none.
+    /// Reached only through this link, never through the sibling chain.
     pub template: u32,
+}
+
+/// The tooltip bubble's look, baked from the style. The bubble itself is
+/// synthesized by the walk (it has per-frame text), so its style lives at
+/// module level rather than on a node.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Bubble {
+    pub background: Color,
+    pub border: Color,
+    pub ink: Color,
+    pub text_size: u16,
 }
 
 /// A compiled UI description plus everything wrong with it, fully owned:
@@ -189,6 +211,11 @@ pub struct UiModule {
     pub segs: Vec<Seg>,
     /// Every literal and variable name, addressed by the segs' spans.
     pub strings: StrBuf,
+    /// The style palette, for `$VAR` color names that only resolve per
+    /// frame; literal names are baked into the nodes directly.
+    pub palette: Palette,
+    /// The tooltip bubble's baked look.
+    pub bubble: Bubble,
     /// Non-fatal validation findings (unknown keys, missing `=`, ...), as
     /// key paths — tabula nodes carry no source positions.
     pub warnings: Vec<String>,
@@ -233,8 +260,8 @@ pub struct ListData {
     pub rows: Span,
 }
 
-/// One image the script can reference by key (`image = { id = soldier }`),
-/// with its renderer handle and natural size.
+/// One image the script can reference by key (`image = { source = soldier
+/// }`), with its renderer handle and natural size.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ImageData {
     pub key: Span,
@@ -352,18 +379,27 @@ impl UiData {
     }
 }
 
-/// Parse and compile a UI description. Never fails: whatever could be
-/// recovered is compiled, with the rest reported in `errors`/`warnings`.
-/// The tabula tree lives in a scratch arena that dies here; only the
-/// owned IR (with its strings copied over) survives.
-pub fn compile(source: &str) -> UiModule {
+/// Parse and compile a UI description against a style. Never fails:
+/// whatever could be recovered is compiled, with the rest reported in
+/// `errors`/`warnings`. The tabula tree lives in a scratch arena that dies
+/// here; only the owned IR (with its strings copied over) survives.
+pub fn compile(source: &str, style: &Style) -> UiModule {
     let scratch = Arena::new();
     let parsed = tabula::parse(&scratch, source);
 
     let mut compiler = Compiler {
         module: UiModule::default(),
+        style: *style,
     };
     compiler.nodes.push(UiNode::default()); // node 0: the null node
+
+    compiler.module.palette = style.palette;
+    compiler.module.bubble = Bubble {
+        background: style.tooltip_background,
+        border: style.palette.outline,
+        ink: style.palette.ink,
+        text_size: style.tooltip_size,
+    };
 
     let mut last = 0usize;
     for (index, root) in parsed.roots.iter().enumerate() {
@@ -422,6 +458,8 @@ const CONTAINER_PROPS: [&str; 20] = [
 struct Compiler {
     /// Built in place; `compile` returns it.
     module: UiModule,
+    /// Baked into the nodes: the compiler is the only consumer.
+    style: Style,
 }
 
 /// The compiler is a thin builder over the module it is producing.
@@ -573,6 +611,30 @@ impl Compiler {
         }
     }
 
+    /// Bakes one script color: absent = `default`; a literal palette name
+    /// (including `none`) bakes to its color, with unknown names warning
+    /// and keeping the default; a `$VAR` name is kept for per-frame
+    /// resolution with `default` as its fallback.
+    fn paint(&mut self, src: &tabula::Node, key: &str, path: &str, default: Color) -> Paint {
+        let name = match src.get_text(key) {
+            Some(name) if !name.is_empty() => name,
+            _ => return Paint::of(default),
+        };
+        if name.contains('$') {
+            return Paint {
+                color: default,
+                name: self.text(Some(name)),
+            };
+        }
+        match self.style.palette.color(name) {
+            Some(color) => Paint::of(color),
+            None => {
+                self.warn(&format!("{path}: '{key} = {name}' is not a palette color"));
+                Paint::of(default)
+            }
+        }
+    }
+
     /// Parses one size property: `cap[:weight]`, where the cap is a pixel
     /// number, `N%` of the parent, or `grow` (uncapped), and `fit` is
     /// sugar for weight 0. Absent → the caller's default stands.
@@ -581,7 +643,6 @@ impl Compiler {
         if value.is_number {
             // A bare number caps a default-weight grower.
             return Some(Size {
-                set: true,
                 cap: value.number.max(0.0),
                 fraction: false,
                 weight: 1.0,
@@ -610,7 +671,6 @@ impl Compiler {
         } else if let Some(percent) = cap_text.strip_suffix('%') {
             match percent.trim().parse::<f32>() {
                 Ok(percent) => Size {
-                    set: true,
                     cap: (percent / 100.0).max(0.0),
                     fraction: true,
                     weight: 1.0,
@@ -623,7 +683,6 @@ impl Compiler {
         } else if let Ok(pixels) = cap_text.parse::<f32>() {
             // Quoted numbers skip tabula's number parsing; accept them.
             Size {
-                set: true,
                 cap: pixels.max(0.0),
                 fraction: false,
                 weight: 1.0,
@@ -640,19 +699,36 @@ impl Compiler {
         Some(size)
     }
 
-    /// Reads the shared container properties into `node`, leaving whatever
-    /// the caller pre-filled (the per-kind defaults) alone for absent keys.
+    /// Reads the min/max constraints shared by every sized widget.
+    fn constraints(&mut self, src: &tabula::Node, node: &mut UiNode) {
+        node.min_width = src.get_number("min_width").unwrap_or(node.min_width);
+        node.max_width = src.get_number("max_width").unwrap_or(node.max_width);
+        node.min_height = src.get_number("min_height").unwrap_or(node.min_height);
+        node.max_height = src.get_number("max_height").unwrap_or(node.max_height);
+    }
+
+    /// Reads the shared container properties into `node` over the caller's
+    /// baked defaults.
     fn container(&mut self, src: &tabula::Node, path: &str, node: &mut UiNode) {
+        // Floating first: it decides the size defaults below. `|=` so the
+        // caller's top-level float can't be unset.
+        if src.get("floating").is_some() {
+            node.floating |= self.yes(src, "floating", path);
+        }
+        node.x_pos = src.get_number("x_pos").unwrap_or(node.x_pos);
+        node.y_pos = src.get_number("y_pos").unwrap_or(node.y_pos);
+        // Floaters have no parent share to claim: they fit unless sized.
+        if node.floating {
+            node.width = Size::FIT;
+            node.height = Size::FIT;
+        }
         if let Some(size) = self.size(src, "width", path) {
             node.width = size;
         }
         if let Some(size) = self.size(src, "height", path) {
             node.height = size;
         }
-        node.min_width = src.get_number("min_width").unwrap_or(node.min_width);
-        node.max_width = src.get_number("max_width").unwrap_or(node.max_width);
-        node.min_height = src.get_number("min_height").unwrap_or(node.min_height);
-        node.max_height = src.get_number("max_height").unwrap_or(node.max_height);
+        self.constraints(src, node);
         if src.get("direction").is_some() {
             node.direction = self.direction(src, path);
         }
@@ -666,29 +742,23 @@ impl Compiler {
             )),
         }
         if let Some(padding) = src.get_number("padding") {
-            node.padding = padding;
-            node.padding_set = true;
+            node.padding = Padding::all(padding);
         }
         if let Some(gap) = src.get_number("gap") {
             node.gap = gap;
-            node.gap_set = true;
         }
-        if src.get("background").is_some() {
-            node.background = self.text(src.get_text("background"));
-        }
+        node.background = self.paint(src, "background", path, node.background.color);
         node.image = self.text(src.get_text("background_image"));
-        if src.get("border").is_some() {
-            node.border = self.yes(src, "border", path);
+        if self.yes(src, "border", path) {
+            node.border_width = 1.0;
+            node.border_color = self.style.palette.outline;
         }
-        if src.get("scrollable").is_some() {
-            node.scrollable = self.yes(src, "scrollable", path);
+        // Scrolling runs along the flow axis.
+        if self.yes(src, "scrollable", path) {
+            node.scroll_x = node.direction == Direction::LeftToRight;
+            node.scroll_y = node.direction == Direction::TopToBottom;
         }
         node.tooltip = self.text(src.get_text("tooltip"));
-        if src.get("floating").is_some() {
-            node.floating = self.yes(src, "floating", path);
-        }
-        node.x_pos = src.get_number("x_pos").unwrap_or(node.x_pos);
-        node.y_pos = src.get_number("y_pos").unwrap_or(node.y_pos);
         node.id = self.text(src.get_text("id"));
         node.visible = self.visible(src, path);
     }
@@ -703,9 +773,7 @@ impl Compiler {
                 "panel" => self.block(child, path, "panel", Self::nested_panel),
                 "row" => self.block(child, path, "row", Self::row),
                 "box" => self.block(child, path, "box", Self::boxed),
-                "label" => self.label(child, path, LabelStyle::Body),
-                "heading" => self.label(child, path, LabelStyle::Heading),
-                "section" => self.label(child, path, LabelStyle::Section),
+                "label" | "heading" | "section" => self.label(child, path),
                 "button" => self.block(child, path, "button", Self::button),
                 "image" => self.block(child, path, "image", Self::image),
                 "list" => self.block(child, path, "list", Self::list),
@@ -745,31 +813,39 @@ impl Compiler {
 
     fn panel(&mut self, src: &tabula::Node, path: &str, top_level: bool) -> u32 {
         self.check_keys(src, path, &[&CONTAINER_PROPS], true);
+        let style = self.style;
         let mut node = UiNode {
-            kind: NodeKind::Panel,
             // Unlike rows, panels stack vertically unless told otherwise.
             direction: Direction::TopToBottom,
+            width: Size::GROW,
+            height: Size::GROW,
+            padding: Padding::all(style.padding),
+            gap: style.gap,
+            background: Paint::of(style.palette.panel),
+            corner_radius: style.corner_radius,
+            // Top-level panels have nothing to be in flow with: always
+            // floating.
+            floating: top_level,
             ..UiNode::default()
         };
         self.container(src, path, &mut node);
-        // Top-level panels have nothing to be in flow with: always floating.
-        node.floating |= top_level;
         let index = self.push(node);
         self.nodes[index as usize].first_child = self.elements(src, path);
         index
     }
 
-    /// A `row` is a panel with container defaults: horizontal, transparent,
-    /// no padding, grow width. Pure compile-time sugar.
+    /// A `row` is a panel with different defaults: horizontal, transparent,
+    /// no padding. Pure compile-time sugar — the walk never knows.
     fn row(&mut self, src: &tabula::Node, path: &str) -> u32 {
         self.check_keys(src, path, &[&CONTAINER_PROPS], true);
+        let style = self.style;
         let mut node = UiNode {
-            kind: NodeKind::Panel,
             direction: Direction::LeftToRight,
             width: Size::GROW,
-            background: self.text(Some("none")),
-            padding_set: true, // padding stays 0.0
-            ..UiNode::default()
+            height: Size::GROW,
+            gap: style.gap,
+            corner_radius: style.corner_radius,
+            ..UiNode::default() // padding and background stay zero
         };
         self.container(src, path, &mut node);
         let index = self.push(node);
@@ -781,14 +857,17 @@ impl Compiler {
     /// content and gets the accent background. Pure compile-time sugar.
     fn boxed(&mut self, src: &tabula::Node, path: &str) -> u32 {
         self.check_keys(src, path, &[&CONTAINER_PROPS], true);
+        let style = self.style;
         let mut node = UiNode {
-            kind: NodeKind::Panel,
             direction: Direction::TopToBottom,
             width: Size::GROW,
             height: Size::GROW,
             align_x: Align::Center,
             align_y: Align::Center,
-            background: self.text(Some("accent")),
+            padding: Padding::all(style.padding),
+            gap: style.gap,
+            background: Paint::of(style.palette.accent),
+            corner_radius: style.corner_radius,
             ..UiNode::default()
         };
         self.container(src, path, &mut node);
@@ -797,36 +876,56 @@ impl Compiler {
         index
     }
 
-    fn label(&mut self, src: &tabula::Node, path: &str, style: LabelStyle) -> u32 {
+    /// `label`, `heading` and `section` are one widget with different text
+    /// roles baked in from the style.
+    fn label(&mut self, src: &tabula::Node, path: &str) -> u32 {
+        let style = self.style;
+        let (role_size, role_color) = match src.key {
+            "heading" => (style.heading_size, style.palette.ink),
+            "section" => (style.section_size, style.palette.muted),
+            _ => (style.text_size, style.palette.ink),
+        };
         let node = if src.is_block() {
-            let path = &format!("{path} > label");
+            let path = &format!("{path} > {}", src.key);
             self.check_keys(
                 src,
                 path,
                 &[&[
-                    "id", "text", "size", "color", "wrap", "width", "height", "visible", "tooltip",
+                    "id",
+                    "text",
+                    "size",
+                    "color",
+                    "wrap",
+                    "width",
+                    "height",
+                    "min_width",
+                    "max_width",
+                    "min_height",
+                    "max_height",
+                    "visible",
+                    "tooltip",
                 ]],
                 false,
             );
-            UiNode {
-                kind: NodeKind::Label,
-                label_style: style,
+            let mut node = UiNode {
                 id: self.text(src.get_text("id")),
                 text: self.text(src.get_text("text")),
-                text_size: src.get_number("size").unwrap_or(0.0) as u16,
-                color: self.text(src.get_text("color")),
+                text_size: src.get_number("size").map_or(role_size, |size| size as u16),
+                color: self.paint(src, "color", path, role_color),
                 wrap: self.yes(src, "wrap", path),
-                width: self.size(src, "width", path).unwrap_or_default(),
-                height: self.size(src, "height", path).unwrap_or_default(),
+                width: self.size(src, "width", path).unwrap_or(Size::FIT),
+                height: self.size(src, "height", path).unwrap_or(Size::FIT),
                 visible: self.visible(src, path),
                 tooltip: self.text(src.get_text("tooltip")),
                 ..UiNode::default()
-            }
+            };
+            self.constraints(src, &mut node);
+            node
         } else {
             UiNode {
-                kind: NodeKind::Label,
-                label_style: style,
                 text: self.text(Some(src.value.text)),
+                text_size: role_size,
+                color: Paint::of(role_color),
                 ..UiNode::default()
             }
         };
@@ -838,6 +937,7 @@ impl Compiler {
             src,
             path,
             &[&[
+                "action",
                 "id",
                 "text",
                 "width",
@@ -851,21 +951,49 @@ impl Compiler {
             ]],
             false,
         );
-        let node = UiNode {
-            kind: NodeKind::Button,
+        let style = self.style;
+        // Unsized buttons grow into the style's default caps.
+        let default = |cap: f32| Size {
+            cap,
+            fraction: false,
+            weight: 1.0,
+        };
+        let text = self.text(src.get_text("text"));
+        let mut node = UiNode {
+            action: self.text(src.get_text("action")),
             id: self.text(src.get_text("id")),
-            text: self.text(src.get_text("text")),
-            width: self.size(src, "width", path).unwrap_or_default(),
-            height: self.size(src, "height", path).unwrap_or_default(),
-            min_width: src.get_number("min_width").unwrap_or(0.0),
-            max_width: src.get_number("max_width").unwrap_or(0.0),
-            min_height: src.get_number("min_height").unwrap_or(0.0),
-            max_height: src.get_number("max_height").unwrap_or(0.0),
+            width: self
+                .size(src, "width", path)
+                .unwrap_or(default(style.button_width)),
+            height: self
+                .size(src, "height", path)
+                .unwrap_or(default(style.button_height)),
+            align_x: Align::Center,
+            align_y: Align::Center,
+            padding: Padding::symmetric(10.0, 4.0),
+            background: Paint::of(style.button_background),
+            hover_background: style.button_hover,
+            border_width: style.button_border_thickness,
+            border_color: style.button_border_color,
+            corner_radius: style.button_corner_radius,
             tooltip: self.text(src.get_text("tooltip")),
             visible: self.visible(src, path),
             ..UiNode::default()
         };
-        self.push(node)
+        self.constraints(src, &mut node);
+        let index = self.push(node);
+        if !text.is_empty() {
+            // The caption is a plain child node, centered by the button's
+            // own alignment.
+            let child = self.push(UiNode {
+                text,
+                text_size: style.text_size,
+                color: Paint::of(style.palette.ink),
+                ..UiNode::default()
+            });
+            self.nodes[index as usize].first_child = child;
+        }
+        index
     }
 
     fn image(&mut self, src: &tabula::Node, path: &str) -> u32 {
@@ -873,9 +1001,14 @@ impl Compiler {
             src,
             path,
             &[&[
+                "source",
                 "id",
                 "width",
                 "height",
+                "min_width",
+                "max_width",
+                "min_height",
+                "max_height",
                 "tint",
                 "fade",
                 "background",
@@ -885,27 +1018,41 @@ impl Compiler {
             ]],
             false,
         );
-        let node = UiNode {
-            kind: NodeKind::Image,
-            image: self.text(src.get_text("id")),
-            width: self.size(src, "width", path).unwrap_or_default(),
-            height: self.size(src, "height", path).unwrap_or_default(),
-            tint: self.text(src.get_text("tint")),
+        if src.get("source").is_none() {
+            self.warn(&format!("{path}: image without a 'source' draws nothing"));
+        }
+        let border = self.yes(src, "border", path);
+        let mut node = UiNode {
+            image: self.text(src.get_text("source")),
+            id: self.text(src.get_text("id")),
+            // Images fit their natural size; growing is opt-in.
+            width: self.size(src, "width", path).unwrap_or(Size::FIT),
+            height: self.size(src, "height", path).unwrap_or(Size::FIT),
+            tint: self.paint(src, "tint", path, Color::default()),
             fade: src.get_number("fade").unwrap_or(0.0),
-            background: self.text(src.get_text("background")),
-            border: self.yes(src, "border", path),
+            background: self.paint(src, "background", path, Color::default()),
+            border_width: if border { 1.0 } else { 0.0 },
+            border_color: self.style.palette.outline,
             tooltip: self.text(src.get_text("tooltip")),
             visible: self.visible(src, path),
             ..UiNode::default()
         };
+        self.constraints(src, &mut node);
         self.push(node)
     }
 
     fn list(&mut self, src: &tabula::Node, path: &str) -> u32 {
         self.check_keys(src, path, &[&CONTAINER_PROPS, &["template"]], false);
+        let style = self.style;
         let mut node = UiNode {
-            kind: NodeKind::List,
             direction: Direction::TopToBottom,
+            width: Size::GROW,
+            height: Size::GROW,
+            gap: style.gap,
+            corner_radius: style.corner_radius,
+            // Padding and background stay zero: a list is stamping
+            // machinery, not a visual box, unless the script says
+            // otherwise.
             ..UiNode::default()
         };
         self.container(src, path, &mut node);
@@ -915,7 +1062,6 @@ impl Compiler {
                 let template_path = format!("{path} > template");
                 self.check_keys(template, &template_path, &[&["id"]], true);
                 let template_node = UiNode {
-                    kind: NodeKind::Template,
                     id: self.text(template.get_text("id")),
                     ..UiNode::default()
                 };
@@ -935,6 +1081,11 @@ impl Compiler {
 mod tests {
     use super::*;
 
+    /// Tests compile against the default style unless they say otherwise.
+    fn compile(source: &str) -> UiModule {
+        super::compile(source, &Style::default())
+    }
+
     fn node(module: &UiModule, index: u32) -> UiNode {
         module.nodes[index as usize]
     }
@@ -948,7 +1099,6 @@ mod tests {
     /// A bare-number size: default-weight grower capped at `cap`.
     fn capped(cap: f32) -> Size {
         Size {
-            set: true,
             cap,
             fraction: false,
             weight: 1.0,
@@ -965,15 +1115,22 @@ mod tests {
         assert!(module.warnings.is_empty(), "{:?}", module.warnings);
 
         let panel = node(&module, module.roots());
-        assert_eq!(panel.kind, NodeKind::Panel);
-        assert!(panel.floating && panel.border);
+        assert!(panel.floating);
+        assert_eq!(panel.border_width, 1.0);
+        assert_eq!(panel.border_color, Style::default().palette.outline);
         assert_eq!((panel.x_pos, panel.y_pos), (0.1, 0.5));
         assert_eq!(panel.width, capped(120.0));
         assert_eq!(panel.direction, Direction::LeftToRight);
+        // Style values are baked in at compile time.
+        assert_eq!(panel.padding, Padding::all(Style::default().padding));
+        assert_eq!(panel.gap, Style::default().gap);
+        assert_eq!(panel.background.color, Style::default().palette.panel);
+        assert!(panel.background.name.is_empty());
 
         let label = node(&module, panel.first_child);
-        assert_eq!(label.kind, NodeKind::Label);
         assert_eq!(seg(&module, label.text, 0).0, "a");
+        assert_eq!(label.text_size, Style::default().text_size);
+        assert_eq!(label.color.color, Style::default().palette.ink);
         assert_eq!(label.next_sibling, 0);
     }
 
@@ -989,7 +1146,7 @@ mod tests {
         assert!(module.warnings.is_empty(), "{:?}", module.warnings);
 
         let panel = node(&module, module.roots());
-        assert!(panel.width.set && panel.width.fraction);
+        assert!(panel.width.fraction);
         assert!((panel.width.cap - 0.92).abs() < 1e-6);
         assert_eq!(panel.width.weight, 1.0);
         assert_eq!(panel.max_width, 760.0);
@@ -997,16 +1154,16 @@ mod tests {
             (panel.align_x, panel.align_y),
             (Align::Center, Align::Center)
         );
-        assert!(panel.padding_set && panel.padding == 22.0);
-        assert!(panel.gap_set && panel.gap == 12.0);
+        assert_eq!(panel.padding, Padding::all(22.0));
+        assert_eq!(panel.gap, 12.0);
 
         let row = node(&module, panel.first_child);
-        assert_eq!(row.kind, NodeKind::Panel);
         assert_eq!(row.direction, Direction::LeftToRight);
         assert_eq!(row.width, Size::GROW);
         assert_eq!(row.height, capped(54.0));
-        assert_eq!(seg(&module, row.background, 0).0, "none");
-        assert!(row.padding_set && row.padding == 0.0);
+        // Rows are transparent, flush cells.
+        assert_eq!(row.background.color.a, 0.0);
+        assert_eq!(row.padding, Padding::all(0.0));
 
         let one = node(&module, row.first_child);
         assert_eq!(one.width, Size::GROW);
@@ -1015,7 +1172,7 @@ mod tests {
 
         let two = node(&module, one.next_sibling);
         assert_eq!((two.width.cap, two.width.weight), (0.0, 2.0));
-        assert_eq!(seg(&module, two.background, 0).0, "accent");
+        assert_eq!(two.background.color, Style::default().palette.accent);
     }
 
     #[test]
@@ -1058,8 +1215,12 @@ mod tests {
         assert!(warnings.contains("cap[:weight]"), "{warnings}");
 
         let panel = node(&module, module.roots());
-        assert!(!panel.width.set, "bad size falls back to unset");
+        // A bad size falls back to the widget's default; a floating
+        // top-level panel fits its content.
+        assert_eq!(panel.width, Size::FIT);
         assert_eq!(panel.height, Size::FIT, "fit:N keeps fit, drops weight");
+        let inner = node(&module, panel.first_child);
+        assert_eq!(inner.width, Size::GROW, "nested panels grow by default");
     }
 
     #[test]
@@ -1070,24 +1231,25 @@ mod tests {
         );
         assert!(module.errors.is_empty());
         assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+        let style = Style::default();
 
         let panel = node(&module, module.roots());
         let heading = node(&module, panel.first_child);
-        assert_eq!(heading.kind, NodeKind::Label);
-        assert_eq!(heading.label_style, LabelStyle::Heading);
+        assert_eq!(heading.text_size, style.heading_size);
+        assert_eq!(heading.color.color, style.palette.ink);
 
         let section = node(&module, heading.next_sibling);
-        assert_eq!(section.label_style, LabelStyle::Section);
+        assert_eq!(section.text_size, style.section_size);
+        assert_eq!(section.color.color, style.palette.muted);
 
         let cell = node(&module, section.next_sibling);
-        assert_eq!(cell.kind, NodeKind::Panel);
         assert_eq!((cell.width, cell.height), (Size::GROW, Size::GROW));
         assert_eq!((cell.align_x, cell.align_y), (Align::Center, Align::Center));
-        assert_eq!(seg(&module, cell.background, 0).0, "accent");
+        assert_eq!(cell.background.color, style.palette.accent);
         assert_eq!(cell.min_width, 70.0);
 
         let cell_label = node(&module, cell.first_child);
-        assert_eq!(cell_label.label_style, LabelStyle::Body);
+        assert_eq!(cell_label.text_size, style.text_size);
     }
 
     #[test]
@@ -1096,7 +1258,7 @@ mod tests {
             "panel = { \
              panel = { floating = yes x_pos = 1 label = { text = \"FLOATING\" size = 13 } } \
              label = { id = body text = \"body\" color = muted wrap = yes width = grow tooltip = \"tip\" } \
-             image = { id = soldier width = 96 height = 48 tint = accent fade = 0.5 border = yes } }",
+             image = { source = soldier width = 96 height = 48 tint = accent fade = 0.5 border = yes } }",
         );
         assert!(module.errors.is_empty());
         assert!(module.warnings.is_empty(), "{:?}", module.warnings);
@@ -1105,25 +1267,25 @@ mod tests {
         let badge = node(&module, panel.first_child);
         assert!(badge.floating);
         assert_eq!((badge.x_pos, badge.y_pos), (1.0, 0.0));
+        // Floaters have no parent share to claim: they fit their content.
+        assert_eq!((badge.width, badge.height), (Size::FIT, Size::FIT));
         let badge_label = node(&module, badge.first_child);
         assert_eq!(badge_label.text_size, 13);
 
         let body = node(&module, badge.next_sibling);
-        assert_eq!(body.kind, NodeKind::Label);
         assert!(body.wrap);
-        assert_eq!(seg(&module, body.color, 0).0, "muted");
+        assert_eq!(body.color.color, Style::default().palette.muted);
         assert_eq!(body.width, Size::GROW);
-        // Ids and tooltips are orthogonal to kind: labels carry them too.
+        // Ids and tooltips are orthogonal to widget vocabulary.
         assert_eq!(seg(&module, body.id, 0).0, "body");
         assert_eq!(seg(&module, body.tooltip, 0).0, "tip");
 
         let image = node(&module, body.next_sibling);
-        assert_eq!(image.kind, NodeKind::Image);
         assert_eq!(seg(&module, image.image, 0).0, "soldier");
         assert_eq!((image.width, image.height), (capped(96.0), capped(48.0)));
-        assert_eq!(seg(&module, image.tint, 0).0, "accent");
+        assert_eq!(image.tint.color, Style::default().palette.accent);
         assert_eq!(image.fade, 0.5);
-        assert!(image.border);
+        assert_eq!(image.border_width, 1.0);
     }
 
     #[test]
@@ -1136,13 +1298,18 @@ mod tests {
         let one = node(&module, first_panel.first_child);
         let two = node(&module, one.next_sibling);
         let three = node(&module, two.next_sibling);
-        assert_eq!(one.kind, NodeKind::Label);
-        assert_eq!(two.kind, NodeKind::Button);
-        assert_eq!(three.kind, NodeKind::Label);
+        assert_eq!(seg(&module, one.text, 0).0, "one");
+        // Buttons are recognizable by their baked hover skin; the caption
+        // is a plain child node.
+        assert!(two.hover_background.a > 0.0);
+        assert_eq!(
+            seg(&module, node(&module, two.first_child).text, 0).0,
+            "two"
+        );
+        assert_eq!(seg(&module, three.text, 0).0, "three");
         assert_eq!(three.next_sibling, 0);
 
         let second_panel = node(&module, first_panel.next_sibling);
-        assert_eq!(second_panel.kind, NodeKind::Panel);
         assert_eq!(second_panel.first_child, 0);
     }
 
@@ -1150,19 +1317,21 @@ mod tests {
     fn tokenizes_variables() {
         let module = compile(
             "panel = { list = { id = l template = { id = \"element_$ID\" \
-             button = { id = \"hire $ID\" text = \"$NAME!\" } } } }",
+             button = { action = \"hire $ID\" text = \"$NAME!\" } } } }",
         );
         let panel = node(&module, module.roots());
         let list = node(&module, panel.first_child);
         let template = node(&module, list.template);
-        assert_eq!(template.kind, NodeKind::Template);
 
         assert_eq!(seg(&module, template.id, 0), ("element_", ""));
         assert_eq!(seg(&module, template.id, 1), ("$ID", "ID"));
 
         let button = node(&module, template.first_child);
-        assert_eq!(seg(&module, button.text, 0), ("$NAME", "NAME"));
-        assert_eq!(seg(&module, button.text, 1), ("!", ""));
+        assert_eq!(seg(&module, button.action, 0), ("hire ", ""));
+        assert_eq!(seg(&module, button.action, 1), ("$ID", "ID"));
+        let caption = node(&module, button.first_child);
+        assert_eq!(seg(&module, caption.text, 0), ("$NAME", "NAME"));
+        assert_eq!(seg(&module, caption.text, 1), ("!", ""));
     }
 
     #[test]
@@ -1195,6 +1364,51 @@ mod tests {
             warnings.contains("'visible = character_open' is not yes/no or a $VAR binding"),
             "{warnings}"
         );
+    }
+
+    #[test]
+    fn bakes_the_style_and_keeps_dynamic_color_names() {
+        let mut style = Style::default();
+        style.padding = 5.0;
+        style.heading_size = 40;
+        style.button_background = Color::rgba(1.0, 0.0, 0.0, 1.0);
+        style.button_hover = Color::rgba(0.0, 1.0, 0.0, 1.0);
+        let module = super::compile(
+            "panel = { heading = \"H\" button = { action = a text = b } \
+             panel = { background = \"$ROW_COLOR\" } }",
+            &style,
+        );
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+
+        let panel = node(&module, module.roots());
+        assert_eq!(panel.padding, Padding::all(5.0));
+        let heading = node(&module, panel.first_child);
+        assert_eq!(heading.text_size, 40);
+        let button = node(&module, heading.next_sibling);
+        assert_eq!(button.background.color, style.button_background);
+        assert_eq!(button.hover_background, style.button_hover);
+
+        // A `$VAR` color keeps its name for per-frame resolution, with the
+        // widget default as the fallback.
+        let dynamic = node(&module, button.next_sibling);
+        assert_eq!(seg(&module, dynamic.background.name, 0).1, "ROW_COLOR");
+        assert_eq!(dynamic.background.color, style.palette.panel);
+
+        // The palette rides in the module for those late names.
+        assert_eq!(module.palette.accent, style.palette.accent);
+    }
+
+    #[test]
+    fn warns_on_unknown_palette_names() {
+        let module = compile("panel = { background = acent }");
+        let warnings = module.warnings.join("\n");
+        assert!(
+            warnings.contains("'background = acent' is not a palette color"),
+            "{warnings}"
+        );
+        // The default stands.
+        let panel = node(&module, module.roots());
+        assert_eq!(panel.background.color, Style::default().palette.panel);
     }
 
     #[test]
@@ -1233,18 +1447,25 @@ mod tests {
         assert!(warnings.contains("not a cap[:weight]"), "{warnings}");
         assert!(warnings.contains("not yes/no"), "{warnings}");
         assert!(warnings.contains("bad weight"), "{warnings}");
-        // Bad values fall back to the defaults instead of poisoning the node.
+        // Bad values fall back to the defaults instead of poisoning the
+        // node: a floating top-level panel fits, the row grows.
         let panel = node(&module, module.roots());
-        assert_eq!(panel.width, Size::default());
+        assert_eq!(panel.width, Size::FIT);
         let row = node(&module, panel.first_child);
         assert!(!row.floating);
+        assert_eq!(row.width, Size::GROW);
     }
 
     #[test]
     fn recovers_around_parse_errors() {
         let module = compile("panel = { label = \"ok\" ");
         assert!(!module.errors.is_empty());
-        assert_eq!(node(&module, module.roots()).kind, NodeKind::Panel);
+        let panel = node(&module, module.roots());
+        assert!(panel.floating, "top-level panels always float");
+        assert_eq!(
+            seg(&module, node(&module, panel.first_child).text, 0).0,
+            "ok"
+        );
     }
 
     #[test]

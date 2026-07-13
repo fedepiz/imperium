@@ -49,7 +49,7 @@ panel = {
 	row = {
 		height = 54
 		button = {
-			id = "print Hey"
+			action = "print Hey"
 			text = "Capped text"
 			width = 180
 			height = grow
@@ -65,10 +65,10 @@ panel = {
 	row = {
 		# Images fit their source size unless the script sizes them.
 		# Image keys resolve through the data the game hands the UI.
-		image = { id = soldier }
-		image = { id = soldier width = 96 height = 48 border = yes }
-		image = { id = soldier tint = accent }
-		image = { id = soldier fade = 0.5 }
+		image = { source = soldier }
+		image = { source = soldier width = 96 height = 48 border = yes }
+		image = { source = soldier tint = accent }
+		image = { source = soldier fade = 0.5 }
 	}
 
 	section = "SCROLL: WHEEL OVER THE LIST"

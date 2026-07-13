@@ -1,8 +1,8 @@
 //! The UI style, parsed from its own tabula source, once per (re)load.
 //!
-//! Style is a separate input to the per-frame interpreter, not part of the
-//! compiled module: [`crate::run::run`] mixes it into the elements it
-//! declares (role font sizes, palette colors the script names, paddings).
+//! Style is an input to [`crate::ir::compile`], not to the per-frame walk:
+//! role font sizes, paddings and palette colors are baked into the
+//! compiled nodes, and a style edit is a recompile like any script edit.
 //! [`parse`] mirrors [`crate::ir::compile`]: it never fails — every
 //! recognized key overrides one [`Style::default`] field, and anything
 //! wrong is reported as a warning while the default stands.
@@ -16,14 +16,7 @@ use crate::layout::Color;
 /// invisibly but harmlessly; [`Style::default`] gives the built-in look.
 #[derive(Clone, Copy)]
 pub struct Style {
-    pub panel_background: Color,
-    pub dark: Color,
-    pub outline: Color,
-    pub ink: Color,
-    pub muted: Color,
-    /// The one highlight color; everything the script wants to pop
-    /// (`box`es, badges, tints) uses this.
-    pub accent: Color,
+    pub palette: Palette,
     pub button_background: Color,
     pub button_hover: Color,
     /// `0.0` = borderless buttons.
@@ -48,12 +41,14 @@ pub struct Style {
 impl Default for Style {
     fn default() -> Self {
         Self {
-            panel_background: Color::rgba(0.055, 0.067, 0.10, 0.9),
-            dark: Color::rgba(0.03, 0.04, 0.07, 1.0),
-            outline: Color::rgba(0.25, 0.29, 0.40, 1.0),
-            ink: Color::rgba(0.94, 0.95, 1.0, 1.0),
-            muted: Color::rgba(0.57, 0.62, 0.74, 1.0),
-            accent: Color::rgba(0.43, 0.32, 0.92, 1.0),
+            palette: Palette {
+                panel: Color::rgba(0.055, 0.067, 0.10, 0.9),
+                dark: Color::rgba(0.03, 0.04, 0.07, 1.0),
+                outline: Color::rgba(0.25, 0.29, 0.40, 1.0),
+                ink: Color::rgba(0.94, 0.95, 1.0, 1.0),
+                muted: Color::rgba(0.57, 0.62, 0.74, 1.0),
+                accent: Color::rgba(0.43, 0.32, 0.92, 1.0),
+            },
             button_background: Color::rgba(0.08, 0.68, 0.72, 1.0),
             button_hover: Color::rgba(0.16, 0.86, 0.90, 1.0),
             button_border_thickness: 0.0,
@@ -73,19 +68,35 @@ impl Default for Style {
     }
 }
 
-impl Style {
+/// The named colors scripts refer to (`background = accent`). A fixed,
+/// compile-time set — one field per name, no lookup tables. It rides in
+/// the compiled module so `$VAR` color names can still resolve per frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Palette {
+    pub panel: Color,
+    pub dark: Color,
+    pub outline: Color,
+    pub ink: Color,
+    pub muted: Color,
+    /// The one highlight color; everything the script wants to pop
+    /// (`box`es, badges, tints) uses this.
+    pub accent: Color,
+}
+
+impl Palette {
     /// Looks up a script color name. The palette is semantic on purpose —
-    /// scripts say what a thing is, not which hue it has. `None` means "no
-    /// color": both the explicit `none` and anything unknown (which stays
-    /// invisible rather than guessing).
-    pub(crate) fn color(&self, name: &str) -> Option<Color> {
+    /// scripts say what a thing is, not which hue it has. `none` is "no
+    /// color" (transparent); unknown names are `None` so callers can warn
+    /// or fall back.
+    pub fn color(&self, name: &str) -> Option<Color> {
         Some(match name {
-            "panel" => self.panel_background,
+            "panel" => self.panel,
             "dark" => self.dark,
             "outline" => self.outline,
             "ink" => self.ink,
             "muted" => self.muted,
             "accent" => self.accent,
+            "none" => Color::default(),
             _ => return None,
         })
     }
@@ -131,12 +142,12 @@ pub fn parse<'a>(arena: &'a Arena, source: &str) -> StyleModule<'a> {
     let mut style = Style::default();
     for node in parsed.roots {
         let slot = match node.key {
-            "panel_background" => &mut style.panel_background,
-            "dark" => &mut style.dark,
-            "outline" => &mut style.outline,
-            "ink" => &mut style.ink,
-            "muted" => &mut style.muted,
-            "accent" => &mut style.accent,
+            "panel_background" => &mut style.palette.panel,
+            "dark" => &mut style.palette.dark,
+            "outline" => &mut style.palette.outline,
+            "ink" => &mut style.palette.ink,
+            "muted" => &mut style.palette.muted,
+            "accent" => &mut style.palette.accent,
             "button_background" => &mut style.button_background,
             "button_hover" => &mut style.button_hover,
             "button_border_color" => &mut style.button_border_color,
@@ -213,7 +224,7 @@ mod tests {
             "accent = { 1 0 0.5 }\ntooltip_background = { 0 0 0 0.5 }\ntext_size = 18\npadding = 6",
         );
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
-        assert_eq!(parsed.style.accent, Color::rgba(1.0, 0.0, 0.5, 1.0));
+        assert_eq!(parsed.style.palette.accent, Color::rgba(1.0, 0.0, 0.5, 1.0));
         assert_eq!(
             parsed.style.tooltip_background,
             Color::rgba(0.0, 0.0, 0.0, 0.5)
@@ -246,10 +257,10 @@ mod tests {
             warnings.contains("'muted' is not a { r g b a } color"),
             "{warnings}"
         );
-        assert_eq!(parsed.style.accent, Style::default().accent);
+        assert_eq!(parsed.style.palette.accent, Style::default().palette.accent);
         assert_eq!(parsed.style.gap, Style::default().gap);
-        assert_eq!(parsed.style.ink, Style::default().ink);
-        assert_eq!(parsed.style.muted, Style::default().muted);
+        assert_eq!(parsed.style.palette.ink, Style::default().palette.ink);
+        assert_eq!(parsed.style.palette.muted, Style::default().palette.muted);
     }
 
     #[test]

@@ -32,10 +32,18 @@ choices; follow them even where std-idiomatic Rust would do otherwise.
 ## Fat structs
 
 - Prefer one large, flat struct covering all cases over a web of small types,
-  trait objects, and deep hierarchies. Typical shape: a `kind` tag plus a
-  superset of fields (some unused per instance — that's fine), or a Rust enum
-  with fat variants and shared fields hoisted into the outer struct.
-- Dispatch with `match` on the kind tag, not `dyn Trait`. Avoid `Box<dyn ...>`
+  trait objects, and deep hierarchies: a superset of fields, some unused per
+  instance — that's fine.
+- We don't like `kind` tags on fat structs. Prefer a capability style where
+  each feature is independently on or off — signalled by a flag, or ideally
+  by the field's meaningful zero (ZII: empty text = no text, alpha 0 = no
+  color, index 0 = no link) — and consumers apply every field
+  unconditionally instead of dispatching on what a thing "is".
+- Reach for an enum only when the variants are genuinely non-overlapping,
+  and check fallbacks before believing that: a variant that falls back on
+  another variant's payload is overlap — keep the struct. When an enum is
+  warranted, use fat variants with shared fields hoisted into the outer
+  struct; dispatch with `match`, never `dyn Trait`. Avoid `Box<dyn ...>`
   in data structures.
 - Keep data layout flat and contiguous (arrays of fat structs in an arena);
   minimize pointer chasing. Accept wasted bytes per instance as the price of

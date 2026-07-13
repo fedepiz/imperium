@@ -38,8 +38,8 @@ panel = {
 				height = fit
 				label = "$NAME, age $AGE"
 				row = {
-					button = { id = "femalify $ID" text = "Make Female" visible = "$IS_MALE"}
-					button = { id = "remove $ID" text = "Remove" tooltip = "Remove the entity, whose name is $NAME."}
+					button = { action = "femalify $ID" text = "Make Female" visible = "$IS_MALE"}
+					button = { action = "remove $ID" text = "Remove" tooltip = "Remove the entity, whose name is $NAME."}
 				}
 			}
 		}
@@ -48,7 +48,7 @@ panel = {
 	row = {
 		height = 60
 		button = {
-			id = "advance_year"
+			action = "advance_year"
 			text = "End Year"
 			width = 200
 			height = grow

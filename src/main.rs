@@ -87,16 +87,15 @@ async fn amain() {
 
     let mut frame_arena = Arena::new();
 
-    // The module and style are plain owned values: reload = reassign.
+    // The module is a plain owned value: reload = recompile and reassign.
+    // The style is a compile input, so a style edit reloads the same way.
     let mut ui_module = load_ui_module();
-    let mut ui_style = load_style();
 
     let mut game = game::Game::new();
 
     loop {
         if mq::is_key_pressed(mq::KeyCode::R) {
             ui_module = load_ui_module();
-            ui_style = load_style();
         }
         if mq::is_key_pressed(mq::KeyCode::Space) {
             game.tick_year();
@@ -115,14 +114,7 @@ async fn amain() {
         );
         ui_data.add_image("widget", background.id, background.width, background.height);
 
-        let (output, events) = build_ui(
-            &mut layout,
-            &font,
-            &ui_module,
-            ui_style,
-            &ui_data,
-            &frame_arena,
-        );
+        let (output, events) = build_ui(&mut layout, &font, &ui_module, &ui_data, &frame_arena);
         if !output.duplicate_ids().is_empty() {
             eprintln!("duplicate element ids: {:?}", output.duplicate_ids());
         }
@@ -145,8 +137,9 @@ async fn amain() {
 }
 
 fn load_ui_module() -> ir::UiModule {
+    let style = load_style();
     let source = std::fs::read_to_string("ui_example.txt").unwrap_or_default();
-    let module = ir::compile(&source);
+    let module = ir::compile(&source, &style);
     for error in &module.errors {
         eprintln!("ui_example.txt: {error}");
     }
@@ -171,7 +164,6 @@ fn build_ui<'a>(
     engine: &'a mut layout::Engine,
     font: &mq::Font,
     module: &ir::UiModule,
-    style: style::Style,
     data: &ir::UiData,
     frame: &Arena,
 ) -> (&'a layout::Output, Vec<String>) {
@@ -212,7 +204,7 @@ fn build_ui<'a>(
 
     let mut events = Vec::new();
     let output = engine.layout(input, measure_text, |ui| {
-        events = run::run(module, style, data, frame, ui);
+        events = run::run(module, data, frame, ui);
     });
     (output, events)
 }
