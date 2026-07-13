@@ -12,6 +12,7 @@ enum Var {
     #[default]
     Dummy,
     Age,
+    Gender,
 }
 
 impl Var {
@@ -19,6 +20,7 @@ impl Var {
         match self {
             Self::Dummy => "Dummy",
             Self::Age => "Age",
+            Self::Gender => "Gender",
         }
     }
 }
@@ -182,6 +184,14 @@ impl Game {
                     self.entities.sweep();
                 }
             }
+            Some("femalify") => {
+                let id = parts.next().and_then(|arg| arg.parse::<EntityId>().ok());
+                let Some(id) = id else {
+                    eprintln!("malformed ui action: {action}");
+                    return;
+                };
+                self.entities.set_var(id, Var::Gender, 0.0);
+            }
             _ => println!("unhandled ui action: {action}"),
         }
     }
@@ -200,6 +210,9 @@ impl Game {
             data.bind("NAME", self.entities.get_name(id));
             let age = self.entities.get_var(id, Var::Age) as u32;
             data.bind("AGE", &format!("{}", age));
+            if self.entities.get_var(id, Var::Gender) > 0. {
+                data.bind("IS_MALE", "yes");
+            }
         }
     }
 }
@@ -221,6 +234,14 @@ fn bootstrap(entities: &mut Entities, source: &str) {
         let name = entities.add_name(node.get_text("name").unwrap_or("Anonymous"));
         entities.set_name(id, name);
         entities.set_var(id, Var::Age, node.get_number("age").unwrap_or(0.0));
+
+        let gender = match node.get_text("gender").unwrap_or_default() {
+            "female" => 0.0,
+            "male" => 1.0,
+            _ => 0.0,
+        };
+        entities.set_var(id, Var::Gender, gender);
+
         entities.add_to_set(Set::People, id);
         if let Some(tag) = node.get_text("tag") {
             entities.bind_to_tag(tag, id);

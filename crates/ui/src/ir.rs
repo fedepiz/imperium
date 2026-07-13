@@ -166,6 +166,10 @@ pub struct UiNode {
     pub tint: Text,
     /// Image widgets: `0.0` = fully opaque.
     pub fade: f32,
+    /// Visibility, resolved per frame after interpolation: empty or `yes`
+    /// = shown, `no` = hidden, any other string = the name of a
+    /// [`UiData`] flag that decides. Zero value = shown.
+    pub visible: Text,
     /// Hover tooltip text; empty = none.
     pub tooltip: Text,
     /// `List` only: index of the `Template` node, `0` = none.
@@ -228,6 +232,14 @@ pub struct ListData {
     pub rows: Span,
 }
 
+/// One named boolean the script's `visible = <name>` conditions look up.
+/// `key` spans [`UiData::strings`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Flag {
+    pub key: Span,
+    pub value: bool,
+}
+
 /// One image the script can reference by key (`image = { id = soldier }`),
 /// with its renderer handle and natural size.
 #[derive(Clone, Copy, Debug, Default)]
@@ -253,6 +265,7 @@ pub struct UiData {
     pub rows: Vec<Row>,
     pub bindings: Vec<Binding>,
     pub images: Vec<ImageData>,
+    pub flags: Vec<Flag>,
 }
 
 impl UiData {
@@ -262,6 +275,7 @@ impl UiData {
         self.rows.clear();
         self.bindings.clear();
         self.images.clear();
+        self.flags.clear();
     }
 
     pub fn text(&self, span: Span) -> &str {
@@ -307,6 +321,22 @@ impl UiData {
         if let Some(row) = self.rows.last_mut() {
             row.bindings.len += 1;
         }
+    }
+
+    /// Sets a named flag for `visible = <name>` conditions. Set last wins.
+    pub fn set_flag(&mut self, key: &str, value: bool) {
+        let key = self.strings.push(key);
+        self.flags.push(Flag { key, value });
+    }
+
+    /// Looks up a flag by name; unset = false, so `visible = <name>` panels
+    /// stay hidden until the caller opts them in.
+    pub fn flag(&self, key: &str) -> bool {
+        self.flags
+            .iter()
+            .rev()
+            .find(|flag| self.text(flag.key) == key)
+            .is_some_and(|flag| flag.value)
     }
 
     pub fn add_image(&mut self, key: &str, image: ImageId, width: f32, height: f32) {
@@ -368,7 +398,8 @@ const ELEMENT_KEYS: [&str; 9] = [
 ];
 
 /// Properties every container (panel, row, box, list) understands.
-const CONTAINER_PROPS: [&str; 19] = [
+const CONTAINER_PROPS: [&str; 20] = [
+    "visible",
     "width",
     "height",
     "min_width",
@@ -650,6 +681,7 @@ impl Compiler {
         node.x_pos = src.get_number("x_pos").unwrap_or(node.x_pos);
         node.y_pos = src.get_number("y_pos").unwrap_or(node.y_pos);
         node.id = self.text(src.get_text("id"));
+        node.visible = self.text(src.get_text("visible"));
     }
 
     /// Compiles the widget children of a block into a sibling chain,
@@ -762,7 +794,7 @@ impl Compiler {
             self.check_keys(
                 src,
                 path,
-                &[&["text", "size", "color", "wrap", "width", "height"]],
+                &[&["text", "size", "color", "wrap", "width", "height", "visible"]],
                 false,
             );
             UiNode {
@@ -774,6 +806,7 @@ impl Compiler {
                 wrap: self.yes(src, "wrap", path),
                 width: self.size(src, "width", path).unwrap_or_default(),
                 height: self.size(src, "height", path).unwrap_or_default(),
+                visible: self.text(src.get_text("visible")),
                 ..UiNode::default()
             }
         } else {
@@ -801,6 +834,7 @@ impl Compiler {
                 "min_height",
                 "max_height",
                 "tooltip",
+                "visible",
             ]],
             false,
         );
@@ -815,6 +849,7 @@ impl Compiler {
             min_height: src.get_number("min_height").unwrap_or(0.0),
             max_height: src.get_number("max_height").unwrap_or(0.0),
             tooltip: self.text(src.get_text("tooltip")),
+            visible: self.text(src.get_text("visible")),
             ..UiNode::default()
         };
         self.push(node)
@@ -833,6 +868,7 @@ impl Compiler {
                 "background",
                 "border",
                 "tooltip",
+                "visible",
             ]],
             false,
         );
@@ -846,6 +882,7 @@ impl Compiler {
             background: self.text(src.get_text("background")),
             border: self.yes(src, "border", path),
             tooltip: self.text(src.get_text("tooltip")),
+            visible: self.text(src.get_text("visible")),
             ..UiNode::default()
         };
         self.push(node)
@@ -1110,6 +1147,35 @@ mod tests {
         let button = node(&module, template.first_child);
         assert_eq!(seg(&module, button.text, 0), ("$NAME", "NAME"));
         assert_eq!(seg(&module, button.text, 1), ("!", ""));
+    }
+
+    #[test]
+    fn compiles_visible_conditions() {
+        let module = compile(
+            "panel = { visible = character_open label = { text = a visible = no } \
+             button = { text = b visible = \"$VISIBLE\" } }",
+        );
+        assert!(module.errors.is_empty());
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+
+        let panel = node(&module, module.roots());
+        assert_eq!(seg(&module, panel.visible, 0).0, "character_open");
+        let label = node(&module, panel.first_child);
+        assert_eq!(seg(&module, label.visible, 0).0, "no");
+        let button = node(&module, label.next_sibling);
+        assert_eq!(seg(&module, button.visible, 0), ("$VISIBLE", "VISIBLE"));
+    }
+
+    #[test]
+    fn flags_look_up_by_name_last_set_wins() {
+        let mut data = UiData::default();
+        assert!(!data.flag("anything"));
+        data.set_flag("open", true);
+        data.set_flag("stale", true);
+        data.set_flag("stale", false);
+        assert!(data.flag("open"));
+        assert!(!data.flag("stale"));
+        assert!(!data.flag("missing"));
     }
 
     #[test]

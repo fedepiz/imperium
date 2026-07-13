@@ -276,9 +276,25 @@ fn tooltip(ctx: &Ctx<'_>, ui: &mut ui::Ui<'_, '_>, text: Text) {
     );
 }
 
+/// Evaluates a node's `visible` condition against the current row and data:
+/// unset/`yes` = shown, `no` = hidden, anything else names a [`UiData`]
+/// flag. Interpolation runs first, so a row can bind `visible = $ALIVE` to
+/// yes/no directly or to a flag name.
+fn visible(ctx: &Ctx<'_>, node: &UiNode) -> bool {
+    match resolve(ctx, node.visible) {
+        "" | "yes" => true,
+        "no" => false,
+        flag => ctx.data.flag(flag),
+    }
+}
+
 fn walk(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, mut index: u32) {
     while index != 0 {
         let node = ctx.module.nodes[index as usize];
+        if !visible(ctx, &node) {
+            index = node.next_sibling;
+            continue;
+        }
         match node.kind {
             NodeKind::Panel => panel(ctx, ui, node),
             NodeKind::Label => label(ctx, ui, node),
@@ -565,6 +581,85 @@ mod tests {
         // The id-less button swallows the click without an event.
         assert!(click_at(&mut frame, 50.0, 60.0, true).is_empty());
         assert_eq!(click_at(&mut frame, 50.0, 95.0, true), ["hire 7"]);
+    }
+
+    #[test]
+    fn visible_conditions_evaluate_against_flags_and_bindings() {
+        let frame = Arena::new();
+        let mut data = UiData::default();
+        data.set_flag("window_open", true);
+        data.begin_list("l");
+        data.begin_row();
+        data.bind("ALIVE", "no");
+        let row = data.rows(data.lists[0])[0];
+        let module = ir::compile(
+            "panel = { \
+             label = { text = a } \
+             label = { text = b visible = yes } \
+             label = { text = c visible = no } \
+             label = { text = d visible = window_open } \
+             label = { text = e visible = missing_flag } \
+             label = { text = f visible = \"$ALIVE\" } }",
+        );
+        assert!(module.errors.is_empty());
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+        let ctx = Ctx {
+            frame: &frame,
+            module: &module,
+            data: &data,
+            events: Vec::new(),
+            style: Style::default(),
+            auto_id: 0,
+            row,
+        };
+        let panel = module.nodes[module.roots() as usize];
+        let mut index = panel.first_child;
+        let mut shown = Vec::new();
+        while index != 0 {
+            let node = module.nodes[index as usize];
+            shown.push(visible(&ctx, &node));
+            index = node.next_sibling;
+        }
+        assert_eq!(shown, [true, true, false, true, false, false]);
+    }
+
+    #[test]
+    fn hidden_nodes_are_not_declared() {
+        const SOURCE: &str = "panel = {
+            button = { id = never text = a visible = no width = 100 height = 30 }
+            button = { id = maybe text = b visible = window_open width = 100 height = 30 }
+        }";
+        let module = ir::compile(SOURCE);
+        assert!(module.errors.is_empty());
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+
+        let mut engine = Engine::default();
+        let mut frame = Arena::new();
+        let measure = |_: &str, _| V2::default();
+
+        let mut click_at = |data: &UiData, x: f32, y: f32, pressed: bool| {
+            frame.reset();
+            let mut probe = input(400.0, 400.0);
+            probe.mouse_pos = V2 { x, y };
+            probe.mouse_pressed = pressed;
+            let mut events: Vec<String> = Vec::new();
+            engine.layout(probe, measure, |ui| {
+                events = run(&module, Style::default(), data, &frame, ui);
+            });
+            events
+        };
+
+        // Both buttons hidden: the first button's slot (panel padding 12)
+        // holds nothing to click.
+        let closed = UiData::default();
+        assert!(click_at(&closed, 0.0, 0.0, false).is_empty());
+        assert!(click_at(&closed, 50.0, 25.0, true).is_empty());
+
+        // Flag on: the conditional button is now the panel's first child.
+        let mut open = UiData::default();
+        open.set_flag("window_open", true);
+        assert!(click_at(&open, 0.0, 0.0, false).is_empty());
+        assert_eq!(click_at(&open, 50.0, 25.0, true), ["maybe"]);
     }
 
     #[test]

@@ -14,18 +14,21 @@ character = {
 	age = 46
 	tag = player
 	married = calpurnia
+	gender = male
 }
 
 character = {
 	id = calpurnia
 	name = "Calpurnia Pisonis"
 	age = 30
+	gender = female
 }
 
 character = {
 	id = crassus
 	name = "Marcus Licinius Crassus"
 	age = 61
+	gender = male
 }
 
 character = {
@@ -33,16 +36,19 @@ character = {
 	name = "Gnaeus Pompeius Magnus"
 	age = 52
 	married = iulia
+	gender = male
 }
 
 character = {
 	id = iulia
 	name = "Iulia Caesaris"
 	age = 22
+	gender = female
 }
 
 character = {
 	id = cicero
 	name = "Marcus Tullius Cicero"
 	age = 52
+	gender = male
 }
