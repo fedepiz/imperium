@@ -107,7 +107,12 @@ async fn amain() {
 
         let mut ui_data = ir::UiData::default();
         game.fill_ui_data(&mut ui_data);
-        ui_data.add_image("soldier", test_image.id, test_image.width, test_image.height);
+        ui_data.add_image(
+            "soldier",
+            test_image.id,
+            test_image.width,
+            test_image.height,
+        );
         ui_data.add_image("widget", background.id, background.width, background.height);
 
         let (output, events) = build_ui(

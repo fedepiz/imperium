@@ -748,10 +748,6 @@ impl<'arena, 'frame> Ui<'arena, 'frame> {
     }
 
     pub fn add_with(&mut self, conf: ElementConf<'_>, body: impl FnOnce(&mut Self)) -> Sense {
-        assert!(
-            conf.text.text.is_empty(),
-            "text elements cannot have children"
-        );
         let (index, sense) = self.push(conf);
         self.parents.push(index);
         body(self);
@@ -2574,18 +2570,50 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "text elements cannot have children")]
-    fn text_elements_cannot_have_children() {
+    fn text_elements_host_floating_children() {
+        // The tooltip shape: a floating bubble anchored to a text leaf.
+        // Text sizing (via measurement) and children are orthogonal; a
+        // float touches neither flow nor size.
         let mut engine = Engine::default();
-        let _ = engine.layout(
+        let commands = engine.layout(
             input(100.0, 100.0),
-            |_, _| V2::default(),
+            |_, _| V2 { x: 40.0, y: 10.0 },
             |ui| {
                 ui.add_with(
-                    ElementConf::text(TextConf::default().text("parent")),
-                    |_| {},
+                    ElementConf::text(TextConf::default().text("host").size(5)).id("host"),
+                    |ui| {
+                        ui.add(
+                            ElementConf::default()
+                                .id("bubble")
+                                .floating_at(V2 { x: 0.5, y: 0.0 }, V2 { x: 0.5, y: 1.0 })
+                                .width(LogicalSize::Pixels(20.0))
+                                .height(LogicalSize::Pixels(6.0))
+                                .background(BLUE),
+                        );
+                    },
                 );
             },
+        );
+
+        // The text still sizes to its measurement, unmoved by the float.
+        assert_eq!(
+            command(commands, "host").bounds,
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                w: 40.0,
+                h: 10.0,
+            }
+        );
+        // The bubble's bottom-center pins to the text's top-center.
+        assert_eq!(
+            command(commands, "bubble").bounds,
+            Rectangle {
+                x: 10.0,
+                y: -6.0,
+                w: 20.0,
+                h: 6.0,
+            }
         );
     }
 

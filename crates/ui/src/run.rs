@@ -46,15 +46,28 @@ struct Ctx<'f> {
     events: Vec<String>,
     style: Style,
     /// Counter for elements with no script id that still need one (buttons,
-    /// scrollable or tooltipped containers); declaration order is
+    /// scrollables, anything tooltipped); declaration order is
     /// deterministic, so the synthesized ids are stable across frames.
     auto_id: u32,
     /// Bindings of the template row being stamped; empty outside lists.
     row: Row,
 }
 
-/// Interpolates a pre-tokenized string against the current row. Missing
-/// bindings keep their `$NAME` spelling so mistakes show up on screen.
+/// Looks a `$VAR` up in the current row's bindings, then in the globals
+/// (the root scope every element sees); a row binding shadows a global of
+/// the same key.
+fn lookup<'f>(ctx: &Ctx<'f>, var: &str) -> Option<&'f str> {
+    ctx.data
+        .bindings(ctx.row)
+        .iter()
+        .chain(ctx.data.globals.iter())
+        .find(|b| ctx.data.text(b.key) == var)
+        .map(|b| ctx.data.text(b.value))
+}
+
+/// Interpolates a pre-tokenized string against the current row and the
+/// globals. Missing bindings keep their `$NAME` spelling so mistakes show
+/// up on screen.
 fn resolve<'f>(ctx: &Ctx<'f>, text: Text) -> &'f str {
     match ctx.module.segs(text) {
         [] => "",
@@ -65,14 +78,10 @@ fn resolve<'f>(ctx: &Ctx<'f>, text: Text) -> &'f str {
             let mut out = AString::new_in(ctx.frame);
             for seg in segs {
                 let var = ctx.module.str(seg.var);
-                let binding = ctx
-                    .data
-                    .bindings(ctx.row)
-                    .iter()
-                    .find(|b| ctx.data.text(b.key) == var);
-                match binding {
-                    Some(binding) if !var.is_empty() => out.push_str(ctx.data.text(binding.value)),
-                    _ => out.push_str(ctx.module.str(seg.literal)),
+                let value = if var.is_empty() { None } else { lookup(ctx, var) };
+                match value {
+                    Some(value) => out.push_str(value),
+                    None => out.push_str(ctx.module.str(seg.literal)),
                 }
             }
             out.into_str()
@@ -276,16 +285,46 @@ fn tooltip(ctx: &Ctx<'_>, ui: &mut ui::Ui<'_, '_>, text: Text) {
     );
 }
 
-/// Evaluates a node's `visible` condition against the current row and data:
-/// unset/`yes` = shown, `no` = hidden, anything else names a [`UiData`]
-/// flag. Interpolation runs first, so a row can bind `visible = $ALIVE` to
-/// yes/no directly or to a flag name.
-fn visible(ctx: &Ctx<'_>, node: &UiNode) -> bool {
-    match resolve(ctx, node.visible) {
-        "" | "yes" => true,
-        "no" => false,
-        flag => ctx.data.flag(flag),
+/// Declares one lowered element. This is the kind-blind half of lowering:
+/// any element can carry a tooltip, whatever widget it came from. The
+/// bubble needs hover sensing and sensing needs a stable id, so `id` is
+/// whatever id the caller already had reasons to mint (button actions,
+/// scroll state) — `None` synthesizes one on demand.
+fn emit(
+    ctx: &mut Ctx<'_>,
+    ui: &mut ui::Ui<'_, '_>,
+    node: &UiNode,
+    mut conf: ElementConf<'_>,
+    id: Option<ElementId>,
+    body: impl FnOnce(&mut Ctx<'_>, &mut ui::Ui<'_, '_>),
+) {
+    let id = match id {
+        Some(id) => Some(id),
+        None if !node.tooltip.is_empty() => Some(element_id(ctx, node, "__script_element")),
+        None => None,
+    };
+    let mut hovered = false;
+    if let Some(id) = id {
+        conf = conf.id(id);
+        if !node.tooltip.is_empty() {
+            hovered = ui.sense(id).hovered;
+        }
     }
+    ui.add_with(conf, |ui| {
+        body(ctx, ui);
+        if hovered {
+            tooltip(ctx, ui, node.tooltip);
+        }
+    });
+}
+
+/// Evaluates a node's `visible` condition: unset = shown, otherwise the
+/// interpolated text must be `yes`. Conditions come from data (`visible =
+/// "$OPEN"` against row bindings or globals); a missing binding keeps its
+/// `$NAME` spelling, so conditional elements stay hidden until the fill
+/// code opts them in.
+fn visible(ctx: &Ctx<'_>, node: &UiNode) -> bool {
+    matches!(resolve(ctx, node.visible), "" | "yes")
 }
 
 fn walk(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, mut index: u32) {
@@ -309,19 +348,14 @@ fn walk(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, mut index: u32) {
 
 fn panel(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     let style = ctx.style;
-    let mut conf = container_conf(ctx, &node, Some(style.panel_background));
-    // Scroll state and hover sensing both need a stable id.
-    let mut hovered = false;
-    if node.scrollable || !node.tooltip.is_empty() {
-        let id = element_id(ctx, &node, "__script_panel");
-        conf = conf.id(id);
-        hovered = ui.sense(id).hovered;
-    }
-    ui.add_with(conf, |ui| {
-        walk(ctx, ui, node.first_child);
-        if hovered && !node.tooltip.is_empty() {
-            tooltip(ctx, ui, node.tooltip);
-        }
+    let conf = container_conf(ctx, &node, Some(style.panel_background));
+    // Scroll state needs a stable id even without a tooltip.
+    let id = node
+        .scrollable
+        .then(|| element_id(ctx, &node, "__script_panel"));
+    let first_child = node.first_child;
+    emit(ctx, ui, &node, conf, id, |ctx, ui| {
+        walk(ctx, ui, first_child);
     });
 }
 
@@ -343,7 +377,7 @@ fn label(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
         name => style.color(name).unwrap_or(role_color),
     };
     // Labels fit their text.
-    ui.add(sized(
+    let conf = sized(
         ElementConf::text(
             TextConf::default()
                 .text(text)
@@ -354,7 +388,8 @@ fn label(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
         &node,
         FIT,
         FIT,
-    ));
+    );
+    emit(ctx, ui, &node, conf, None, |_, _| {});
 }
 
 fn button(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
@@ -377,7 +412,6 @@ fn button(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
         default_for(style.button_width),
         default_for(style.button_height),
     )
-    .id(id)
     .padding(Padding::symmetric(10.0, 4.0))
     .align_x(Align::Center)
     .align_y(Align::Center)
@@ -391,16 +425,13 @@ fn button(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
         conf = conf.border(style.button_border_thickness, style.button_border_color);
     }
     let text = resolve(ctx, node.text);
-    ui.add_with(conf, |ui| {
+    emit(ctx, ui, &node, conf, Some(id), |_, ui| {
         ui.add(ElementConf::text(
             TextConf::default()
                 .text(text)
                 .size(style.text_size)
                 .color(style.ink),
         ));
-        if sense.hovered && !node.tooltip.is_empty() {
-            tooltip(ctx, ui, node.tooltip);
-        }
     });
     if sense.clicked && !action.is_empty() {
         ctx.events.push(action.to_string());
@@ -432,7 +463,7 @@ fn image(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     if node.border {
         conf = conf.border(1.0, style.outline);
     }
-    ui.add(conf);
+    emit(ctx, ui, &node, conf, None, |_, _| {});
 }
 
 fn list(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
@@ -446,8 +477,7 @@ fn list(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     }
     // Stable id keeps the engine's scroll state across frames.
     let id = element_id(ctx, &node, "__script_list");
-    let conf = container_conf(ctx, &list_node, None).id(id);
-    let hovered = ui.sense(id).hovered;
+    let conf = container_conf(ctx, &list_node, None);
     let rows = ctx
         .data
         .lists
@@ -455,9 +485,12 @@ fn list(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
         .find(|list| ctx.data.text(list.id) == list_id)
         .map_or(&[][..], |list| ctx.data.rows(*list));
     let template = node.template;
-    ui.add_with(conf, |ui| {
+    emit(ctx, ui, &node, conf, Some(id), |ctx, ui| {
         if template != 0 {
             let template_node = ctx.module.nodes[template as usize];
+            // Stack discipline: a nested list must not clobber the row its
+            // siblings in the enclosing template still resolve against.
+            let outer_row = ctx.row;
             // Rows fill the list's cross axis, so grow-sized template
             // content has room to work with.
             let stamp_conf = match node.direction {
@@ -477,10 +510,7 @@ fn list(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
                     walk(ctx, ui, template_node.first_child);
                 });
             }
-            ctx.row = Row::default();
-        }
-        if hovered && !node.tooltip.is_empty() {
-            tooltip(ctx, ui, node.tooltip);
+            ctx.row = outer_row;
         }
     });
 }
@@ -513,18 +543,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_interpolates_and_keeps_missing_vars_literal() {
+    fn resolve_interpolates_rows_then_globals_and_keeps_missing_vars_literal() {
         let frame = Arena::new();
         let mut data = UiData::default();
+        data.bind_global("ID", "99"); // shadowed by the row's ID
+        data.bind_global("YEAR", "700");
         data.begin_list("l");
         data.begin_row();
         data.bind("ID", "42");
         let row = data.rows(data.lists[0])[0];
         // Tokenization is the compiler's job; go through it.
-        let module = ir::compile("panel = { label = \"hire $ID $MISSING\" }");
+        let module = ir::compile("panel = { label = \"hire $ID in $YEAR $MISSING\" }");
         assert!(module.errors.is_empty() && module.warnings.is_empty());
         let label = module.nodes[module.nodes[module.roots() as usize].first_child as usize];
-        let ctx = Ctx {
+        let mut ctx = Ctx {
             frame: &frame,
             module: &module,
             data: &data,
@@ -533,8 +565,11 @@ mod tests {
             auto_id: 0,
             row,
         };
-        assert_eq!(resolve(&ctx, label.text), "hire 42 $MISSING");
+        assert_eq!(resolve(&ctx, label.text), "hire 42 in 700 $MISSING");
         assert_eq!(resolve(&ctx, Text::default()), "");
+        // Outside any row (the zero row), globals still resolve.
+        ctx.row = Row::default();
+        assert_eq!(resolve(&ctx, label.text), "hire 99 in 700 $MISSING");
     }
 
     #[test]
@@ -584,10 +619,10 @@ mod tests {
     }
 
     #[test]
-    fn visible_conditions_evaluate_against_flags_and_bindings() {
+    fn visible_conditions_evaluate_against_bindings_and_globals() {
         let frame = Arena::new();
         let mut data = UiData::default();
-        data.set_flag("window_open", true);
+        data.bind_global("WINDOW_OPEN", "yes");
         data.begin_list("l");
         data.begin_row();
         data.bind("ALIVE", "no");
@@ -597,8 +632,8 @@ mod tests {
              label = { text = a } \
              label = { text = b visible = yes } \
              label = { text = c visible = no } \
-             label = { text = d visible = window_open } \
-             label = { text = e visible = missing_flag } \
+             label = { text = d visible = \"$WINDOW_OPEN\" } \
+             label = { text = e visible = \"$MISSING\" } \
              label = { text = f visible = \"$ALIVE\" } }",
         );
         assert!(module.errors.is_empty());
@@ -627,7 +662,7 @@ mod tests {
     fn hidden_nodes_are_not_declared() {
         const SOURCE: &str = "panel = {
             button = { id = never text = a visible = no width = 100 height = 30 }
-            button = { id = maybe text = b visible = window_open width = 100 height = 30 }
+            button = { id = maybe text = b visible = \"$WINDOW_OPEN\" width = 100 height = 30 }
         }";
         let module = ir::compile(SOURCE);
         assert!(module.errors.is_empty());
@@ -655,9 +690,9 @@ mod tests {
         assert!(click_at(&closed, 0.0, 0.0, false).is_empty());
         assert!(click_at(&closed, 50.0, 25.0, true).is_empty());
 
-        // Flag on: the conditional button is now the panel's first child.
+        // Bound to yes: the conditional button is now the panel's first child.
         let mut open = UiData::default();
-        open.set_flag("window_open", true);
+        open.bind_global("WINDOW_OPEN", "yes");
         assert!(click_at(&open, 0.0, 0.0, false).is_empty());
         assert_eq!(click_at(&open, 50.0, 25.0, true), ["maybe"]);
     }

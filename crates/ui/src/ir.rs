@@ -166,9 +166,10 @@ pub struct UiNode {
     pub tint: Text,
     /// Image widgets: `0.0` = fully opaque.
     pub fade: f32,
-    /// Visibility, resolved per frame after interpolation: empty or `yes`
-    /// = shown, `no` = hidden, any other string = the name of a
-    /// [`UiData`] flag that decides. Zero value = shown.
+    /// Visibility, resolved per frame: the interpolated text must be
+    /// empty or `yes` to show the element. Conditions come from data via
+    /// `$VAR` (row bindings, then globals); a missing binding keeps its
+    /// `$NAME` spelling and hides. Zero value = shown.
     pub visible: Text,
     /// Hover tooltip text; empty = none.
     pub tooltip: Text,
@@ -232,14 +233,6 @@ pub struct ListData {
     pub rows: Span,
 }
 
-/// One named boolean the script's `visible = <name>` conditions look up.
-/// `key` spans [`UiData::strings`].
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Flag {
-    pub key: Span,
-    pub value: bool,
-}
-
 /// One image the script can reference by key (`image = { id = soldier }`),
 /// with its renderer handle and natural size.
 #[derive(Clone, Copy, Debug, Default)]
@@ -255,17 +248,23 @@ pub struct ImageData {
 /// lists, no images); [`UiData::clear`] recycles all buffers so one value
 /// can be refilled every frame without reallocating.
 ///
+/// One channel carries all sim-facing data: bindings, resolved current
+/// row first, then [`UiData::globals`] — the root scope every element
+/// sees, including top-level panels outside any list. Visibility rides
+/// the same channel (`visible = "$OPEN"` against a yes/no value).
+///
 /// Built top-down in declaration order: `begin_list`, then `begin_row` and
 /// `bind` for each row, so every list's rows (and every row's bindings)
-/// are contiguous.
+/// are contiguous. Globals live in their own array, so `bind_global` is
+/// legal at any point.
 #[derive(Clone, Debug, Default)]
 pub struct UiData {
     pub strings: StrBuf,
     pub lists: Vec<ListData>,
     pub rows: Vec<Row>,
     pub bindings: Vec<Binding>,
+    pub globals: Vec<Binding>,
     pub images: Vec<ImageData>,
-    pub flags: Vec<Flag>,
 }
 
 impl UiData {
@@ -274,8 +273,8 @@ impl UiData {
         self.lists.clear();
         self.rows.clear();
         self.bindings.clear();
+        self.globals.clear();
         self.images.clear();
-        self.flags.clear();
     }
 
     pub fn text(&self, span: Span) -> &str {
@@ -323,20 +322,15 @@ impl UiData {
         }
     }
 
-    /// Sets a named flag for `visible = <name>` conditions. Set last wins.
-    pub fn set_flag(&mut self, key: &str, value: bool) {
-        let key = self.strings.push(key);
-        self.flags.push(Flag { key, value });
-    }
-
-    /// Looks up a flag by name; unset = false, so `visible = <name>` panels
-    /// stay hidden until the caller opts them in.
-    pub fn flag(&self, key: &str) -> bool {
-        self.flags
-            .iter()
-            .rev()
-            .find(|flag| self.text(flag.key) == key)
-            .is_some_and(|flag| flag.value)
+    /// Adds a `$key = value` binding to the root scope: visible to every
+    /// element, shadowed by a row binding of the same key. Legal at any
+    /// point during the fill — globals live outside the row/list spans.
+    pub fn bind_global(&mut self, key: &str, value: &str) {
+        let binding = Binding {
+            key: self.strings.push(key),
+            value: self.strings.push(value),
+        };
+        self.globals.push(binding);
     }
 
     pub fn add_image(&mut self, key: &str, image: ImageId, width: f32, height: f32) {
@@ -539,6 +533,21 @@ impl Compiler {
         }
     }
 
+    /// Tokenizes a `visible` value. Visibility is `yes`/`no` or comes from
+    /// data via `$VAR`; a bare name never resolves to `yes`, so it would
+    /// silently hide the element forever — warn instead.
+    fn visible(&mut self, src: &tabula::Node, path: &str) -> Text {
+        let source = src.get_text("visible");
+        if let Some(value) = source {
+            if !matches!(value, "" | "yes" | "no") && !value.contains('$') {
+                self.warn(&format!(
+                    "{path}: 'visible = {value}' is not yes/no or a $VAR binding"
+                ));
+            }
+        }
+        self.text(source)
+    }
+
     fn yes(&mut self, src: &tabula::Node, key: &str, path: &str) -> bool {
         match src.get_text(key) {
             None => false,
@@ -681,7 +690,7 @@ impl Compiler {
         node.x_pos = src.get_number("x_pos").unwrap_or(node.x_pos);
         node.y_pos = src.get_number("y_pos").unwrap_or(node.y_pos);
         node.id = self.text(src.get_text("id"));
-        node.visible = self.text(src.get_text("visible"));
+        node.visible = self.visible(src, path);
     }
 
     /// Compiles the widget children of a block into a sibling chain,
@@ -794,19 +803,23 @@ impl Compiler {
             self.check_keys(
                 src,
                 path,
-                &[&["text", "size", "color", "wrap", "width", "height", "visible"]],
+                &[&[
+                    "id", "text", "size", "color", "wrap", "width", "height", "visible", "tooltip",
+                ]],
                 false,
             );
             UiNode {
                 kind: NodeKind::Label,
                 label_style: style,
+                id: self.text(src.get_text("id")),
                 text: self.text(src.get_text("text")),
                 text_size: src.get_number("size").unwrap_or(0.0) as u16,
                 color: self.text(src.get_text("color")),
                 wrap: self.yes(src, "wrap", path),
                 width: self.size(src, "width", path).unwrap_or_default(),
                 height: self.size(src, "height", path).unwrap_or_default(),
-                visible: self.text(src.get_text("visible")),
+                visible: self.visible(src, path),
+                tooltip: self.text(src.get_text("tooltip")),
                 ..UiNode::default()
             }
         } else {
@@ -849,7 +862,7 @@ impl Compiler {
             min_height: src.get_number("min_height").unwrap_or(0.0),
             max_height: src.get_number("max_height").unwrap_or(0.0),
             tooltip: self.text(src.get_text("tooltip")),
-            visible: self.text(src.get_text("visible")),
+            visible: self.visible(src, path),
             ..UiNode::default()
         };
         self.push(node)
@@ -882,7 +895,7 @@ impl Compiler {
             background: self.text(src.get_text("background")),
             border: self.yes(src, "border", path),
             tooltip: self.text(src.get_text("tooltip")),
-            visible: self.text(src.get_text("visible")),
+            visible: self.visible(src, path),
             ..UiNode::default()
         };
         self.push(node)
@@ -1082,7 +1095,7 @@ mod tests {
         let module = compile(
             "panel = { \
              panel = { floating = yes x_pos = 1 label = { text = \"FLOATING\" size = 13 } } \
-             label = { text = \"body\" color = muted wrap = yes width = grow } \
+             label = { id = body text = \"body\" color = muted wrap = yes width = grow tooltip = \"tip\" } \
              image = { id = soldier width = 96 height = 48 tint = accent fade = 0.5 border = yes } }",
         );
         assert!(module.errors.is_empty());
@@ -1100,6 +1113,9 @@ mod tests {
         assert!(body.wrap);
         assert_eq!(seg(&module, body.color, 0).0, "muted");
         assert_eq!(body.width, Size::GROW);
+        // Ids and tooltips are orthogonal to kind: labels carry them too.
+        assert_eq!(seg(&module, body.id, 0).0, "body");
+        assert_eq!(seg(&module, body.tooltip, 0).0, "tip");
 
         let image = node(&module, body.next_sibling);
         assert_eq!(image.kind, NodeKind::Image);
@@ -1152,14 +1168,17 @@ mod tests {
     #[test]
     fn compiles_visible_conditions() {
         let module = compile(
-            "panel = { visible = character_open label = { text = a visible = no } \
+            "panel = { visible = \"$CHARACTER_OPEN\" label = { text = a visible = no } \
              button = { text = b visible = \"$VISIBLE\" } }",
         );
         assert!(module.errors.is_empty());
         assert!(module.warnings.is_empty(), "{:?}", module.warnings);
 
         let panel = node(&module, module.roots());
-        assert_eq!(seg(&module, panel.visible, 0).0, "character_open");
+        assert_eq!(
+            seg(&module, panel.visible, 0),
+            ("$CHARACTER_OPEN", "CHARACTER_OPEN")
+        );
         let label = node(&module, panel.first_child);
         assert_eq!(seg(&module, label.visible, 0).0, "no");
         let button = node(&module, label.next_sibling);
@@ -1167,15 +1186,33 @@ mod tests {
     }
 
     #[test]
-    fn flags_look_up_by_name_last_set_wins() {
+    fn warns_on_bare_visible_names() {
+        // Flag-style conditions are gone: a bare name would hide forever.
+        let module = compile("panel = { visible = character_open }");
+        assert!(module.errors.is_empty());
+        let warnings = module.warnings.join("\n");
+        assert!(
+            warnings.contains("'visible = character_open' is not yes/no or a $VAR binding"),
+            "{warnings}"
+        );
+    }
+
+    #[test]
+    fn globals_bind_outside_the_row_machinery() {
         let mut data = UiData::default();
-        assert!(!data.flag("anything"));
-        data.set_flag("open", true);
-        data.set_flag("stale", true);
-        data.set_flag("stale", false);
-        assert!(data.flag("open"));
-        assert!(!data.flag("stale"));
-        assert!(!data.flag("missing"));
+        data.begin_list("l");
+        data.begin_row();
+        data.bind("A", "row");
+        // Legal mid-fill: globals live in their own array, so the open
+        // row's binding span is untouched.
+        data.bind_global("STATUS", "Year 700");
+        data.bind("B", "row");
+
+        let row = data.rows(data.lists[0])[0];
+        assert_eq!(data.bindings(row).len(), 2);
+        assert_eq!(data.globals.len(), 1);
+        assert_eq!(data.text(data.globals[0].key), "STATUS");
+        assert_eq!(data.text(data.globals[0].value), "Year 700");
     }
 
     #[test]

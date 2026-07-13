@@ -18,16 +18,10 @@ panel = {
 	align = center
 	border = yes
 
-	heading = "IMPERIUM"
+	heading = { text = "IMPERIUM" tooltip = "Test" }
 
-	# One-row list: the game binds $STATUS every frame.
-	list = {
-		id = "status"
-		width = grow
-		template = {
-			label = "$STATUS"
-		}
-	}
+	# A global binding: the game binds $STATUS every frame.
+	label = "$STATUS"
 
 	section = "PEOPLE OF ROME"
 	list = {
@@ -45,7 +39,7 @@ panel = {
 				label = "$NAME, age $AGE"
 				row = {
 					button = { id = "femalify $ID" text = "Make Female" visible = "$IS_MALE"}
-					button = { id = "remove $ID" text = "Remove" }
+					button = { id = "remove $ID" text = "Remove" tooltip = "Remove the entity, whose name is $NAME."}
 				}
 			}
 		}

@@ -198,10 +198,8 @@ impl Game {
 
     /// The per-frame bridge: dump the sim state the UI script binds to.
     pub fn fill_ui_data(&self, data: &mut ir::UiData) {
-        data.begin_list("status");
-        data.begin_row();
         let souls = self.entities.iter_set(Set::People).count();
-        data.bind("STATUS", &format!("Year {} AUC — {souls} souls", self.year));
+        data.bind_global("STATUS", &format!("Year {} AUC — {souls} souls", self.year));
 
         data.begin_list("people");
         for id in self.entities.iter_set(Set::People) {
@@ -326,14 +324,13 @@ mod tests {
         let mut data = ir::UiData::default();
         game.fill_ui_data(&mut data);
 
-        assert_eq!(data.lists.len(), 2);
-        let status_rows = data.rows(data.lists[0]);
-        assert_eq!(status_rows.len(), 1);
-        let binding = data.bindings(status_rows[0])[0];
-        assert_eq!(data.text(binding.key), "STATUS");
-        assert_eq!(data.text(binding.value), "Year 700 AUC — 3 souls");
+        // The status line is a global: visible everywhere, no list needed.
+        assert_eq!(data.globals.len(), 1);
+        assert_eq!(data.text(data.globals[0].key), "STATUS");
+        assert_eq!(data.text(data.globals[0].value), "Year 700 AUC — 3 souls");
 
-        let people_rows = data.rows(data.lists[1]);
+        assert_eq!(data.lists.len(), 1);
+        let people_rows = data.rows(data.lists[0]);
         assert_eq!(people_rows.len(), 3);
         let bindings = data.bindings(people_rows[0]);
         let get = |key: &str| {
