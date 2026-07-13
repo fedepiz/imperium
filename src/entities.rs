@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use util::strings::{Span, StrBuf};
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
 pub(crate) struct EntityId {
     index: u16,
@@ -7,6 +9,12 @@ pub(crate) struct EntityId {
 }
 
 impl EntityId {
+    /// Sorts after every real id — the upper bound for range scans.
+    const MAX: EntityId = EntityId {
+        index: u16::MAX,
+        generation: u16::MAX,
+    };
+
     pub fn is_valid(&self) -> bool {
         self.index != 0 && self.generation % 2 == 1
     }
@@ -17,16 +25,16 @@ struct EntityData {
     id: EntityId,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct VarId(pub usize);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
+pub struct VarId(pub u16);
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct RelationId(pub usize);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
+pub struct RelationId(pub u16);
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct SetId(pub usize);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
+pub struct SetId(pub u16);
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Definitions {
     var_names: Vec<String>,
     relation_names: Vec<String>,
@@ -35,45 +43,45 @@ pub(crate) struct Definitions {
 
 impl Definitions {
     pub fn define_var(&mut self, name: impl Into<String>) -> VarId {
-        let id = VarId(self.var_names.len());
+        let id = VarId(u16::try_from(self.var_names.len()).unwrap());
         self.var_names.push(name.into());
         id
     }
 
     pub fn define_relation(&mut self, name: impl Into<String>) -> RelationId {
-        let id = RelationId(self.relation_names.len());
+        let id = RelationId(u16::try_from(self.relation_names.len()).unwrap());
         self.relation_names.push(name.into());
         id
     }
 
     pub fn define_set(&mut self, name: impl Into<String>) -> SetId {
-        let id = SetId(self.set_names.len());
+        let id = SetId(u16::try_from(self.set_names.len()).unwrap());
         self.set_names.push(name.into());
         id
     }
 
     pub fn get_var_name(&self, id: VarId) -> Option<&str> {
-        self.var_names.get(id.0).map(String::as_str)
+        self.var_names.get(id.0 as usize).map(String::as_str)
     }
 
     pub fn get_relation_name(&self, id: RelationId) -> Option<&str> {
-        self.relation_names.get(id.0).map(String::as_str)
+        self.relation_names.get(id.0 as usize).map(String::as_str)
     }
 
     pub fn get_set_name(&self, id: SetId) -> Option<&str> {
-        self.set_names.get(id.0).map(String::as_str)
+        self.set_names.get(id.0 as usize).map(String::as_str)
     }
 
     pub fn iter_vars(&self) -> impl ExactSizeIterator<Item = VarId> {
-        (0..self.var_names.len()).map(VarId)
+        (0..self.var_names.len() as u16).map(VarId)
     }
 
     pub fn iter_relations(&self) -> impl ExactSizeIterator<Item = RelationId> {
-        (0..self.relation_names.len()).map(RelationId)
+        (0..self.relation_names.len() as u16).map(RelationId)
     }
 
     pub fn iter_sets(&self) -> impl ExactSizeIterator<Item = SetId> {
-        (0..self.set_names.len()).map(SetId)
+        (0..self.set_names.len() as u16).map(SetId)
     }
 }
 
@@ -82,6 +90,25 @@ pub(crate) struct RelationKey {
     pub source: EntityId,
     pub relation: RelationId,
     pub target: EntityId,
+}
+
+/// Same edges as [`RelationKey`], sorted by (target, relation, source) so
+/// incoming-edge queries are one range scan too.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ReverseKey {
+    target: EntityId,
+    relation: RelationId,
+    source: EntityId,
+}
+
+impl ReverseKey {
+    fn of(key: RelationKey) -> Self {
+        ReverseKey {
+            target: key.target,
+            relation: key.relation,
+            source: key.source,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
@@ -98,18 +125,26 @@ struct SetKey {
     entity: EntityId,
 }
 
+#[derive(Clone)]
 pub(crate) struct Entities {
     defs: Definitions,
     entries: Vec<EntityData>,
     free_list: Vec<u16>,
-    names: Vec<String>,
+    /// Per-slot spans into `name_buf`. Zero span = unnamed.
+    names: Vec<Span>,
+    /// One shared buffer for all entity names. Append-only: renames and
+    /// despawns leak their old bytes until `compact_names`.
+    name_buf: StrBuf,
     tags: BTreeMap<String, EntityId>,
     vars: Vec<f32>,
     relations: BTreeMap<RelationKey, f32>,
+    /// Mirror of `relations` keyed for incoming-edge scans. Kept in sync by
+    /// `set_relation` and `sweep`, the only two mutation points.
+    relations_rev: BTreeMap<ReverseKey, f32>,
     sets: BTreeSet<SetKey>,
-    /// Entities despawned since the last `garbage_collect`. Their relations
-    /// stay in the map (reads filter them out lazily) until collected.
-    dead_since_gc: Vec<EntityId>,
+    /// Entities marked by `mark_despawn`, still fully alive until the next
+    /// `sweep` despawns them and purges their tags/relations/memberships.
+    marked: Vec<EntityId>,
 }
 
 impl Entities {
@@ -126,21 +161,21 @@ impl Entities {
             })
             .collect();
 
-        let vars = (0..Self::NUM_ENTITIES * defs.var_names.len())
-            .map(|_| 0.0)
-            .collect();
-        let names = (0..Self::NUM_ENTITIES).map(|_| String::new()).collect();
+        let vars = vec![0.0; Self::NUM_ENTITIES * defs.var_names.len()];
+        let names = vec![Span::default(); Self::NUM_ENTITIES];
 
         Self {
             defs,
             entries,
             free_list,
             names,
+            name_buf: StrBuf::default(),
             tags: BTreeMap::default(),
             vars,
             relations: BTreeMap::default(),
+            relations_rev: BTreeMap::default(),
             sets: BTreeSet::default(),
-            dead_since_gc: Vec::new(),
+            marked: Vec::new(),
         }
     }
 
@@ -153,7 +188,7 @@ impl Entities {
     fn var_idx(&self, id: EntityId, var: VarId) -> usize {
         assert!(self.is_alive(id));
         assert!(self.defs.get_var_name(var).is_some());
-        (id.index as usize * self.defs.var_names.len()) + var.0
+        (id.index as usize * self.defs.var_names.len()) + var.0 as usize
     }
 
     pub fn get_var(&self, id: EntityId, var: impl Into<VarId>) -> f32 {
@@ -167,18 +202,16 @@ impl Entities {
 
     pub fn get_name(&self, id: EntityId) -> &str {
         assert!(self.is_alive(id));
-        &self.names[id.index as usize]
+        self.name_buf.get(self.names[id.index as usize])
     }
 
     pub fn set_name(&mut self, id: EntityId, name: &str) {
         assert!(self.is_alive(id));
-        let dst = &mut self.names[id.index as usize];
-        dst.clear();
-        dst.push_str(name);
+        self.names[id.index as usize] = self.name_buf.push(name);
     }
 
     pub fn lookup_by_tag(&self, tag: &str) -> Option<EntityId> {
-        self.tags.get(tag).copied().filter(|id| self.is_alive(*id))
+        self.tags.get(tag).copied()
     }
 
     pub fn bind_to_tag(&mut self, tag: impl Into<String>, id: EntityId) -> Option<EntityId> {
@@ -218,7 +251,9 @@ impl Entities {
         self.defs.iter_sets()
     }
 
-    // If value == 0, remove entry. Otherwise, ensure entry exists and has the given value
+    // If value == 0, remove entry. Otherwise, ensure entry exists and has the given value.
+    // Removal deliberately skips every check so cleanup never has to
+    // establish liveness first; only insertion demands live endpoints.
     pub fn set_relation(
         &mut self,
         source: EntityId,
@@ -233,12 +268,25 @@ impl Entities {
         };
         if value == 0.0 {
             self.relations.remove(&key);
+            self.relations_rev.remove(&ReverseKey::of(key));
         } else {
+            assert!(!value.is_nan());
             assert!(self.defs.get_relation_name(key.relation).is_some());
             assert!(self.is_alive(source));
             assert!(self.is_alive(target));
             self.relations.insert(key, value);
+            self.relations_rev.insert(ReverseKey::of(key), value);
         }
+    }
+
+    /// All live entities, in slot order. Marked-but-unswept entities are
+    /// still alive and included. Borrows `self`, so game logic that
+    /// mutates while walking should collect into a Vec first.
+    pub fn iter_alive(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.entries
+            .iter()
+            .map(|entry| entry.id)
+            .filter(EntityId::is_valid)
     }
 
     /// An id is alive iff its slot still holds the same generation.
@@ -250,9 +298,9 @@ impl Entities {
                 .is_some_and(|entry| entry.id == id)
     }
 
-    /// All live relations with this source, in (relation, target) order.
+    /// All relations with this source, in (relation, target) order.
     /// Keys sort by (source, relation, target), so this is one range scan.
-    /// Entries whose endpoints have died are filtered out lazily.
+    /// A dead source has no entries left, so the scan is naturally empty.
     pub fn get_related(&self, source: EntityId) -> impl Iterator<Item = RelationEntry> + '_ {
         let min = RelationKey {
             source,
@@ -261,15 +309,11 @@ impl Entities {
         };
         let max = RelationKey {
             source,
-            relation: RelationId(usize::MAX),
-            target: EntityId {
-                index: u16::MAX,
-                generation: u16::MAX,
-            },
+            relation: RelationId(u16::MAX),
+            target: EntityId::MAX,
         };
         self.relations
             .range(min..=max)
-            .filter(move |(key, _)| self.is_alive(key.source) && self.is_alive(key.target))
             .map(|(key, value)| RelationEntry {
                 source: key.source,
                 relation: key.relation,
@@ -278,9 +322,8 @@ impl Entities {
             })
     }
 
-    /// Live targets of this source's relations of one kind, in target
-    /// order. One range scan over the (source, relation) prefix; entries
-    /// whose endpoints have died are filtered out lazily.
+    /// Targets of this source's relations of one kind, in target order.
+    /// One range scan over the (source, relation) prefix.
     pub fn get_related_via(
         &self,
         source: EntityId,
@@ -295,15 +338,58 @@ impl Entities {
         let max = RelationKey {
             source,
             relation,
-            target: EntityId {
-                index: u16::MAX,
-                generation: u16::MAX,
-            },
+            target: EntityId::MAX,
         };
         self.relations
             .range(min..=max)
-            .filter(move |(key, _)| self.is_alive(key.source) && self.is_alive(key.target))
             .map(|(key, value)| (key.target, *value))
+    }
+
+    /// All relations pointing at this target, in (relation, source)
+    /// order. One range scan over the reverse index.
+    pub fn get_related_to(&self, target: EntityId) -> impl Iterator<Item = RelationEntry> + '_ {
+        let min = ReverseKey {
+            target,
+            relation: RelationId(0),
+            source: EntityId::default(),
+        };
+        let max = ReverseKey {
+            target,
+            relation: RelationId(u16::MAX),
+            source: EntityId::MAX,
+        };
+        self.relations_rev
+            .range(min..=max)
+            .map(|(key, value)| RelationEntry {
+                source: key.source,
+                relation: key.relation,
+                target: key.target,
+                value: *value,
+            })
+    }
+
+    /// Sources with a relation of one kind pointing at this target, in
+    /// source order. One range scan over the reverse index's
+    /// (target, relation) prefix.
+    pub fn get_related_to_via(
+        &self,
+        target: EntityId,
+        relation: impl Into<RelationId>,
+    ) -> impl Iterator<Item = (EntityId, f32)> + '_ {
+        let relation = relation.into();
+        let min = ReverseKey {
+            target,
+            relation,
+            source: EntityId::default(),
+        };
+        let max = ReverseKey {
+            target,
+            relation,
+            source: EntityId::MAX,
+        };
+        self.relations_rev
+            .range(min..=max)
+            .map(|(key, value)| (key.source, *value))
     }
 
     pub fn add_to_set(&mut self, set: impl Into<SetId>, entity: EntityId) -> bool {
@@ -321,11 +407,10 @@ impl Entities {
     }
 
     pub fn in_set(&self, set: impl Into<SetId>, entity: EntityId) -> bool {
-        self.is_alive(entity)
-            && self.sets.contains(&SetKey {
-                set: set.into(),
-                entity,
-            })
+        self.sets.contains(&SetKey {
+            set: set.into(),
+            entity,
+        })
     }
 
     pub fn iter_set(&self, set: impl Into<SetId>) -> impl Iterator<Item = EntityId> + '_ {
@@ -336,35 +421,103 @@ impl Entities {
         };
         let max = SetKey {
             set,
-            entity: EntityId {
-                index: u16::MAX,
-                generation: u16::MAX,
-            },
+            entity: EntityId::MAX,
         };
-        self.sets
-            .range(min..=max)
-            .filter(move |key| self.is_alive(key.entity))
-            .map(|key| key.entity)
+        self.sets.range(min..=max).map(|key| key.entity)
     }
 
-    /// Bulk-remove tags, relations, and set memberships involving entities
-    /// that died since the last collect.
-    /// Reads are already correct without this (they filter lazily); this
-    /// only reclaims memory, so call it whenever convenient.
-    pub fn garbage_collect(&mut self) {
-        if self.dead_since_gc.is_empty() {
+    /// Despawn every entity marked since the last sweep, purging its tags,
+    /// relations, and set memberships in the same breath. Call once per
+    /// frame: reads don't filter for liveness, so the maps holding only
+    /// live ids depends on marks not outliving the frame that made them.
+    ///
+    /// Marks are deduplicated implicitly: despawning bumps the slot's
+    /// generation, so a duplicate mark fails the aliveness check and is
+    /// skipped. Relations and sets are removed by targeted lookups on the
+    /// dead ids; tags are string-keyed, so they take a full scan.
+    pub fn sweep(&mut self) {
+        let marked = std::mem::take(&mut self.marked);
+        let mut dead: Vec<EntityId> = Vec::new();
+        for id in marked {
+            if !self.is_alive(id) {
+                continue;
+            }
+            let entry = &mut self.entries[id.index as usize];
+            if entry.id.generation == u16::MAX {
+                // This slot can no longer be reused without resurrecting stale IDs.
+                entry.id.generation = 0;
+            } else {
+                entry.id.generation += 1;
+                self.free_list.push(id.index);
+            }
+            self.names[id.index as usize] = Span::default();
+            dead.push(id);
+        }
+        if dead.is_empty() {
             return;
         }
+
+        let mut doomed: Vec<RelationKey> = Vec::new();
+        for &id in &dead {
+            let min = RelationKey {
+                source: id,
+                relation: RelationId(0),
+                target: EntityId::default(),
+            };
+            let max = RelationKey {
+                source: id,
+                relation: RelationId(u16::MAX),
+                target: EntityId::MAX,
+            };
+            doomed.extend(self.relations.range(min..=max).map(|(key, _)| *key));
+
+            let min = ReverseKey {
+                target: id,
+                relation: RelationId(0),
+                source: EntityId::default(),
+            };
+            let max = ReverseKey {
+                target: id,
+                relation: RelationId(u16::MAX),
+                source: EntityId::MAX,
+            };
+            doomed.extend(
+                self.relations_rev
+                    .range(min..=max)
+                    .map(|(key, _)| RelationKey {
+                        source: key.source,
+                        relation: key.relation,
+                        target: key.target,
+                    }),
+            );
+        }
+        for key in doomed {
+            self.relations.remove(&key);
+            self.relations_rev.remove(&ReverseKey::of(key));
+        }
+
+        for &id in &dead {
+            for set in self.defs.iter_sets() {
+                self.sets.remove(&SetKey { set, entity: id });
+            }
+        }
+
         let entries = &self.entries;
         self.tags
             .retain(|_, id| entries[id.index as usize].id == *id);
-        self.relations.retain(|key, _| {
-            entries[key.source.index as usize].id == key.source
-                && entries[key.target.index as usize].id == key.target
-        });
-        self.sets
-            .retain(|key| entries[key.entity.index as usize].id == key.entity);
-        self.dead_since_gc.clear();
+    }
+
+    /// Rebuild the name buffer from live spans, reclaiming bytes leaked by
+    /// renames and despawns. Purely a memory optimization — call
+    /// sporadically, whenever convenient.
+    pub fn compact_names(&mut self) {
+        let mut compacted = StrBuf::default();
+        for span in &mut self.names {
+            if !span.is_empty() {
+                *span = compacted.push(self.name_buf.get(*span));
+            }
+        }
+        self.name_buf = compacted;
     }
 
     /// 0.0 means "no relation" — absent entries and zero are the same thing.
@@ -374,9 +527,6 @@ impl Entities {
         relation: impl Into<RelationId>,
         target: EntityId,
     ) -> f32 {
-        if !self.is_alive(source) || !self.is_alive(target) {
-            return 0.0;
-        }
         let key = RelationKey {
             source,
             relation: relation.into(),
@@ -399,20 +549,12 @@ impl Entities {
         id
     }
 
-    pub fn despawn(&mut self, id: EntityId) {
-        // Id must be valid
+    /// Record that this entity should die at the next `sweep`. Until then
+    /// it stays fully alive: visible to every query and writable. Marking
+    /// twice, or marking an id that dies before the sweep, is harmless.
+    pub fn mark_despawn(&mut self, id: EntityId) {
         assert!(id.is_valid());
-        let entry = &mut self.entries[id.index as usize];
-        assert!(entry.id == id);
-        if entry.id.generation == u16::MAX {
-            // This slot can no longer be reused without resurrecting stale IDs.
-            entry.id.generation = 0;
-        } else {
-            entry.id.generation += 1;
-            self.free_list.push(id.index);
-        }
-        self.names[id.index as usize].clear();
-        self.dead_since_gc.push(id);
+        self.marked.push(id);
     }
 }
 
@@ -472,11 +614,56 @@ mod tests {
     }
 
     #[test]
+    fn marked_entities_stay_alive_until_sweep() {
+        let mut entities = entities();
+        let doomed = entities.spawn();
+        entities.add_to_set(SetId(0), doomed);
+        entities.mark_despawn(doomed);
+        // Double-marking is harmless.
+        entities.mark_despawn(doomed);
+
+        assert!(entities.is_alive(doomed));
+        assert!(entities.in_set(SetId(0), doomed));
+        assert_eq!(entities.iter_set(SetId(0)).count(), 1);
+
+        entities.sweep();
+        assert!(!entities.is_alive(doomed));
+        assert!(!entities.in_set(SetId(0), doomed));
+        assert!(entities.sets.is_empty());
+
+        // Marking an already-dead id is harmless too.
+        entities.mark_despawn(doomed);
+        entities.sweep();
+    }
+
+    #[test]
+    fn iter_alive_lists_live_entities_in_slot_order() {
+        let mut entities = entities();
+        assert_eq!(entities.iter_alive().count(), 0);
+
+        let a = entities.spawn();
+        let b = entities.spawn();
+        let c = entities.spawn();
+        entities.mark_despawn(b);
+
+        // Marked but unswept: still alive.
+        assert_eq!(entities.iter_alive().collect::<Vec<_>>(), [a, b, c]);
+
+        entities.sweep();
+        assert_eq!(entities.iter_alive().collect::<Vec<_>>(), [a, c]);
+
+        let reused = entities.spawn();
+        assert_eq!(reused.index, b.index);
+        assert_eq!(entities.iter_alive().collect::<Vec<_>>(), [a, reused, c]);
+    }
+
+    #[test]
     fn stale_id_cannot_access_reused_slot() {
         let mut entities = entities();
         let stale = entities.spawn();
         entities.set_var(stale, VarId(0), 1.0);
-        entities.despawn(stale);
+        entities.mark_despawn(stale);
+        entities.sweep();
         let replacement = entities.spawn();
 
         assert_eq!(stale.index, replacement.index);
@@ -498,7 +685,8 @@ mod tests {
         entities.set_name(first, "Marcus Tullius Cicero");
         assert_eq!(entities.get_name(first), "Marcus Tullius Cicero");
 
-        entities.despawn(first);
+        entities.mark_despawn(first);
+        entities.sweep();
         let replacement = entities.spawn();
 
         assert_eq!(first.index, replacement.index);
@@ -506,6 +694,26 @@ mod tests {
         entities.set_name(replacement, "Gaius Julius Caesar");
         assert_eq!(entities.get_name(replacement), "Gaius Julius Caesar");
         assert!(std::panic::catch_unwind(|| entities.get_name(first)).is_err());
+    }
+
+    #[test]
+    fn compact_names_reclaims_leaked_bytes() {
+        let mut entities = entities();
+        let kept = entities.spawn();
+        let renamed = entities.spawn();
+        let dead = entities.spawn();
+        entities.set_name(kept, "Cicero");
+        entities.set_name(renamed, "Octavianus");
+        entities.set_name(renamed, "Augustus");
+        entities.set_name(dead, "Crassus");
+        entities.mark_despawn(dead);
+        entities.sweep();
+
+        entities.compact_names();
+
+        assert_eq!(entities.get_name(kept), "Cicero");
+        assert_eq!(entities.get_name(renamed), "Augustus");
+        assert_eq!(entities.name_buf.len(), "Cicero".len() + "Augustus".len());
     }
 
     #[test]
@@ -524,28 +732,30 @@ mod tests {
     }
 
     #[test]
-    fn dead_tags_are_filtered_and_collected() {
+    fn sweep_purges_tags_of_dead_entities() {
         let mut entities = entities();
         let dead = entities.spawn();
         entities.bind_to_tag("emperor", dead);
-        entities.despawn(dead);
+        entities.mark_despawn(dead);
 
+        // Marked but not yet swept: the tag still resolves.
+        assert_eq!(entities.lookup_by_tag("emperor"), Some(dead));
+
+        entities.sweep();
         assert_eq!(entities.lookup_by_tag("emperor"), None);
-        assert_eq!(entities.tags.len(), 1);
+        assert!(entities.tags.is_empty());
 
         let replacement = entities.spawn();
         assert_eq!(dead.index, replacement.index);
         assert_eq!(entities.lookup_by_tag("emperor"), None);
-
-        entities.garbage_collect();
-        assert!(entities.tags.is_empty());
     }
 
     #[test]
     fn tags_require_live_entities() {
         let mut entities = entities();
         let dead = entities.spawn();
-        entities.despawn(dead);
+        entities.mark_despawn(dead);
+        entities.sweep();
 
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -566,7 +776,8 @@ mod tests {
         };
         entities.entries[first.index as usize].id = exhausted;
 
-        entities.despawn(exhausted);
+        entities.mark_despawn(exhausted);
+        entities.sweep();
         let next = entities.spawn();
 
         assert!(!entities.is_alive(exhausted));
@@ -578,8 +789,8 @@ mod tests {
         let mut entities = entities();
         let source = entities.spawn();
         let target = entities.spawn();
-        entities.despawn(target);
-        entities.garbage_collect();
+        entities.mark_despawn(target);
+        entities.sweep();
 
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -588,22 +799,79 @@ mod tests {
             .is_err()
         );
         assert!(entities.relations.is_empty());
+        assert!(entities.relations_rev.is_empty());
     }
 
     #[test]
-    fn dead_relations_are_filtered_and_collected() {
+    fn sweep_purges_relations_of_dead_entities() {
         let mut entities = entities();
         let source = entities.spawn();
         let target = entities.spawn();
         entities.set_relation(source, RelationId(0), target, 1.0);
-        entities.despawn(target);
+        entities.mark_despawn(target);
 
+        // Marked but not yet swept: the relation is still visible.
+        assert_eq!(entities.get_relation(source, RelationId(0), target), 1.0);
+        assert_eq!(entities.get_related(source).count(), 1);
+        assert_eq!(entities.get_related_to(target).count(), 1);
+
+        entities.sweep();
         assert_eq!(entities.get_relation(source, RelationId(0), target), 0.0);
         assert_eq!(entities.get_related(source).count(), 0);
-        assert_eq!(entities.relations.len(), 1);
-
-        entities.garbage_collect();
+        assert_eq!(entities.get_related_to(target).count(), 0);
         assert!(entities.relations.is_empty());
+        assert!(entities.relations_rev.is_empty());
+    }
+
+    #[test]
+    fn reverse_queries_find_sources_in_order() {
+        let mut entities = entities();
+        let first = entities.spawn();
+        let second = entities.spawn();
+        let target = entities.spawn();
+        entities.set_relation(second, RelationId(0), target, 2.0);
+        entities.set_relation(first, RelationId(0), target, 1.0);
+
+        assert_eq!(
+            entities
+                .get_related_to_via(target, RelationId(0))
+                .collect::<Vec<_>>(),
+            [(first, 1.0), (second, 2.0)]
+        );
+        let incoming: Vec<_> = entities.get_related_to(target).collect();
+        assert_eq!(incoming.len(), 2);
+        assert!(incoming.iter().all(|e| e.target == target));
+
+        entities.set_relation(first, RelationId(0), target, 0.0);
+        assert_eq!(
+            entities
+                .get_related_to_via(target, RelationId(0))
+                .collect::<Vec<_>>(),
+            [(second, 2.0)]
+        );
+    }
+
+    #[test]
+    fn sweep_only_removes_relations_of_dead_ids() {
+        let mut entities = entities();
+        let source = entities.spawn();
+        let dead = entities.spawn();
+        let live = entities.spawn();
+        entities.set_relation(source, RelationId(0), dead, 1.0);
+        entities.set_relation(source, RelationId(0), live, 2.0);
+        entities.set_relation(dead, RelationId(0), live, 3.0);
+        entities.mark_despawn(dead);
+
+        entities.sweep();
+        assert_eq!(entities.relations.len(), 1);
+        assert_eq!(entities.relations_rev.len(), 1);
+        assert_eq!(entities.get_relation(source, RelationId(0), live), 2.0);
+
+        // The reused slot starts with a clean slate.
+        let replacement = entities.spawn();
+        assert_eq!(dead.index, replacement.index);
+        assert_eq!(entities.get_related(replacement).count(), 0);
+        assert_eq!(entities.get_related_to(replacement).count(), 0);
     }
 
     #[test]
@@ -626,29 +894,28 @@ mod tests {
     }
 
     #[test]
-    fn dead_set_members_are_filtered_and_collected() {
+    fn sweep_purges_set_memberships_of_dead_entities() {
         let mut entities = entities();
         let dead = entities.spawn();
         entities.add_to_set(SetId(0), dead);
-        entities.despawn(dead);
+        entities.mark_despawn(dead);
 
+        entities.sweep();
         assert!(!entities.in_set(SetId(0), dead));
         assert_eq!(entities.iter_set(SetId(0)).count(), 0);
-        assert_eq!(entities.sets.len(), 1);
+        assert!(entities.sets.is_empty());
 
         let replacement = entities.spawn();
         assert_eq!(dead.index, replacement.index);
         assert!(!entities.in_set(SetId(0), replacement));
-
-        entities.garbage_collect();
-        assert!(entities.sets.is_empty());
     }
 
     #[test]
     fn sets_require_defined_ids_and_live_entities() {
         let mut entities = entities();
         let dead = entities.spawn();
-        entities.despawn(dead);
+        entities.mark_despawn(dead);
+        entities.sweep();
 
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

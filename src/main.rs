@@ -3,12 +3,19 @@ mod game;
 
 use std::collections::HashMap;
 
-use arena::{AVec, Arena};
+use arena::Arena;
 use macroquad::prelude as mq;
-use ui::{ir, layout, run};
+use ui::{ir, layout, run, style};
 
 fn main() {
-    macroquad::Window::new("Imperium", amain());
+    let conf = mq::Conf {
+        window_title: "Imperium".to_string(),
+        window_width: 1600,
+        window_height: 900,
+        high_dpi: true,
+        ..Default::default()
+    };
+    macroquad::Window::from_config(conf, amain());
 }
 
 /// How the renderer fills an element's bounds with a texture. A property of
@@ -81,107 +88,122 @@ async fn amain() {
 
     let mut frame_arena = Arena::new();
 
-    // The whole script-UI module is one unit: reload = drop its arena and
-    // compile again.
-    'reload: loop {
-        let module_arena = Arena::new();
-        let source = std::fs::read_to_string("ui_example.txt").unwrap_or_default();
-        let module = ir::compile(&module_arena, &source);
-        for error in module.errors {
-            eprintln!("ui_example.txt: {error}");
-        }
-        for warning in module.warnings {
-            eprintln!("ui_example.txt: {warning}");
+    // The module and style are plain owned values: reload = reassign.
+    let mut ui_module = load_ui_module();
+    let mut ui_style = load_style();
+
+    loop {
+        if mq::is_key_pressed(mq::KeyCode::R) {
+            ui_module = load_ui_module();
+            ui_style = load_style();
         }
 
-        loop {
-            mq::clear_background(mq::BLACK);
-            frame_arena.reset();
-            let data = demo_ui_data(&frame_arena, test_image, background);
+        mq::clear_background(mq::BLACK);
+        frame_arena.reset();
+        let ui_data = demo_ui_data(test_image, background);
 
-            let (output, events) = build_ui(&mut layout, &font, &module, data, &frame_arena);
-            if !output.duplicate_ids().is_empty() {
-                eprintln!("duplicate element ids: {:?}", output.duplicate_ids());
-            }
-            render_ui_commands(output.commands(), &font, &images);
-
-            for action in events {
-                println!("ui action: {action}");
-            }
-
-            if mq::is_key_pressed(mq::KeyCode::Escape) {
-                return;
-            }
-            if mq::is_key_pressed(mq::KeyCode::R) {
-                mq::next_frame().await;
-                continue 'reload;
-            }
-
-            if mq::is_mouse_button_pressed(mq::MouseButton::Left) && !output.is_pointer_over_ui() {
-                println!("Clicked")
-            }
-
-            mq::next_frame().await;
+        let (output, events) = build_ui(
+            &mut layout,
+            &font,
+            &ui_module,
+            ui_style,
+            &ui_data,
+            &frame_arena,
+        );
+        if !output.duplicate_ids().is_empty() {
+            eprintln!("duplicate element ids: {:?}", output.duplicate_ids());
         }
+        render_ui_commands(output, &font, &images);
+
+        for action in events {
+            println!("ui action: {action}");
+        }
+
+        if mq::is_key_pressed(mq::KeyCode::Escape) {
+            return;
+        }
+
+        if mq::is_mouse_button_pressed(mq::MouseButton::Left) && !output.is_pointer_over_ui() {
+            println!("Clicked")
+        }
+
+        mq::next_frame().await;
     }
 }
 
-/// Demo rows and image bindings for the script UI, built fresh into the
-/// frame arena. Stands in for whatever the game will fetch for real.
-fn demo_ui_data<'a>(arena: &'a Arena, soldier: Image, widget: Image) -> ir::UiData<'a> {
+fn load_ui_module() -> ir::UiModule {
+    let source = std::fs::read_to_string("ui_example.txt").unwrap_or_default();
+    let module = ir::compile(&source);
+    for error in &module.errors {
+        eprintln!("ui_example.txt: {error}");
+    }
+    for warning in &module.warnings {
+        eprintln!("ui_example.txt: {warning}");
+    }
+    module
+}
+
+fn load_style() -> style::Style {
+    // Scratch arena for the parse warnings; they are printed and die here.
+    let arena = Arena::new();
+    let source = std::fs::read_to_string("data/style.txt").unwrap_or_default();
+    let parsed = style::parse(&arena, &source);
+    for warning in parsed.warnings {
+        eprintln!("data/style.txt: {warning}");
+    }
+    parsed.style
+}
+
+/// Demo rows and image bindings for the script UI, refilled every frame
+/// into the recycled buffers. Stands in for whatever the game will fetch
+/// for real.
+fn demo_ui_data(soldier: Image, widget: Image) -> ir::UiData {
+    let mut data = ir::UiData::default();
     const ROWS: usize = 12;
-    let mut rows = AVec::with_capacity_in(ROWS, arena);
+    data.begin_list("demo_rows");
     for index in 0..ROWS {
-        let bindings = arena.alloc_slice_copy(&[ir::Binding {
-            key: "LABEL",
-            value: arena.alloc_str(&format!("Row {index:02}")),
-        }]);
-        rows.push(ir::Row { bindings });
+        data.begin_row();
+        data.bind("LABEL", &format!("Row {index:02}"));
     }
-    let image = |key, image: Image| ir::ImageData {
-        key,
-        image: image.id,
-        width: image.width,
-        height: image.height,
-    };
-    ir::UiData {
-        lists: arena.alloc_slice_copy(&[ir::ListData {
-            id: "demo_rows",
-            rows: rows.into_slice(),
-        }]),
-        images: arena.alloc_slice_copy(&[image("soldier", soldier), image("widget", widget)]),
-    }
+    data.add_image("soldier", soldier.id, soldier.width, soldier.height);
+    data.add_image("widget", widget.id, widget.width, widget.height);
+    data
 }
 
-fn build_ui<'a, 'f>(
+fn build_ui<'a>(
     engine: &'a mut layout::Engine,
     font: &mq::Font,
-    module: &ir::UiModule<'_>,
-    data: ir::UiData<'f>,
-    frame: &'f Arena,
-) -> (layout::Output<'a>, &'f [&'f str]) {
+    module: &ir::UiModule,
+    style: style::Style,
+    data: &ir::UiData,
+    frame: &Arena,
+) -> (&'a layout::Output, Vec<String>) {
     let (mouse_x, mouse_y) = mq::mouse_position();
     let (wheel_x, wheel_y) = mq::mouse_wheel();
 
+    // The UI works in logical points; only input and rendering know about
+    // the physical framebuffer.
+    let dpi = mq::screen_dpi_scale();
     let input = layout::Input {
         bounds: layout::Rectangle {
             x: 0.0,
             y: 0.0,
-            w: mq::screen_width(),
-            h: mq::screen_height(),
+            w: mq::screen_width() / dpi,
+            h: mq::screen_height() / dpi,
         },
         mouse_pos: layout::V2 {
-            x: mouse_x,
-            y: mouse_y,
+            x: mouse_x / dpi,
+            y: mouse_y / dpi,
         },
         mouse_pressed: mq::is_mouse_button_pressed(mq::MouseButton::Left),
         wheel: layout::V2 {
-            x: wheel_x,
-            y: wheel_y,
+            x: wheel_x / dpi,
+            y: wheel_y / dpi,
         },
     };
-    let measure_text = |text: &str, _font: layout::FontId, size| {
-        let measured = mq::measure_text(text, Some(font), size, 1.0);
+    // Rasterize glyphs at physical resolution, report logical metrics.
+    let measure_text = |text: &str, size: u16| {
+        let measured = mq::measure_text(text, Some(font), physical_font_size(size, dpi), 1.0 / dpi);
         layout::TextMetrics {
             size: layout::V2 {
                 x: measured.width,
@@ -191,16 +213,28 @@ fn build_ui<'a, 'f>(
         }
     };
 
-    let mut events: &'f [&'f str] = &[];
+    let mut events = Vec::new();
     let output = engine.layout(input, measure_text, |ui| {
-        events = run::run(module, data, frame, ui);
+        events = run::run(module, style, data, frame, ui);
     });
     (output, events)
 }
 
-fn render_ui_commands(commands: &[layout::DrawCommand], font: &mq::Font, images: &ImageMap) {
+/// Rounded so glyphs rasterize on whole pixels; `u16` mirrors macroquad.
+fn physical_font_size(size: u16, dpi: f32) -> u16 {
+    (size as f32 * dpi).round() as u16
+}
+
+fn render_ui_commands(output: &layout::Output, font: &mq::Font, images: &ImageMap) {
+    // Draw commands are in logical points: scale everything up to physical
+    // pixels here, except glyphs, which are rasterized at physical size and
+    // drawn at 1/dpi so they stay pixel-exact.
+    let dpi = mq::screen_dpi_scale();
+    unsafe { mq::get_internal_gl() }
+        .quad_gl
+        .push_model_matrix(mq::Mat4::from_scale(mq::vec3(dpi, dpi, 1.0)));
     let mut clip_stack: Vec<layout::Rectangle> = Vec::new();
-    for command in commands {
+    for command in output.commands() {
         let color = mq::Color::new(
             command.color.r,
             command.color.g,
@@ -222,13 +256,17 @@ fn render_ui_commands(commands: &[layout::DrawCommand], font: &mq::Font, images:
                 }
             }
             layout::DrawKind::Text => {
+                // Snap the origin to a whole physical pixel; a fractional
+                // start smears every glyph across two pixel rows/columns.
+                let snap = |value: f32| (value * dpi).round() / dpi;
                 mq::draw_text_ex(
-                    command.text.text,
-                    command.bounds.x,
-                    command.bounds.y + command.text_baseline,
+                    output.text(command.text),
+                    snap(command.bounds.x),
+                    snap(command.bounds.y + command.text_baseline),
                     mq::TextParams {
                         font: Some(font),
-                        font_size: command.text.size,
+                        font_size: physical_font_size(command.text_size, dpi),
+                        font_scale: 1.0 / dpi,
                         color,
                         ..Default::default()
                     },
@@ -277,15 +315,16 @@ fn render_ui_commands(commands: &[layout::DrawCommand], font: &mq::Font, images:
                     .last()
                     .map_or(command.bounds, |top| top.intersect(command.bounds));
                 clip_stack.push(clip);
-                apply_scissor(Some(clip));
+                apply_scissor(Some(clip), dpi);
             }
             layout::DrawKind::ClipEnd => {
                 clip_stack.pop();
-                apply_scissor(clip_stack.last().copied());
+                apply_scissor(clip_stack.last().copied(), dpi);
             }
             layout::DrawKind::None => {}
         }
     }
+    unsafe { mq::get_internal_gl() }.quad_gl.pop_model_matrix();
 }
 
 /// Repeats the texture at its natural size from the top-left of `bounds`;
@@ -320,12 +359,20 @@ fn draw_texture_tiled(entry: &ImageEntry, bounds: layout::Rectangle, color: mq::
     }
 }
 
-fn apply_scissor(clip: Option<layout::Rectangle>) {
+fn apply_scissor(clip: Option<layout::Rectangle>, dpi: f32) {
     // Macroquad batches draw calls per clip state and converts to GL's
-    // bottom-left origin itself, so top-left coordinates pass through.
+    // bottom-left origin itself, so top-left coordinates pass through. The
+    // scissor bypasses the model matrix, so scale to physical pixels here.
     unsafe { mq::get_internal_gl() }
         .quad_gl
-        .scissor(clip.map(|clip| (clip.x as i32, clip.y as i32, clip.w as i32, clip.h as i32)));
+        .scissor(clip.map(|clip| {
+            (
+                (clip.x * dpi) as i32,
+                (clip.y * dpi) as i32,
+                (clip.w * dpi) as i32,
+                (clip.h * dpi) as i32,
+            )
+        }));
 }
 
 const CORNER_SEGMENTS: usize = 8;
@@ -369,7 +416,12 @@ fn draw_rounded_rectangle(bounds: layout::Rectangle, radius: f32, color: mq::Col
     }
 }
 
-fn draw_rounded_rectangle_lines(bounds: layout::Rectangle, radius: f32, width: f32, color: mq::Color) {
+fn draw_rounded_rectangle_lines(
+    bounds: layout::Rectangle,
+    radius: f32,
+    width: f32,
+    color: mq::Color,
+) {
     let points = rounded_rectangle_points(bounds, radius);
     for index in 0..points.len() {
         mq::draw_line(

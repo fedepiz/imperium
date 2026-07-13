@@ -3,17 +3,20 @@
 //! The layout engine rebuilds every frame, so whatever describes the UI is
 //! walked every frame too. The raw tabula tree is the wrong shape for that
 //! (string key matching, `yes`/`no` atoms, number re-parsing), so [`compile`]
-//! translates it once into [`UiNode`]s: a flat, arena-resident array of fat
-//! kind-tagged structs with every field pre-parsed and every `$VAR` string
-//! pre-tokenized. The per-frame walk lives in [`crate::run`].
+//! translates it once into [`UiNode`]s: a flat array of fat kind-tagged
+//! structs with every field pre-parsed and every `$VAR` string
+//! pre-tokenized. The module owns its storage outright (nodes, segs, one
+//! string buffer), so it is `'static`, `Send`, and reloaded by
+//! reassignment. The per-frame walk lives in [`crate::run`].
 //!
 //! The IR also defines the data the UI binds against ([`UiData`]): the
 //! caller fetches rows from wherever it likes and hands them over in this
 //! format, keeping the UI isolated from the rest of the game.
 
-use arena::{AVec, Arena};
+use arena::Arena;
 
 use crate::layout::{Align, Direction, ImageId};
+use util::strings::{Span, StrBuf};
 
 /// What a [`UiNode`] is. Zero value = `None`, the reserved null node.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -68,20 +71,22 @@ pub struct Size {
 /// One piece of a pre-tokenized string: either a plain literal (`var` is
 /// empty) or a `$VAR` reference, in which case `literal` keeps the source
 /// spelling (`"$NAME"`) as the fallback when the binding is missing.
+/// Spans index [`UiModule::strings`].
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Seg<'a> {
-    pub literal: &'a str,
-    pub var: &'a str,
+pub struct Seg {
+    pub literal: Span,
+    pub var: Span,
 }
 
 /// A string with its `$VAR` references found at compile time, so per-frame
-/// interpolation never rescans. Zero value = no text.
+/// interpolation never rescans: a range into [`UiModule::segs`]. Zero
+/// value = no text.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Text<'a> {
-    pub segs: &'a [Seg<'a>],
+pub struct Text {
+    pub segs: Span,
 }
 
-impl<'a> Text<'a> {
+impl Text {
     pub fn is_empty(&self) -> bool {
         self.segs.is_empty()
     }
@@ -91,14 +96,14 @@ impl<'a> Text<'a> {
 /// value. Children are index links into the module's flat node array, with
 /// `0` (the reserved null node) meaning "none".
 #[derive(Clone, Copy, Debug, Default)]
-pub struct UiNode<'a> {
+pub struct UiNode {
     pub kind: NodeKind,
     pub first_child: u32,
     pub next_sibling: u32,
     /// Button action id / list binding id / template element id.
-    pub id: Text<'a>,
+    pub id: Text,
     /// Label text / button text.
-    pub text: Text<'a>,
+    pub text: Text,
     /// Floating containers: position as a fraction of the parent (the
     /// screen for top-level panels). 0 = flush left/top, 0.5 = centered,
     /// 1 = flush right/bottom.
@@ -128,98 +133,194 @@ pub struct UiNode<'a> {
     pub gap_set: bool,
     /// Palette name ("accent", "none", ...), interpolatable so rows can
     /// bind it. Empty = the widget's default.
-    pub background: Text<'a>,
+    pub background: Text,
     /// Labels: which style text role to render with.
     pub label_style: LabelStyle,
     /// Labels: palette name for the ink. Empty = the role's default.
-    pub color: Text<'a>,
+    pub color: Text,
     /// Labels: font size override, `0` = the role's default.
     pub text_size: u16,
     /// Labels: wrap to the element width.
     pub wrap: bool,
     /// Image widgets: the image key resolved through [`UiData::images`].
     /// Containers: background image key (tiling is the renderer's call).
-    pub image: Text<'a>,
+    pub image: Text,
     /// Image widgets: palette name to tint with. Empty = untinted.
-    pub tint: Text<'a>,
+    pub tint: Text,
     /// Image widgets: `0.0` = fully opaque.
     pub fade: f32,
     /// Hover tooltip text; empty = none.
-    pub tooltip: Text<'a>,
+    pub tooltip: Text,
     /// `List` only: index of the `Template` node, `0` = none.
     pub template: u32,
 }
 
-/// A compiled UI description plus everything wrong with it. All slices live
-/// in the arena given to [`compile`]; reload = drop that arena, re-compile.
-#[derive(Clone, Copy, Default)]
-pub struct UiModule<'a> {
+/// A compiled UI description plus everything wrong with it, fully owned:
+/// flat node array, seg table, and one string buffer. Reload = compile a
+/// new one and assign over the old.
+#[derive(Clone, Debug, Default)]
+pub struct UiModule {
     /// Flat node array. Node 0 is the null node; the top-level panels hang
     /// off its `first_child` chain.
-    pub nodes: &'a [UiNode<'a>],
+    pub nodes: Vec<UiNode>,
+    /// All nodes' [`Text`] segments, ranged into by `Text::segs`.
+    pub segs: Vec<Seg>,
+    /// Every literal and variable name, addressed by the segs' spans.
+    pub strings: StrBuf,
     /// Non-fatal validation findings (unknown keys, missing `=`, ...), as
     /// key paths — tabula nodes carry no source positions.
-    pub warnings: &'a [&'a str],
-    pub errors: &'a [tabula::ParseError],
+    pub warnings: Vec<String>,
+    pub errors: Vec<tabula::ParseError>,
 }
 
-impl<'a> UiModule<'a> {
+impl UiModule {
     /// Index of the first top-level panel, `0` if there are none.
     pub fn roots(&self) -> u32 {
         self.nodes.first().map_or(0, |null| null.first_child)
     }
+
+    pub fn str(&self, span: Span) -> &str {
+        self.strings.get(span)
+    }
+
+    pub fn segs(&self, text: Text) -> &[Seg] {
+        &self.segs[text.segs.range()]
+    }
 }
 
-/// One `$VAR` binding: `key` is the variable name without the `$`.
+/// One `$VAR` binding: `key` is the variable name without the `$`. Spans
+/// index [`UiData::strings`].
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Binding<'a> {
-    pub key: &'a str,
-    pub value: &'a str,
+pub struct Binding {
+    pub key: Span,
+    pub value: Span,
 }
 
-/// The bindings one stamped-out template instance interpolates from.
+/// The bindings one stamped-out template instance interpolates from:
+/// a range into [`UiData::bindings`].
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Row<'a> {
-    pub bindings: &'a [Binding<'a>],
+pub struct Row {
+    pub bindings: Span,
 }
 
-/// The rows behind one `list`, matched to it by `id`.
+/// The rows behind one `list`, matched to it by `id` (a string span);
+/// `rows` ranges into [`UiData::rows`].
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ListData<'a> {
-    pub id: &'a str,
-    pub rows: &'a [Row<'a>],
+pub struct ListData {
+    pub id: Span,
+    pub rows: Span,
 }
 
 /// One image the script can reference by key (`image = { id = soldier }`),
 /// with its renderer handle and natural size.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ImageData<'a> {
-    pub key: &'a str,
+pub struct ImageData {
+    pub key: Span,
     pub image: ImageId,
     pub width: f32,
     pub height: f32,
 }
 
-/// Everything the UI binds against this frame. The zero value is valid:
-/// every list stamps zero rows, every image reference resolves to nothing.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UiData<'a> {
-    pub lists: &'a [ListData<'a>],
-    pub images: &'a [ImageData<'a>],
+/// Everything the UI binds against this frame, fully owned: flat arrays
+/// linked by spans, strings in one buffer. The zero value is valid (no
+/// lists, no images); [`UiData::clear`] recycles all buffers so one value
+/// can be refilled every frame without reallocating.
+///
+/// Built top-down in declaration order: `begin_list`, then `begin_row` and
+/// `bind` for each row, so every list's rows (and every row's bindings)
+/// are contiguous.
+#[derive(Clone, Debug, Default)]
+pub struct UiData {
+    pub strings: StrBuf,
+    pub lists: Vec<ListData>,
+    pub rows: Vec<Row>,
+    pub bindings: Vec<Binding>,
+    pub images: Vec<ImageData>,
+}
+
+impl UiData {
+    pub fn clear(&mut self) {
+        self.strings.clear();
+        self.lists.clear();
+        self.rows.clear();
+        self.bindings.clear();
+        self.images.clear();
+    }
+
+    pub fn text(&self, span: Span) -> &str {
+        self.strings.get(span)
+    }
+
+    /// Starts a new list; subsequent `begin_row` calls belong to it.
+    pub fn begin_list(&mut self, id: &str) {
+        let id = self.strings.push(id);
+        self.lists.push(ListData {
+            id,
+            rows: Span {
+                start: self.rows.len() as u32,
+                len: 0,
+            },
+        });
+    }
+
+    /// Starts a new row in the current list; subsequent `bind` calls
+    /// belong to it. Without a `begin_list` first, the row is orphaned
+    /// (harmless: nothing ranges over it).
+    pub fn begin_row(&mut self) {
+        let row = Row {
+            bindings: Span {
+                start: self.bindings.len() as u32,
+                len: 0,
+            },
+        };
+        self.rows.push(row);
+        if let Some(list) = self.lists.last_mut() {
+            list.rows.len += 1;
+        }
+    }
+
+    /// Adds a `$key = value` binding to the current row. Without a
+    /// `begin_row` first, the binding is orphaned (harmless).
+    pub fn bind(&mut self, key: &str, value: &str) {
+        let binding = Binding {
+            key: self.strings.push(key),
+            value: self.strings.push(value),
+        };
+        self.bindings.push(binding);
+        if let Some(row) = self.rows.last_mut() {
+            row.bindings.len += 1;
+        }
+    }
+
+    pub fn add_image(&mut self, key: &str, image: ImageId, width: f32, height: f32) {
+        let key = self.strings.push(key);
+        self.images.push(ImageData {
+            key,
+            image,
+            width,
+            height,
+        });
+    }
+
+    pub fn rows(&self, list: ListData) -> &[Row] {
+        &self.rows[list.rows.range()]
+    }
+
+    pub fn bindings(&self, row: Row) -> &[Binding] {
+        &self.bindings[row.bindings.range()]
+    }
 }
 
 /// Parse and compile a UI description. Never fails: whatever could be
 /// recovered is compiled, with the rest reported in `errors`/`warnings`.
-/// The tabula tree lives in a scratch arena that dies here; only the IR
-/// (with its strings copied over) lands in `arena`.
-pub fn compile<'a>(arena: &'a Arena, source: &str) -> UiModule<'a> {
+/// The tabula tree lives in a scratch arena that dies here; only the
+/// owned IR (with its strings copied over) survives.
+pub fn compile(source: &str) -> UiModule {
     let scratch = Arena::new();
     let parsed = tabula::parse(&scratch, source);
 
     let mut compiler = Compiler {
-        arena,
-        nodes: AVec::new_in(arena),
-        warnings: AVec::new_in(arena),
+        module: UiModule::default(),
     };
     compiler.nodes.push(UiNode::default()); // node 0: the null node
 
@@ -239,11 +340,8 @@ pub fn compile<'a>(arena: &'a Arena, source: &str) -> UiModule<'a> {
         last = node as usize;
     }
 
-    UiModule {
-        nodes: compiler.nodes.into_slice(),
-        warnings: compiler.warnings.into_slice(),
-        errors: arena.alloc_slice_copy(parsed.errors),
-    }
+    compiler.module.errors = parsed.errors.to_vec();
+    compiler.module
 }
 
 /// Keys that declare child widgets rather than properties, allowed wherever
@@ -279,21 +377,35 @@ const CONTAINER_PROPS: [&str; 19] = [
 // that today fail silently on screen — e.g. `scrollable = yes` with a `Fit`
 // scroll axis and no `max_*` bound (never scrolls), a `list` id with no
 // matching data, or a `$VAR` no binding ever provides.
-struct Compiler<'a> {
-    arena: &'a Arena,
-    nodes: AVec<'a, UiNode<'a>>,
-    warnings: AVec<'a, &'a str>,
+struct Compiler {
+    /// Built in place; `compile` returns it.
+    module: UiModule,
 }
 
-impl<'a> Compiler<'a> {
-    fn push(&mut self, node: UiNode<'a>) -> u32 {
+/// The compiler is a thin builder over the module it is producing.
+impl core::ops::Deref for Compiler {
+    type Target = UiModule;
+
+    fn deref(&self) -> &UiModule {
+        &self.module
+    }
+}
+
+impl core::ops::DerefMut for Compiler {
+    fn deref_mut(&mut self) -> &mut UiModule {
+        &mut self.module
+    }
+}
+
+impl Compiler {
+    fn push(&mut self, node: UiNode) -> u32 {
         let index = self.nodes.len() as u32;
-        self.nodes.push(node);
+        self.module.nodes.push(node);
         index
     }
 
     fn warn(&mut self, message: &str) {
-        self.warnings.push(self.arena.alloc_str(message));
+        self.module.warnings.push(message.to_string());
     }
 
     fn warn_misplaced(&mut self, node: &tabula::Node, path: &str) {
@@ -325,14 +437,16 @@ impl<'a> Compiler<'a> {
     }
 
     /// Tokenizes a source string into literal and `$VAR` segments, copying
-    /// everything into the module arena (the source dies with the scratch
-    /// arena).
-    fn text(&mut self, source: Option<&str>) -> Text<'a> {
+    /// everything into the module's string buffer (the source dies with
+    /// the scratch arena). Segments land contiguously in the seg table, so
+    /// the returned range is only valid because nothing else pushes segs
+    /// mid-call.
+    fn text(&mut self, source: Option<&str>) -> Text {
         let source = match source {
             Some(source) if !source.is_empty() => source,
             _ => return Text::default(),
         };
-        let mut segs = AVec::new_in(self.arena);
+        let start = self.segs.len() as u32;
         let bytes = source.as_bytes();
         let (mut pos, mut literal_start) = (0, 0);
         while pos < bytes.len() {
@@ -346,15 +460,15 @@ impl<'a> Compiler<'a> {
                 }
                 if name_end > name_start {
                     if literal_start < pos {
-                        segs.push(Seg {
-                            literal: self.arena.alloc_str(&source[literal_start..pos]),
-                            var: "",
+                        let literal = self.module.strings.push(&source[literal_start..pos]);
+                        self.module.segs.push(Seg {
+                            literal,
+                            var: Span::default(),
                         });
                     }
-                    segs.push(Seg {
-                        literal: self.arena.alloc_str(&source[pos..name_end]),
-                        var: self.arena.alloc_str(&source[name_start..name_end]),
-                    });
+                    let literal = self.module.strings.push(&source[pos..name_end]);
+                    let var = self.module.strings.push(&source[name_start..name_end]);
+                    self.module.segs.push(Seg { literal, var });
                     pos = name_end;
                     literal_start = name_end;
                     continue;
@@ -363,13 +477,17 @@ impl<'a> Compiler<'a> {
             pos += 1;
         }
         if literal_start < bytes.len() {
-            segs.push(Seg {
-                literal: self.arena.alloc_str(&source[literal_start..]),
-                var: "",
+            let literal = self.module.strings.push(&source[literal_start..]);
+            self.module.segs.push(Seg {
+                literal,
+                var: Span::default(),
             });
         }
         Text {
-            segs: segs.into_slice(),
+            segs: Span {
+                start,
+                len: self.segs.len() as u32 - start,
+            },
         }
     }
 
@@ -455,7 +573,7 @@ impl<'a> Compiler<'a> {
 
     /// Reads the shared container properties into `node`, leaving whatever
     /// the caller pre-filled (the per-kind defaults) alone for absent keys.
-    fn container(&mut self, src: &tabula::Node, path: &str, node: &mut UiNode<'a>) {
+    fn container(&mut self, src: &tabula::Node, path: &str, node: &mut UiNode) {
         if let Some(size) = self.size(src, "width", path) {
             node.width = size;
         }
@@ -654,8 +772,15 @@ impl<'a> Compiler<'a> {
             src,
             path,
             &[&[
-                "id", "text", "width", "height", "min_width", "max_width", "min_height",
-                "max_height", "tooltip",
+                "id",
+                "text",
+                "width",
+                "height",
+                "min_width",
+                "max_width",
+                "min_height",
+                "max_height",
+                "tooltip",
             ]],
             false,
         );
@@ -680,7 +805,14 @@ impl<'a> Compiler<'a> {
             src,
             path,
             &[&[
-                "id", "width", "height", "tint", "fade", "background", "border", "tooltip",
+                "id",
+                "width",
+                "height",
+                "tint",
+                "fade",
+                "background",
+                "border",
+                "tooltip",
             ]],
             false,
         );
@@ -733,8 +865,14 @@ impl<'a> Compiler<'a> {
 mod tests {
     use super::*;
 
-    fn node<'a>(module: &UiModule<'a>, index: u32) -> UiNode<'a> {
+    fn node(module: &UiModule, index: u32) -> UiNode {
         module.nodes[index as usize]
+    }
+
+    /// One seg of a node's text, resolved to `(literal, var)` strings.
+    fn seg<'m>(module: &'m UiModule, text: Text, index: usize) -> (&'m str, &'m str) {
+        let seg = module.segs(text)[index];
+        (module.str(seg.literal), module.str(seg.var))
     }
 
     fn pixels(value: f32) -> Size {
@@ -746,9 +884,7 @@ mod tests {
 
     #[test]
     fn compiles_panels_with_properties() {
-        let arena = Arena::new();
         let module = compile(
-            &arena,
             "panel = { x_pos = 0.1 y_pos = 0.5 border = yes \
              direction = horizontal width = 120 label = \"a\" }",
         );
@@ -764,15 +900,13 @@ mod tests {
 
         let label = node(&module, panel.first_child);
         assert_eq!(label.kind, NodeKind::Label);
-        assert_eq!(label.text.segs[0].literal, "a");
+        assert_eq!(seg(&module, label.text, 0).0, "a");
         assert_eq!(label.next_sibling, 0);
     }
 
     #[test]
     fn parses_logical_sizes_and_layout_properties() {
-        let arena = Arena::new();
         let module = compile(
-            &arena,
             "panel = { width = 92% max_width = 760 align = center padding = 22 gap = 12 \
              row = { height = 54 \
                  panel = { width = grow min_width = 70 tooltip = \"tip\" } \
@@ -785,7 +919,10 @@ mod tests {
         assert_eq!(panel.width.kind, SizeKind::Fraction);
         assert!((panel.width.value - 0.92).abs() < 1e-6);
         assert_eq!(panel.max_width, 760.0);
-        assert_eq!((panel.align_x, panel.align_y), (Align::Center, Align::Center));
+        assert_eq!(
+            (panel.align_x, panel.align_y),
+            (Align::Center, Align::Center)
+        );
         assert!(panel.padding_set && panel.padding == 22.0);
         assert!(panel.gap_set && panel.gap == 12.0);
 
@@ -794,24 +931,22 @@ mod tests {
         assert_eq!(row.direction, Direction::LeftToRight);
         assert_eq!(row.width.kind, SizeKind::Grow);
         assert_eq!(row.height, pixels(54.0));
-        assert_eq!(row.background.segs[0].literal, "none");
+        assert_eq!(seg(&module, row.background, 0).0, "none");
         assert!(row.padding_set && row.padding == 0.0);
 
         let one = node(&module, row.first_child);
         assert_eq!((one.width.kind, one.width.value), (SizeKind::Grow, 1.0));
         assert_eq!(one.min_width, 70.0);
-        assert_eq!(one.tooltip.segs[0].literal, "tip");
+        assert_eq!(seg(&module, one.tooltip, 0).0, "tip");
 
         let two = node(&module, one.next_sibling);
         assert_eq!((two.width.kind, two.width.value), (SizeKind::Grow, 2.0));
-        assert_eq!(two.background.segs[0].literal, "accent");
+        assert_eq!(seg(&module, two.background, 0).0, "accent");
     }
 
     #[test]
     fn boxes_and_text_roles_carry_their_defaults() {
-        let arena = Arena::new();
         let module = compile(
-            &arena,
             "panel = { heading = \"Big\" section = \"SMALL\" \
              box = { min_width = 70 label = \"1x\" } }",
         );
@@ -828,9 +963,12 @@ mod tests {
 
         let cell = node(&module, section.next_sibling);
         assert_eq!(cell.kind, NodeKind::Panel);
-        assert_eq!((cell.width.kind, cell.height.kind), (SizeKind::Grow, SizeKind::Grow));
+        assert_eq!(
+            (cell.width.kind, cell.height.kind),
+            (SizeKind::Grow, SizeKind::Grow)
+        );
         assert_eq!((cell.align_x, cell.align_y), (Align::Center, Align::Center));
-        assert_eq!(cell.background.segs[0].literal, "accent");
+        assert_eq!(seg(&module, cell.background, 0).0, "accent");
         assert_eq!(cell.min_width, 70.0);
 
         let cell_label = node(&module, cell.first_child);
@@ -839,9 +977,7 @@ mod tests {
 
     #[test]
     fn compiles_labels_images_and_floats() {
-        let arena = Arena::new();
         let module = compile(
-            &arena,
             "panel = { \
              panel = { floating = yes x_pos = 1 label = { text = \"FLOATING\" size = 13 } } \
              label = { text = \"body\" color = muted wrap = yes width = grow } \
@@ -860,23 +996,21 @@ mod tests {
         let body = node(&module, badge.next_sibling);
         assert_eq!(body.kind, NodeKind::Label);
         assert!(body.wrap);
-        assert_eq!(body.color.segs[0].literal, "muted");
+        assert_eq!(seg(&module, body.color, 0).0, "muted");
         assert_eq!(body.width.kind, SizeKind::Grow);
 
         let image = node(&module, body.next_sibling);
         assert_eq!(image.kind, NodeKind::Image);
-        assert_eq!(image.image.segs[0].literal, "soldier");
+        assert_eq!(seg(&module, image.image, 0).0, "soldier");
         assert_eq!((image.width, image.height), (pixels(96.0), pixels(48.0)));
-        assert_eq!(image.tint.segs[0].literal, "accent");
+        assert_eq!(seg(&module, image.tint, 0).0, "accent");
         assert_eq!(image.fade, 0.5);
         assert!(image.border);
     }
 
     #[test]
     fn sibling_chain_preserves_declaration_order() {
-        let arena = Arena::new();
         let module = compile(
-            &arena,
             "panel = { label = \"one\" button = { text = \"two\" } label = \"three\" }\n\
              panel = { }",
         );
@@ -896,9 +1030,7 @@ mod tests {
 
     #[test]
     fn tokenizes_variables() {
-        let arena = Arena::new();
         let module = compile(
-            &arena,
             "panel = { list = { id = l template = { id = \"element_$ID\" \
              button = { id = \"hire $ID\" text = \"$NAME!\" } } } }",
         );
@@ -907,23 +1039,17 @@ mod tests {
         let template = node(&module, list.template);
         assert_eq!(template.kind, NodeKind::Template);
 
-        let id = template.id.segs;
-        assert_eq!((id[0].literal, id[0].var), ("element_", ""));
-        assert_eq!((id[1].literal, id[1].var), ("$ID", "ID"));
+        assert_eq!(seg(&module, template.id, 0), ("element_", ""));
+        assert_eq!(seg(&module, template.id, 1), ("$ID", "ID"));
 
         let button = node(&module, template.first_child);
-        let text = button.text.segs;
-        assert_eq!((text[0].literal, text[0].var), ("$NAME", "NAME"));
-        assert_eq!((text[1].literal, text[1].var), ("!", ""));
+        assert_eq!(seg(&module, button.text, 0), ("$NAME", "NAME"));
+        assert_eq!(seg(&module, button.text, 1), ("!", ""));
     }
 
     #[test]
     fn warns_on_unknown_keys_and_missing_equals() {
-        let arena = Arena::new();
-        let module = compile(
-            &arena,
-            "panel = { frobnicate = 3 panel { } }\nlabel = \"top level\"",
-        );
+        let module = compile("panel = { frobnicate = 3 panel { } }\nlabel = \"top level\"");
         assert!(module.errors.is_empty());
         let warnings = module.warnings.join("\n");
         assert!(warnings.contains("unknown key 'frobnicate'"), "{warnings}");
@@ -933,11 +1059,8 @@ mod tests {
 
     #[test]
     fn warns_on_bad_sizes_and_flags() {
-        let arena = Arena::new();
-        let module = compile(
-            &arena,
-            "panel = { width = wide row = { width = grow:fast floating = sideways } }",
-        );
+        let module =
+            compile("panel = { width = wide row = { width = grow:fast floating = sideways } }");
         let warnings = module.warnings.join("\n");
         assert!(warnings.contains("not a number"), "{warnings}");
         assert!(warnings.contains("not yes/no"), "{warnings}");
@@ -951,16 +1074,14 @@ mod tests {
 
     #[test]
     fn recovers_around_parse_errors() {
-        let arena = Arena::new();
-        let module = compile(&arena, "panel = { label = \"ok\" ");
+        let module = compile("panel = { label = \"ok\" ");
         assert!(!module.errors.is_empty());
         assert_eq!(node(&module, module.roots()).kind, NodeKind::Panel);
     }
 
     #[test]
     fn zii_empty_module() {
-        let arena = Arena::new();
-        let module = compile(&arena, "");
+        let module = compile("");
         assert_eq!(module.roots(), 0);
         assert!(module.errors.is_empty() && module.warnings.is_empty());
         assert_eq!(UiModule::default().roots(), 0);

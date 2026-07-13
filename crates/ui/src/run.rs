@@ -1,133 +1,78 @@
 //! Per-frame interpreter for a compiled [`UiModule`]: walks the IR, emits
 //! layout elements, and collects the action ids of everything clicked.
 //!
-//! All per-frame scratch — interpolated strings and the event list — lands
-//! in the caller's frame arena, so the returned events outlive the layout
-//! pass and die with the frame.
+//! Per-frame scratch (interpolated strings) lands in the caller's frame
+//! arena; the returned events are owned, so they outlive the frame.
 
-use arena::{AString, AVec, Arena};
+use arena::{AString, Arena};
 
-use crate::layout::{
-    self as ui, Align, Color, Direction, ElementConf, ElementId, LogicalSize, Padding, TextConf,
-    V2,
-};
 use crate::ir::{LabelStyle, NodeKind, Row, Size, SizeKind, Text, UiData, UiModule, UiNode};
-
-/// Visuals the script format doesn't specify, plus the palette the script
-/// refers to by name (`background = accent`). The zero value renders
-/// invisibly but harmlessly; [`Style::default`] gives the palette below.
-#[derive(Clone, Copy)]
-pub struct Style {
-    pub panel_background: Color,
-    pub dark: Color,
-    pub outline: Color,
-    pub ink: Color,
-    pub muted: Color,
-    /// The one highlight color; everything the script wants to pop
-    /// (`box`es, badges, tints) uses this.
-    pub accent: Color,
-    pub button_background: Color,
-    pub button_hover: Color,
-    pub tooltip_background: Color,
-    pub heading_size: u16,
-    pub section_size: u16,
-    pub text_size: u16,
-    pub padding: f32,
-    pub gap: f32,
-    pub corner_radius: f32,
-}
-
-impl Default for Style {
-    fn default() -> Self {
-        Self {
-            panel_background: Color::rgba(0.055, 0.067, 0.10, 0.9),
-            dark: Color::rgba(0.03, 0.04, 0.07, 1.0),
-            outline: Color::rgba(0.25, 0.29, 0.40, 1.0),
-            ink: Color::rgba(0.94, 0.95, 1.0, 1.0),
-            muted: Color::rgba(0.57, 0.62, 0.74, 1.0),
-            accent: Color::rgba(0.43, 0.32, 0.92, 1.0),
-            button_background: Color::rgba(0.08, 0.68, 0.72, 1.0),
-            button_hover: Color::rgba(0.16, 0.86, 0.90, 1.0),
-            tooltip_background: Color::rgba(0.02, 0.03, 0.05, 0.95),
-            heading_size: 28,
-            section_size: 13,
-            text_size: 16,
-            padding: 12.0,
-            gap: 8.0,
-            corner_radius: 10.0,
-        }
-    }
-}
-
-impl Style {
-    /// Looks up a script color name. The palette is semantic on purpose —
-    /// scripts say what a thing is, not which hue it has. `None` means "no
-    /// color": both the explicit `none` and anything unknown (which stays
-    /// invisible rather than guessing).
-    fn color(&self, name: &str) -> Option<Color> {
-        Some(match name {
-            "panel" => self.panel_background,
-            "dark" => self.dark,
-            "outline" => self.outline,
-            "ink" => self.ink,
-            "muted" => self.muted,
-            "accent" => self.accent,
-            _ => return None,
-        })
-    }
-}
+use crate::layout::{
+    self as ui, Align, Color, Direction, ElementConf, ElementId, LogicalSize, Padding, TextConf, V2,
+};
+use crate::style::Style;
 
 /// Walks the module's panels, declaring them into the current layout pass.
 /// Returns the interpolated action ids of every button clicked this frame,
-/// in click order, allocated in `frame`.
+/// in click order.
 pub fn run<'f>(
-    module: &UiModule<'_>,
-    data: UiData<'f>,
+    module: &'f UiModule,
+    style: Style,
+    data: &'f UiData,
     frame: &'f Arena,
     ui: &mut ui::Ui<'_, '_>,
-) -> &'f [&'f str] {
+) -> Vec<String> {
     let mut ctx = Ctx {
         frame,
+        module,
         data,
-        events: AVec::new_in(frame),
-        style: Style::default(),
+        events: Vec::new(),
+        style,
         auto_id: 0,
         row: Row::default(),
     };
-    walk(&mut ctx, module, ui, module.roots());
-    ctx.events.into_slice()
+    walk(&mut ctx, ui, module.roots());
+    ctx.events
 }
 
 /// Everything the walk threads along, one fat struct. One lifetime for all
-/// of it: the binding data is required to live as long as the frame arena
-/// (in practice the caller builds it there), and everything dies together
-/// at the end of the frame.
+/// of it: the module and data must outlive the frame (they are owned
+/// values up the stack), and everything borrowed dies together at the end
+/// of the frame.
 struct Ctx<'f> {
     frame: &'f Arena,
-    data: UiData<'f>,
-    events: AVec<'f, &'f str>,
+    module: &'f UiModule,
+    data: &'f UiData,
+    events: Vec<String>,
     style: Style,
     /// Counter for elements with no script id that still need one (buttons,
     /// scrollable or tooltipped containers); declaration order is
     /// deterministic, so the synthesized ids are stable across frames.
     auto_id: u32,
     /// Bindings of the template row being stamped; empty outside lists.
-    row: Row<'f>,
+    row: Row,
 }
 
 /// Interpolates a pre-tokenized string against the current row. Missing
 /// bindings keep their `$NAME` spelling so mistakes show up on screen.
-fn resolve<'f>(ctx: &Ctx<'f>, text: Text<'_>) -> &'f str {
-    match text.segs {
+fn resolve<'f>(ctx: &Ctx<'f>, text: Text) -> &'f str {
+    match ctx.module.segs(text) {
         [] => "",
-        [seg] if seg.var.is_empty() => ctx.frame.alloc_str(seg.literal),
+        // A plain literal needs no interpolation: the module outlives the
+        // frame, so its string is returned as-is, no copy.
+        [seg] if seg.var.is_empty() => ctx.module.str(seg.literal),
         segs => {
             let mut out = AString::new_in(ctx.frame);
             for seg in segs {
-                let binding = ctx.row.bindings.iter().find(|b| b.key == seg.var);
+                let var = ctx.module.str(seg.var);
+                let binding = ctx
+                    .data
+                    .bindings(ctx.row)
+                    .iter()
+                    .find(|b| ctx.data.text(b.key) == var);
                 match binding {
-                    Some(binding) if !seg.var.is_empty() => out.push_str(binding.value),
-                    _ => out.push_str(seg.literal),
+                    Some(binding) if !var.is_empty() => out.push_str(ctx.data.text(binding.value)),
+                    _ => out.push_str(ctx.module.str(seg.literal)),
                 }
             }
             out.into_str()
@@ -150,7 +95,7 @@ fn size(size: Size) -> LogicalSize {
 
 /// The container's background: empty name = the widget default, `none` (or
 /// an unknown name) = no background at all.
-fn background(ctx: &Ctx<'_>, node: &UiNode<'_>, default: Option<Color>) -> Option<Color> {
+fn background(ctx: &Ctx<'_>, node: &UiNode, default: Option<Color>) -> Option<Color> {
     match resolve(ctx, node.background) {
         "" => default,
         name => ctx.style.color(name),
@@ -159,7 +104,7 @@ fn background(ctx: &Ctx<'_>, node: &UiNode<'_>, default: Option<Color>) -> Optio
 
 /// The shared container config: everything panels, rows and lists have in
 /// common. The caller layers on its per-kind pieces (ids, floats, rows).
-fn container_conf(ctx: &Ctx<'_>, node: &UiNode<'_>, default_bg: Option<Color>) -> ElementConf<'static> {
+fn container_conf(ctx: &Ctx<'_>, node: &UiNode, default_bg: Option<Color>) -> ElementConf<'static> {
     let style = ctx.style;
     let mut conf = ElementConf::default()
         .direction(node.direction)
@@ -222,14 +167,18 @@ fn container_conf(ctx: &Ctx<'_>, node: &UiNode<'_>, default_bg: Option<Color>) -
     conf
 }
 
-fn find_image<'f>(ctx: &Ctx<'f>, key: Text<'_>) -> Option<crate::ir::ImageData<'f>> {
+fn find_image(ctx: &Ctx<'_>, key: Text) -> Option<crate::ir::ImageData> {
     let key = resolve(ctx, key);
-    ctx.data.images.iter().find(|image| image.key == key).copied()
+    ctx.data
+        .images
+        .iter()
+        .find(|image| ctx.data.text(image.key) == key)
+        .copied()
 }
 
 /// The stable id an interactive container needs (scroll state, tooltips):
 /// the script's own id when given, else a synthesized one.
-fn element_id(ctx: &mut Ctx<'_>, node: &UiNode<'_>, kind: &'static str) -> ElementId {
+fn element_id(ctx: &mut Ctx<'_>, node: &UiNode, kind: &'static str) -> ElementId {
     let scripted = resolve(ctx, node.id);
     if scripted.is_empty() {
         ctx.auto_id += 1;
@@ -240,7 +189,7 @@ fn element_id(ctx: &mut Ctx<'_>, node: &UiNode<'_>, kind: &'static str) -> Eleme
 }
 
 /// Declares the floating tooltip bubble inside a hovered element.
-fn tooltip(ctx: &Ctx<'_>, ui: &mut ui::Ui<'_, '_>, text: Text<'_>) {
+fn tooltip(ctx: &Ctx<'_>, ui: &mut ui::Ui<'_, '_>, text: Text) {
     let style = ctx.style;
     let text = resolve(ctx, text);
     ui.add_with(
@@ -256,28 +205,31 @@ fn tooltip(ctx: &Ctx<'_>, ui: &mut ui::Ui<'_, '_>, text: Text<'_>) {
             .corner_radius(6.0),
         |ui| {
             ui.add(ElementConf::text(
-                TextConf::default().text(text).size(14).color(style.ink),
+                TextConf::default()
+                    .text(text)
+                    .size(style.tooltip_size)
+                    .color(style.ink),
             ));
         },
     );
 }
 
-fn walk(ctx: &mut Ctx<'_>, module: &UiModule<'_>, ui: &mut ui::Ui<'_, '_>, mut index: u32) {
+fn walk(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, mut index: u32) {
     while index != 0 {
-        let node = module.nodes[index as usize];
+        let node = ctx.module.nodes[index as usize];
         match node.kind {
-            NodeKind::Panel => panel(ctx, module, ui, node),
+            NodeKind::Panel => panel(ctx, ui, node),
             NodeKind::Label => label(ctx, ui, node),
             NodeKind::Button => button(ctx, ui, node),
             NodeKind::Image => image(ctx, ui, node),
-            NodeKind::List => list(ctx, module, ui, node),
+            NodeKind::List => list(ctx, ui, node),
             NodeKind::None | NodeKind::Template => {}
         }
         index = node.next_sibling;
     }
 }
 
-fn panel(ctx: &mut Ctx<'_>, module: &UiModule<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode<'_>) {
+fn panel(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     let style = ctx.style;
     let mut conf = container_conf(ctx, &node, Some(style.panel_background));
     // Scroll state and hover sensing both need a stable id.
@@ -288,14 +240,14 @@ fn panel(ctx: &mut Ctx<'_>, module: &UiModule<'_>, ui: &mut ui::Ui<'_, '_>, node
         hovered = ui.sense(id).hovered;
     }
     ui.add_with(conf, |ui| {
-        walk(ctx, module, ui, node.first_child);
+        walk(ctx, ui, node.first_child);
         if hovered && !node.tooltip.is_empty() {
             tooltip(ctx, ui, node.tooltip);
         }
     });
 }
 
-fn label(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode<'_>) {
+fn label(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     let style = ctx.style;
     let text = resolve(ctx, node.text);
     let (role_size, role_color) = match node.label_style {
@@ -325,7 +277,7 @@ fn label(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode<'_>) {
     );
 }
 
-fn button(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode<'_>) {
+fn button(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     let style = ctx.style;
     let action = resolve(ctx, node.id);
     let id: ElementId = if action.is_empty() {
@@ -350,6 +302,9 @@ fn button(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode<'_>) {
             style.button_background
         })
         .corner_radius(style.corner_radius);
+    if style.button_border_thickness > 0.0 {
+        conf = conf.border(style.button_border_thickness, style.button_border_color);
+    }
     if node.min_width > 0.0 {
         conf = conf.min_width(node.min_width);
     }
@@ -375,11 +330,11 @@ fn button(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode<'_>) {
         }
     });
     if sense.clicked && !action.is_empty() {
-        ctx.events.push(action);
+        ctx.events.push(action.to_string());
     }
 }
 
-fn image(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode<'_>) {
+fn image(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     let style = ctx.style;
     let Some(data) = find_image(ctx, node.image) else {
         return; // unknown key: draw nothing, the module already validated
@@ -409,7 +364,7 @@ fn image(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode<'_>) {
     ui.add(conf);
 }
 
-fn list(ctx: &mut Ctx<'_>, module: &UiModule<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode<'_>) {
+fn list(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     let list_id = resolve(ctx, node.id);
     // Lists default to no padding, no background: they are stamping
     // machinery, not a visual box, unless the script says otherwise.
@@ -426,12 +381,12 @@ fn list(ctx: &mut Ctx<'_>, module: &UiModule<'_>, ui: &mut ui::Ui<'_, '_>, node:
         .data
         .lists
         .iter()
-        .find(|list| list.id == list_id)
-        .map_or(&[][..], |list| list.rows);
+        .find(|list| ctx.data.text(list.id) == list_id)
+        .map_or(&[][..], |list| ctx.data.rows(*list));
     let template = node.template;
     ui.add_with(conf, |ui| {
         if template != 0 {
-            let template_node = module.nodes[template as usize];
+            let template_node = ctx.module.nodes[template as usize];
             // Rows fill the list's cross axis, so grow-sized template
             // content has room to work with.
             let stamp_conf = match node.direction {
@@ -448,7 +403,7 @@ fn list(ctx: &mut Ctx<'_>, module: &UiModule<'_>, ui: &mut ui::Ui<'_, '_>, node:
                     stamp_conf.id(resolve(ctx, template_node.id))
                 };
                 ui.add_with(row_conf, |ui| {
-                    walk(ctx, module, ui, template_node.first_child);
+                    walk(ctx, ui, template_node.first_child);
                 });
             }
             ctx.row = Row::default();
@@ -462,8 +417,8 @@ fn list(ctx: &mut Ctx<'_>, module: &UiModule<'_>, ui: &mut ui::Ui<'_, '_>, node:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir;
     use crate::layout::{Engine, Input, Rectangle};
-    use crate::ir::{self, Binding, ListData};
 
     fn input(w: f32, h: f32) -> Input {
         Input {
@@ -477,60 +432,37 @@ mod tests {
         }
     }
 
-    fn people(arena: &Arena) -> UiData<'_> {
-        let bindings = arena.alloc_slice_copy(&[
-            Binding {
-                key: "ID",
-                value: "7",
-            },
-            Binding {
-                key: "NAME",
-                value: "Livia",
-            },
-        ]);
-        let rows = arena.alloc_slice_copy(&[Row { bindings }]);
-        UiData {
-            lists: arena.alloc_slice_copy(&[ListData {
-                id: "people_list",
-                rows,
-            }]),
-            ..UiData::default()
-        }
+    fn people() -> UiData {
+        let mut data = UiData::default();
+        data.begin_list("people_list");
+        data.begin_row();
+        data.bind("ID", "7");
+        data.bind("NAME", "Livia");
+        data
     }
 
     #[test]
     fn resolve_interpolates_and_keeps_missing_vars_literal() {
         let frame = Arena::new();
-        let bindings = [Binding {
-            key: "ID",
-            value: "42",
-        }];
+        let mut data = UiData::default();
+        data.begin_list("l");
+        data.begin_row();
+        data.bind("ID", "42");
+        let row = data.rows(data.lists[0])[0];
+        // Tokenization is the compiler's job; go through it.
+        let module = ir::compile("panel = { label = \"hire $ID $MISSING\" }");
+        assert!(module.errors.is_empty() && module.warnings.is_empty());
+        let label = module.nodes[module.nodes[module.roots() as usize].first_child as usize];
         let ctx = Ctx {
             frame: &frame,
-            data: UiData::default(),
-            events: AVec::new_in(&frame),
+            module: &module,
+            data: &data,
+            events: Vec::new(),
             style: Style::default(),
             auto_id: 0,
-            row: Row {
-                bindings: &bindings,
-            },
+            row,
         };
-        let segs = [
-            crate::ir::Seg {
-                literal: "hire ",
-                var: "",
-            },
-            crate::ir::Seg {
-                literal: "$ID",
-                var: "ID",
-            },
-            crate::ir::Seg {
-                literal: " $MISSING",
-                var: "MISSING",
-            },
-        ];
-        let text = Text { segs: &segs };
-        assert_eq!(resolve(&ctx, text), "hire 42 $MISSING");
+        assert_eq!(resolve(&ctx, label.text), "hire 42 $MISSING");
         assert_eq!(resolve(&ctx, Text::default()), "");
     }
 
@@ -547,30 +479,28 @@ mod tests {
                 }
             }
         }";
-        let module_arena = Arena::new();
-        let module = ir::compile(&module_arena, SOURCE);
+        let module = ir::compile(SOURCE);
         assert!(module.errors.is_empty());
         assert!(module.warnings.is_empty(), "{:?}", module.warnings);
 
         let mut engine = Engine::default();
         let mut frame = Arena::new();
-        let measure = |_: &str, _, _| V2::default();
+        let measure = |_: &str, _| V2::default();
+
+        // Owned data survives the frame arena resets, so build it once.
+        let data = people();
 
         // Panel padding 12, gap 8: buttons at y = 12 and 50, the list's row
         // at y = 88. A frame with no input establishes the bounds `sense`
         // reads on the next one.
         let mut click_at = |arena: &mut Arena, x: f32, y: f32, pressed: bool| {
             arena.reset();
-            let data = people(arena);
             let mut probe = input(400.0, 400.0);
             probe.mouse_pos = V2 { x, y };
             probe.mouse_pressed = pressed;
             let mut events: Vec<String> = Vec::new();
             engine.layout(probe, measure, |ui| {
-                events = run(&module, data, arena, ui)
-                    .iter()
-                    .map(|action| action.to_string())
-                    .collect();
+                events = run(&module, Style::default(), &data, arena, ui);
             });
             events
         };

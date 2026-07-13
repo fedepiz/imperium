@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-arena = { path = "../arena" }
-tabula = { path = "../tabula" }
+arena = { workspace = true }
+tabula = { workspace = true }
+util = { workspace = true }

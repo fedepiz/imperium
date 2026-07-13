@@ -66,13 +66,25 @@ impl<'a, T> AVec<'a, T> {
     /// let v: arena::AVec<String> = arena::AVec::new_in(&arena);
     /// ```
     pub fn new_in(arena: &'a Arena) -> Self {
-        const { assert!(!mem::needs_drop::<T>(), "AVec cannot hold types that need Drop") };
+        const {
+            assert!(
+                !mem::needs_drop::<T>(),
+                "AVec cannot hold types that need Drop"
+            )
+        };
         AVec(bumpalo::collections::Vec::new_in(&arena.0))
     }
 
     pub fn with_capacity_in(capacity: usize, arena: &'a Arena) -> Self {
-        const { assert!(!mem::needs_drop::<T>(), "AVec cannot hold types that need Drop") };
-        AVec(bumpalo::collections::Vec::with_capacity_in(capacity, &arena.0))
+        const {
+            assert!(
+                !mem::needs_drop::<T>(),
+                "AVec cannot hold types that need Drop"
+            )
+        };
+        AVec(bumpalo::collections::Vec::with_capacity_in(
+            capacity, &arena.0,
+        ))
     }
 
     pub fn push(&mut self, value: T) {
@@ -153,7 +165,9 @@ impl<'a> AString<'a> {
     }
 
     pub fn with_capacity_in(capacity: usize, arena: &'a Arena) -> Self {
-        AString(bumpalo::collections::String::with_capacity_in(capacity, &arena.0))
+        AString(bumpalo::collections::String::with_capacity_in(
+            capacity, &arena.0,
+        ))
     }
 
     pub fn from_str_in(str: &str, arena: &'a Arena) -> Self {

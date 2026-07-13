@@ -10,19 +10,32 @@ use std::collections::{BTreeMap, HashMap};
 
 use arena::{AVec, Arena};
 
-#[derive(Clone, Copy)]
-pub struct Output<'a> {
-    commands: &'a [DrawCommand<'a>],
+use util::strings::{Span, StrBuf};
+
+/// One frame's draw output: owned and engine-resident, recycled every
+/// frame. Command text lives in one contiguous buffer, addressed by the
+/// commands' spans.
+#[derive(Default)]
+pub struct Output {
+    commands: Vec<DrawCommand>,
+    /// All command text for the frame, one buffer.
+    text: StrBuf,
     is_pointer_over_ui: bool,
-    duplicate_ids: &'a [ElementId],
+    duplicate_ids: Vec<ElementId>,
 }
 
-impl<'a> Output<'a> {
-    pub fn commands(self) -> &'a [DrawCommand<'a>] {
-        self.commands
+impl Output {
+    pub fn commands(&self) -> &[DrawCommand] {
+        &self.commands
     }
 
-    pub fn is_pointer_over_ui(self) -> bool {
+    /// Resolves a command's text span. Spans are only meaningful against
+    /// the `Output` that issued them, and die at the next `layout` call.
+    pub fn text(&self, span: Span) -> &str {
+        self.text.get(span)
+    }
+
+    pub fn is_pointer_over_ui(&self) -> bool {
         self.is_pointer_over_ui
     }
 
@@ -31,22 +44,30 @@ impl<'a> Output<'a> {
     /// hover, scroll state — so treat any entry as a bug in the UI
     /// declaration. Also fires on the (vanishingly rare) hash collision
     /// between distinct names.
-    pub fn duplicate_ids(self) -> &'a [ElementId] {
-        self.duplicate_ids
+    pub fn duplicate_ids(&self) -> &[ElementId] {
+        &self.duplicate_ids
+    }
+
+    fn clear(&mut self) {
+        self.commands.clear();
+        self.text.clear();
+        self.is_pointer_over_ui = false;
+        self.duplicate_ids.clear();
     }
 }
 
-impl<'a> core::ops::Deref for Output<'a> {
-    type Target = [DrawCommand<'a>];
+impl core::ops::Deref for Output {
+    type Target = [DrawCommand];
 
     fn deref(&self) -> &Self::Target {
-        self.commands
+        &self.commands
     }
 }
 
 #[derive(Default)]
 pub struct Engine {
     arena: Arena,
+    output: Output,
     previous_bounds: BTreeMap<ElementId, Rectangle>,
     current_bounds: BTreeMap<ElementId, Rectangle>,
     text_measurements: TextCache,
@@ -61,19 +82,21 @@ impl Engine {
         input: Input,
         measure_text: M,
         build: impl FnOnce(&mut Ui<'a, '_>),
-    ) -> Output<'a>
+    ) -> &'a Output
     where
-        M: Fn(&str, FontId, u16) -> T,
+        M: Fn(&str, u16) -> T,
         T: Into<TextMetrics>,
     {
         let Self {
             arena,
+            output,
             previous_bounds,
             current_bounds,
             text_measurements,
             scroll_states,
         } = self;
         arena.reset();
+        output.clear();
         current_bounds.clear();
         text_measurements.begin_frame();
         apply_wheel(scroll_states, input);
@@ -111,8 +134,13 @@ impl Engine {
         nodes[0].bounds = input.bounds;
         arrange_children(0, &mut nodes);
 
-        let mut duplicate_ids = AVec::new_in(arena);
-        record_bounds(0, UNCLIPPED, &nodes, current_bounds, &mut duplicate_ids);
+        record_bounds(
+            0,
+            UNCLIPPED,
+            &nodes,
+            current_bounds,
+            &mut output.duplicate_ids,
+        );
 
         for state in scroll_states.values_mut() {
             state.live = false;
@@ -140,8 +168,7 @@ impl Engine {
         }
         scroll_states.retain(|_, state| state.live);
 
-        let mut commands = AVec::new_in(arena);
-        emit_children(0, &nodes, &mut commands);
+        emit_children(0, &nodes, output);
         // Floating subtrees draw above the normal tree, lowest z first;
         // equal z keeps declaration order via the node index.
         let mut floating = AVec::new_in(arena);
@@ -153,14 +180,14 @@ impl Engine {
         let floating = floating.into_slice();
         floating.sort_unstable();
         for &(_, index) in floating.iter() {
-            emit_element(index, &nodes, &mut commands);
+            emit_element(index, &nodes, output);
         }
         // Invisible containers are layout scaffolding and should not capture
         // map/game input. A visible render primitive defines the UI surface,
         // shrunk to what enclosing clip regions leave visible.
         let mut clip_stack = AVec::new_in(arena);
         let mut is_pointer_over_ui = false;
-        for command in commands.iter() {
+        for command in output.commands.iter() {
             match command.kind {
                 DrawKind::ClipStart => {
                     let clip = clip_stack.last().copied().unwrap_or(UNCLIPPED);
@@ -176,14 +203,10 @@ impl Engine {
                 }
             }
         }
+        output.is_pointer_over_ui = is_pointer_over_ui;
         std::mem::swap(previous_bounds, current_bounds);
-        Output {
-            commands: commands.into_slice(),
-            is_pointer_over_ui,
-            duplicate_ids: duplicate_ids.into_slice(),
-        }
+        output
     }
-
 }
 
 /// Persistent scroll state for one clipping element, carried across frames
@@ -262,9 +285,6 @@ impl From<V2> for TextMetrics {
         }
     }
 }
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug, Hash)]
-pub struct FontId(pub u64);
 
 /// Opaque handle to a renderer-owned texture; `0` means no image.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug, Hash)]
@@ -428,7 +448,6 @@ pub enum LogicalSize {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Text<'a> {
     pub text: &'a str,
-    pub font: FontId,
     pub size: u16,
     pub color: Color,
 }
@@ -436,7 +455,6 @@ pub struct Text<'a> {
 #[derive(Default, Clone, Copy)]
 pub struct TextConf<'a> {
     text: &'a str,
-    font: FontId,
     size: u16,
     color: Color,
     wrap: bool,
@@ -451,11 +469,6 @@ impl<'a> TextConf<'a> {
 
     pub fn size(mut self, size: u16) -> Self {
         self.size = size;
-        self
-    }
-
-    pub fn font(mut self, font: FontId) -> Self {
-        self.font = font;
         self
     }
 
@@ -767,7 +780,6 @@ impl<'arena, 'frame> Ui<'arena, 'frame> {
             border: conf.border,
             text: Text {
                 text,
-                font: conf.text.font,
                 size: conf.text.size,
                 color: conf.text.color,
             },
@@ -891,12 +903,14 @@ pub enum DrawKind {
 }
 
 #[derive(Default, Clone, Copy, Debug)]
-pub struct DrawCommand<'a> {
+pub struct DrawCommand {
     pub kind: DrawKind,
     pub id: ElementId,
     pub bounds: Rectangle,
     pub color: Color,
-    pub text: Text<'a>,
+    /// Into the owning [`Output`]'s text buffer.
+    pub text: Span,
+    pub text_size: u16,
     pub text_baseline: f32,
     pub border_width: f32,
     pub corner_radius: f32,
@@ -910,7 +924,7 @@ fn measure_text_elements<'a, M, T>(
     measure_text: &M,
     wrap: bool,
 ) where
-    M: Fn(&str, FontId, u16) -> T,
+    M: Fn(&str, u16) -> T,
     T: Into<TextMetrics>,
 {
     for index in 0..nodes.len() {
@@ -942,7 +956,7 @@ fn break_text_lines<'a, M, T>(
     measure_text: &M,
 ) -> (&'a [TextLine<'a>], V2)
 where
-    M: Fn(&str, FontId, u16) -> T,
+    M: Fn(&str, u16) -> T,
     T: Into<TextMetrics>,
 {
     let mut lines = AVec::new_in(arena);
@@ -985,7 +999,7 @@ where
             }
 
             let candidate = text.text[line_start..next].trim_end();
-            let candidate_metrics = cache.measure(measure_text, candidate, text.font, text.size);
+            let candidate_metrics = cache.measure(measure_text, candidate, text.size);
             if candidate_metrics.size.x > max_width && best_end > line_start {
                 let line_end = last_break
                     .filter(|&index| index > line_start)
@@ -1055,13 +1069,12 @@ fn push_text_line<'a, M, T>(
     measure_text: &M,
     measured: &mut V2,
 ) where
-    M: Fn(&str, FontId, u16) -> T,
+    M: Fn(&str, u16) -> T,
     T: Into<TextMetrics>,
 {
     let mut metrics = cache.measure(
         measure_text,
         if line.is_empty() { " " } else { line },
-        text.font,
         text.size,
     );
     if line.is_empty() {
@@ -1076,7 +1089,7 @@ fn push_text_line<'a, M, T>(
 }
 
 /// A cached measurement. The measured text is never stored — the map key is
-/// a hash of (font, size, text) — so a 64-bit hash collision silently shares
+/// a hash of (size, text) — so a 64-bit hash collision silently shares
 /// a measurement, as in Clay.
 #[derive(Clone, Copy, Default)]
 struct TextCacheEntry {
@@ -1102,23 +1115,17 @@ impl TextCache {
         self.entries.retain(|_, entry| entry.generation == previous);
     }
 
-    fn measure<M, T>(
-        &mut self,
-        measure_text: &M,
-        text: &str,
-        font: FontId,
-        size: u16,
-    ) -> TextMetrics
+    fn measure<M, T>(&mut self, measure_text: &M, text: &str, size: u16) -> TextMetrics
     where
-        M: Fn(&str, FontId, u16) -> T,
+        M: Fn(&str, u16) -> T,
         T: Into<TextMetrics>,
     {
-        let hash = hash_text(text, font, size);
+        let hash = hash_text(text, size);
         if let Some(entry) = self.entries.get_mut(&hash) {
             entry.generation = self.generation;
             return entry.metrics;
         }
-        let metrics = measure_text(text, font, size).into();
+        let metrics = measure_text(text, size).into();
         self.entries.insert(
             hash,
             TextCacheEntry {
@@ -1130,15 +1137,9 @@ impl TextCache {
     }
 }
 
-fn hash_text(text: &str, font: FontId, size: u16) -> u64 {
+fn hash_text(text: &str, size: u16) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in font
-        .0
-        .to_le_bytes()
-        .into_iter()
-        .chain(size.to_le_bytes())
-        .chain(text.bytes())
-    {
+    for byte in size.to_le_bytes().into_iter().chain(text.bytes()) {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
@@ -1544,7 +1545,7 @@ fn record_bounds(
     clip: Rectangle,
     nodes: &[Element<'_>],
     bounds: &mut BTreeMap<ElementId, Rectangle>,
-    duplicates: &mut AVec<'_, ElementId>,
+    duplicates: &mut Vec<ElementId>,
 ) {
     let mut child = nodes[parent].first_child;
     while child != 0 {
@@ -1566,26 +1567,22 @@ fn record_bounds(
     }
 }
 
-fn emit_children<'a>(
-    parent: usize,
-    nodes: &[Element<'a>],
-    commands: &mut AVec<'a, DrawCommand<'a>>,
-) {
+fn emit_children(parent: usize, nodes: &[Element<'_>], out: &mut Output) {
     let mut child = nodes[parent].first_child;
     while child != 0 {
         // Floating subtrees are emitted in a separate z-ordered pass.
         if !nodes[child].floating {
-            emit_element(child, nodes, commands);
+            emit_element(child, nodes, out);
         }
         child = nodes[child].next_sibling;
     }
 }
 
-fn emit_element<'a>(index: usize, nodes: &[Element<'a>], commands: &mut AVec<'a, DrawCommand<'a>>) {
+fn emit_element(index: usize, nodes: &[Element<'_>], out: &mut Output) {
     let node = nodes[index];
     // TODO: Cull elements against the viewport and active clip stack here.
     if node.background.a > 0.0 {
-        commands.push(DrawCommand {
+        out.commands.push(DrawCommand {
             kind: DrawKind::Rectangle,
             id: node.id,
             bounds: node.bounds,
@@ -1605,7 +1602,7 @@ fn emit_element<'a>(index: usize, nodes: &[Element<'a>], commands: &mut AVec<'a,
             Color::rgba(1.0, 1.0, 1.0, 1.0)
         };
         tint.a *= 1.0 - node.image_fade;
-        commands.push(DrawCommand {
+        out.commands.push(DrawCommand {
             kind: DrawKind::Image,
             id: node.id,
             bounds: node.bounds,
@@ -1615,7 +1612,7 @@ fn emit_element<'a>(index: usize, nodes: &[Element<'a>], commands: &mut AVec<'a,
         });
     }
     if node.clip {
-        commands.push(DrawCommand {
+        out.commands.push(DrawCommand {
             kind: DrawKind::ClipStart,
             id: node.id,
             bounds: node.bounds,
@@ -1632,7 +1629,10 @@ fn emit_element<'a>(index: usize, nodes: &[Element<'a>], commands: &mut AVec<'a,
         let mut y = text_bounds.y;
         for line in node.text_lines {
             if !line.text.is_empty() {
-                commands.push(DrawCommand {
+                // The line text is copied out of the frame arena here, so
+                // the command outlives the layout pass.
+                let text = out.text.push(line.text);
+                out.commands.push(DrawCommand {
                     kind: DrawKind::Text,
                     id: node.id,
                     bounds: Rectangle {
@@ -1641,10 +1641,8 @@ fn emit_element<'a>(index: usize, nodes: &[Element<'a>], commands: &mut AVec<'a,
                         ..text_bounds
                     },
                     color: node.text.color,
-                    text: Text {
-                        text: line.text,
-                        ..node.text
-                    },
+                    text,
+                    text_size: node.text.size,
                     text_baseline: line.metrics.baseline,
                     ..DrawCommand::default()
                 });
@@ -1652,9 +1650,9 @@ fn emit_element<'a>(index: usize, nodes: &[Element<'a>], commands: &mut AVec<'a,
             y += line.metrics.size.y;
         }
     }
-    emit_children(index, nodes, commands);
+    emit_children(index, nodes, out);
     if node.clip {
-        commands.push(DrawCommand {
+        out.commands.push(DrawCommand {
             kind: DrawKind::ClipEnd,
             id: node.id,
             bounds: node.bounds,
@@ -1663,7 +1661,7 @@ fn emit_element<'a>(index: usize, nodes: &[Element<'a>], commands: &mut AVec<'a,
     }
     // The border sits on the element's own edge, outside its clip region.
     if node.border.width > 0.0 && node.border.color.a > 0.0 {
-        commands.push(DrawCommand {
+        out.commands.push(DrawCommand {
             kind: DrawKind::Border,
             id: node.id,
             bounds: node.bounds,
@@ -1697,7 +1695,7 @@ mod tests {
         }
     }
 
-    fn command<'a>(output: Output<'a>, id: &str) -> &'a DrawCommand<'a> {
+    fn command<'a>(output: &'a Output, id: &str) -> &'a DrawCommand {
         let id = ElementId::named(id);
         output
             .commands
@@ -1706,7 +1704,7 @@ mod tests {
             .unwrap()
     }
 
-    fn command_kind<'a>(output: Output<'a>, id: &str, kind: DrawKind) -> &'a DrawCommand<'a> {
+    fn command_kind<'a>(output: &'a Output, id: &str, kind: DrawKind) -> &'a DrawCommand {
         let id = ElementId::named(id);
         output
             .commands
@@ -1720,7 +1718,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(300.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -1764,7 +1762,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(300.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -1799,7 +1797,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(300.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -1835,7 +1833,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(150.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -1866,7 +1864,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(150.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -1902,7 +1900,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(200.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -1938,7 +1936,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(300.0, 100.0),
-            |text, _, _| V2 {
+            |text, _| V2 {
                 x: text.len() as f32 * 10.0,
                 y: 10.0,
             },
@@ -1968,7 +1966,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(400.0, 200.0),
-            |text, _, size| V2 {
+            |text, size| V2 {
                 x: text.len() as f32 * size as f32,
                 y: size as f32,
             },
@@ -1994,7 +1992,7 @@ mod tests {
                 h: 10.0
             }
         );
-        assert_eq!(text.text.text, "abc");
+        assert_eq!(commands.text(text.text), "abc");
     }
 
     #[test]
@@ -2002,7 +2000,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(200.0, 200.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -2038,7 +2036,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(200.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -2075,7 +2073,7 @@ mod tests {
         let mut first = Sense::default();
         let _ = engine.layout(
             input(200.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 first = ui.add(button());
             },
@@ -2088,7 +2086,7 @@ mod tests {
         second_input.mouse_pressed = true;
         let _ = engine.layout(
             second_input,
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 second = ui.add(button());
             },
@@ -2108,7 +2106,7 @@ mod tests {
         let mut first = Sense::default();
         let _ = engine.layout(
             input(100.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 first = ui.add(
                     ElementConf::default()
@@ -2124,7 +2122,7 @@ mod tests {
         let mut second = Sense::default();
         let _ = engine.layout(
             second_input,
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 second = ui.add(
                     ElementConf::default()
@@ -2143,7 +2141,7 @@ mod tests {
             let text = String::from("temporary");
             engine.layout(
                 input(100.0, 100.0),
-                |text, _, _| V2 {
+                |text, _| V2 {
                     x: text.len() as f32,
                     y: 10.0,
                 },
@@ -2153,7 +2151,7 @@ mod tests {
             )
         };
 
-        assert_eq!(commands[0].text.text, "temporary");
+        assert_eq!(commands.text(commands[0].text), "temporary");
     }
 
     #[test]
@@ -2161,7 +2159,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(100.0, 100.0),
-            |_, _, size| V2 {
+            |_, size| V2 {
                 x: 20.0,
                 y: size as f32,
             },
@@ -2197,7 +2195,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(100.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add(
                     ElementConf::default()
@@ -2226,25 +2224,16 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(100.0, 100.0),
-            |text, font, _| {
-                assert_eq!(font, FontId(7));
-                V2 {
-                    x: text.chars().count() as f32 * 10.0,
-                    y: 10.0,
-                }
+            |text, _| V2 {
+                x: text.chars().count() as f32 * 10.0,
+                y: 10.0,
             },
             |ui| {
                 ui.add(
-                    ElementConf::text(
-                        TextConf::default()
-                            .text("one two")
-                            .font(FontId(7))
-                            .size(10)
-                            .wrap(true),
-                    )
-                    .id("wrapped")
-                    .width(LogicalSize::Pixels(35.0))
-                    .background(RED),
+                    ElementConf::text(TextConf::default().text("one two").size(10).wrap(true))
+                        .id("wrapped")
+                        .width(LogicalSize::Pixels(35.0))
+                        .background(RED),
                 );
             },
         );
@@ -2258,9 +2247,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(background.bounds.h, 20.0);
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text.text, "one");
-        assert_eq!(lines[1].text.text, "two");
-        assert_eq!(lines[0].text.font, FontId(7));
+        assert_eq!(commands.text(lines[0].text), "one");
+        assert_eq!(commands.text(lines[1].text), "two");
         assert_eq!(lines[1].bounds.y, 10.0);
     }
 
@@ -2269,7 +2257,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(100.0, 100.0),
-            |text, _, _| V2 {
+            |text, _| V2 {
                 x: text.chars().count() as f32 * 10.0,
                 y: 10.0,
             },
@@ -2285,7 +2273,7 @@ mod tests {
         assert_eq!(
             commands
                 .iter()
-                .map(|command| command.text.text)
+                .map(|command| commands.text(command.text))
                 .collect::<Vec<_>>(),
             ["ab", "cd", "ef"]
         );
@@ -2296,7 +2284,7 @@ mod tests {
     fn text_measurements_are_cached_generationally() {
         let mut engine = Engine::default();
         let calls = Cell::new(0usize);
-        let measure = |text: &str, _: FontId, _: u16| {
+        let measure = |text: &str, _: u16| {
             calls.set(calls.get() + 1);
             V2 {
                 x: text.len() as f32 * 10.0,
@@ -2305,14 +2293,8 @@ mod tests {
         };
         let build = |ui: &mut Ui<'_, '_>| {
             ui.add(
-                ElementConf::text(
-                    TextConf::default()
-                        .text("cached text")
-                        .font(FontId(3))
-                        .size(12)
-                        .wrap(true),
-                )
-                .width(LogicalSize::Pixels(60.0)),
+                ElementConf::text(TextConf::default().text("cached text").size(12).wrap(true))
+                    .width(LogicalSize::Pixels(60.0)),
             );
         };
 
@@ -2335,7 +2317,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(100.0, 100.0),
-            |_, _, _| TextMetrics {
+            |_, _| TextMetrics {
                 size: V2 { x: 20.0, y: 12.0 },
                 baseline: 9.0,
             },
@@ -2352,7 +2334,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(100.0, 100.0),
-            |_, _, _| V2 { x: 5.0, y: 5.0 },
+            |_, _| V2 { x: 5.0, y: 5.0 },
             |ui| {
                 ui.add(
                     ElementConf::text(TextConf::default().text("x").size(5))
@@ -2373,7 +2355,7 @@ mod tests {
         let mut engine = Engine::default();
         let _ = engine.layout(
             input(100.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::text(TextConf::default().text("parent")),
@@ -2390,7 +2372,7 @@ mod tests {
         pointer_input.mouse_pos = V2 { x: 150.0, y: 50.0 };
         let output = engine.layout(
             pointer_input,
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -2418,7 +2400,7 @@ mod tests {
         pointer_input.mouse_pos = V2 { x: 25.0, y: 25.0 };
         let output = engine.layout(
             pointer_input,
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add(
                     ElementConf::default()
@@ -2458,7 +2440,7 @@ mod tests {
             );
         };
 
-        let first = engine.layout(input(200.0, 200.0), |_, _, _| V2::default(), build);
+        let first = engine.layout(input(200.0, 200.0), |_, _| V2::default(), build);
         assert_eq!(
             first
                 .commands
@@ -2481,7 +2463,7 @@ mod tests {
         let mut wheel_input = input(200.0, 200.0);
         wheel_input.mouse_pos = V2 { x: 50.0, y: 50.0 };
         wheel_input.wheel = V2 { x: 0.0, y: -30.0 };
-        let second = engine.layout(wheel_input, |_, _, _| V2::default(), build);
+        let second = engine.layout(wheel_input, |_, _| V2::default(), build);
         assert_eq!(command(second, "row-a").bounds.y, -30.0);
 
         // Content is 200 tall in a 100-tall viewport: the offset clamps at
@@ -2489,7 +2471,7 @@ mod tests {
         let mut flood_input = input(200.0, 200.0);
         flood_input.mouse_pos = V2 { x: 50.0, y: 50.0 };
         flood_input.wheel = V2 { x: 0.0, y: -1000.0 };
-        let third = engine.layout(flood_input, |_, _, _| V2::default(), build);
+        let third = engine.layout(flood_input, |_, _| V2::default(), build);
         assert_eq!(command(third, "row-a").bounds.y, -100.0);
     }
 
@@ -2514,7 +2496,7 @@ mod tests {
 
         let _ = engine.layout(
             input(200.0, 200.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(list(), |ui| {
                     for id in ["row-a", "row-b", "row-c", "row-d"] {
@@ -2535,7 +2517,7 @@ mod tests {
         };
         let output = engine.layout(
             probe,
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(list(), |ui| {
                     for id in ["row-a", "row-b", "row-c", "row-d"] {
@@ -2557,7 +2539,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(200.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add_with(
                     ElementConf::default()
@@ -2619,7 +2601,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(100.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add(
                     ElementConf::default()
@@ -2688,11 +2670,11 @@ mod tests {
             );
         };
 
-        let _ = engine.layout(input(200.0, 200.0), |_, _, _| V2::default(), build);
+        let _ = engine.layout(input(200.0, 200.0), |_, _| V2::default(), build);
 
         let mut probe = input(200.0, 200.0);
         probe.mouse_pos = V2 { x: 20.0, y: 140.0 };
-        let output = engine.layout(probe, |_, _, _| V2::default(), build);
+        let output = engine.layout(probe, |_, _| V2::default(), build);
 
         // The float's commands come after the scroll region's ClipEnd, so
         // the pointer scan sees them unclipped.
@@ -2712,7 +2694,7 @@ mod tests {
 
         let _ = engine.layout(
             input(200.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add(button());
             },
@@ -2725,7 +2707,7 @@ mod tests {
         let mut after = Sense::default();
         let _ = engine.layout(
             probe,
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 before = ui.sense("button");
                 after = ui.add(button());
@@ -2747,7 +2729,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(200.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 // Fit-sized: takes the source dimensions as intrinsic size.
                 ui.add(
@@ -2799,7 +2781,7 @@ mod tests {
         let mut engine = Engine::default();
         let commands = engine.layout(
             input(300.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add(
                     ElementConf::default()
@@ -2856,7 +2838,7 @@ mod tests {
 
         let output = engine.layout(
             input(100.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add(square());
                 ui.add(square().id("unique"));
@@ -2867,7 +2849,7 @@ mod tests {
 
         let clean = engine.layout(
             input(100.0, 100.0),
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 ui.add(square());
                 ui.add(square().id("unique"));
@@ -2894,7 +2876,7 @@ mod tests {
             }
         };
 
-        let first = engine.layout(input(100.0, 100.0), |_, _, _| V2::default(), build);
+        let first = engine.layout(input(100.0, 100.0), |_, _| V2::default(), build);
         assert!(first.duplicate_ids().is_empty());
 
         // Row 1 spans y = 20..40; the id is stable across frames, so it
@@ -2904,7 +2886,7 @@ mod tests {
         let mut hovered = false;
         let _ = engine.layout(
             probe,
-            |_, _, _| V2::default(),
+            |_, _| V2::default(),
             |ui| {
                 hovered = ui.sense(("row", 1)).hovered;
                 build(ui);

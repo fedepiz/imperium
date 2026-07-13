@@ -15,6 +15,7 @@ strum = { version = "0.28", features = ["derive"] }
 arena = { path = "crates/arena" }
 tabula = { path = "crates/tabula" }
 ui = { path = "crates/ui" }
+util = { path = "crates/util" }
 
 [dependencies]
 arena = { workspace = true }
@@ -23,3 +24,4 @@ num_enum = { workspace = true }
 tabula = { workspace = true }
 strum = { workspace = true }
 ui = { workspace = true }
+util = { workspace = true }

@@ -26,11 +26,11 @@ impl Var {
 
 impl From<Var> for VarId {
     fn from(value: Var) -> Self {
-        VarId(value as usize)
+        VarId(value as u16)
     }
 }
 
-#[repr(usize)]
+#[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, EnumCount, EnumIter, TryFromPrimitive)]
 enum Relation {
     Married,
@@ -50,11 +50,11 @@ impl Relation {
 
 impl From<Relation> for RelationId {
     fn from(value: Relation) -> Self {
-        RelationId(value as usize)
+        RelationId(value as u16)
     }
 }
 
-#[repr(usize)]
+#[repr(u16)]
 #[derive(
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, EnumCount, EnumIter, TryFromPrimitive,
 )]
@@ -77,7 +77,7 @@ impl Set {
 
 impl From<Set> for SetId {
     fn from(value: Set) -> Self {
-        SetId(value as usize)
+        SetId(value as u16)
     }
 }
 
@@ -155,14 +155,14 @@ mod tests {
     fn relation_from_usize() {
         assert!(matches!(Relation::try_from(0), Ok(Relation::Married)));
         assert!(Relation::try_from(1).is_err());
-        assert!(Relation::try_from(usize::MAX).is_err());
+        assert!(Relation::try_from(u16::MAX).is_err());
     }
 
     #[test]
     fn set_from_usize() {
         assert!(matches!(Set::try_from(0), Ok(Set::People)));
         assert!(Set::try_from(1).is_err());
-        assert!(Set::try_from(usize::MAX).is_err());
+        assert!(Set::try_from(u16::MAX).is_err());
         assert!(matches!(Set::from_id(SetId(0)), Some(Set::People)));
     }
 }
