@@ -28,8 +28,11 @@ fn main() {
 struct Clock {
     /// Real seconds per requested day, before `speed`.
     seconds_per_day: f32,
-    /// dt multiplier: 0 = paused (nothing pumped), 1 = normal, 2 = double.
+    /// dt multiplier in whole levels 0..=5; level 0 stops time on its own.
     speed: f32,
+    /// Explicit pause toggle, independent of speed: unpausing resumes at
+    /// whatever level the clock was left on.
+    paused: bool,
     accumulator: f32,
 }
 
@@ -38,21 +41,73 @@ impl Default for Clock {
         Clock {
             seconds_per_day: 0.15,
             speed: 1.0,
+            paused: false,
             accumulator: 0.0,
         }
     }
 }
 
 impl Clock {
+    fn is_paused(&self) -> bool {
+        self.paused || self.speed == 0.0
+    }
+
+    /// Applies the command's clock fields.
+    fn apply(&mut self, command: &AppCommand) {
+        if command.set_speed != 0 {
+            self.speed = (command.set_speed as f32).clamp(0.0, 5.0);
+        }
+        self.paused ^= command.toggle_pause;
+    }
+
     /// Feed one frame's dt; returns how many days to request this frame
     /// (at most one — the cap that keeps hitches from bursting).
     fn due_days(&mut self, dt: f32) -> u32 {
+        if self.is_paused() {
+            return 0;
+        }
         self.accumulator = (self.accumulator + dt * self.speed).min(self.seconds_per_day);
         if self.accumulator >= self.seconds_per_day {
             self.accumulator = 0.0;
             1
         } else {
             0
+        }
+    }
+}
+
+/// One frame's worth of app-level intent: a superset of fields with
+/// meaningful zeros — set_speed 0 = no change, toggle_pause false = leave
+/// pause alone, game Idle = nothing for the sim — so `default()` is the
+/// do-nothing command. Keys, UI buttons, or anything else produce these;
+/// each consumer applies its own fields unconditionally. The clock fields
+/// stay in the harness and never enter the sim's history.
+#[derive(Clone, Copy, Default)]
+struct AppCommand {
+    /// Speed level to set, 1..=5; 0 = leave the speed alone.
+    set_speed: i32,
+    toggle_pause: bool,
+    /// The sim's share of the command.
+    game: game::Command,
+}
+
+impl AppCommand {
+    fn parse(action: &str) -> AppCommand {
+        if let Some(level) = action.strip_prefix("time_speed ") {
+            return AppCommand {
+                set_speed: level.trim().parse().unwrap_or(0),
+                ..AppCommand::default()
+            };
+        }
+        match action {
+            "time_toggle" => AppCommand {
+                toggle_pause: true,
+                ..AppCommand::default()
+            },
+            _ => AppCommand {
+                game: game::Command::parse(action),
+                ..AppCommand::default()
+            },
         }
     }
 }
@@ -133,6 +188,9 @@ async fn amain() {
 
     let mut game = game::Game::new();
     let mut clock = Clock::default();
+    // Last tick's report, carried across the frame boundary: input at the
+    // top of a frame reacts to what the sim said last.
+    let mut game_output = game::Output::default();
 
     loop {
         if mq::is_key_pressed(mq::KeyCode::R) {
@@ -143,14 +201,16 @@ async fn amain() {
         // once more per command; it never renders, rendering never mutates.
         // Real time never enters the sim: the clock converts it into
         // AdvanceTime requests, which the game is free to decline.
-        let mut command = game::Command::default();
-        if mq::is_key_pressed(mq::KeyCode::Space) {
-            // Manual single day, even while the clock is paused.
-            command = game::Command::ADVANCE_TIME;
+        let mut command = AppCommand::default();
+        // While the sim force-pauses, the pause controls are locked: the
+        // key mirrors the disabled button.
+        if mq::is_key_pressed(mq::KeyCode::Space) && !game_output.forced_paused {
+            command.toggle_pause = true;
         }
-        game.tick(command);
+        clock.apply(&command);
+        game_output = game.tick(command.game);
         for _ in 0..clock.due_days(mq::get_frame_time()) {
-            game.tick(game::Command::ADVANCE_TIME);
+            game_output = game.tick(game::Command::ADVANCE_TIME);
         }
 
         mq::clear_background(mq::BLACK);
@@ -159,10 +219,37 @@ async fn amain() {
         let mut ui_data = ir::UiData::default();
         game.fill_ui_data(&mut ui_data);
         // The external clock's own UI state; the sim knows nothing of it.
+        // Pause is the union of both halves: the clock's (speed 0 or the
+        // explicit toggle) and the sim's (force-paused while the player
+        // idles). Force-pause also locks the button.
         ui_data.bind_global(
             "TIME_BUTTON",
-            if clock.speed > 0.0 { "Pause" } else { "Play" },
+            if clock.is_paused() || game_output.forced_paused {
+                "Paused"
+            } else {
+                "Playing"
+            },
         );
+        ui_data.bind_global(
+            "TIME_ENABLED",
+            if game_output.forced_paused {
+                "no"
+            } else {
+                "yes"
+            },
+        );
+        // Speed buttons: the current level is the one you can't press;
+        // any kind of pause locks them all.
+        for level in 1..=4 {
+            ui_data.bind_global(
+                &format!("SPEED_{level}"),
+                if clock.speed == level as f32 {
+                    "no"
+                } else {
+                    "yes"
+                },
+            );
+        }
         ui_data.add_image(
             "soldier",
             test_image.id,
@@ -178,12 +265,11 @@ async fn amain() {
         render_ui_commands(output, &font, &images);
 
         for action in events {
-            // Clock controls belong to the harness, not the sim: they
-            // never become Commands and never enter the sim's history.
-            match action.as_str() {
-                "time_toggle" => clock.speed = if clock.speed > 0.0 { 0.0 } else { 1.0 },
-                _ => game.tick(game::Command::parse(&action)),
-            }
+            // Every action becomes one AppCommand; the clock and the sim
+            // each take their share, no routing.
+            let command = AppCommand::parse(&action);
+            clock.apply(&command);
+            game_output = game.tick(command.game);
         }
 
         if mq::is_key_pressed(mq::KeyCode::Escape) {

@@ -166,6 +166,11 @@ pub struct UiNode {
     /// `$VAR` (row bindings, then globals); a missing binding keeps its
     /// `$NAME` spelling and hides. Zero value = shown.
     pub visible: Text,
+    /// Interactivity, resolved per frame on the same channel as `visible`:
+    /// empty or `yes` = enabled. Disabled elements draw dimmed, sense
+    /// nothing and emit no clicks, and the state cascades to their
+    /// children. Zero value = enabled.
+    pub enabled: Text,
     /// Hover tooltip text; empty = none.
     pub tooltip: Text,
 
@@ -433,7 +438,7 @@ pub fn compile(source: &str, style: &Style) -> UiModule {
     compiler.module.bubble = Bubble {
         background: style.tooltip_background,
         border: style.palette.outline,
-        ink: style.palette.ink,
+        ink: style.tooltip_ink,
         text_size: style.tooltip_size,
     };
 
@@ -464,8 +469,9 @@ const ELEMENT_KEYS: [&str; 9] = [
 ];
 
 /// Properties every container (panel, row, box, list) understands.
-const CONTAINER_PROPS: [&str; 20] = [
+const CONTAINER_PROPS: [&str; 21] = [
     "visible",
+    "enabled",
     "width",
     "height",
     "min_width",
@@ -619,15 +625,15 @@ impl Compiler {
         }
     }
 
-    /// Tokenizes a `visible` value. Visibility is `yes`/`no` or comes from
-    /// data via `$VAR`; a bare name never resolves to `yes`, so it would
-    /// silently hide the element forever — warn instead.
-    fn visible(&mut self, src: &tabula::Node, path: &str) -> Text {
-        let source = src.get_text("visible");
+    /// Tokenizes a yes/no condition value (`visible`, `enabled`): `yes`/`no`
+    /// or data via `$VAR`. A bare name never resolves to `yes`, so it would
+    /// silently pin the condition off forever — warn instead.
+    fn condition(&mut self, src: &tabula::Node, key: &str, path: &str) -> Text {
+        let source = src.get_text(key);
         if let Some(value) = source {
             if !matches!(value, "" | "yes" | "no") && !value.contains('$') {
                 self.warn(&format!(
-                    "{path}: 'visible = {value}' is not yes/no or a $VAR binding"
+                    "{path}: '{key} = {value}' is not yes/no or a $VAR binding"
                 ));
             }
         }
@@ -808,7 +814,8 @@ impl Compiler {
         }
         node.tooltip = self.text(src.get_text("tooltip"));
         node.id = self.text(src.get_text("id"));
-        node.visible = self.visible(src, path);
+        node.visible = self.condition(src, "visible", path);
+        node.enabled = self.condition(src, "enabled", path);
     }
 
     /// Compiles the widget children of a block into a sibling chain,
@@ -951,6 +958,7 @@ impl Compiler {
                     "min_height",
                     "max_height",
                     "visible",
+                    "enabled",
                     "tooltip",
                 ]],
                 false,
@@ -963,7 +971,8 @@ impl Compiler {
                 wrap: self.yes(src, "wrap", path),
                 width: self.size(src, "width", path).unwrap_or(Size::FIT),
                 height: self.size(src, "height", path).unwrap_or(Size::FIT),
-                visible: self.visible(src, path),
+                visible: self.condition(src, "visible", path),
+                enabled: self.condition(src, "enabled", path),
                 tooltip: self.text(src.get_text("tooltip")),
                 ..UiNode::default()
             };
@@ -996,6 +1005,7 @@ impl Compiler {
                 "max_height",
                 "tooltip",
                 "visible",
+                "enabled",
             ]],
             false,
         );
@@ -1025,7 +1035,8 @@ impl Compiler {
             border_color: style.button_border_color,
             corner_radius: style.button_corner_radius,
             tooltip: self.text(src.get_text("tooltip")),
-            visible: self.visible(src, path),
+            visible: self.condition(src, "visible", path),
+            enabled: self.condition(src, "enabled", path),
             ..UiNode::default()
         };
         self.constraints(src, &mut node);
@@ -1063,6 +1074,7 @@ impl Compiler {
                 "border",
                 "tooltip",
                 "visible",
+                "enabled",
             ]],
             false,
         );
@@ -1082,7 +1094,8 @@ impl Compiler {
             border_width: if border { 1.0 } else { 0.0 },
             border_color: self.style.palette.outline,
             tooltip: self.text(src.get_text("tooltip")),
-            visible: self.visible(src, path),
+            visible: self.condition(src, "visible", path),
+            enabled: self.condition(src, "enabled", path),
             ..UiNode::default()
         };
         self.constraints(src, &mut node);

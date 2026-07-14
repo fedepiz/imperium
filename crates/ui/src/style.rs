@@ -29,6 +29,9 @@ pub struct Style {
     pub button_width: f32,
     pub button_height: f32,
     pub tooltip_background: Color,
+    /// Tooltip text color, separate from `palette.ink` — the bubble keeps
+    /// its own ground, so its text can't follow the panels' ink.
+    pub tooltip_ink: Color,
     pub heading_size: u16,
     pub section_size: u16,
     pub text_size: u16,
@@ -57,6 +60,7 @@ impl Default for Style {
             button_width: 0.0,
             button_height: 0.0,
             tooltip_background: Color::rgba(0.02, 0.03, 0.05, 0.95),
+            tooltip_ink: Color::rgba(0.94, 0.95, 1.0, 1.0),
             heading_size: 28,
             section_size: 13,
             text_size: 16,
@@ -152,6 +156,7 @@ pub fn parse<'a>(arena: &'a Arena, source: &str) -> StyleModule<'a> {
             "button_hover" => &mut style.button_hover,
             "button_border_color" => &mut style.button_border_color,
             "tooltip_background" => &mut style.tooltip_background,
+            "tooltip_ink" => &mut style.tooltip_ink,
             key if NUMBER_KEYS.contains(&key) => {
                 if !node.is_block() && node.value.is_number {
                     let number = node.value.number;

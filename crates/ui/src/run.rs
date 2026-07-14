@@ -32,6 +32,7 @@ pub fn run<'f>(
         events: Vec::new(),
         auto_id: 0,
         row: Row::default(),
+        disabled: false,
     };
     walk(&mut ctx, ui, module.roots());
     ctx.events
@@ -52,6 +53,9 @@ struct Ctx<'f> {
     auto_id: u32,
     /// Bindings of the template row being stamped; empty outside lists.
     row: Row,
+    /// True inside a disabled element's subtree: disabling cascades, so a
+    /// disabled button's caption dims with it.
+    disabled: bool,
 }
 
 /// Looks a `$VAR` up in the current row's bindings, then in the globals
@@ -221,6 +225,25 @@ fn visible(ctx: &Ctx<'_>, node: &UiNode) -> bool {
     matches!(resolve(ctx, node.visible), "" | "yes")
 }
 
+/// Evaluates a node's `enabled` condition on the same channel as `visible`:
+/// unset = enabled, otherwise the interpolated text must be `yes`.
+fn enabled(ctx: &Ctx<'_>, node: &UiNode) -> bool {
+    matches!(resolve(ctx, node.enabled), "" | "yes")
+}
+
+/// The disabled skin: everything keeps its color, at a fraction of its
+/// alpha.
+fn dimmed(color: Color, disabled: bool) -> Color {
+    if disabled {
+        Color {
+            a: color.a * 0.4,
+            ..color
+        }
+    } else {
+        color
+    }
+}
+
 fn walk(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, mut index: u32) {
     while index != 0 {
         let node = ctx.module.nodes[index as usize];
@@ -237,13 +260,15 @@ fn walk(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, mut index: u32) {
 fn element(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     // Anything can be interactive: an action, a hover skin, scrolling or
     // a tooltip needs a stable id and hover sensing (sense-then-declare:
-    // styling reads last frame's bounds).
+    // styling reads last frame's bounds). Disabled elements sense nothing.
+    let disabled = ctx.disabled || !enabled(ctx, &node);
     let action = resolve(ctx, node.action);
-    let interactive = !action.is_empty()
-        || node.hover_background.a > 0.0
-        || node.scroll_x
-        || node.scroll_y
-        || !node.tooltip.is_empty();
+    let interactive = !disabled
+        && (!action.is_empty()
+            || node.hover_background.a > 0.0
+            || node.scroll_x
+            || node.scroll_y
+            || !node.tooltip.is_empty());
     let id = if interactive {
         Some(element_id(ctx, &node, action))
     } else {
@@ -259,7 +284,7 @@ fn element(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
             TextConf::default()
                 .text(text)
                 .size(node.text_size)
-                .color(paint(ctx, node.color))
+                .color(dimmed(paint(ctx, node.color), disabled))
                 .wrap(node.wrap),
         )
     };
@@ -273,7 +298,7 @@ fn element(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     let background = if sense.hovered && node.hover_background.a > 0.0 {
         node.hover_background
     } else {
-        paint(ctx, node.background)
+        dimmed(paint(ctx, node.background), disabled)
     };
     if background.a > 0.0 {
         conf = conf.background(background);
@@ -291,13 +316,19 @@ fn element(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
             if tint.a > 0.0 {
                 conf = conf.image_tint(tint);
             }
-            if node.fade > 0.0 {
-                conf = conf.image_fade(node.fade);
+            // Disabled images dim through the fade channel.
+            let fade = if disabled {
+                node.fade.max(0.6)
+            } else {
+                node.fade
+            };
+            if fade > 0.0 {
+                conf = conf.image_fade(fade);
             }
         }
     }
     if node.border_width > 0.0 {
-        conf = conf.border(node.border_width, node.border_color);
+        conf = conf.border(node.border_width, dimmed(node.border_color, disabled));
     }
     if node.scroll_x || node.scroll_y {
         conf = conf.scroll(node.scroll_x, node.scroll_y);
@@ -316,6 +347,10 @@ fn element(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
         conf = conf.id(id);
     }
 
+    // Stack discipline: the subtree inherits this element's disabled
+    // state, siblings get the caller's back.
+    let outer_disabled = ctx.disabled;
+    ctx.disabled = disabled;
     ui.add_with(conf, |ui| {
         walk(ctx, ui, node.first_child);
         if node.template != 0 {
@@ -325,6 +360,7 @@ fn element(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
             bubble(ctx, ui, node.tooltip);
         }
     });
+    ctx.disabled = outer_disabled;
     if sense.clicked && !action.is_empty() {
         ctx.events.push(action.to_string());
     }
@@ -419,6 +455,7 @@ mod tests {
             events: Vec::new(),
             auto_id: 0,
             row,
+            disabled: false,
         };
         assert_eq!(resolve(&ctx, label.text), "hire 42 in 700 $MISSING");
         assert_eq!(resolve(&ctx, Text::default()), "");
@@ -447,6 +484,7 @@ mod tests {
             events: Vec::new(),
             auto_id: 0,
             row: Row::default(),
+            disabled: false,
         };
         let root = module.nodes[module.roots() as usize];
         let good = module.nodes[root.first_child as usize];
@@ -531,6 +569,7 @@ mod tests {
             events: Vec::new(),
             auto_id: 0,
             row,
+            disabled: false,
         };
         let panel = module.nodes[module.roots() as usize];
         let mut index = panel.first_child;
@@ -580,6 +619,48 @@ mod tests {
         open.bind_global("WINDOW_OPEN", "yes");
         assert!(click_at(&open, 0.0, 0.0, false).is_empty());
         assert_eq!(click_at(&open, 50.0, 25.0, true), ["maybe"]);
+    }
+
+    #[test]
+    fn disabled_buttons_do_not_emit_clicks() {
+        const SOURCE: &str = "panel = {
+            button = { action = press text = a enabled = \"$CAN_PRESS\" width = 100 height = 30 }
+        }";
+        let module = compile(SOURCE);
+        assert!(module.errors.is_empty());
+        assert!(module.warnings.is_empty(), "{:?}", module.warnings);
+
+        let mut engine = Engine::default();
+        let mut frame = Arena::new();
+        let measure = |_: &str, _| V2::default();
+
+        // Sense-then-declare: the first pass declares, the second clicks.
+        let mut click_at = |data: &UiData, pressed: bool| {
+            frame.reset();
+            let mut probe = input(400.0, 400.0);
+            probe.mouse_pos = V2 { x: 50.0, y: 25.0 };
+            probe.mouse_pressed = pressed;
+            let mut events: Vec<String> = Vec::new();
+            engine.layout(probe, measure, |ui| {
+                events = run(&module, data, &frame, ui);
+            });
+            events
+        };
+
+        // Unbound ($CAN_PRESS stays literal) and bound to no: the button
+        // still occupies its slot but senses nothing.
+        let unbound = UiData::default();
+        assert!(click_at(&unbound, false).is_empty());
+        assert!(click_at(&unbound, true).is_empty());
+        let mut off = UiData::default();
+        off.bind_global("CAN_PRESS", "no");
+        assert!(click_at(&off, false).is_empty());
+        assert!(click_at(&off, true).is_empty());
+
+        let mut on = UiData::default();
+        on.bind_global("CAN_PRESS", "yes");
+        assert!(click_at(&on, false).is_empty());
+        assert_eq!(click_at(&on, true), ["press"]);
     }
 
     #[test]

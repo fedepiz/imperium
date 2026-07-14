@@ -38,6 +38,17 @@ pub struct Command {
     pub target: EntityId,
 }
 
+/// What one tick reports back to the harness, as plain data: a superset of
+/// fields with meaningful zeros, so `Output::default()` says nothing
+/// notable happened.
+#[derive(Clone, Copy, Default)]
+pub struct Output {
+    /// The sim is declining `AdvanceTime`: the internal half of the pause
+    /// story (the player is idle or absent). The harness shows this as
+    /// paused and locks its own pause controls.
+    pub forced_paused: bool,
+}
+
 impl Command {
     pub const IDLE: Command = Command {
         verb: Verb::Idle,
@@ -122,7 +133,7 @@ impl Game {
     /// The sole entry point that mutates the sim. Called every frame with
     /// exactly one command — `Idle` on frames with no input — and possibly
     /// several times per frame; rendering never happens in here.
-    pub fn tick(&mut self, command: Command) {
+    pub fn tick(&mut self, command: Command) -> Output {
         match command.verb {
             Verb::Idle => {}
             // A request, not an imperative: declined outright when the
@@ -149,6 +160,9 @@ impl Game {
                         .set(&self.world.ids, command.target, Var::Gender, 0.0);
                 }
             }
+        }
+        Output {
+            forced_paused: !time_may_flow(&self.world),
         }
     }
 

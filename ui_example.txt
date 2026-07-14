@@ -57,7 +57,13 @@ panel = {
 
 	label = "$DATE"
 	row = {
-		button = { action = "time_toggle" text = "$TIME_BUTTON" }
+		button = { action = "time_toggle" text = "$TIME_BUTTON" enabled = "$TIME_ENABLED" }
 		button = { action = "$PLAYER_ACTION" text = "$PLAYER_BUTTON" visible = "$HAS_PLAYER" }
+	}
+	row = {
+		button = { action = "time_speed 1" text = "1" width = grow enabled = "$SPEED_1" }
+		button = { action = "time_speed 2" text = "2" width = grow enabled = "$SPEED_2" }
+		button = { action = "time_speed 3" text = "3" width = grow enabled = "$SPEED_3" }
+		button = { action = "time_speed 4" text = "4" width = grow enabled = "$SPEED_4" }
 	}
 }
