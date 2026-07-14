@@ -121,6 +121,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "game"
+version = "0.1.0"
+dependencies = [
+ "arena",
+ "entities",
+ "num_enum",
+ "strum",
+ "tabula",
+ "ui",
+ "util",
+]
+
+[[package]]
 name = "glam"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -167,13 +180,9 @@ name = "imperium"
 version = "0.1.0"
 dependencies = [
  "arena",
- "entities",
+ "game",
  "macroquad",
- "num_enum",
- "strum",
- "tabula",
  "ui",
- "util",
 ]
 
 [[package]]

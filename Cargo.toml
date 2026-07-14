@@ -14,16 +14,13 @@ strum = { version = "0.28", features = ["derive"] }
 
 arena = { path = "crates/arena" }
 entities = { path = "crates/entities" }
+game = { path = "crates/game" }
 tabula = { path = "crates/tabula" }
 ui = { path = "crates/ui" }
 util = { path = "crates/util" }
 
 [dependencies]
 arena = { workspace = true }
-entities = { workspace = true }
+game = { workspace = true }
 macroquad = { workspace = true }
-num_enum = { workspace = true }
-tabula = { workspace = true }
-strum = { workspace = true }
 ui = { workspace = true }
-util = { workspace = true }

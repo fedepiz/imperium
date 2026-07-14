@@ -1,8 +1,3 @@
-mod date;
-mod defs;
-mod game;
-mod world;
-
 use std::collections::HashMap;
 
 use arena::Arena;
