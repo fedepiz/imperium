@@ -1,4 +1,7 @@
+mod date;
+mod defs;
 mod game;
+mod world;
 
 use std::collections::HashMap;
 
@@ -15,6 +18,43 @@ fn main() {
         ..Default::default()
     };
     macroquad::Window::from_config(conf, amain());
+}
+
+/// The external half of time: converts real seconds into `AdvanceTime`
+/// requests at a steady cadence. It pumps blindly — whether a request is
+/// honored is the sim's business (it declines while the player is idle),
+/// and the accumulator drains either way, so declined stretches and frame
+/// hitches never burst into a backlog of days.
+struct Clock {
+    /// Real seconds per requested day, before `speed`.
+    seconds_per_day: f32,
+    /// dt multiplier: 0 = paused (nothing pumped), 1 = normal, 2 = double.
+    speed: f32,
+    accumulator: f32,
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Clock {
+            seconds_per_day: 0.15,
+            speed: 1.0,
+            accumulator: 0.0,
+        }
+    }
+}
+
+impl Clock {
+    /// Feed one frame's dt; returns how many days to request this frame
+    /// (at most one — the cap that keeps hitches from bursting).
+    fn due_days(&mut self, dt: f32) -> u32 {
+        self.accumulator = (self.accumulator + dt * self.speed).min(self.seconds_per_day);
+        if self.accumulator >= self.seconds_per_day {
+            self.accumulator = 0.0;
+            1
+        } else {
+            0
+        }
+    }
 }
 
 /// How the renderer fills an element's bounds with a texture. A property of
@@ -92,13 +132,25 @@ async fn amain() {
     let mut ui_module = load_ui_module();
 
     let mut game = game::Game::new();
+    let mut clock = Clock::default();
 
     loop {
         if mq::is_key_pressed(mq::KeyCode::R) {
             ui_module = load_ui_module();
         }
+
+        // The sim ticks every frame — Idle when nothing happened — and
+        // once more per command; it never renders, rendering never mutates.
+        // Real time never enters the sim: the clock converts it into
+        // AdvanceTime requests, which the game is free to decline.
+        let mut command = game::Command::default();
         if mq::is_key_pressed(mq::KeyCode::Space) {
-            game.tick_year();
+            // Manual single day, even while the clock is paused.
+            command = game::Command::ADVANCE_TIME;
+        }
+        game.tick(command);
+        for _ in 0..clock.due_days(mq::get_frame_time()) {
+            game.tick(game::Command::ADVANCE_TIME);
         }
 
         mq::clear_background(mq::BLACK);
@@ -106,6 +158,11 @@ async fn amain() {
 
         let mut ui_data = ir::UiData::default();
         game.fill_ui_data(&mut ui_data);
+        // The external clock's own UI state; the sim knows nothing of it.
+        ui_data.bind_global(
+            "TIME_BUTTON",
+            if clock.speed > 0.0 { "Pause" } else { "Play" },
+        );
         ui_data.add_image(
             "soldier",
             test_image.id,
@@ -121,7 +178,12 @@ async fn amain() {
         render_ui_commands(output, &font, &images);
 
         for action in events {
-            game.handle_action(&action);
+            // Clock controls belong to the harness, not the sim: they
+            // never become Commands and never enter the sim's history.
+            match action.as_str() {
+                "time_toggle" => clock.speed = if clock.speed > 0.0 { 0.0 } else { 1.0 },
+                _ => game.tick(game::Command::parse(&action)),
+            }
         }
 
         if mq::is_key_pressed(mq::KeyCode::Escape) {
@@ -191,8 +253,11 @@ fn build_ui<'a>(
         },
     };
     // Rasterize glyphs at physical resolution, report logical metrics.
+    // Raw ink extents only: the layout engine's text cache replaces height
+    // and baseline with per-size line metrics from its probe.
     let measure_text = |text: &str, size: u16| {
-        let measured = mq::measure_text(text, Some(font), physical_font_size(size, dpi), 1.0 / dpi);
+        let physical = physical_font_size(size, dpi);
+        let measured = mq::measure_text(text, Some(font), physical, 1.0 / dpi);
         layout::TextMetrics {
             size: layout::V2 {
                 x: measured.width,

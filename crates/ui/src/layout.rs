@@ -1133,6 +1133,7 @@ struct TextCacheEntry {
 struct TextCache {
     entries: HashMap<u64, TextCacheEntry>,
     generation: u32,
+    heights: HashMap<u16, TextMetrics>,
 }
 
 impl TextCache {
@@ -1141,6 +1142,12 @@ impl TextCache {
         self.generation = self.generation.wrapping_add(1);
         self.entries.retain(|_, entry| entry.generation == previous);
     }
+
+    /// Fixed string spanning a font's full vertical range (tall accented cap,
+    /// deep descenders). Line height and baseline come from measuring this probe,
+    /// so a text's box depends only on its size — never on which glyphs the
+    /// string happens to contain.
+    const LINE_PROBE: &str = "ÁM|jgqp";
 
     fn measure<M, T>(&mut self, measure_text: &M, text: &str, size: u16) -> TextMetrics
     where
@@ -1152,7 +1159,15 @@ impl TextCache {
             entry.generation = self.generation;
             return entry.metrics;
         }
-        let metrics = measure_text(text, size).into();
+        let mut metrics = measure_text(text, size).into();
+        // The height does not depend on the actual text but from the size, which
+        // we compute based on the probe
+        let probe_metrics = self
+            .heights
+            .entry(size)
+            .or_insert_with(|| measure_text(Self::LINE_PROBE, size).into());
+        metrics.size.y = probe_metrics.size.y;
+        metrics.baseline = probe_metrics.baseline;
         self.entries.insert(
             hash,
             TextCacheEntry {
@@ -2531,10 +2546,11 @@ mod tests {
         assert_eq!(calls.get(), first_frame_calls);
 
         // One frame without the text evicts its entries; declaring it
-        // again measures from scratch.
+        // again measures from scratch — except the line probe, whose
+        // per-size metrics outlive generational eviction.
         let _ = engine.layout(input(100.0, 100.0), &measure, |_| {});
         let _ = engine.layout(input(100.0, 100.0), &measure, build);
-        assert_eq!(calls.get(), first_frame_calls * 2);
+        assert_eq!(calls.get(), first_frame_calls * 2 - 1);
     }
 
     #[test]

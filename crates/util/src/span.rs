@@ -48,12 +48,14 @@ impl Span {
         &mut buffer[self.range()]
     }
 
-    /// Appends one item, returning the span that reads it back. Grow a
-    /// multi-item span by widening `len` as contiguous pushes land.
-    pub fn push<T>(buffer: &mut Vec<T>, item: T) -> Span {
+    /// Appends items, returning the span that reads them back.
+    pub fn push<T>(buffer: &mut Vec<T>, items: impl IntoIterator<Item = T>) -> Span {
         let start = buffer.len() as u32;
-        buffer.push(item);
-        Span { start, len: 1 }
+        buffer.extend(items);
+        Span {
+            start,
+            len: buffer.len() as u32 - start,
+        }
     }
 
     /// Appends a string, returning the span that reads it back.
@@ -93,12 +95,10 @@ mod tests {
         span.slice_mut(&mut table)[0] = 25;
         assert_eq!(table, [10, 25, 30]);
 
-        let mut one = Span::push(&mut table, 40);
-        assert_eq!(one.slice(&table), [40]);
-        // Contiguous pushes widen into one span.
-        Span::push(&mut table, 50);
-        one.len += 1;
-        assert_eq!(one.slice(&table), [40, 50]);
+        let pushed = Span::push(&mut table, [40, 50]);
+        assert_eq!(pushed.slice(&table), [40, 50]);
+        // ZII holds for pushing nothing: an empty span at the tail.
+        assert!(Span::push(&mut table, []).is_empty());
     }
 
     #[test]

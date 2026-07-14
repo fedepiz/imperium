@@ -36,7 +36,7 @@ panel = {
 			panel = {
 				width = grow
 				height = fit
-				label = "$NAME, age $AGE"
+				label = "$NAME, age $AGE $ACTIVITY"
 				row = {
 					button = { action = "femalify $ID" text = "Make Female" visible = "$IS_MALE"}
 					button = { action = "remove $ID" text = "Remove" tooltip = "Remove the entity, whose name is $NAME."}
@@ -45,13 +45,19 @@ panel = {
 		}
 	}
 
+}
+
+# Time controls: the clock's pause/play
+# and the player's rest/stop (a sim command). Time flows when both agree.
+panel = {
+	x_pos = 0.99
+	y_pos = 0.02
+	align = center
+	border = yes
+
+	label = "$DATE"
 	row = {
-		height = 60
-		button = {
-			action = "advance_year"
-			text = "End Year"
-			width = 200
-			height = grow
-		}
+		button = { action = "time_toggle" text = "$TIME_BUTTON" }
+		button = { action = "$PLAYER_ACTION" text = "$PLAYER_BUTTON" visible = "$HAS_PLAYER" }
 	}
 }
