@@ -1,9 +1,9 @@
-//! The repo's real `ui_example.txt` must always compile clean; hot reload
+//! The repo's real `data/ui.txt` must always compile clean; hot reload
 //! prints warnings at runtime, but nothing should ship tripping them.
 
 #[test]
 fn repo_ui_example_compiles_clean() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui_example.txt");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/ui.txt");
     let source = std::fs::read_to_string(path).unwrap();
     let module = ui::ir::compile(&source, &ui::style::Style::default());
     assert!(module.errors.is_empty(), "{:?}", module.errors);

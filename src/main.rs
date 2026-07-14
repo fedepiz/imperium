@@ -28,8 +28,8 @@ fn main() {
 struct Clock {
     /// Real seconds per requested day, before `speed`.
     seconds_per_day: f32,
-    /// dt multiplier in whole levels 0..=5; level 0 stops time on its own.
-    speed: f32,
+    /// dt multiplier in whole levels 0..=MAX_SPEED; level 0 stops time on its own.
+    speed: i32,
     /// Explicit pause toggle, independent of speed: unpausing resumes at
     /// whatever level the clock was left on.
     paused: bool,
@@ -40,7 +40,7 @@ impl Default for Clock {
     fn default() -> Self {
         Clock {
             seconds_per_day: 0.15,
-            speed: 1.0,
+            speed: 1,
             paused: false,
             accumulator: 0.0,
         }
@@ -48,14 +48,16 @@ impl Default for Clock {
 }
 
 impl Clock {
+    pub const MAX_SPEED: i32 = 5;
+
     fn is_paused(&self) -> bool {
-        self.paused || self.speed == 0.0
+        self.paused || self.speed == 0
     }
 
     /// Applies the command's clock fields.
     fn apply(&mut self, command: &AppCommand) {
         if command.set_speed != 0 {
-            self.speed = (command.set_speed as f32).clamp(0.0, 5.0);
+            self.speed = command.set_speed.clamp(0, Self::MAX_SPEED);
         }
         self.paused ^= command.toggle_pause;
     }
@@ -66,7 +68,7 @@ impl Clock {
         if self.is_paused() {
             return 0;
         }
-        self.accumulator = (self.accumulator + dt * self.speed).min(self.seconds_per_day);
+        self.accumulator = (self.accumulator + dt * self.speed as f32).min(self.seconds_per_day);
         if self.accumulator >= self.seconds_per_day {
             self.accumulator = 0.0;
             1
@@ -84,7 +86,7 @@ impl Clock {
 /// stay in the harness and never enter the sim's history.
 #[derive(Clone, Copy, Default)]
 struct AppCommand {
-    /// Speed level to set, 1..=5; 0 = leave the speed alone.
+    /// Speed level to set, 1..=MAX_SPEED; 0 = leave the speed alone.
     set_speed: i32,
     toggle_pause: bool,
     /// The sim's share of the command.
@@ -238,12 +240,16 @@ async fn amain() {
                 "yes"
             },
         );
-        // Speed buttons: the current level is the one you can't press;
-        // any kind of pause locks them all.
-        for level in 1..=4 {
-            ui_data.bind_global(
-                &format!("SPEED_{level}"),
-                if clock.speed == level as f32 {
+        // Speed buttons, one list row per level: the current level is the
+        // one you can't press, and any kind of pause locks them all.
+        let time_stopped = clock.is_paused() || game_output.forced_paused;
+        ui_data.begin_list("speeds");
+        for level in 1..=Clock::MAX_SPEED {
+            ui_data.begin_row();
+            ui_data.bind("LEVEL", &level.to_string());
+            ui_data.bind(
+                "ENABLED",
+                if time_stopped || clock.speed == level {
                     "no"
                 } else {
                     "yes"

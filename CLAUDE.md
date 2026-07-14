@@ -1,5 +1,14 @@
 # Imperium — project style
 
+The game's concept, setting and design pillars live in docs/DESIGN.md — read it
+before design-adjacent work, and keep it current: when a change shifts the
+game's design (new mechanics, setting decisions, changed direction), update
+DESIGN.md in the same breath. It is design-only; technical matters stay here.
+
+How the UI works — script vocabulary, sizing, bindings, lists, style — is
+documented in docs/UI.md. Read it before UI work, and update it whenever the
+script format, binding model, or style keys change.
+
 Read this before writing or editing code. These are deliberate, project-wide
 choices; follow them even where std-idiomatic Rust would do otherwise.
 

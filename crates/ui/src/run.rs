@@ -13,7 +13,7 @@ use arena::{AString, Arena};
 
 use crate::ir::{Paint, Row, Size, Text, UiData, UiModule, UiNode};
 use crate::layout::{
-    self as ui, Color, Direction, ElementConf, ElementId, LogicalSize, Padding, Sense, TextConf, V2,
+    self as ui, Color, ElementConf, ElementId, LogicalSize, Padding, Sense, TextConf, V2,
 };
 
 /// Walks the module's panels, declaring them into the current layout pass.
@@ -367,7 +367,13 @@ fn element(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
 }
 
 /// Stamps the node's template once per row of its bound data list (matched
-/// by the node's interpolated id).
+/// by the node's interpolated id). Pure splicing: each instance's elements
+/// land directly in the list container, as if the template's body had been
+/// written out once per row — no wrapper element, so the list lays out
+/// stamped children exactly like literal ones. Templates that want a
+/// per-row unit (a background, a hover surface) declare their own
+/// container, and per-row identity that must survive reordering comes from
+/// interpolated ids on the elements themselves.
 fn stamp(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: &UiNode) {
     let key = resolve(ctx, node.id);
     let rows = ctx
@@ -380,24 +386,9 @@ fn stamp(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: &UiNode) {
     // Stack discipline: a nested list must not clobber the row its
     // siblings in the enclosing template still resolve against.
     let outer_row = ctx.row;
-    // Rows fill the list's cross axis, so grow-sized template content has
-    // room to work with.
-    let stamp_conf = match node.direction {
-        Direction::TopToBottom => ElementConf::default().width(LogicalSize::Grow),
-        Direction::LeftToRight => ElementConf::default().height(LogicalSize::Grow),
-    };
     for &row in rows {
         ctx.row = row;
-        let row_conf = if template.id.is_empty() {
-            // No script id: the engine derives a stable one from the
-            // parent id and the child ordinal.
-            stamp_conf
-        } else {
-            stamp_conf.id(resolve(ctx, template.id))
-        };
-        ui.add_with(row_conf, |ui| {
-            walk(ctx, ui, template.first_child);
-        });
+        walk(ctx, ui, template.first_child);
     }
     ctx.row = outer_row;
 }
@@ -504,8 +495,7 @@ mod tests {
             list = {
                 id = \"people_list\"
                 template = {
-                    id = \"element_$ID\"
-                    button = { action = \"hire $ID\" text = \"$NAME\" width = 100 height = 30 }
+                    button = { id = \"element_$ID\" action = \"hire $ID\" text = \"$NAME\" width = 100 height = 30 }
                 }
             }
         }";

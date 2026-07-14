@@ -1121,12 +1121,11 @@ impl Compiler {
         match src.get("template") {
             Some(template) if template.is_block() => {
                 let template_path = format!("{path} > template");
-                self.check_keys(template, &template_path, &[&["id"]], true);
-                let template_node = UiNode {
-                    id: self.text(template.get_text("id")),
-                    ..UiNode::default()
-                };
-                let template_index = self.push(template_node);
+                self.check_keys(template, &template_path, &[], true);
+                // A pure anchor for the stamped subtree: the walk splices
+                // the template's elements straight into the list, so the
+                // node itself never reaches layout.
+                let template_index = self.push(UiNode::default());
                 self.nodes[template_index as usize].first_child =
                     self.elements(template, &template_path);
                 self.nodes[index as usize].template = template_index;
@@ -1377,17 +1376,16 @@ mod tests {
     #[test]
     fn tokenizes_variables() {
         let module = compile(
-            "panel = { list = { id = l template = { id = \"element_$ID\" \
-             button = { action = \"hire $ID\" text = \"$NAME!\" } } } }",
+            "panel = { list = { id = l template = { \
+             button = { id = \"element_$ID\" action = \"hire $ID\" text = \"$NAME!\" } } } }",
         );
         let panel = node(&module, module.roots());
         let list = node(&module, panel.first_child);
         let template = node(&module, list.template);
 
-        assert_eq!(seg(&module, template.id, 0), ("element_", ""));
-        assert_eq!(seg(&module, template.id, 1), ("$ID", "ID"));
-
         let button = node(&module, template.first_child);
+        assert_eq!(seg(&module, button.id, 0), ("element_", ""));
+        assert_eq!(seg(&module, button.id, 1), ("$ID", "ID"));
         assert_eq!(seg(&module, button.action, 0), ("hire ", ""));
         assert_eq!(seg(&module, button.action, 1), ("$ID", "ID"));
         let caption = node(&module, button.first_child);
