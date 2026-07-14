@@ -286,13 +286,14 @@ async fn amain() {
 
 fn load_ui_module() -> ir::UiModule {
     let style = load_style();
-    let source = std::fs::read_to_string("ui_example.txt").unwrap_or_default();
+    let path = "data/ui.txt";
+    let source = std::fs::read_to_string(path).unwrap_or_default();
     let module = ir::compile(&source, &style);
     for error in &module.errors {
-        eprintln!("ui_example.txt: {error}");
+        eprintln!("{path}: {error}");
     }
     for warning in &module.warnings {
-        eprintln!("ui_example.txt: {warning}");
+        eprintln!("{path}: {warning}");
     }
     module
 }
@@ -300,10 +301,11 @@ fn load_ui_module() -> ir::UiModule {
 fn load_style() -> style::Style {
     // Scratch arena for the parse warnings; they are printed and die here.
     let arena = Arena::new();
-    let source = std::fs::read_to_string("data/style.txt").unwrap_or_default();
+    let path = "data/style.txt";
+    let source = std::fs::read_to_string(path).unwrap_or_default();
     let parsed = style::parse(&arena, &source);
     for warning in parsed.warnings {
-        eprintln!("data/style.txt: {warning}");
+        eprintln!("{path}: {warning}");
     }
     parsed.style
 }
