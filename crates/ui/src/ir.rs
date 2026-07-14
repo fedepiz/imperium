@@ -27,7 +27,43 @@ use arena::Arena;
 
 use crate::layout::{Align, Color, Direction, ImageId, Padding};
 use crate::style::{Palette, Style};
-use util::strings::{Span, StrBuf};
+use util::span::Span;
+
+// Typed spans: each wrapper names the one buffer its span reads, so a
+// string span can't be handed to a table (or the wrong buffer's) accessor.
+// All inherit ZII from `Span`: the zero value is empty.
+
+/// A string span into [`UiModule::strings`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModuleStr(pub Span);
+
+impl ModuleStr {
+    pub fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// A range into [`UiModule::segs`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SegRange(pub Span);
+
+impl SegRange {
+    pub fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// A string span into [`UiData::strings`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DataStr(pub Span);
+
+/// A range into [`UiData::rows`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowRange(pub Span);
+
+/// A range into [`UiData::bindings`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BindingRange(pub Span);
 
 /// A pre-parsed script size: `cap[:weight]` per axis.
 ///
@@ -70,8 +106,8 @@ impl Size {
 /// Spans index [`UiModule::strings`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Seg {
-    pub literal: Span,
-    pub var: Span,
+    pub literal: ModuleStr,
+    pub var: ModuleStr,
 }
 
 /// A string with its `$VAR` references found at compile time, so per-frame
@@ -79,7 +115,7 @@ pub struct Seg {
 /// value = no text.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Text {
-    pub segs: Span,
+    pub segs: SegRange,
 }
 
 impl Text {
@@ -210,7 +246,7 @@ pub struct UiModule {
     /// All nodes' [`Text`] segments, ranged into by `Text::segs`.
     pub segs: Vec<Seg>,
     /// Every literal and variable name, addressed by the segs' spans.
-    pub strings: StrBuf,
+    pub strings: String,
     /// The style palette, for `$VAR` color names that only resolve per
     /// frame; literal names are baked into the nodes directly.
     pub palette: Palette,
@@ -228,12 +264,12 @@ impl UiModule {
         self.nodes.first().map_or(0, |null| null.first_child)
     }
 
-    pub fn str(&self, span: Span) -> &str {
-        self.strings.get(span)
+    pub fn str(&self, span: ModuleStr) -> &str {
+        span.0.str(&self.strings)
     }
 
     pub fn segs(&self, text: Text) -> &[Seg] {
-        &self.segs[text.segs.range()]
+        text.segs.0.slice(&self.segs)
     }
 }
 
@@ -241,30 +277,30 @@ impl UiModule {
 /// index [`UiData::strings`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Binding {
-    pub key: Span,
-    pub value: Span,
+    pub key: DataStr,
+    pub value: DataStr,
 }
 
 /// The bindings one stamped-out template instance interpolates from:
 /// a range into [`UiData::bindings`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Row {
-    pub bindings: Span,
+    pub bindings: BindingRange,
 }
 
 /// The rows behind one `list`, matched to it by `id` (a string span);
 /// `rows` ranges into [`UiData::rows`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ListData {
-    pub id: Span,
-    pub rows: Span,
+    pub id: DataStr,
+    pub rows: RowRange,
 }
 
 /// One image the script can reference by key (`image = { source = soldier
 /// }`), with its renderer handle and natural size.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ImageData {
-    pub key: Span,
+    pub key: DataStr,
     pub image: ImageId,
     pub width: f32,
     pub height: f32,
@@ -286,7 +322,7 @@ pub struct ImageData {
 /// legal at any point.
 #[derive(Clone, Debug, Default)]
 pub struct UiData {
-    pub strings: StrBuf,
+    pub strings: String,
     pub lists: Vec<ListData>,
     pub rows: Vec<Row>,
     pub bindings: Vec<Binding>,
@@ -304,19 +340,19 @@ impl UiData {
         self.images.clear();
     }
 
-    pub fn text(&self, span: Span) -> &str {
-        self.strings.get(span)
+    pub fn text(&self, span: DataStr) -> &str {
+        span.0.str(&self.strings)
     }
 
     /// Starts a new list; subsequent `begin_row` calls belong to it.
     pub fn begin_list(&mut self, id: &str) {
-        let id = self.strings.push(id);
+        let id = DataStr(Span::push_str(&mut self.strings, id));
         self.lists.push(ListData {
             id,
-            rows: Span {
+            rows: RowRange(Span {
                 start: self.rows.len() as u32,
                 len: 0,
-            },
+            }),
         });
     }
 
@@ -325,14 +361,14 @@ impl UiData {
     /// (harmless: nothing ranges over it).
     pub fn begin_row(&mut self) {
         let row = Row {
-            bindings: Span {
+            bindings: BindingRange(Span {
                 start: self.bindings.len() as u32,
                 len: 0,
-            },
+            }),
         };
         self.rows.push(row);
         if let Some(list) = self.lists.last_mut() {
-            list.rows.len += 1;
+            list.rows.0.len += 1;
         }
     }
 
@@ -340,12 +376,12 @@ impl UiData {
     /// `begin_row` first, the binding is orphaned (harmless).
     pub fn bind(&mut self, key: &str, value: &str) {
         let binding = Binding {
-            key: self.strings.push(key),
-            value: self.strings.push(value),
+            key: DataStr(Span::push_str(&mut self.strings, key)),
+            value: DataStr(Span::push_str(&mut self.strings, value)),
         };
         self.bindings.push(binding);
         if let Some(row) = self.rows.last_mut() {
-            row.bindings.len += 1;
+            row.bindings.0.len += 1;
         }
     }
 
@@ -354,14 +390,14 @@ impl UiData {
     /// point during the fill — globals live outside the row/list spans.
     pub fn bind_global(&mut self, key: &str, value: &str) {
         let binding = Binding {
-            key: self.strings.push(key),
-            value: self.strings.push(value),
+            key: DataStr(Span::push_str(&mut self.strings, key)),
+            value: DataStr(Span::push_str(&mut self.strings, value)),
         };
         self.globals.push(binding);
     }
 
     pub fn add_image(&mut self, key: &str, image: ImageId, width: f32, height: f32) {
-        let key = self.strings.push(key);
+        let key = DataStr(Span::push_str(&mut self.strings, key));
         self.images.push(ImageData {
             key,
             image,
@@ -371,11 +407,11 @@ impl UiData {
     }
 
     pub fn rows(&self, list: ListData) -> &[Row] {
-        &self.rows[list.rows.range()]
+        list.rows.0.slice(&self.rows)
     }
 
     pub fn bindings(&self, row: Row) -> &[Binding] {
-        &self.bindings[row.bindings.range()]
+        row.bindings.0.slice(&self.bindings)
     }
 }
 
@@ -540,14 +576,23 @@ impl Compiler {
                 }
                 if name_end > name_start {
                     if literal_start < pos {
-                        let literal = self.module.strings.push(&source[literal_start..pos]);
+                        let literal = ModuleStr(Span::push_str(
+                            &mut self.module.strings,
+                            &source[literal_start..pos],
+                        ));
                         self.module.segs.push(Seg {
                             literal,
-                            var: Span::default(),
+                            var: ModuleStr::default(),
                         });
                     }
-                    let literal = self.module.strings.push(&source[pos..name_end]);
-                    let var = self.module.strings.push(&source[name_start..name_end]);
+                    let literal = ModuleStr(Span::push_str(
+                        &mut self.module.strings,
+                        &source[pos..name_end],
+                    ));
+                    let var = ModuleStr(Span::push_str(
+                        &mut self.module.strings,
+                        &source[name_start..name_end],
+                    ));
                     self.module.segs.push(Seg { literal, var });
                     pos = name_end;
                     literal_start = name_end;
@@ -557,17 +602,20 @@ impl Compiler {
             pos += 1;
         }
         if literal_start < bytes.len() {
-            let literal = self.module.strings.push(&source[literal_start..]);
+            let literal = ModuleStr(Span::push_str(
+                &mut self.module.strings,
+                &source[literal_start..],
+            ));
             self.module.segs.push(Seg {
                 literal,
-                var: Span::default(),
+                var: ModuleStr::default(),
             });
         }
         Text {
-            segs: Span {
+            segs: SegRange(Span {
                 start,
                 len: self.segs.len() as u32 - start,
-            },
+            }),
         }
     }
 

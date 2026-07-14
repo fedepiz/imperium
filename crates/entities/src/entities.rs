@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use util::strings::{Span, StrBuf};
+use util::span::Span;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
 pub struct EntityId {
@@ -178,7 +178,7 @@ pub struct Entities {
     /// The name vocabulary: every name ever added, append-only. It never
     /// moves, so symbols stay valid forever. A replaced name's bytes
     /// leak — rare (custom/generated names only) and accepted.
-    name_buf: StrBuf,
+    name_buf: String,
     tags: BTreeMap<String, EntityId>,
     vars: Vec<f32>,
     relations: BTreeMap<RelationKey, f32>,
@@ -213,7 +213,7 @@ impl Entities {
             entries,
             free_list,
             names,
-            name_buf: StrBuf::default(),
+            name_buf: String::new(),
             tags: BTreeMap::default(),
             vars,
             relations: BTreeMap::default(),
@@ -246,14 +246,14 @@ impl Entities {
 
     pub fn get_name(&self, id: EntityId) -> &str {
         assert!(self.is_alive(id));
-        self.name_buf.get(self.names[id.index as usize].0)
+        self.names[id.index as usize].0.str(&self.name_buf)
     }
 
     /// Adds a name to the vocabulary, returning the symbol that names
     /// entities with it. Adding the same text twice stores it twice —
     /// name banks dedup by construction; don't churn this.
     pub fn add_name(&mut self, name: &str) -> Symbol {
-        Symbol(self.name_buf.push(name))
+        Symbol(Span::push_str(&mut self.name_buf, name))
     }
 
     pub fn set_name(&mut self, id: EntityId, name: Symbol) {

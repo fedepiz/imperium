@@ -14,5 +14,5 @@
 pub mod ir;
 pub mod layout;
 pub mod run;
-pub use util::strings;
+pub use util::span;
 pub mod style;

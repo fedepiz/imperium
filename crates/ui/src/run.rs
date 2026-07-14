@@ -79,7 +79,11 @@ fn resolve<'f>(ctx: &Ctx<'f>, text: Text) -> &'f str {
             let mut out = AString::new_in(ctx.frame);
             for seg in segs {
                 let var = ctx.module.str(seg.var);
-                let value = if var.is_empty() { None } else { lookup(ctx, var) };
+                let value = if var.is_empty() {
+                    None
+                } else {
+                    lookup(ctx, var)
+                };
                 match value {
                     Some(value) => out.push_str(value),
                     None => out.push_str(ctx.module.str(seg.literal)),
@@ -123,7 +127,11 @@ fn axis(size: Size) -> (LogicalSize, f32, f32) {
 /// fractional cap in the same way).
 fn sized<'a>(mut conf: ElementConf<'a>, node: &UiNode) -> ElementConf<'a> {
     let tighter = |a: f32, b: f32| {
-        if a > 0.0 && b > 0.0 { a.min(b) } else { a.max(b) }
+        if a > 0.0 && b > 0.0 {
+            a.min(b)
+        } else {
+            a.max(b)
+        }
     };
 
     let (logical, cap, fraction) = axis(node.width);

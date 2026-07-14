@@ -10,7 +10,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use arena::{AVec, Arena};
 
-use util::strings::{Span, StrBuf};
+use util::span::Span;
+
+/// A string span into the owning [`Output`]'s text buffer. Only meaningful
+/// against the `Output` that issued it; ZII: the zero value is empty.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutputStr(pub Span);
 
 /// One frame's draw output: owned and engine-resident, recycled every
 /// frame. Command text lives in one contiguous buffer, addressed by the
@@ -19,7 +24,7 @@ use util::strings::{Span, StrBuf};
 pub struct Output {
     commands: Vec<DrawCommand>,
     /// All command text for the frame, one buffer.
-    text: StrBuf,
+    text: String,
     is_pointer_over_ui: bool,
     duplicate_ids: Vec<ElementId>,
 }
@@ -31,8 +36,8 @@ impl Output {
 
     /// Resolves a command's text span. Spans are only meaningful against
     /// the `Output` that issued them, and die at the next `layout` call.
-    pub fn text(&self, span: Span) -> &str {
-        self.text.get(span)
+    pub fn text(&self, span: OutputStr) -> &str {
+        span.0.str(&self.text)
     }
 
     pub fn is_pointer_over_ui(&self) -> bool {
@@ -931,7 +936,7 @@ pub struct DrawCommand {
     pub bounds: Rectangle,
     pub color: Color,
     /// Into the owning [`Output`]'s text buffer.
-    pub text: Span,
+    pub text: OutputStr,
     pub text_size: u16,
     pub text_baseline: f32,
     pub border_width: f32,
@@ -1750,7 +1755,7 @@ fn emit_element(index: usize, nodes: &[Element<'_>], out: &mut Output) {
             if !line.text.is_empty() {
                 // The line text is copied out of the frame arena here, so
                 // the command outlives the layout pass.
-                let text = out.text.push(line.text);
+                let text = OutputStr(Span::push_str(&mut out.text, line.text));
                 out.commands.push(DrawCommand {
                     kind: DrawKind::Text,
                     id: node.id,
