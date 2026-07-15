@@ -37,6 +37,11 @@ choices; follow them even where std-idiomatic Rust would do otherwise.
 - No mandatory `new()`-style setup: a zeroed struct must be safe to use
   immediately. If a type can't satisfy that, reconsider its design before
   reaching for constructor discipline.
+- Don't define named constants for notable instances of plain-data
+  structs (the mostly-zero value with one field set, the "empty" value).
+  Build them at the use site from `Default::default()` with struct-update
+  syntax; if an instance genuinely recurs, a small function is fine. Such
+  constants restate the ZII story and rot as fields are added.
 
 ## Fat structs
 
@@ -73,6 +78,11 @@ choices; follow them even where std-idiomatic Rust would do otherwise.
   history) folded in; and playtesting for content and feel.
 - Ordinary unit tests are fine for components — library crates and isolated
   pieces with stable contracts.
+- Never write `#[test]` functions that exercise extensive sim behavior —
+  long simulated stretches (many in-game years), playthrough-scale runs,
+  soaks. The every-run suite must stay fast and small-scoped. Tests of
+  that scale are separate programs/utilities (exemplar replays, soak
+  binaries), run deliberately, not on every `cargo test`.
 
 ## General
 

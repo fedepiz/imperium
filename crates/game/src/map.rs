@@ -65,8 +65,9 @@ pub struct Map {
     pub width: u32,
     pub height: u32,
     cells: Vec<Cell>,
-    /// Each settlement's anchor — the first cell of its blob in row-major
-    /// order, recorded at parse time. Where "located" people are dropped.
+    /// Each settlement's anchor — the center of its blob, computed at
+    /// parse time. Where "located" people are dropped. Blobs are always
+    /// odd-sided squares (1x1, 3x3), so the center is an exact cell.
     anchors: Vec<(EntityId, CellPos)>,
 }
 
@@ -149,7 +150,9 @@ impl Map {
         let height = rows.len() as u32;
 
         let mut cells = vec![Cell::default(); (width * height) as usize];
-        let mut anchors: Vec<(EntityId, CellPos)> = Vec::new();
+        // Each settlement's bounding box and cell count, grown as its
+        // cells appear; anchors (centers) derive from these afterwards.
+        let mut blobs: Vec<(EntityId, CellPos, CellPos, u32)> = Vec::new();
         for (y, row) in rows.iter().enumerate() {
             for (x, glyph) in row.chars().enumerate() {
                 let cell = match glyph {
@@ -166,14 +169,19 @@ impl Map {
                     letter => match letter_slot(letter) {
                         Some(slot) if legend[slot] != EntityId::NULL => {
                             let settlement = legend[slot];
-                            if !anchors.iter().any(|(id, _)| *id == settlement) {
-                                anchors.push((
-                                    settlement,
-                                    CellPos {
-                                        x: x as u32,
-                                        y: y as u32,
-                                    },
-                                ));
+                            let pos = CellPos {
+                                x: x as u32,
+                                y: y as u32,
+                            };
+                            match blobs.iter_mut().find(|(id, ..)| *id == settlement) {
+                                Some((_, min, max, count)) => {
+                                    min.x = min.x.min(pos.x);
+                                    min.y = min.y.min(pos.y);
+                                    max.x = max.x.max(pos.x);
+                                    max.y = max.y.max(pos.y);
+                                    *count += 1;
+                                }
+                                None => blobs.push((settlement, pos, pos, 1)),
                             }
                             Cell {
                                 terrain: Terrain::Settlement,
@@ -195,6 +203,29 @@ impl Map {
             }
         }
 
+        // Anchors: the center of each blob. Blobs must be filled odd-sided
+        // squares so the center is an exact cell — an ill-shaped one still
+        // anchors at its bounding box's center, but gets reported.
+        let anchors = blobs
+            .iter()
+            .map(|&(id, min, max, count)| {
+                let (w, h) = (max.x - min.x + 1, max.y - min.y + 1);
+                if w != h || count != w * h || w % 2 == 0 {
+                    errors.push(format!(
+                        "settlement blob at {},{} is not a filled odd square",
+                        min.x, min.y
+                    ));
+                }
+                (
+                    id,
+                    CellPos {
+                        x: min.x + (w - 1) / 2,
+                        y: min.y + (h - 1) / 2,
+                    },
+                )
+            })
+            .collect();
+
         (
             Map {
                 width,
@@ -212,8 +243,10 @@ mod tests {
     use super::*;
 
     const SOURCE: &str = "
-        ~..
-        ~aa#
+        ~....
+        ~aaa#
+        ~aaa.
+        ~aaa.
         a = home
     ";
 
@@ -229,24 +262,24 @@ mod tests {
     fn parses_grid_legend_and_costs() {
         let (map, errors) = map();
         assert!(errors.is_empty());
-        assert_eq!((map.width, map.height), (4, 2));
+        assert_eq!((map.width, map.height), (5, 4));
 
         // Sea keeps its kind; wilds are the zero cell, as is row padding.
         assert_eq!(map.cell(CellPos { x: 0, y: 0 }).terrain, Terrain::Sea);
         assert_eq!(map.cell(CellPos { x: 1, y: 0 }).terrain, Terrain::Wild);
-        assert_eq!(map.cell(CellPos { x: 3, y: 0 }).terrain, Terrain::Wild);
+        assert_eq!(map.cell(CellPos { x: 4, y: 0 }).terrain, Terrain::Wild);
         // Roads are steppable but belong to no one.
-        let road = map.cell(CellPos { x: 3, y: 1 });
+        let road = map.cell(CellPos { x: 4, y: 1 });
         assert_eq!(road.terrain, Terrain::Road);
         assert_eq!(road.cost, 1);
         assert_eq!(road.settlement, EntityId::NULL);
-        // Settlement cells carry their blob's id; the anchor is recorded
-        // at parse time as the blob's first cell.
+        // Settlement cells carry their blob's id; the anchor is the
+        // center of the blob's square.
         let town = map.cell(CellPos { x: 1, y: 1 });
         assert_eq!(town.terrain, Terrain::Settlement);
         assert_eq!(town.cost, 1);
         assert_eq!(town.settlement, home());
-        assert_eq!(map.anchor(home()), CellPos { x: 1, y: 1 });
+        assert_eq!(map.anchor(home()), CellPos { x: 2, y: 2 });
         assert_eq!(map.anchor(EntityId::NULL), CellPos::default());
     }
 
@@ -257,6 +290,26 @@ mod tests {
         assert_eq!(beyond.terrain, Terrain::Wild);
         assert_eq!(beyond.cost, 0);
         assert_eq!(beyond.settlement, EntityId::NULL);
+    }
+
+    #[test]
+    fn single_cell_blobs_anchor_on_themselves() {
+        let (map, errors) = Map::parse(".a\na = home", |_| Some(home()));
+        assert!(errors.is_empty());
+        assert_eq!(map.anchor(home()), CellPos { x: 1, y: 0 });
+    }
+
+    #[test]
+    fn ill_shaped_blobs_are_an_error() {
+        // Even squares and lopsided blobs alike: no exact center cell.
+        let (_, errors) = Map::parse("aa\naa\na = home", |_| Some(home()));
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("not a filled odd square"));
+
+        let (map, errors) = Map::parse("aaa\naa.\na = home", |_| Some(home()));
+        assert_eq!(errors.len(), 1);
+        // The anchor still lands somewhere sensible: the bbox center.
+        assert_eq!(map.anchor(home()), CellPos { x: 1, y: 0 });
     }
 
     #[test]

@@ -116,7 +116,9 @@ fn gather_keyboard(command: &mut AppCommand, forced_paused: bool) {
 impl AppCommand {
     /// Folds one UI action into the frame's command, the actions' twin of
     /// `gather_keyboard`: every source writes into the same singular
-    /// command, built fresh each frame from `default()`.
+    /// command, built fresh each frame from `default()`. The sim's share
+    /// is fat and ZII like this one, so actions merge by each setting
+    /// their own fields.
     fn parse(&mut self, action: &str) {
         if let Some(level) = action.strip_prefix("time_speed ") {
             self.set_speed = level.trim().parse().unwrap_or(0);
@@ -124,17 +126,7 @@ impl AppCommand {
         }
         match action {
             "time_toggle" => self.toggle_pause = true,
-            _ => {
-                let game = game::Command::parse(action);
-                // The command holds one sim verb; garbage (Idle) never
-                // clobbers a real one, and a real collision warns.
-                if game.verb != game::Verb::Idle {
-                    if self.game.verb != game::Verb::Idle {
-                        eprintln!("two sim commands in one frame; keeping '{action}'");
-                    }
-                    self.game = game;
-                }
-            }
+            _ => self.game.parse(action),
         }
     }
 }
@@ -292,22 +284,22 @@ async fn amain() {
             ui_module = load_ui_module();
         }
 
-        // The sim ticks every frame — Idle when nothing happened — and
-        // once more per command; it never renders, rendering never mutates.
-        // Real time never enters the sim: the clock converts it into
-        // AdvanceTime requests, which the game is free to decline.
-        // The frame's singular command: default, then every source folds
-        // its share in — last frame's UI actions, then the keyboard.
+        // The sim ticks exactly once per frame, with the frame's singular
+        // command: default (a no-op), then every source folds its share
+        // in — last frame's UI actions, the keyboard, and finally the
+        // clock, which converts real time into an advance_time request
+        // the game is free to decline. It never renders, rendering never
+        // mutates, and real time never enters the sim.
         let mut command = AppCommand::default();
         for action in pending_actions.drain(..) {
             command.parse(&action);
         }
         gather_keyboard(&mut command, game_output.forced_paused);
         clock.apply(&command);
-        game_output = game.tick(command.game);
-        for _ in 0..clock.due_days(mq::get_frame_time()) {
-            game_output = game.tick(game::Command::ADVANCE_TIME);
+        if clock.due_days(mq::get_frame_time()) > 0 {
+            command.game.advance_time = true;
         }
+        game_output = game.tick(command.game);
 
         mq::clear_background(mq::BLACK);
         frame_arena.reset();

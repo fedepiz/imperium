@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use arena::Arena;
 use ui::ir;
 
-use crate::date::{days_between, Date, DAYS_PER_YEAR};
-use crate::defs::{init_world, Relation, Set, UVar, Var};
+use crate::date::{DAYS_PER_YEAR, Date, days_between};
+use crate::defs::{Relation, Set, UVar, Var, init_world};
 use crate::map::{CellPos, Map};
 use crate::world::{Activity, ActivityVerb, Epoch, World};
 use entities::*;
@@ -18,25 +18,23 @@ const START_EPOCH: Epoch = Epoch(700 * DAYS_PER_YEAR);
 const MORTALITY_AGE: f32 = 60.0;
 const MORTALITY_SPAN: f32 = 30.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Verb {
-    /// The zero command: nothing happened this frame.
-    #[default]
-    Idle,
-    AdvanceTime,
-    Rest,
-    Stop,
-    Remove,
-    Femalify,
-}
-
-/// One frame's worth of player intent, as plain data: a verb plus a superset
-/// of arguments, unused ones left at zero. `Command::default()` is `Idle`.
-/// The whole sim history is the seed plus the command stream.
+/// One tick's worth of player intent, fat and ZII: not a verb to dispatch
+/// on, but a superset of independent fields, each turning one step of the
+/// tick on or off — zero everywhere means "leave it alone", so
+/// `Command::default()` does nothing. The whole sim history is the seed
+/// plus the command stream.
 #[derive(Clone, Copy, Default)]
 pub struct Command {
-    pub verb: Verb,
-    pub target: EntityId,
+    /// Request one day to pass; the sim declines while the player idles.
+    pub advance_time: bool,
+    /// Give the player this activity; Idle = no order given.
+    pub activity: ActivityVerb,
+    /// Cancel the player's current activity, back to Idle.
+    pub stop: bool,
+    /// Despawn this entity; null = nobody.
+    pub remove: EntityId,
+    /// Set this entity's gender to female; null = nobody.
+    pub femalify: EntityId,
 }
 
 /// What one tick reports back to the harness, as plain data: a superset of
@@ -51,43 +49,35 @@ pub struct Output {
 }
 
 impl Command {
-    pub const IDLE: Command = Command {
-        verb: Verb::Idle,
-        target: EntityId::NULL,
-    };
-
-    pub const ADVANCE_TIME: Command = Command {
-        verb: Verb::AdvanceTime,
-        target: EntityId::NULL,
-    };
-
-    fn on(verb: Verb, target: EntityId) -> Command {
-        Command { verb, target }
-    }
-
     /// UI action protocol: `<verb> [args…]`, with entity ids packed via
-    /// `EntityId::to_bits` (the `Display`/`FromStr` round trip). Anything
-    /// malformed warns and parses to `Idle`, the do-nothing command.
-    pub fn parse(action: &str) -> Command {
+    /// `EntityId::to_bits` (the `Display`/`FromStr` round trip). Actions
+    /// fold into an existing command — several per tick merge, each
+    /// setting its own fields — and anything malformed warns and sets
+    /// nothing.
+    pub fn parse(&mut self, action: &str) {
         let mut parts = action.split_whitespace();
-        let verb = match parts.next() {
-            Some("advance_time") => return Command::ADVANCE_TIME,
-            Some("rest") => return Command::on(Verb::Rest, EntityId::NULL),
-            Some("stop") => return Command::on(Verb::Stop, EntityId::NULL),
-            Some("remove") => Verb::Remove,
-            Some("femalify") => Verb::Femalify,
-            _ => {
-                eprintln!("unhandled ui action: {action}");
-                return Command::IDLE;
-            }
-        };
-        match parts.next().and_then(|arg| arg.parse::<EntityId>().ok()) {
-            Some(target) => Command::on(verb, target),
+        let verb = parts.next().unwrap_or_default();
+        let mut target = || match parts.next().and_then(|arg| arg.parse::<EntityId>().ok()) {
+            Some(id) => id,
             None => {
                 eprintln!("malformed ui action: {action}");
-                Command::IDLE
+                EntityId::NULL
             }
+        };
+        match verb {
+            "advance_time" => self.advance_time = true,
+            "rest" => self.activity = ActivityVerb::Rest,
+            "stop" => self.stop = true,
+            "remove" => self.remove = target(),
+            "femalify" => self.femalify = target(),
+            _ => eprintln!("unhandled ui action: {action}"),
         }
+    }
+
+    pub fn advance_time() -> Self {
+        let mut this = Self::default();
+        this.advance_time = true;
+        this
     }
 }
 
@@ -132,37 +122,74 @@ impl Game {
         Game { world }
     }
 
-    /// The sole entry point that mutates the sim. Called every frame with
-    /// exactly one command — `Idle` on frames with no input — and possibly
-    /// several times per frame; rendering never happens in here.
+    /// The sole entry point that mutates the sim: one command per tick, a
+    /// frame's worth of intent. Not a dispatch — one general path whose
+    /// steps run in a fixed order, each reading its share of the command,
+    /// the ZII fields turning steps on and off (null ids fail the
+    /// liveness checks, false bools skip). Rendering never happens in
+    /// here.
     pub fn tick(&mut self, command: Command) -> Output {
-        match command.verb {
-            Verb::Idle => {}
-            // A request, not an imperative: declined outright when the
-            // player isn't occupying the time that would pass.
-            Verb::AdvanceTime => {
-                if time_may_flow(&self.world) {
-                    self.step_day();
+        // The player's orders: stop, then a fresh activity — a command
+        // carrying both lands on the new activity.
+        if command.stop {
+            self.set_player_activity(ActivityVerb::Idle);
+        }
+        if command.activity != ActivityVerb::Idle {
+            self.set_player_activity(command.activity);
+        }
+
+        // Removal. Stale ids parse fine and fail the liveness check — a
+        // click raced a death.
+        if self.world.ids.is_alive(command.remove) {
+            self.world.ids.mark_despawn(command.remove);
+            self.report_death(command.remove);
+            self.world.sweep();
+        }
+
+        if self.world.ids.is_alive(command.femalify) {
+            self.world
+                .vars
+                .set(&self.world.ids, command.femalify, Var::Gender, 0.0);
+        }
+
+        // Time. A request, not an imperative: declined outright when the
+        // player isn't occupying the time that would pass.
+        let day_passes = command.advance_time && time_may_flow(&self.world);
+        if day_passes {
+            self.world.epoch.advance();
+        }
+
+        // The entity pass: one uniform loop over every live entity — no
+        // kinds — where each runs every check, GPU-style, written from
+        // the entity's point of view. Checks gate themselves, on the day
+        // advancing (right now, all of them) or on a set-membership bit,
+        // and only where a check genuinely doesn't apply. Death reactions
+        // run between mark and sweep, while the corpse's relations are
+        // still queryable.
+        let entities: Vec<_> = self.world.ids.iter_alive().collect();
+        for &id in &entities {
+            // Resolve an activity that came due — anything can be doing
+            // something, not just people. Completion effects go here as
+            // verbs gain them.
+            if day_passes {
+                let activity = self.world.activities.get(&self.world.ids, id);
+                if activity.until != Epoch(0) && activity.until <= self.world.epoch {
+                    self.world.activities.reset(id);
                 }
             }
-            Verb::Rest => self.set_player_activity(ActivityVerb::Rest),
-            Verb::Stop => self.set_player_activity(ActivityVerb::Idle),
-            Verb::Remove => {
-                // Stale ids parse fine and fail here — a click raced a death.
-                if self.world.ids.is_alive(command.target) {
-                    self.world.ids.mark_despawn(command.target);
-                    self.report_death(command.target);
-                    self.world.sweep();
-                }
-            }
-            Verb::Femalify => {
-                if self.world.ids.is_alive(command.target) {
-                    self.world
-                        .vars
-                        .set(&self.world.ids, command.target, Var::Gender, 0.0);
+
+            // On birthdays, roll the mortality ramp. Only people age.
+            if day_passes && self.world.ids.in_set(id, Set::People) && is_birthday(&self.world, id)
+            {
+                let hazard = (age(&self.world, id) as f32 - MORTALITY_AGE) / MORTALITY_SPAN;
+                if self.world.rng.chance(hazard) {
+                    self.world.ids.mark_despawn(id);
+                    self.report_death(id);
                 }
             }
         }
+        self.world.sweep();
+
         Output {
             forced_paused: !time_may_flow(&self.world),
         }
@@ -184,35 +211,6 @@ impl Game {
             },
         };
         self.world.activities.set(&self.world.ids, player, activity);
-    }
-
-    /// One day passes. Resolve what came due, then the daily sim content:
-    /// on birthdays, roll the mortality ramp. Death reactions run between
-    /// mark and sweep, while the corpse's relations are still queryable.
-    fn step_day(&mut self) {
-        self.world.epoch.advance();
-        let people: Vec<_> = self.world.sets.iter(Set::People).collect();
-
-        for &id in &people {
-            let activity = self.world.activities.get(&self.world.ids, id);
-            if activity.until != Epoch(0) && activity.until <= self.world.epoch {
-                // Verb completion effects go here as verbs gain them.
-                self.world.activities.reset(id);
-            }
-        }
-
-        for &id in &people {
-            if !is_birthday(&self.world, id) {
-                continue;
-            }
-            let hazard = (age(&self.world, id) as f32 - MORTALITY_AGE) / MORTALITY_SPAN;
-            if self.world.rng.chance(hazard) {
-                self.world.ids.mark_despawn(id);
-                self.report_death(id);
-            }
-        }
-
-        self.world.sweep();
     }
 
     /// Placeholder death reaction: console obituary. Runs before the sweep
@@ -317,7 +315,7 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
         let id = world.spawn();
         let name = world.names.add(node.get_text("name").unwrap_or("Nowhere"));
         world.names.set(&world.ids, id, name);
-        world.sets.add(&world.ids, Set::Settlements, id);
+        world.sets.add(&mut world.ids, Set::Settlements, id);
         if let Some(key) = node.get_text("id") {
             if by_key.insert(key, id).is_some() {
                 eprintln!("data/characters.txt: duplicate id '{key}'");
@@ -334,7 +332,9 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
 
     for node in characters() {
         let id = world.spawn();
-        let name = world.names.add(node.get_text("name").unwrap_or("Anonymous"));
+        let name = world
+            .names
+            .add(node.get_text("name").unwrap_or("Anonymous"));
         world.names.set(&world.ids, id, name);
         // The data speaks in ages; the sim speaks in birth epochs. Whole
         // ages put every starting birthday on new year's day.
@@ -349,7 +349,7 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
         };
         world.vars.set(&world.ids, id, Var::Gender, gender);
 
-        world.sets.add(&world.ids, Set::People, id);
+        world.sets.add(&mut world.ids, Set::People, id);
         if let Some(tag) = node.get_text("tag") {
             world.tags.bind(&world.ids, tag, id);
         }
@@ -385,7 +385,9 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
                     if anchor == CellPos::default() {
                         eprintln!("data/map.txt: '{place}' has no cells on the map");
                     }
-                    world.uvars.set(&world.ids, source_id, UVar::Position, anchor);
+                    world
+                        .uvars
+                        .set(&world.ids, source_id, UVar::Position, anchor);
                     world
                         .relations
                         .set(&world.ids, source_id, Relation::LocatedIn, target, 1.0);
@@ -409,7 +411,7 @@ mod tests {
 
     const TEST_MAP: &str = "
         ~....
-        ~vv#.
+        ~v#..
         ~....
         v = v
     ";
@@ -421,12 +423,20 @@ mod tests {
         Game { world }
     }
 
+    /// A command built the way the harness builds them: parsed from a UI
+    /// action string into the zero command.
+    fn command(action: &str) -> Command {
+        let mut command = Command::default();
+        command.parse(action);
+        command
+    }
+
     /// One in-game day, forced through regardless of the player (tests that
     /// exercise the sim, not the decline rule).
     fn rest_and_tick_days(game: &mut Game, days: u64) {
-        game.tick(Command::parse("rest"));
+        game.tick(command("rest"));
         for _ in 0..days {
-            game.tick(Command::ADVANCE_TIME);
+            game.tick(Command::advance_time());
         }
     }
 
@@ -435,18 +445,18 @@ mod tests {
         let mut game = game();
 
         // Fresh game: the player is idle, so the sim declines time.
-        game.tick(Command::ADVANCE_TIME);
-        game.tick(Command::ADVANCE_TIME);
+        game.tick(Command::advance_time());
+        game.tick(Command::advance_time());
         assert_eq!(game.world.epoch, START_EPOCH);
 
         // Resting occupies the player: days pass.
-        game.tick(Command::parse("rest"));
-        game.tick(Command::ADVANCE_TIME);
+        game.tick(command("rest"));
+        game.tick(Command::advance_time());
         assert_eq!(game.world.epoch, Epoch(START_EPOCH.0 + 1));
 
         // Stopping goes idle again: declined again.
-        game.tick(Command::parse("stop"));
-        game.tick(Command::ADVANCE_TIME);
+        game.tick(command("stop"));
+        game.tick(Command::advance_time());
         assert_eq!(game.world.epoch, Epoch(START_EPOCH.0 + 1));
     }
 
@@ -467,30 +477,19 @@ mod tests {
     fn dead_player_halts_time_for_good() {
         let mut game = game();
         let player = game.world.tags.lookup("player").unwrap();
-        game.tick(Command::parse("rest"));
-        game.tick(Command::on(Verb::Remove, player));
+        game.tick(command("rest"));
+        game.tick(Command {
+            remove: player,
+            ..Command::default()
+        });
 
         let epoch = game.world.epoch;
-        game.tick(Command::ADVANCE_TIME);
+        game.tick(Command::advance_time());
         assert_eq!(game.world.epoch, epoch);
         // Commanding the void warns and does nothing.
-        game.tick(Command::parse("rest"));
-        game.tick(Command::ADVANCE_TIME);
+        game.tick(command("rest"));
+        game.tick(Command::advance_time());
         assert_eq!(game.world.epoch, epoch);
-    }
-
-    #[test]
-    fn same_seed_and_commands_reproduce_the_same_history() {
-        let run = || {
-            let mut game = game();
-            rest_and_tick_days(&mut game, 40 * 360);
-            (
-                game.world.epoch,
-                game.world.sets.iter(Set::People).count(),
-                game.world.tags.lookup("player").is_some(),
-            )
-        };
-        assert_eq!(run(), run());
     }
 
     #[test]
@@ -537,21 +536,21 @@ mod tests {
         let mut game = game();
         let player = game.world.tags.lookup("player").unwrap();
 
-        // Idle and garbage are no-ops; the sim only moves on real verbs.
+        // The zero command and garbage are no-ops; the sim only moves on
+        // fields an action actually set.
         game.tick(Command::default());
-        game.tick(Command::parse("frobnicate 12"));
-        game.tick(Command::parse("remove not-an-id"));
+        game.tick(command("frobnicate 12"));
+        game.tick(command("remove not-an-id"));
         assert_eq!(game.world.epoch, START_EPOCH);
         assert_eq!(game.world.sets.iter(Set::People).count(), 3);
 
         // The exact strings the UI script emits, ids via Display.
-        game.tick(Command::parse(&format!("remove {player}")));
+        game.tick(command(&format!("remove {player}")));
         assert!(!game.world.ids.is_alive(player));
         assert_eq!(game.world.sets.iter(Set::People).count(), 2);
 
         // A stale id parses fine and does nothing.
-        game.tick(Command::parse(&format!("remove {player}")));
+        game.tick(command(&format!("remove {player}")));
         assert_eq!(game.world.sets.iter(Set::People).count(), 2);
     }
-
 }

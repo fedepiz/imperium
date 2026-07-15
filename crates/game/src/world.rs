@@ -134,7 +134,7 @@ mod tests {
         let mut world = world();
         let doomed = world.spawn();
         let widow = world.spawn();
-        world.sets.add(&world.ids, SetId(0), doomed);
+        world.sets.add(&mut world.ids, SetId(0), doomed);
         world.tags.bind(&world.ids, "emperor", doomed);
         world
             .relations
@@ -146,7 +146,7 @@ mod tests {
 
         // Marked but unswept: visible everywhere, like any live entity.
         assert!(world.ids.is_alive(doomed));
-        assert!(world.sets.contains(SetId(0), doomed));
+        assert!(world.sets.contains(&world.ids, SetId(0), doomed));
         assert_eq!(world.tags.lookup("emperor"), Some(doomed));
         assert_eq!(world.relations.get_related(doomed).count(), 1);
         assert_eq!(world.names.get(&world.ids, doomed), "Commodus");
@@ -155,7 +155,7 @@ mod tests {
 
         // Swept: gone from every store at once.
         assert!(!world.ids.is_alive(doomed));
-        assert!(!world.sets.contains(SetId(0), doomed));
+        assert!(!world.sets.contains(&world.ids, SetId(0), doomed));
         assert_eq!(world.tags.lookup("emperor"), None);
         assert_eq!(world.relations.get_related(doomed).count(), 0);
         assert_eq!(world.relations.get_related_to(widow).count(), 0);

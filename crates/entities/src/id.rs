@@ -65,11 +65,18 @@ impl core::str::FromStr for EntityId {
 #[derive(Default, Clone, Copy)]
 struct EntityData {
     id: EntityId,
+    /// Inline set memberships, one bit per `SetId`: the fast half of
+    /// membership, kept in lockstep with `Sets`' ordered keys (which
+    /// exist for iteration). ZII: no bits, no memberships — despawn
+    /// clears them, so reused slots start clean.
+    sets: util::bitset::BitSet<1>,
 }
 
-/// The id allocator: owns liveness and nothing else. Slot 0 is reserved as
-/// the null slot; a slot's id is alive iff its generation is odd, and a
-/// held `EntityId` is alive iff the slot still holds that exact id.
+/// The id allocator: owns liveness, plus the per-entity inline data that
+/// wants to sit right next to it (the membership bits). Slot 0 is
+/// reserved as the null slot; a slot's id is alive iff its generation is
+/// odd, and a held `EntityId` is alive iff the slot still holds that
+/// exact id.
 #[derive(Clone)]
 pub struct Ids {
     entries: Vec<EntityData>,
@@ -86,8 +93,9 @@ impl Default for Ids {
 }
 
 impl Ids {
-    /// Fixed slot count shared by every dense per-slot store.
-    pub const CAPACITY: usize = 65_000;
+    /// Fixed slot count shared by every dense per-slot store. Sized to the
+    /// game's design (a cast of a few thousand, plus generous headroom).
+    pub const CAPACITY: usize = 16_384;
 
     pub fn new() -> Ids {
         let free_list: Vec<_> = (1..Self::CAPACITY).rev().map(|x| x as u16).collect();
@@ -97,6 +105,7 @@ impl Ids {
                     index: index as u16,
                     generation: 0,
                 },
+                ..Default::default()
             })
             .collect();
         Ids {
@@ -131,7 +140,28 @@ impl Ids {
                 .is_some_and(|entry| entry.id == id)
     }
 
-    /// All live entities, in slot order. Marked-but-unswept entities are
+    /// Fast membership check against the inline bits: O(1), the entity's
+    /// slot and one bit. Dead and stale ids are in no set; `Sets` is the
+    /// writer that keeps the bits true.
+    pub fn in_set(&self, id: EntityId, set: impl Into<crate::defs::SetId>) -> bool {
+        self.is_alive(id)
+            && self.entries[id.index as usize]
+                .sets
+                .get(set.into().0 as usize)
+    }
+
+    /// Flip a live entity's inline membership bit; `Sets::add`/`remove`
+    /// call this in lockstep with their ordered keys.
+    pub(crate) fn set_membership(&mut self, id: EntityId, set: crate::defs::SetId, member: bool) {
+        assert!(self.is_alive(id));
+        self.entries[id.index as usize]
+            .sets
+            .set(set.0 as usize, member);
+    }
+
+    /// All live entities, in slot order — a full scan of every slot, by
+    /// design: the cost is `CAPACITY` every time, however many entities
+    /// exist. Predictable beats adaptive. Marked-but-unswept entities are
     /// still alive and included. Borrows `self`, so game logic that
     /// mutates while walking should collect into a Vec first.
     pub fn iter_alive(&self) -> impl Iterator<Item = EntityId> + '_ {
@@ -158,6 +188,8 @@ impl Ids {
                 continue;
             }
             let entry = &mut self.entries[id.index as usize];
+            // The inline data dies with the entity, so reuse starts ZII.
+            entry.sets = Default::default();
             if entry.id.generation == u16::MAX {
                 // This slot can no longer be reused without resurrecting stale IDs.
                 entry.id.generation = 0;

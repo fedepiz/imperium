@@ -70,7 +70,9 @@ cells, and the map is the authored truth about space.
 
 - Every cell is painted as one of: part of a settlement or other
   location (settlements are *blobs* — a contiguous group of cells
-  bearing the same place), road, or impassable.
+  bearing the same place), road, or impassable. Blobs are always
+  odd-sided squares — 1x1 or 3x3 in practice — so every place has an
+  exact center cell, its *anchor*, where arriving people stand.
 - Underneath lies a logical graph — places as nodes, road-cell chains
   as edges — but it is *derived* from the painted grid, never authored
   separately, so the two cannot disagree.
