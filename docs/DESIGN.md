@@ -8,7 +8,7 @@ elsewhere (CLAUDE.md); this file is only about what the game *is*.
 ## The concept
 
 Imperium is a character-driven strategy sim in the spirit of Romance of
-the Three Kingdoms VII: **you are one person inside the world, not a
+the Three Kingdoms X: **you are one person inside the world, not a
 faction**. The player character has a body, a location, a household, a
 reputation, and relationships — and climbs (or falls) through them. You
 might begin as a wandering sword, a younger son, a village strongman;
@@ -64,7 +64,7 @@ Rome is the shadow, not the stage.
 
 ## The map
 
-Taken, like much else, from ROTK VII: the world is a grid of square
+Taken, like much else, from ROTK X: the world is a grid of square
 cells, and the map is the authored truth about space.
 
 - Every cell is painted as one of: part of a settlement or other
