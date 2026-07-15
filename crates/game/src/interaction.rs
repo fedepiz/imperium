@@ -48,13 +48,13 @@ fn company_names(world: &World, place: EntityId) -> Vec<&str> {
         .relations
         .get_related_to_via(place, Relation::LocatedIn)
         .filter(|&(other, _)| Some(other) != player)
-        .map(|(other, _)| world.names.get(&world.ids, other))
+        .map(|(other, _)| world.names.get(other))
         .collect()
 }
 
 /// The screen raised when the player's travel resolves at a settlement.
 pub fn arrival(world: &mut World, params: ChoiceParams) -> Option<Interaction> {
-    let name = world.names.get(&world.ids, params.target);
+    let name = world.names.get(params.target);
     let deserted = company_names(world, params.target).is_empty();
     Some(Interaction {
         title: name.to_string(),
@@ -89,7 +89,7 @@ pub fn arrival(world: &mut World, params: ChoiceParams) -> Option<Interaction> {
 fn company(world: &mut World, params: ChoiceParams) -> Option<Interaction> {
     let names = company_names(world, params.target);
     Some(Interaction {
-        title: world.names.get(&world.ids, params.target).to_string(),
+        title: world.names.get(params.target).to_string(),
         text: format!("You find {} here.", names.join(", ")),
         choices: vec![Choice {
             text: "Step back".to_string(),

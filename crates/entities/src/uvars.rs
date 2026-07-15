@@ -51,18 +51,17 @@ impl UVars {
         }
     }
 
-    fn idx(&self, ids: &Ids, id: EntityId, var: UVarId) -> usize {
-        assert!(ids.is_alive(id));
+    fn idx(&self, id: EntityId, var: UVarId) -> usize {
         assert!((var.0 as usize) < self.stride);
         id.index() * self.stride + var.0 as usize
     }
 
-    pub fn get<T: Bits64>(&self, ids: &Ids, id: EntityId, var: impl Into<UVarId>) -> T {
-        T::from_bits(self.values[self.idx(ids, id, var.into())])
+    pub fn get<T: Bits64>(&self, id: EntityId, var: impl Into<UVarId>) -> T {
+        T::from_bits(self.values[self.idx(id, var.into())])
     }
 
-    pub fn set<T: Bits64>(&mut self, ids: &Ids, id: EntityId, var: impl Into<UVarId>, value: T) {
-        let idx = self.idx(ids, id, var.into());
+    pub fn set<T: Bits64>(&mut self, id: EntityId, var: impl Into<UVarId>, value: T) {
+        let idx = self.idx(id, var.into());
         self.values[idx] = value.to_bits();
     }
 
@@ -90,12 +89,12 @@ mod tests {
         let mut uvars = uvars();
         let id = ids.spawn();
 
-        assert_eq!(uvars.get::<u64>(&ids, id, UVarId(0)), 0);
-        uvars.set(&ids, id, UVarId(0), 99u64);
-        assert_eq!(uvars.get::<u64>(&ids, id, UVarId(0)), 99);
+        assert_eq!(uvars.get::<u64>(id, UVarId(0)), 0);
+        uvars.set(id, UVarId(0), 99u64);
+        assert_eq!(uvars.get::<u64>(id, UVarId(0)), 99);
 
         uvars.reset(id);
-        assert_eq!(uvars.get::<u64>(&ids, id, UVarId(0)), 0);
+        assert_eq!(uvars.get::<u64>(id, UVarId(0)), 0);
     }
 
     #[test]
@@ -106,16 +105,16 @@ mod tests {
         let friend = ids.spawn();
 
         // ZII: the zero slot reads as the null id.
-        assert_eq!(uvars.get::<EntityId>(&ids, holder, UVarId(1)), EntityId::NULL);
+        assert_eq!(uvars.get::<EntityId>(holder, UVarId(1)), EntityId::NULL);
 
-        uvars.set(&ids, holder, UVarId(1), friend);
-        assert_eq!(uvars.get::<EntityId>(&ids, holder, UVarId(1)), friend);
+        uvars.set(holder, UVarId(1), friend);
+        assert_eq!(uvars.get::<EntityId>(holder, UVarId(1)), friend);
 
         // Nothing purges a weak ref on death: it reads back stale and
         // simply fails the caller's is_alive check.
         ids.mark_despawn(friend);
         ids.sweep();
-        let stale: EntityId = uvars.get(&ids, holder, UVarId(1));
+        let stale: EntityId = uvars.get(holder, UVarId(1));
         assert_eq!(stale, friend);
         assert!(!ids.is_alive(stale));
 
@@ -126,16 +125,11 @@ mod tests {
     }
 
     #[test]
-    fn stale_and_undefined_accesses_panic() {
+    fn undefined_accesses_panic() {
         let mut ids = Ids::new();
-        let mut uvars = uvars();
-        let stale = ids.spawn();
-        uvars.set(&ids, stale, UVarId(0), 1u64);
-        ids.mark_despawn(stale);
-        ids.sweep();
+        let uvars = uvars();
         let live = ids.spawn();
 
-        assert!(std::panic::catch_unwind(|| uvars.get::<u64>(&ids, stale, UVarId(0))).is_err());
-        assert!(std::panic::catch_unwind(|| uvars.get::<u64>(&ids, live, UVarId(2))).is_err());
+        assert!(std::panic::catch_unwind(|| uvars.get::<u64>(live, UVarId(2))).is_err());
     }
 }

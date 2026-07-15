@@ -41,13 +41,11 @@ impl Names {
         Symbol(Span::push_str(&mut self.buf, name))
     }
 
-    pub fn get(&self, ids: &Ids, id: EntityId) -> &str {
-        assert!(ids.is_alive(id));
+    pub fn get(&self, id: EntityId) -> &str {
         self.symbols[id.index()].0.str(&self.buf)
     }
 
-    pub fn set(&mut self, ids: &Ids, id: EntityId, name: Symbol) {
-        assert!(ids.is_alive(id));
+    pub fn set(&mut self, id: EntityId, name: Symbol) {
         self.symbols[id.index()] = name;
     }
 
@@ -69,19 +67,18 @@ mod tests {
         let mut names = Names::new();
         let first = ids.spawn();
         let cicero = names.add("Marcus Tullius Cicero");
-        names.set(&ids, first, cicero);
-        assert_eq!(names.get(&ids, first), "Marcus Tullius Cicero");
+        names.set(first, cicero);
+        assert_eq!(names.get(first), "Marcus Tullius Cicero");
 
         ids.mark_despawn(first);
         let dead = ids.sweep();
         names.purge(&dead);
         let replacement = ids.spawn();
 
-        assert_eq!(names.get(&ids, replacement), "");
+        assert_eq!(names.get(replacement), "");
         let caesar = names.add("Gaius Julius Caesar");
-        names.set(&ids, replacement, caesar);
-        assert_eq!(names.get(&ids, replacement), "Gaius Julius Caesar");
-        assert!(std::panic::catch_unwind(|| names.get(&ids, first)).is_err());
+        names.set(replacement, caesar);
+        assert_eq!(names.get(replacement), "Gaius Julius Caesar");
     }
 
     #[test]
@@ -91,10 +88,10 @@ mod tests {
         let gaius = names.add("Gaius");
         let a = ids.spawn();
         let b = ids.spawn();
-        names.set(&ids, a, gaius);
-        names.set(&ids, b, gaius);
-        assert_eq!(names.get(&ids, a), "Gaius");
-        assert_eq!(names.get(&ids, b), "Gaius");
+        names.set(a, gaius);
+        names.set(b, gaius);
+        assert_eq!(names.get(a), "Gaius");
+        assert_eq!(names.get(b), "Gaius");
         // One vocabulary entry serves both.
         assert_eq!(names.buf.len(), "Gaius".len());
 
@@ -102,7 +99,7 @@ mod tests {
         let dead = ids.sweep();
         names.purge(&dead);
         let c = ids.spawn();
-        names.set(&ids, c, gaius);
-        assert_eq!(names.get(&ids, c), "Gaius");
+        names.set(c, gaius);
+        assert_eq!(names.get(c), "Gaius");
     }
 }

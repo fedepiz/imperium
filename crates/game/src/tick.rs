@@ -132,7 +132,7 @@ pub struct Event {
 /// logical mirror (`LocatedIn`) in step across blob boundaries — the
 /// contract the bootstrap's `located` handling establishes.
 fn move_entity(world: &mut World, id: EntityId, from: CellPos, to: CellPos) {
-    world.uvars.set(&world.ids, id, UVar::Position, to);
+    world.uvars.set(id, UVar::Position, to);
     let old = world.map.cell(from).settlement;
     let new = world.map.cell(to).settlement;
     if old != new {
@@ -162,7 +162,7 @@ fn time_may_flow(world: &World) -> bool {
 /// Placeholder death reaction: console obituary. Runs before the sweep
 /// so it can still read the deceased's name and marriages.
 fn report_death(world: &World, id: EntityId) {
-    let name = world.names.get(&world.ids, id);
+    let name = world.names.get(id);
     // Marriage is declared one-way in the data; look both directions.
     let spouses: Vec<&str> = world
         .relations
@@ -174,7 +174,7 @@ fn report_death(world: &World, id: EntityId) {
                 .get_related_to_via(id, Relation::Married)
                 .map(|(other, _)| other),
         )
-        .map(|other| world.names.get(&world.ids, other))
+        .map(|other| world.names.get(other))
         .collect();
     if spouses.is_empty() {
         println!("{}: {name} has died.", Date::of(world.epoch));
@@ -231,10 +231,10 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
                     start: game.world.epoch,
                     until: Epoch::MAX, // open-ended
                     // Zero for the verbs that don't want one.
-                    target: command.destination,
+                    destination: command.destination,
                 },
             };
-            if next.verb != current.verb || next.target != current.target {
+            if next.verb != current.verb || next.destination != current.destination {
                 game.world.activities.set(player, next);
             }
         }
@@ -275,9 +275,7 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
     }
 
     if game.world.ids.is_alive(command.femalify) {
-        game.world
-            .vars
-            .set(&game.world.ids, command.femalify, Var::Gender, 0.0);
+        game.world.vars.set(command.femalify, Var::Gender, 0.0);
     }
 
     // Time. A request, not an imperative: declined outright when the
@@ -321,16 +319,16 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
         if day_passes {
             let activity = *game.world.activities.get(this);
             if activity.verb == ActivityVerb::Travel {
-                let pos: CellPos = game.world.uvars.get(&game.world.ids, this, UVar::Position);
+                let pos: CellPos = game.world.uvars.get(this, UVar::Position);
                 let next = game
                     .pathfinding
-                    .next_step(&game.world.map, pos, activity.target);
+                    .next_step(&game.world.map, pos, activity.destination);
                 if next == CellPos::default() {
                     // Already there, or no way there: the journey ends.
                     game.world.activities.reset(this);
                 } else {
                     move_entity(&mut game.world, this, pos, next);
-                    if next == activity.target {
+                    if next == activity.destination {
                         game.world.activities.reset(this);
                         let place = game.world.map.cell(next).settlement;
                         if game.world.ids.is_alive(place) {
@@ -349,26 +347,17 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
         // other roll: the rng is world state, so drawing from it on
         // dayless ticks would fork histories that share a command
         // stream.
-        if day_passes
-            && !is_player
-            && is_person
-            && game.world.activities.get(this).verb == ActivityVerb::Idle
-            && game.world.rng.chance(0.01)
-        {
-            // Pick a random city and travel to it. Picking the city
-            // they're already in is a valid draw — the journey just
-            // resolves on its first step.
-            let count = game.world.map.anchors().len();
-            if count > 0 {
-                let pick = game.world.rng.next_u64() as usize % count;
-                let (_, target) = game.world.map.anchors()[pick];
+        if day_passes && !is_player && is_person {
+            if let Some(decision) = decide_destination(this, &mut game.world) {
+                let name = game.world.names.get(this);
+                println!("{name}: {}", decision.reason);
                 game.world.activities.set(
                     this,
                     Activity {
                         verb: ActivityVerb::Travel,
                         start: game.world.epoch,
                         until: Epoch::MAX, // open-ended, ends on arrival
-                        target,
+                        destination: decision.destination,
                     },
                 );
             }
@@ -414,5 +403,49 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
 
     Output {
         forced_paused: game.interaction.is_some() || !time_may_flow(&game.world),
+    }
+}
+
+struct DecideDestination {
+    reason: &'static str,
+    destination: CellPos,
+}
+
+fn decide_destination(this: EntityId, world: &mut World) -> Option<DecideDestination> {
+    // People randomly travel if idle. Gated on the day like every
+    // other roll: the rng is world state, so drawing from it on
+    // dayless ticks would fork histories that share a command
+    // stream.
+    if world.activities.get(this).verb == ActivityVerb::Idle && world.rng.chance(0.05) {
+        // If I am a ruler of a place, go to that place
+        let reason;
+        let destination = match world
+            .relations
+            .get_related_via(this, Relation::Rules)
+            .next()
+        {
+            Some((x, _)) => {
+                reason = "to return to the land ruled";
+                Some(world.map.anchor(x))
+            }
+            None => {
+                reason = "as random travel";
+                let count = world.map.anchors().len();
+                let pick = world.rng.next_u64() as usize % count;
+                world.map.anchors().get(pick).map(|(_, x)| *x)
+            }
+        };
+
+        destination
+            .map(|destination| DecideDestination {
+                reason,
+                destination,
+            })
+            .filter(|decision| {
+                let current_position: CellPos = world.uvars.get(this, UVar::Position);
+                decision.destination != current_position
+            })
+    } else {
+        None
     }
 }

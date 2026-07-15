@@ -58,12 +58,12 @@ pub struct Activity {
     pub start: Epoch,
     pub until: Epoch,
     /// Where Travel is headed; the zero cell = no destination.
-    pub target: crate::map::CellPos,
+    pub destination: crate::map::CellPos,
 }
 
 /// THE authoritative sim state: every piece of world state is a field here,
 /// nothing lives outside. Plain data — `Clone` is save, ZII throughout;
-/// game code addresses the stores directly (`world.vars.set(&world.ids, …)`).
+/// game code addresses the stores directly (`world.vars.set(…)`).
 /// The only methods are the cross-store coordinators, `spawn` and `sweep`.
 #[derive(Clone)]
 pub struct World {
@@ -156,7 +156,7 @@ mod tests {
             .relations
             .set(&world.ids, doomed, RelationId(0), widow, 1.0);
         let name = world.names.add("Cuthbert");
-        world.names.set(&world.ids, doomed, name);
+        world.names.set(doomed, name);
 
         world.ids.mark_despawn(doomed);
 
@@ -165,7 +165,7 @@ mod tests {
         assert!(world.sets.contains(&world.ids, SetId(0), doomed));
         assert_eq!(world.tags.lookup("emperor"), Some(doomed));
         assert_eq!(world.relations.get_related(doomed).count(), 1);
-        assert_eq!(world.names.get(&world.ids, doomed), "Cuthbert");
+        assert_eq!(world.names.get(doomed), "Cuthbert");
 
         world.sweep();
 
@@ -181,7 +181,7 @@ mod tests {
     fn reused_slots_start_with_a_clean_slate() {
         let mut world = world();
         let stale = world.spawn();
-        world.vars.set(&world.ids, stale, VarId(0), 1.0);
+        world.vars.set(stale, VarId(0), 1.0);
         world.activities.set(
             stale,
             Activity {
@@ -190,22 +190,14 @@ mod tests {
             },
         );
         let name = world.names.add("Sigered");
-        world.names.set(&world.ids, stale, name);
+        world.names.set(stale, name);
         world.ids.mark_despawn(stale);
         world.sweep();
 
         let replacement = world.spawn();
         assert!(!world.ids.is_alive(stale));
-        assert_eq!(world.vars.get(&world.ids, replacement, VarId(0)), 0.0);
-        assert_eq!(world.names.get(&world.ids, replacement), "");
+        assert_eq!(world.vars.get(replacement, VarId(0)), 0.0);
+        assert_eq!(world.names.get(replacement), "");
         assert_eq!(world.activities.get(replacement).verb, ActivityVerb::Idle);
-
-        // The stale id can't reach the reused slot.
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                world.vars.get(&world.ids, stale, VarId(0))
-            }))
-            .is_err()
-        );
     }
 }

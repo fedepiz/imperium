@@ -70,6 +70,11 @@ pub enum Relation {
     /// *follows* [`UVar::Position`] — whatever moves an entity across a
     /// blob boundary updates both. Weight unused.
     LocatedIn,
+    /// Character → character: a personal oath of service. Weight unused.
+    SwornTo,
+    /// Character → settlement: personal rule over a place. One place per
+    /// ruler. Weight unused.
+    Rules,
 }
 
 impl Relation {
@@ -77,6 +82,8 @@ impl Relation {
         match self {
             Relation::Married => "Married",
             Relation::LocatedIn => "LocatedIn",
+            Relation::SwornTo => "SwornTo",
+            Relation::Rules => "Rules",
         }
     }
 

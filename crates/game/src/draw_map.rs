@@ -69,7 +69,7 @@ pub fn build(world: &World) -> DrawMap {
     // player's dot outshines anyone sharing the cell.
     let player = world.tags.lookup("player");
     for id in world.sets.iter(Set::People) {
-        let pos: CellPos = world.uvars.get(&world.ids, id, UVar::Position);
+        let pos: CellPos = world.uvars.get(id, UVar::Position);
         // The zero position is "nowhere", not the corner cell.
         if pos == CellPos::default() || pos.x >= map.width || pos.y >= map.height {
             continue;

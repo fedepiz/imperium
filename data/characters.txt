@@ -12,6 +12,8 @@
 #     tag = <optional singleton tag, e.g. player>
 #     married = <id of spouse, declared on one side only>
 #     located = <id of the settlement the character starts in>
+#     sworn = <id of the lord this character is sworn to>
+#     rules = <id of the settlement this character rules; one place per ruler>
 # }
 
 settlement = {
@@ -68,6 +70,7 @@ character = {
 	age = 61
 	gender = male
 	located = beornford
+	rules = beornford
 }
 
 character = {
@@ -77,6 +80,8 @@ character = {
 	married = leofrun
 	gender = male
 	located = aescburh
+	sworn = wulfhere
+	rules = aescburh
 }
 
 character = {
@@ -88,9 +93,38 @@ character = {
 }
 
 character = {
+	id = dunstan
+	name = "Dunstan"
+	age = 35
+	gender = male
+	located = beornford
+	sworn = wulfhere
+}
+
+character = {
 	id = aethelstan
 	name = "Æthelstan"
 	age = 52
 	gender = male
 	located = seolforwic
+	rules = seolforwic
+}
+
+character = {
+	id = sigered
+	name = "Sigered"
+	age = 44
+	gender = male
+	located = meretun
+	sworn = aethelstan
+	rules = meretun
+}
+
+character = {
+	id = godwine
+	name = "Godwine"
+	age = 28
+	gender = male
+	located = seolforwic
+	sworn = aethelstan
 }

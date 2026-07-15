@@ -31,7 +31,7 @@ pub struct Game {
 
 /// Days since birth (births never postdate now, so the distance is it).
 fn days_alive(world: &World, id: EntityId) -> u64 {
-    let birth: Epoch = world.uvars.get(&world.ids, id, UVar::BirthEpoch);
+    let birth: Epoch = world.uvars.get(id, UVar::BirthEpoch);
     days_between(world.epoch, birth)
 }
 
@@ -108,7 +108,11 @@ impl Game {
                 data.bind("INDEX", &index.to_string());
                 data.bind(
                     "ENABLED",
-                    if choice.disabled.is_empty() { "yes" } else { "no" },
+                    if choice.disabled.is_empty() {
+                        "yes"
+                    } else {
+                        "no"
+                    },
                 );
                 // Disabled elements sense nothing, so a tooltip can't
                 // carry the reason: fold it into the caption.
@@ -124,7 +128,7 @@ impl Game {
         for id in world.sets.iter(Set::People) {
             data.begin_row();
             data.bind("ID", &format!("{}", id));
-            data.bind("NAME", world.names.get(&world.ids, id));
+            data.bind("NAME", world.names.get(id));
             data.bind("AGE", &format!("{}", age(&self.world, id)));
             let activity = world.activities.get(id);
             let doing = match activity.verb {
@@ -134,10 +138,10 @@ impl Game {
                 }
                 ActivityVerb::Travel => {
                     // Destinations are cells; a settlement's blob names it.
-                    let place = world.map.cell(activity.target).settlement;
+                    let place = world.map.cell(activity.destination).settlement;
                     match world.ids.is_alive(place) {
                         true => {
-                            format!("· travelling to {}", world.names.get(&world.ids, place))
+                            format!("· travelling to {}", world.names.get(place))
                         }
                         false => "· travelling".to_string(),
                     }
@@ -146,12 +150,12 @@ impl Game {
             data.bind("ACTIVITY", &doing);
             // Where they stand, spoken as a settlement name; unbound when
             // they're nowhere or on no one's cells.
-            let pos: CellPos = world.uvars.get(&world.ids, id, UVar::Position);
+            let pos: CellPos = world.uvars.get(id, UVar::Position);
             let place = world.map.cell(pos).settlement;
             if world.ids.is_alive(place) {
-                data.bind("PLACE", world.names.get(&world.ids, place));
+                data.bind("PLACE", world.names.get(place));
             }
-            if world.vars.get(&world.ids, id, Var::Gender) > 0. {
+            if world.vars.get(id, Var::Gender) > 0. {
                 data.bind("IS_MALE", "yes");
             }
         }
@@ -177,7 +181,7 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
     for node in settlements() {
         let id = world.spawn();
         let name = world.names.add(node.get_text("name").unwrap_or("Nowhere"));
-        world.names.set(&world.ids, id, name);
+        world.names.set(id, name);
         world.sets.add(&mut world.ids, Set::Settlements, id);
         if let Some(key) = node.get_text("id") {
             if by_key.insert(key, id).is_some() {
@@ -198,19 +202,19 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
         let name = world
             .names
             .add(node.get_text("name").unwrap_or("Anonymous"));
-        world.names.set(&world.ids, id, name);
+        world.names.set(id, name);
         // The data speaks in ages; the sim speaks in birth epochs. Whole
         // ages put every starting birthday on new year's day.
         let age = node.get_number("age").unwrap_or(0.0);
         let birth = Epoch(world.epoch.0 - (age as u64) * DAYS_PER_YEAR);
-        world.uvars.set(&world.ids, id, UVar::BirthEpoch, birth);
+        world.uvars.set(id, UVar::BirthEpoch, birth);
 
         let gender = match node.get_text("gender").unwrap_or_default() {
             "female" => 0.0,
             "male" => 1.0,
             _ => 0.0,
         };
-        world.vars.set(&world.ids, id, Var::Gender, gender);
+        world.vars.set(id, Var::Gender, gender);
 
         world.sets.add(&mut world.ids, Set::People, id);
         if let Some(tag) = node.get_text("tag") {
@@ -238,6 +242,26 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
                 None => eprintln!("data/characters.txt: '{key}' married unknown id '{spouse}'"),
             }
         }
+        if let Some(lord) = node.get_text("sworn") {
+            match by_key.get(lord) {
+                Some(&target) => {
+                    world
+                        .relations
+                        .set(&world.ids, source_id, Relation::SwornTo, target, 1.0)
+                }
+                None => eprintln!("data/characters.txt: '{key}' sworn to unknown id '{lord}'"),
+            }
+        }
+        if let Some(place) = node.get_text("rules") {
+            match by_key.get(place) {
+                Some(&target) => {
+                    world
+                        .relations
+                        .set(&world.ids, source_id, Relation::Rules, target, 1.0)
+                }
+                None => eprintln!("data/characters.txt: '{key}' rules unknown id '{place}'"),
+            }
+        }
         // "located" sets both halves of place: the position (spatial
         // truth, the settlement's anchor cell) and the LocatedIn relation
         // (its logical mirror). Movement code must keep doing likewise.
@@ -250,7 +274,7 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
                     }
                     world
                         .uvars
-                        .set(&world.ids, source_id, UVar::Position, anchor);
+                        .set(source_id, UVar::Position, anchor);
                     world
                         .relations
                         .set(&world.ids, source_id, Relation::LocatedIn, target, 1.0);
@@ -348,10 +372,13 @@ mod tests {
         let mut game = game();
         let player = game.world.tags.lookup("player").unwrap();
         tick(&mut game, command("rest"));
-        tick(&mut game, Command {
-            remove: player,
-            ..Command::default()
-        });
+        tick(
+            &mut game,
+            Command {
+                remove: player,
+                ..Command::default()
+            },
+        );
 
         let epoch = game.world.epoch;
         tick(&mut game, Command::advance_time());
@@ -443,7 +470,7 @@ mod tests {
         let pos: CellPos = game
             .world
             .uvars
-            .get(&game.world.ids, player, UVar::Position);
+            .get(player, UVar::Position);
         assert_eq!(pos, CellPos { x: 2, y: 1 });
         assert_eq!(
             game.world.relations.get(player, Relation::LocatedIn, vicus),
@@ -457,7 +484,7 @@ mod tests {
         let pos: CellPos = game
             .world
             .uvars
-            .get(&game.world.ids, player, UVar::Position);
+            .get(player, UVar::Position);
         assert_eq!(pos, destination);
         assert_eq!(
             game.world.relations.get(player, Relation::LocatedIn, wick),

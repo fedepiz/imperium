@@ -18,18 +18,17 @@ impl Vars {
         }
     }
 
-    fn idx(&self, ids: &Ids, id: EntityId, var: VarId) -> usize {
-        assert!(ids.is_alive(id));
+    fn idx(&self, id: EntityId, var: VarId) -> usize {
         assert!((var.0 as usize) < self.stride);
         id.index() * self.stride + var.0 as usize
     }
 
-    pub fn get(&self, ids: &Ids, id: EntityId, var: impl Into<VarId>) -> f32 {
-        self.values[self.idx(ids, id, var.into())]
+    pub fn get(&self, id: EntityId, var: impl Into<VarId>) -> f32 {
+        self.values[self.idx(id, var.into())]
     }
 
-    pub fn set(&mut self, ids: &Ids, id: EntityId, var: impl Into<VarId>, value: f32) {
-        let idx = self.idx(ids, id, var.into());
+    pub fn set(&mut self, id: EntityId, var: impl Into<VarId>, value: f32) {
+        let idx = self.idx(id, var.into());
         self.values[idx] = value;
     }
 
@@ -57,34 +56,23 @@ mod tests {
         let mut vars = vars();
         let id = ids.spawn();
 
-        assert_eq!(vars.get(&ids, id, VarId(0)), 0.0);
-        vars.set(&ids, id, VarId(0), 1.5);
-        vars.set(&ids, id, VarId(1), -2.0);
-        assert_eq!(vars.get(&ids, id, VarId(0)), 1.5);
-        assert_eq!(vars.get(&ids, id, VarId(1)), -2.0);
+        assert_eq!(vars.get(id, VarId(0)), 0.0);
+        vars.set(id, VarId(0), 1.5);
+        vars.set(id, VarId(1), -2.0);
+        assert_eq!(vars.get(id, VarId(0)), 1.5);
+        assert_eq!(vars.get(id, VarId(1)), -2.0);
 
         vars.reset(id);
-        assert_eq!(vars.get(&ids, id, VarId(0)), 0.0);
-        assert_eq!(vars.get(&ids, id, VarId(1)), 0.0);
+        assert_eq!(vars.get(id, VarId(0)), 0.0);
+        assert_eq!(vars.get(id, VarId(1)), 0.0);
     }
 
     #[test]
-    fn stale_and_undefined_accesses_panic() {
+    fn undefined_accesses_panic() {
         let mut ids = Ids::new();
-        let mut vars = vars();
-        let stale = ids.spawn();
-        vars.set(&ids, stale, VarId(0), 1.0);
-        ids.mark_despawn(stale);
-        ids.sweep();
+        let vars = vars();
         let live = ids.spawn();
 
-        assert!(std::panic::catch_unwind(|| vars.get(&ids, stale, VarId(0))).is_err());
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                vars.set(&ids, stale, VarId(0), 2.0)
-            }))
-            .is_err()
-        );
-        assert!(std::panic::catch_unwind(|| vars.get(&ids, live, VarId(2))).is_err());
+        assert!(std::panic::catch_unwind(|| vars.get(live, VarId(2))).is_err());
     }
 }

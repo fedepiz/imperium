@@ -62,6 +62,29 @@ Rome is the shadow, not the stage.
    trace back to people: *he* refused because *you* shamed his brother.
    Not opaque global modifiers.
 
+## Power and allegiance
+
+The first layer of the political game, following the "power is
+personal" pillar — bonds between people:
+
+- **Oaths**: a character may be sworn to another character — a personal
+  bond of service, lord and man. Hierarchy is chains of oaths (a lord
+  may himself be sworn to a greater lord).
+- **Rule**: a character may rule a settlement, personally. One place
+  per ruler for now. A settlement with no ruler is a valid state — a
+  masterless place.
+- Because the bonds are personal, they die with their holders: a dead
+  lord's oaths and rule simply vanish, leaving retainers masterless and
+  places unruled. What happens next — succession, acclamation, seizure —
+  is reaction content, deliberately not designed until a few lords have
+  died in play.
+- How larger political bodies (factions, peoples, dynasties) relate to
+  these bonds is open — see open questions.
+
+Kinship sits beside oaths as the other family of personal bonds.
+Marriage is modeled now; it will likely generalize to a single family
+relation whose value encodes the kind (spouse, child, ...).
+
 ## The map
 
 Taken, like much else, from ROTK X: the world is a grid of square
@@ -156,3 +179,5 @@ write (what a conversation did to a bond).
 - What "winning" means, if anything, beyond the story of a life.
 - Whether NPCs decide through the same interaction structures the
   player does, or through separate AI machinery.
+- What factions and other larger political bodies (peoples, dynasties)
+  are, and how they relate to the personal bonds of oath and rule.
