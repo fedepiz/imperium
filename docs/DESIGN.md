@@ -95,6 +95,45 @@ cells, and the map is the authored truth about space.
   which for the player also pauses time. Clicking a settlement on the
   map is how the order is given.
 
+## Interactions
+
+The game's fundamental choice mechanism, underpinning conversations
+with characters, events, dealings with towns — any moment where the
+sim stops to offer options and someone picks one.
+
+- An interaction is modal sim state: a prompt and a set of options
+  (possibly parameterized — a target person, an amount). While one is
+  open for the player, time is force-paused; the pick arrives as a
+  command like any other input, so interaction-heavy play is still
+  seed + command stream — replays and exemplar runs never need to
+  know interactions exist.
+- Resolution is continuation-passing in style: resolving an option
+  transforms the world and may hand back the *next* interaction. A
+  chain, never a stack — the current interaction is replaced or
+  cleared, never suspended and resumed. Usually the option names its
+  successor directly (conversation flow); the sim can also raise
+  interactions unprompted (encounters, arrivals, events).
+- An open interaction is *not* authoritative world state: it lives
+  beside the world (in Game, not World), and the game cannot be saved
+  mid-interaction — a save is always a world between choices. An
+  unanswered interaction needn't be persisted or resolved; it can
+  simply be re-raised. (Architecturally this also lets the
+  interaction and the world be borrowed separately.)
+- Interactions are instants — the moment of choice, not the activity.
+  An option can *order* an activity ("stay the night" → rest a day);
+  choice and time stay orthogonal.
+- Authoring: built in code first; data-driven interaction content is
+  the likely endgame (events are content, content wants to be data),
+  but the effect-language gets designed after a few interactions exist
+  by hand, not before.
+- Whether NPC AI chooses through the same option structures (one
+  definition of a situation, player picks by click, NPC picks by
+  scoring) is attractive but uncommitted — see open questions.
+
+Relationships and opinions are not a separate system on top: they are
+world state that interactions read (who will say what to whom) and
+write (what a conversation did to a bond).
+
 ## Scale and texture
 
 - A cast of a few thousand living entities — characters, settlements,
@@ -115,3 +154,5 @@ cells, and the map is the authored truth about space.
   householder, lord...).
 - How reputation/legend is measured and what it buys.
 - What "winning" means, if anything, beyond the story of a life.
+- Whether NPCs decide through the same interaction structures the
+  player does, or through separate AI machinery.

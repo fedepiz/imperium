@@ -413,7 +413,7 @@ async fn amain(conf: AppConf) {
         if clock.due_days(mq::get_frame_time()) > 0 {
             command.game.advance_time = true;
         }
-        game_output = game.tick(command.game);
+        game_output = game::tick(&mut game, command.game);
 
         mq::clear_background(mq::BLACK);
         frame_arena.reset();

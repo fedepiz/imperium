@@ -6,6 +6,27 @@
 # (default 1), and stop at the cap. `width = 200` = grow up to 200;
 # `grow` = uncapped; `fit` = weight 0; `50%` = capped at half the parent.
 
+# The interaction window: modal choice. The game binds $INTERACTION
+# only while one is open; unbound hides the whole panel.
+panel = {
+	x_pos = 0.5
+	y_pos = 0.5
+	width = 34%
+	min_width = 380
+	border = yes
+	visible = "$INTERACTION"
+
+	heading = "$INT_TITLE"
+	label = { text = "$INT_TEXT" wrap = yes }
+	list = {
+		id = "choices"
+		width = grow
+		template = {
+			button = { action = "choose $INDEX" text = "$CHOICE" width = grow enabled = "$ENABLED" }
+		}
+	}
+}
+
 panel = {
 	# Centered on screen (fraction of the screen, 0.5 = middle)
 	x_pos = 0.99

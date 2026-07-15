@@ -63,6 +63,17 @@ choices; follow them even where std-idiomatic Rust would do otherwise.
   minimize pointer chasing. Accept wasted bytes per instance as the price of
   simplicity and cache-friendly iteration.
 
+## Mutation locality in sim passes
+
+- The more globally observable a mutation is, the further outside the
+  inner loop it must be performed. Entity passes may write per-entity
+  state in place; anything world-scale or modal is recorded as an
+  `Event` (tick.rs) during traversal and resolved one by one after the
+  loop, in the order recorded. Deaths and arrivals (which can raise an
+  interaction) already work this way; new global effects join the enum.
+- When in doubt, defer: post-traversal resolution keeps the pass a
+  pure sweep and makes the order of global effects explicit.
+
 ## Testing
 
 - Do **not** write small behavioural tests for complex game behavior —

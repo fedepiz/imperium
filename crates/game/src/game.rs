@@ -5,108 +5,25 @@ use ui::ir;
 
 use crate::date::{DAYS_PER_YEAR, Date, days_between};
 use crate::defs::{Relation, Set, UVar, Var, init_world};
+use crate::interaction::Interaction;
 use crate::map::{CellPos, Map};
 use crate::pathfinding::Pathfinding;
-use crate::world::{Activity, ActivityVerb, Epoch, World};
+use crate::world::{ActivityVerb, Epoch, World};
 use entities::*;
 
 /// The sim begins here, centuries after the calendar's dawn, so every
 /// starting birth date fits above epoch 0.
 const START_EPOCH: Epoch = Epoch(700 * DAYS_PER_YEAR);
 
-/// Mortality ramp, rolled once a year on each person's birthday: no chance
-/// of death up to this age, certain death `MORTALITY_SPAN` years later.
-const MORTALITY_AGE: f32 = 60.0;
-const MORTALITY_SPAN: f32 = 30.0;
-
-/// One tick's worth of player intent, fat and ZII: not a verb to dispatch
-/// on, but a superset of independent fields, each turning one step of the
-/// tick on or off — zero everywhere means "leave it alone", so
-/// `Command::default()` does nothing. The whole sim history is the seed
-/// plus the command stream.
-#[derive(Clone, Copy, Default)]
-pub struct Command {
-    /// Request one day to pass; the sim declines while the player idles.
-    pub advance_time: bool,
-    /// Order the player into this activity; None = no order given.
-    /// Stopping is not its own thing: an order of Idle is the stop.
-    pub activity: Option<ActivityVerb>,
-    /// Let time pass while otherwise unoccupied: an idle player rests
-    /// through the coming day, and a waiting rest is extended by it.
-    pub wait: bool,
-    /// Where an ordered Travel goes; zero = nowhere. Only meaningful
-    /// alongside `activity = Some(Travel)`.
-    pub destination: CellPos,
-    /// Despawn this entity; null = nobody.
-    pub remove: EntityId,
-    /// Set this entity's gender to female; null = nobody.
-    pub femalify: EntityId,
-}
-
-/// What one tick reports back to the harness, as plain data: a superset of
-/// fields with meaningful zeros, so `Output::default()` says nothing
-/// notable happened.
-#[derive(Clone, Copy, Default)]
-pub struct Output {
-    /// The sim is declining `AdvanceTime`: the internal half of the pause
-    /// story (the player is idle or absent). The harness shows this as
-    /// paused and locks its own pause controls.
-    pub forced_paused: bool,
-}
-
-impl Command {
-    /// UI action protocol: `<verb> [args…]`, with entity ids and cells
-    /// packed via their `to_bits` (the `Display`/`FromStr` round trip).
-    /// Actions fold into an existing command — several per tick merge,
-    /// each setting its own fields — and anything malformed warns and
-    /// sets nothing.
-    pub fn parse(&mut self, action: &str) {
-        let mut parts = action.split_whitespace();
-        let verb = parts.next().unwrap_or_default();
-        let arg = parts.next().unwrap_or_default();
-        match verb {
-            "advance_time" => self.advance_time = true,
-            "rest" => self.activity = Some(ActivityVerb::Rest),
-            "stop" => self.activity = Some(ActivityVerb::Idle),
-            "travel" => {
-                let destination: CellPos = parse_arg(arg, action);
-                // Travelling to nowhere isn't an order.
-                if destination != CellPos::default() {
-                    self.activity = Some(ActivityVerb::Travel);
-                    self.destination = destination;
-                }
-            }
-            "remove" => self.remove = parse_arg(arg, action),
-            "femalify" => self.femalify = parse_arg(arg, action),
-            _ => eprintln!("unhandled ui action: {action}"),
-        }
-    }
-
-    pub fn advance_time() -> Self {
-        let mut this = Self::default();
-        this.advance_time = true;
-        this
-    }
-}
-
-/// An action's packed argument (`EntityId`, `CellPos`, …) via the
-/// `FromStr` half of the protocol; malformed warns and reads as the zero
-/// value ("nobody", "nowhere"), which every consumer treats as absent.
-fn parse_arg<T: core::str::FromStr + Default>(arg: &str, action: &str) -> T {
-    match arg.parse::<T>() {
-        Ok(value) => value,
-        Err(_) => {
-            eprintln!("malformed ui action: {action}");
-            T::default()
-        }
-    }
-}
-
 pub struct Game {
-    world: World,
+    pub(crate) world: World,
     /// Derived route memory, not world state: outside the save/clone
     /// unit, rebuilt from nothing.
-    pathfinding: Pathfinding,
+    pub(crate) pathfinding: Pathfinding,
+    /// The open interaction, if any: modal choice state beside the
+    /// world, not in it — never saved, replaced or cleared, never
+    /// suspended. While one is open, time does not flow.
+    pub(crate) interaction: Option<Interaction>,
 }
 
 // Derivations: computed from the world on the fly, never stored, never
@@ -118,43 +35,12 @@ fn days_alive(world: &World, id: EntityId) -> u64 {
     days_between(world.epoch, birth)
 }
 
-fn age(world: &World, id: EntityId) -> u32 {
+pub(crate) fn age(world: &World, id: EntityId) -> u32 {
     (days_alive(world, id) / DAYS_PER_YEAR) as u32
 }
 
-fn is_birthday(world: &World, id: EntityId) -> bool {
+pub(crate) fn is_birthday(world: &World, id: EntityId) -> bool {
     days_alive(world, id) % DAYS_PER_YEAR == 0
-}
-
-/// The one mover: sets the spatial truth (`Position`) and keeps its
-/// logical mirror (`LocatedIn`) in step across blob boundaries — the
-/// contract the bootstrap's `located` handling establishes.
-fn move_entity(world: &mut World, id: EntityId, from: CellPos, to: CellPos) {
-    world.uvars.set(&world.ids, id, UVar::Position, to);
-    let old = world.map.cell(from).settlement;
-    let new = world.map.cell(to).settlement;
-    if old != new {
-        // Removal (weight 0) is a no-op when there's no such edge, so a
-        // null `old` (stepping off a road) needs no special case.
-        world
-            .relations
-            .set(&world.ids, id, Relation::LocatedIn, old, 0.0);
-        if new != EntityId::NULL {
-            world
-                .relations
-                .set(&world.ids, id, Relation::LocatedIn, new, 1.0);
-        }
-    }
-}
-
-/// The internal half of the pause story: the sim declines to step while
-/// the player is idle or absent. (The external half — whether
-/// `AdvanceTime` gets pumped at all — is the clock's, outside the sim.)
-fn time_may_flow(world: &World) -> bool {
-    match world.tags.lookup("player") {
-        Some(player) => world.activities.get(player).verb != ActivityVerb::Idle,
-        None => false,
-    }
 }
 
 impl Game {
@@ -167,203 +53,7 @@ impl Game {
         Game {
             world,
             pathfinding: Pathfinding::default(),
-        }
-    }
-
-    /// The sole entry point that mutates the sim: one command per tick, a
-    /// frame's worth of intent. Not a dispatch — one general path whose
-    /// steps run in a fixed order, each reading its share of the command,
-    /// the ZII fields turning steps on and off (null ids fail the
-    /// liveness checks, false bools skip). Rendering never happens in
-    /// here.
-    pub fn tick(&mut self, command: Command) -> Output {
-        // The player's orders: an ordered activity replaces the current
-        // one (an order of Idle is the stop); no order, no change. Only
-        // a genuinely new activity — different verb or target — starts,
-        // so repeating an order doesn't restart its clock, while
-        // retargeting an ongoing travel does take effect.
-        let player = self.world.tags.lookup("player");
-        if let Some(player) = player {
-            if let Some(next_verb) = command.activity {
-                let current = *self.world.activities.get(player);
-                let next = match next_verb {
-                    ActivityVerb::Idle => Activity::default(),
-                    verb => Activity {
-                        verb,
-                        start: self.world.epoch,
-                        until: Epoch::MAX, // open-ended
-                        // Zero for the verbs that don't want one.
-                        target: command.destination,
-                    },
-                };
-                if next.verb != current.verb || next.target != current.target {
-                    self.world.activities.set(player, next);
-                }
-            }
-
-            // Waiting: an idle player rests through the coming day. The
-            // horizon sits one day past whatever this tick advances to,
-            // so a held wait outlives each day's advance (no expiring and
-            // re-arming every day, which read as a one-frame pause) and
-            // resolves one day after the waiting stops.
-            if command.wait {
-                let horizon = self.world.epoch + 1 + command.advance_time as u64;
-                let activity = self.world.activities.get_mut(player);
-                match activity.verb {
-                    ActivityVerb::Idle => {
-                        *activity = Activity {
-                            verb: ActivityVerb::Rest,
-                            start: self.world.epoch,
-                            until: horizon,
-                            ..Activity::default()
-                        };
-                    }
-                    // Extend a finite rest; an open-ended one (until MAX,
-                    // ordered explicitly) absorbs the max unchanged.
-                    ActivityVerb::Rest => {
-                        activity.until = activity.until.max(horizon);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Removal. Stale ids parse fine and fail the liveness check — a
-        // click raced a death.
-        if self.world.ids.is_alive(command.remove) {
-            self.world.ids.mark_despawn(command.remove);
-            self.report_death(command.remove);
-            self.world.sweep();
-        }
-
-        if self.world.ids.is_alive(command.femalify) {
-            self.world
-                .vars
-                .set(&self.world.ids, command.femalify, Var::Gender, 0.0);
-        }
-
-        // Time. A request, not an imperative: declined outright when the
-        // player isn't occupying the time that would pass.
-        let day_passes = command.advance_time && time_may_flow(&self.world);
-        if day_passes {
-            self.world.epoch.advance();
-        }
-
-        // The entity pass: one uniform loop over every live entity — no
-        // kinds — where each runs every check, GPU-style, written from
-        // the entity's point of view. Checks gate themselves, on the day
-        // advancing (right now, all of them) or on a set-membership bit,
-        // and only where a check genuinely doesn't apply. Death reactions
-        // run between mark and sweep, while the corpse's relations are
-        // still queryable.
-        let entities: Vec<_> = self.world.ids.iter_alive().collect();
-        for &this in &entities {
-            let is_player = this == player.unwrap_or_default();
-            let is_person = self.world.ids.in_set(this, Set::People);
-
-            // Resolve an activity that came due — anything can be doing
-            // something, not just people. Completion effects go here as
-            // verbs gain them.
-            if day_passes {
-                let activity = self.world.activities.get(this);
-                if activity.until <= self.world.epoch {
-                    self.world.activities.reset(this);
-                }
-            }
-
-            // Travel: one cell per day toward the target. Stateless —
-            // nobody stores a route; each step re-asks from the current
-            // cell, so retargeting and detours cost nothing extra.
-            if day_passes {
-                let activity = *self.world.activities.get(this);
-                if activity.verb == ActivityVerb::Travel {
-                    let pos: CellPos = self.world.uvars.get(&self.world.ids, this, UVar::Position);
-                    let next = self
-                        .pathfinding
-                        .next_step(&self.world.map, pos, activity.target);
-                    if next == CellPos::default() {
-                        // Already there, or no way there: the journey ends.
-                        self.world.activities.reset(this);
-                    } else {
-                        move_entity(&mut self.world, this, pos, next);
-                        if next == activity.target {
-                            self.world.activities.reset(this);
-                        }
-                    }
-                }
-            }
-
-            // People randomly travel if idle. Gated on the day like every
-            // other roll: the rng is world state, so drawing from it on
-            // dayless ticks would fork histories that share a command
-            // stream.
-            if day_passes
-                && !is_player
-                && is_person
-                && self.world.activities.get(this).verb == ActivityVerb::Idle
-                && self.world.rng.chance(0.01)
-            {
-                // Pick a random city and travel to it. Picking the city
-                // they're already in is a valid draw — the journey just
-                // resolves on its first step.
-                let count = self.world.map.anchors().len();
-                if count > 0 {
-                    let pick = self.world.rng.next_u64() as usize % count;
-                    let (_, target) = self.world.map.anchors()[pick];
-                    self.world.activities.set(
-                        this,
-                        Activity {
-                            verb: ActivityVerb::Travel,
-                            start: self.world.epoch,
-                            until: Epoch::MAX, // open-ended, ends on arrival
-                            target,
-                        },
-                    );
-                }
-            }
-
-            // On birthdays, roll the mortality ramp. Only people age.
-            if day_passes && is_person && is_birthday(&self.world, this) {
-                let hazard = (age(&self.world, this) as f32 - MORTALITY_AGE) / MORTALITY_SPAN;
-                if self.world.rng.chance(hazard) {
-                    self.world.ids.mark_despawn(this);
-                    self.report_death(this);
-                }
-            }
-        }
-        self.world.sweep();
-
-        Output {
-            forced_paused: !time_may_flow(&self.world),
-        }
-    }
-
-    /// Placeholder death reaction: console obituary. Runs before the sweep
-    /// so it can still read the deceased's name and marriages.
-    fn report_death(&self, id: EntityId) {
-        let world = &self.world;
-        let name = world.names.get(&world.ids, id);
-        // Marriage is declared one-way in the data; look both directions.
-        let spouses: Vec<&str> = world
-            .relations
-            .get_related_via(id, Relation::Married)
-            .map(|(other, _)| other)
-            .chain(
-                world
-                    .relations
-                    .get_related_to_via(id, Relation::Married)
-                    .map(|(other, _)| other),
-            )
-            .map(|other| world.names.get(&world.ids, other))
-            .collect();
-        if spouses.is_empty() {
-            println!("{}: {name} has died.", Date::of(self.world.epoch));
-        } else {
-            println!(
-                "{}: {name} has died, survived by {}.",
-                Date::of(self.world.epoch),
-                spouses.join(", ")
-            );
+            interaction: None,
         }
     }
 
@@ -404,6 +94,30 @@ impl Game {
             let idle = world.activities.get(player).verb == ActivityVerb::Idle;
             data.bind_global("PLAYER_BUTTON", if idle { "Rest" } else { "Stop" });
             data.bind_global("PLAYER_ACTION", if idle { "rest" } else { "stop" });
+        }
+
+        // The interaction window: $INTERACTION is bound only while one
+        // is open, which is what shows the panel.
+        if let Some(interaction) = &self.interaction {
+            data.bind_global("INTERACTION", "yes");
+            data.bind_global("INT_TITLE", &interaction.title);
+            data.bind_global("INT_TEXT", &interaction.text);
+            data.begin_list("choices");
+            for (index, choice) in interaction.choices.iter().enumerate() {
+                data.begin_row();
+                data.bind("INDEX", &index.to_string());
+                data.bind(
+                    "ENABLED",
+                    if choice.disabled.is_empty() { "yes" } else { "no" },
+                );
+                // Disabled elements sense nothing, so a tooltip can't
+                // carry the reason: fold it into the caption.
+                let caption = match choice.disabled.is_empty() {
+                    true => choice.text.clone(),
+                    false => format!("{} — {}", choice.text, choice.disabled),
+                };
+                data.bind("CHOICE", &caption);
+            }
         }
 
         data.begin_list("people");
@@ -550,6 +264,7 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tick::{Command, tick};
 
     const TEST_CAST: &str = r#"
         settlement = { id = v name = "Wicstow" }
@@ -574,6 +289,7 @@ mod tests {
         Game {
             world,
             pathfinding: Pathfinding::default(),
+            interaction: None,
         }
     }
 
@@ -588,9 +304,9 @@ mod tests {
     /// One in-game day, forced through regardless of the player (tests that
     /// exercise the sim, not the decline rule).
     fn rest_and_tick_days(game: &mut Game, days: u64) {
-        game.tick(command("rest"));
+        tick(game, command("rest"));
         for _ in 0..days {
-            game.tick(Command::advance_time());
+            tick(game, Command::advance_time());
         }
     }
 
@@ -599,18 +315,18 @@ mod tests {
         let mut game = game();
 
         // Fresh game: the player is idle, so the sim declines time.
-        game.tick(Command::advance_time());
-        game.tick(Command::advance_time());
+        tick(&mut game, Command::advance_time());
+        tick(&mut game, Command::advance_time());
         assert_eq!(game.world.epoch, START_EPOCH);
 
         // Resting occupies the player: days pass.
-        game.tick(command("rest"));
-        game.tick(Command::advance_time());
+        tick(&mut game, command("rest"));
+        tick(&mut game, Command::advance_time());
         assert_eq!(game.world.epoch, Epoch(START_EPOCH.0 + 1));
 
         // Stopping goes idle again: declined again.
-        game.tick(command("stop"));
-        game.tick(Command::advance_time());
+        tick(&mut game, command("stop"));
+        tick(&mut game, Command::advance_time());
         assert_eq!(game.world.epoch, Epoch(START_EPOCH.0 + 1));
     }
 
@@ -631,18 +347,18 @@ mod tests {
     fn dead_player_halts_time_for_good() {
         let mut game = game();
         let player = game.world.tags.lookup("player").unwrap();
-        game.tick(command("rest"));
-        game.tick(Command {
+        tick(&mut game, command("rest"));
+        tick(&mut game, Command {
             remove: player,
             ..Command::default()
         });
 
         let epoch = game.world.epoch;
-        game.tick(Command::advance_time());
+        tick(&mut game, Command::advance_time());
         assert_eq!(game.world.epoch, epoch);
         // Commanding the void warns and does nothing.
-        game.tick(command("rest"));
-        game.tick(Command::advance_time());
+        tick(&mut game, command("rest"));
+        tick(&mut game, Command::advance_time());
         assert_eq!(game.world.epoch, epoch);
     }
 
@@ -692,19 +408,19 @@ mod tests {
 
         // The zero command and garbage are no-ops; the sim only moves on
         // fields an action actually set.
-        game.tick(Command::default());
-        game.tick(command("frobnicate 12"));
-        game.tick(command("remove not-an-id"));
+        tick(&mut game, Command::default());
+        tick(&mut game, command("frobnicate 12"));
+        tick(&mut game, command("remove not-an-id"));
         assert_eq!(game.world.epoch, START_EPOCH);
         assert_eq!(game.world.sets.iter(Set::People).count(), 3);
 
         // The exact strings the UI script emits, ids via Display.
-        game.tick(command(&format!("remove {player}")));
+        tick(&mut game, command(&format!("remove {player}")));
         assert!(!game.world.ids.is_alive(player));
         assert_eq!(game.world.sets.iter(Set::People).count(), 2);
 
         // A stale id parses fine and does nothing.
-        game.tick(command(&format!("remove {player}")));
+        tick(&mut game, command(&format!("remove {player}")));
         assert_eq!(game.world.sets.iter(Set::People).count(), 2);
     }
 
@@ -718,12 +434,12 @@ mod tests {
 
         // The exact string a board click produces. The order lands the
         // same tick; walking starts with the days.
-        game.tick(command(&format!("travel {destination}")));
+        tick(&mut game, command(&format!("travel {destination}")));
         assert_eq!(game.world.activities.get(player).verb, ActivityVerb::Travel);
 
         // One day, one cell: onto the road, out of Wicstow — both halves of
         // place move together.
-        game.tick(Command::advance_time());
+        tick(&mut game, Command::advance_time());
         let pos: CellPos = game
             .world
             .uvars
@@ -736,8 +452,8 @@ mod tests {
 
         // Two more days reach Hamtun: position on its anchor, LocatedIn
         // mirroring it, the journey resolved back to Idle.
-        game.tick(Command::advance_time());
-        game.tick(Command::advance_time());
+        tick(&mut game, Command::advance_time());
+        tick(&mut game, Command::advance_time());
         let pos: CellPos = game
             .world
             .uvars
@@ -751,7 +467,7 @@ mod tests {
 
         // Arrived and idle: the sim declines further time.
         let epoch = game.world.epoch;
-        game.tick(Command::advance_time());
+        tick(&mut game, Command::advance_time());
         assert_eq!(game.world.epoch, epoch);
     }
 
