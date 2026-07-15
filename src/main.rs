@@ -170,6 +170,8 @@ struct AppCommand {
     toggle_pause: bool,
     /// Map pan intent, ±1 per axis; zero = leave the camera alone.
     pan: mq::Vec2,
+    /// Map zoom intent, ±1 (in/out); zero = leave the zoom alone.
+    zoom: f32,
     /// The sim's share of the command.
     game: game::Command,
 }
@@ -195,6 +197,12 @@ fn gather_keyboard(command: &mut AppCommand, forced_paused: bool) {
     if mq::is_key_down(mq::KeyCode::D) {
         command.pan.x += 1.0;
     }
+    if mq::is_key_down(mq::KeyCode::Q) {
+        command.zoom += 1.0;
+    }
+    if mq::is_key_down(mq::KeyCode::E) {
+        command.zoom -= 1.0;
+    }
     if mq::is_key_down(mq::KeyCode::LeftShift) {
         command.game.wait = true;
     }
@@ -218,43 +226,63 @@ impl AppCommand {
     }
 }
 
-/// The map layer's viewport: a pan position driven by WASD, in logical
-/// points, wrapped around the real `mq::Camera2D` both directions go
-/// through — drawing (`set_camera`) and picking (`screen_to_world`) use
-/// the same lens, so they can't disagree. Velocity chases the keys'
-/// intent through exponential smoothing, so panning eases in and out
-/// instead of snapping.
+/// The map layer's viewport: a pan position driven by WASD and a zoom
+/// driven by Q/E, in logical points, wrapped around the real
+/// `mq::Camera2D` both directions go through — drawing (`set_camera`)
+/// and picking (`screen_to_world`) use the same lens, so they can't
+/// disagree. Velocities chase the keys' intent through exponential
+/// smoothing, so panning and zooming ease in and out instead of
+/// snapping.
 #[derive(Default)]
 struct MapCamera {
     camera: mq::Camera2D,
+    /// The world point at the center of the screen — also the fixed
+    /// point the zoom scales around.
     pos: mq::Vec2,
     velocity: mq::Vec2,
+    /// Zoom as a log2 scale: 0 = 1:1, 1 = twice as close, -1 = half.
+    /// The zoom pivots on the screen center, which `pos` tracks.
+    zoom_level: f32,
+    zoom_velocity: f32,
     /// Side of one map cell in world points, from conf.txt. Board
     /// geometry lives on the lens so drawing and picking share it.
     tile_size: f32,
 }
 
 impl MapCamera {
-    /// Full pan speed, logical points per second.
+    /// Full pan speed, logical points per second on screen (world speed
+    /// shrinks as the zoom closes in, so the feel stays constant).
     const PAN_SPEED: f32 = 700.0;
+    /// Full zoom speed, doublings per second.
+    const ZOOM_SPEED: f32 = 1.5;
+    /// Zoom bounds, in doublings either side of 1:1.
+    const ZOOM_MIN: f32 = -2.0;
+    const ZOOM_MAX: f32 = 3.0;
     /// Smoothing rate: higher = snappier. ~1/RATE seconds to mostly catch up.
     const RATE: f32 = 10.0;
 
-    /// Integrate one frame: the command's pan intent is the target
-    /// direction; this never reads input devices itself. Also refits the
-    /// lens to the current window: a view logical-points wide, y flipped
-    /// to run down, top-left at `pos`.
+    /// Integrate one frame: the command's pan and zoom intents are the
+    /// target directions; this never reads input devices itself. Also
+    /// refits the lens to the current window: a view logical-points wide
+    /// at 1:1 zoom, y flipped to run down, centered on `pos`.
     fn update(&mut self, command: &AppCommand, dt: f32) {
-        let target = command.pan.normalize_or_zero() * Self::PAN_SPEED;
-        // Frame-rate independent lerp toward the target velocity.
+        // Frame-rate independent lerp toward the target velocities.
         let blend = 1.0 - (-dt * Self::RATE).exp();
+
+        let zoom_target = command.zoom.clamp(-1.0, 1.0) * Self::ZOOM_SPEED;
+        self.zoom_velocity += (zoom_target - self.zoom_velocity) * blend;
+        self.zoom_level =
+            (self.zoom_level + self.zoom_velocity * dt).clamp(Self::ZOOM_MIN, Self::ZOOM_MAX);
+        let scale = self.zoom_level.exp2();
+
+        let target = command.pan.normalize_or_zero() * Self::PAN_SPEED;
         self.velocity += (target - self.velocity) * blend;
-        self.pos += self.velocity * dt;
+        self.pos += self.velocity * dt / scale;
 
         let dpi = mq::screen_dpi_scale();
         let logical = mq::vec2(mq::screen_width(), mq::screen_height()) / dpi;
-        self.camera.target = self.pos + logical * 0.5;
-        self.camera.zoom = mq::vec2(2.0 / logical.x, -2.0 / logical.y);
+        self.camera.target = self.pos;
+        self.camera.zoom = mq::vec2(2.0 / logical.x, -2.0 / logical.y) * scale;
     }
 
     /// The cell under a screen point (`mouse_position()` units), through
@@ -382,9 +410,16 @@ async fn amain(conf: AppConf) {
 
     let mut game = game::Game::new();
     let mut clock = Clock::default();
-    let mut camera = MapCamera {
-        tile_size: conf.map_tile_size,
-        ..Default::default()
+    // Open with the middle of the board in the middle of the screen.
+    let mut camera = {
+        let map = game.draw_map();
+        let map_center = mq::vec2(map.width as f32, map.height as f32);
+        let pos = map_center * conf.map_tile_size * 0.5 + mq::vec2(MARGIN, MARGIN);
+        MapCamera {
+            tile_size: conf.map_tile_size,
+            pos,
+            ..Default::default()
+        }
     };
     // Last tick's report, carried across the frame boundary: input at the
     // top of a frame reacts to what the sim said last.
@@ -485,16 +520,6 @@ async fn amain(conf: AppConf) {
         // the same one-frame pipeline, no special path into the sim.
         if mq::is_mouse_button_pressed(mq::MouseButton::Left) && !output.is_pointer_over_ui() {
             let destination = camera.pick_cell(mq::mouse_position().into());
-            // Temporary pick diagnostics: every unit assumption in one line.
-            println!(
-                "pick {:?} | mouse {:?} dpi {} screen {:?} camera.pos {:?} world {:?}",
-                destination,
-                mq::mouse_position(),
-                mq::screen_dpi_scale(),
-                (mq::screen_width(), mq::screen_height()),
-                camera.pos,
-                camera.camera.screen_to_world(mq::mouse_position().into()),
-            );
             if destination != game::CellPos::default() {
                 pending_actions.push(format!("travel {destination}"));
             }

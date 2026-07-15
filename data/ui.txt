@@ -27,8 +27,24 @@ panel = {
 	}
 }
 
+# Bottom panel
 panel = {
-	# Centered on screen (fraction of the screen, 0.5 = middle)
+	id = "bottom_panel"
+
+	x_pos = 0
+	y_pos = 0.99
+
+	width = 100%
+	height = 60
+
+	# Temporary buttons just to have a filled up bottom panel
+	row = {
+		button = { text = "Button #1" }
+		button = { text = "Button #2" }
+	}
+}
+
+panel = {
 	x_pos = 0.99
 	y_pos = 0.5
 
@@ -38,6 +54,8 @@ panel = {
 
 	align = center
 	border = yes
+
+	visible = no
 
 	heading = { text = "IMPERIUM" tooltip = "Test" }
 

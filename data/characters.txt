@@ -39,6 +39,11 @@ settlement = {
 	name = "Meretun"
 }
 
+settlement = {
+	id = halford
+	name = "Halford"
+}
+
 character = {
 	id = cenred
 	name = "Cenred"
