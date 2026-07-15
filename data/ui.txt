@@ -11,13 +11,16 @@
 panel = {
 	x_pos = 0.5
 	y_pos = 0.5
-	width = 34%
-	min_width = 380
+	width = 800
 	border = yes
 	visible = "$INTERACTION"
 
 	heading = "$INT_TITLE"
-	label = { text = "$INT_TEXT" wrap = yes }
+	label = {
+		text = "$INT_TEXT"
+		wrap = yes
+		width = 100%
+	}
 	list = {
 		id = "choices"
 		width = grow

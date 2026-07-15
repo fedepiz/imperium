@@ -7,6 +7,7 @@
 use crate::defs::Relation;
 use crate::world::{Activity, ActivityVerb, Epoch, World};
 use entities::EntityId;
+use std::fmt::Write as _; // import without risk of name clashing
 
 /// A choice's consequence: mutate the world as needed and hand back the
 /// next interaction. Chaining to another screen is just returning it;
@@ -52,13 +53,43 @@ fn company_names(world: &World, place: EntityId) -> Vec<&str> {
         .collect()
 }
 
+fn describe_person(out: &mut String, this: EntityId, world: &World) {
+    if this == EntityId::NULL {
+        out.push_str("no one");
+        return;
+    }
+
+    let name = world.names.get(this);
+    write!(out, "{}", name).unwrap();
+    if let Some((master, _)) = world
+        .relations
+        .get_related_to_via(this, Relation::SwornTo)
+        .next()
+    {
+        let name = world.names.get(master);
+        write!(out, ", who is sworn to {name}").unwrap();
+    }
+}
+
 /// The screen raised when the player's travel resolves at a settlement.
 pub fn arrival(world: &mut World, params: ChoiceParams) -> Option<Interaction> {
     let name = world.names.get(params.target);
+
+    let mut text = format!("You arrive at {name}.");
+    let (ruler, _) = world
+        .relations
+        .get_related_to_via(params.target, Relation::Rules)
+        .next()
+        .unwrap_or_default();
+
+    text.push_str(" The settlement is ruled by ");
+    describe_person(&mut text, ruler, world);
+    text.push('.');
+
     let deserted = company_names(world, params.target).is_empty();
     Some(Interaction {
         title: name.to_string(),
-        text: format!("You arrive at {name} as the day ends."),
+        text,
         choices: vec![
             Choice {
                 text: "Seek out company".to_string(),
