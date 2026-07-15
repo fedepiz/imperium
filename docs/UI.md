@@ -140,6 +140,17 @@ keeps its own ground), role font sizes (`heading_size`, `section_size`,
 `text_size`, `tooltip_size`), and container metrics (`padding`, `gap`,
 `corner_radius`).
 
+## The board (out of band)
+
+The map layer under the panels is not script UI: the harness draws it
+directly from the sim's render model, and clicks on it never touch the
+layout engine. A left-click that isn't over any UI surface (the engine's
+`is_pointer_over_ui` decides) is a *board pick*: the harness inverts the
+map camera to a cell, asks the game what entity sits there
+(`entity_at`), and turns the answer into an ordinary action string
+(`travel <cell>`) that rides the same pipeline as any button press. The
+sim never sees a click — only actions.
+
 ## Implementor's view (concepts only)
 
 - **Compile once, walk flat.** Scripts are parsed and compiled to a

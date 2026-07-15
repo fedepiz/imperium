@@ -32,17 +32,21 @@ pub enum ActivityVerb {
     #[default]
     Idle,
     Rest,
+    Travel,
 }
 
 /// What an entity is doing: a command extended in time, a superset of the
-/// verbs' fields (a `target` arrives with the first verb that wants one).
-/// ZII: the zero activity is Idle. `until` is the epoch it resolves at;
-/// 0 = open-ended (never resolves — it ends only by being replaced).
+/// verbs' fields — `target` is Travel's, zero for the verbs that don't
+/// want one. ZII: the zero activity is Idle. `until` is the epoch it
+/// resolves at; 0 = open-ended (never resolves — it ends only by being
+/// replaced, or, for Travel, by arrival).
 #[derive(Clone, Copy, Default)]
 pub struct Activity {
     pub verb: ActivityVerb,
     pub start: Epoch,
     pub until: Epoch,
+    /// Where Travel is headed; the zero cell = no destination.
+    pub target: crate::map::CellPos,
 }
 
 /// THE authoritative sim state: every piece of world state is a field here,
@@ -139,7 +143,7 @@ mod tests {
         world
             .relations
             .set(&world.ids, doomed, RelationId(0), widow, 1.0);
-        let name = world.names.add("Commodus");
+        let name = world.names.add("Cuthbert");
         world.names.set(&world.ids, doomed, name);
 
         world.ids.mark_despawn(doomed);
@@ -149,7 +153,7 @@ mod tests {
         assert!(world.sets.contains(&world.ids, SetId(0), doomed));
         assert_eq!(world.tags.lookup("emperor"), Some(doomed));
         assert_eq!(world.relations.get_related(doomed).count(), 1);
-        assert_eq!(world.names.get(&world.ids, doomed), "Commodus");
+        assert_eq!(world.names.get(&world.ids, doomed), "Cuthbert");
 
         world.sweep();
 
@@ -173,7 +177,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let name = world.names.add("Sulla");
+        let name = world.names.add("Sigered");
         world.names.set(&world.ids, stale, name);
         world.ids.mark_despawn(stale);
         world.sweep();

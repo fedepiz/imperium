@@ -36,14 +36,13 @@ The working essence, more important than any particular century:
   the raw material sagas are made of. Deeds outlive men; reputation is a
   currency.
 
-Candidate settings that fit the essence (not yet committed):
-
-- Post-Roman Britain (the current working flavor — the UI mocks say
-  "Dumnonia, 493" and the visual language is manuscript vellum and
-  oxblood).
-- Late antiquity more broadly.
-- Bronze Age Near East / Mycenaean world.
-- Early or pre-Roman Italy.
+The setting is **committed: sub-Roman Britain**, late 5th century —
+the migration period, Britons and incoming Anglo-Saxons after the
+legions left. The UI mocks say "Dumnonia, 493"; the visual language
+is manuscript vellum and oxblood; names and places are Anglo-Saxon
+(for now made up, e.g. Cenred of Wealdham). Other eras that fit the
+essence (late antiquity broadly, the Mycenaean world, pre-Roman
+Italy) informed the pillars but are no longer candidates.
 
 Despite the code-name, the setting is **not** imperial Rome itself —
 Rome is the shadow, not the stage.
@@ -88,6 +87,13 @@ cells, and the map is the authored truth about space.
 - Cell scale is tentatively 5–10 km — a few road cells per day of
   walking, so multi-day journeys show progress each tick. Not yet
   committed.
+- Travel: an activity whose target is a *cell* — ordering
+  travel to a settlement means ordering travel to its anchor. One cell
+  per day, along the cheapest route; nobody remembers a route (each day
+  re-asks from where they stand, so redirection and interruption are
+  free), and arriving — or finding no way there — ends the activity,
+  which for the player also pauses time. Clicking a settlement on the
+  map is how the order is given.
 
 ## Scale and texture
 
@@ -103,7 +109,6 @@ cells, and the map is the authored truth about space.
 
 ## Open questions
 
-- Which setting to commit to (post-Roman Britain currently leading).
 - The map cell scale (5–10 km is the working guess), and with it how
   many cells a day's travel covers.
 - What the player's verb set is at each station of life (retainer,

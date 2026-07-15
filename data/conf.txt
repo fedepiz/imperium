@@ -1,0 +1,17 @@
+# Launch configuration: knobs the window needs before it exists.
+# Missing keys (or this whole file) fall back to built-in defaults;
+# junk warns and the default stands.
+
+# Rendering backend on macOS: metal or opengl. Metal presents display-
+# synced (no tearing); the opengl path leaves vsync off by design.
+apple_api = metal
+
+# Vertical sync on the GL platforms (Windows/Linux): yes or no. A hint
+# to the driver; macOS ignores it (see apple_api).
+vsync = yes
+
+# Window size in points, width then height.
+resolution = { 1600 900 }
+
+# Side of one map cell on screen, in points.
+map_tile_size = 16

@@ -3,6 +3,7 @@ mod defs;
 mod draw_map;
 mod game;
 mod map;
+mod pathfinding;
 mod world;
 
 pub use date::*;
@@ -10,4 +11,5 @@ pub use defs::*;
 pub use draw_map::*;
 pub use game::*;
 pub use map::*;
+pub use pathfinding::*;
 pub use world::*;

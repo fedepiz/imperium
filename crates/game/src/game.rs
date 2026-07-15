@@ -6,6 +6,7 @@ use ui::ir;
 use crate::date::{DAYS_PER_YEAR, Date, days_between};
 use crate::defs::{Relation, Set, UVar, Var, init_world};
 use crate::map::{CellPos, Map};
+use crate::pathfinding::Pathfinding;
 use crate::world::{Activity, ActivityVerb, Epoch, World};
 use entities::*;
 
@@ -30,6 +31,9 @@ pub struct Command {
     /// Order the player into this activity; None = no order given.
     /// Stopping is not its own thing: an order of Idle is the stop.
     pub activity: Option<ActivityVerb>,
+    /// Where an ordered Travel goes; zero = nowhere. Only meaningful
+    /// alongside `activity = Some(Travel)`.
+    pub destination: CellPos,
     /// Despawn this entity; null = nobody.
     pub remove: EntityId,
     /// Set this entity's gender to female; null = nobody.
@@ -48,27 +52,29 @@ pub struct Output {
 }
 
 impl Command {
-    /// UI action protocol: `<verb> [args…]`, with entity ids packed via
-    /// `EntityId::to_bits` (the `Display`/`FromStr` round trip). Actions
-    /// fold into an existing command — several per tick merge, each
-    /// setting its own fields — and anything malformed warns and sets
-    /// nothing.
+    /// UI action protocol: `<verb> [args…]`, with entity ids and cells
+    /// packed via their `to_bits` (the `Display`/`FromStr` round trip).
+    /// Actions fold into an existing command — several per tick merge,
+    /// each setting its own fields — and anything malformed warns and
+    /// sets nothing.
     pub fn parse(&mut self, action: &str) {
         let mut parts = action.split_whitespace();
         let verb = parts.next().unwrap_or_default();
-        let mut target = || match parts.next().and_then(|arg| arg.parse::<EntityId>().ok()) {
-            Some(id) => id,
-            None => {
-                eprintln!("malformed ui action: {action}");
-                EntityId::NULL
-            }
-        };
+        let arg = parts.next().unwrap_or_default();
         match verb {
             "advance_time" => self.advance_time = true,
             "rest" => self.activity = Some(ActivityVerb::Rest),
             "stop" => self.activity = Some(ActivityVerb::Idle),
-            "remove" => self.remove = target(),
-            "femalify" => self.femalify = target(),
+            "travel" => {
+                let destination: CellPos = parse_arg(arg, action);
+                // Travelling to nowhere isn't an order.
+                if destination != CellPos::default() {
+                    self.activity = Some(ActivityVerb::Travel);
+                    self.destination = destination;
+                }
+            }
+            "remove" => self.remove = parse_arg(arg, action),
+            "femalify" => self.femalify = parse_arg(arg, action),
             _ => eprintln!("unhandled ui action: {action}"),
         }
     }
@@ -80,8 +86,24 @@ impl Command {
     }
 }
 
+/// An action's packed argument (`EntityId`, `CellPos`, …) via the
+/// `FromStr` half of the protocol; malformed warns and reads as the zero
+/// value ("nobody", "nowhere"), which every consumer treats as absent.
+fn parse_arg<T: core::str::FromStr + Default>(arg: &str, action: &str) -> T {
+    match arg.parse::<T>() {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("malformed ui action: {action}");
+            T::default()
+        }
+    }
+}
+
 pub struct Game {
     world: World,
+    /// Derived route memory, not world state: outside the save/clone
+    /// unit, rebuilt from nothing.
+    pathfinding: Pathfinding,
 }
 
 // Derivations: computed from the world on the fly, never stored, never
@@ -101,6 +123,27 @@ fn is_birthday(world: &World, id: EntityId) -> bool {
     days_alive(world, id) % DAYS_PER_YEAR == 0
 }
 
+/// The one mover: sets the spatial truth (`Position`) and keeps its
+/// logical mirror (`LocatedIn`) in step across blob boundaries — the
+/// contract the bootstrap's `located` handling establishes.
+fn move_entity(world: &mut World, id: EntityId, from: CellPos, to: CellPos) {
+    world.uvars.set(&world.ids, id, UVar::Position, to);
+    let old = world.map.cell(from).settlement;
+    let new = world.map.cell(to).settlement;
+    if old != new {
+        // Removal (weight 0) is a no-op when there's no such edge, so a
+        // null `old` (stepping off a road) needs no special case.
+        world
+            .relations
+            .set(&world.ids, id, Relation::LocatedIn, old, 0.0);
+        if new != EntityId::NULL {
+            world
+                .relations
+                .set(&world.ids, id, Relation::LocatedIn, new, 1.0);
+        }
+    }
+}
+
 /// The internal half of the pause story: the sim declines to step while
 /// the player is idle or absent. (The external half — whether
 /// `AdvanceTime` gets pumped at all — is the clock's, outside the sim.)
@@ -118,7 +161,10 @@ impl Game {
         let characters = std::fs::read_to_string("data/characters.txt").unwrap_or_default();
         let map = std::fs::read_to_string("data/map.txt").unwrap_or_default();
         bootstrap(&mut world, &characters, &map);
-        Game { world }
+        Game {
+            world,
+            pathfinding: Pathfinding::default(),
+        }
     }
 
     /// The sole entry point that mutates the sim: one command per tick, a
@@ -129,21 +175,26 @@ impl Game {
     /// here.
     pub fn tick(&mut self, command: Command) -> Output {
         // The player's orders: an ordered activity replaces the current
-        // one (an order of Idle is the stop); no order, no change.
-        if let Some(player) = self.world.tags.lookup("player") {
-            let current_verb = self.world.activities.get(player).verb;
-            let next_verb = command.activity.unwrap_or(current_verb);
-            if next_verb != current_verb {
-                // Start activity
-                let activity = match next_verb {
-                    ActivityVerb::Idle => Activity::default(),
-                    verb => Activity {
-                        verb,
-                        start: self.world.epoch,
-                        until: Epoch(0), // open-ended
-                    },
-                };
-                self.world.activities.set(player, activity);
+        // one (an order of Idle is the stop); no order, no change. Only
+        // a genuinely new activity — different verb or target — starts,
+        // so repeating an order doesn't restart its clock, while
+        // retargeting an ongoing travel does take effect.
+        if let (Some(next_verb), Some(player)) =
+            (command.activity, self.world.tags.lookup("player"))
+        {
+            let current = *self.world.activities.get(player);
+            let next = match next_verb {
+                ActivityVerb::Idle => Activity::default(),
+                verb => Activity {
+                    verb,
+                    start: self.world.epoch,
+                    until: Epoch(0), // open-ended
+                    // Zero for the verbs that don't want one.
+                    target: command.destination,
+                },
+            };
+            if next.verb != current.verb || next.target != current.target {
+                self.world.activities.set(player, next);
             }
         }
 
@@ -184,6 +235,26 @@ impl Game {
                 let activity = self.world.activities.get(id);
                 if activity.until != Epoch(0) && activity.until <= self.world.epoch {
                     self.world.activities.reset(id);
+                }
+            }
+
+            // Travel: one cell per day toward the target. Stateless —
+            // nobody stores a route; each step re-asks from the current
+            // cell, so retargeting and detours cost nothing extra.
+            if day_passes {
+                let activity = *self.world.activities.get(id);
+                if activity.verb == ActivityVerb::Travel {
+                    let pos: CellPos = self.world.uvars.get(&self.world.ids, id, UVar::Position);
+                    let next = self.pathfinding.next_step(&self.world.map, pos, activity.target);
+                    if next == CellPos::default() {
+                        // Already there, or no way there: the journey ends.
+                        self.world.activities.reset(id);
+                    } else {
+                        move_entity(&mut self.world, id, pos, next);
+                        if next == activity.target {
+                            self.world.activities.reset(id);
+                        }
+                    }
                 }
             }
 
@@ -240,6 +311,20 @@ impl Game {
         crate::draw_map::build(&self.world)
     }
 
+    /// The general board pick: the entity a click on this cell lands on;
+    /// null = nothing there. Settlements for now (the cell's blob owner);
+    /// when picking people matters, whoever stands on the cell takes
+    /// precedence here.
+    pub fn entity_at(&self, pos: CellPos) -> EntityId {
+        self.world.map.cell(pos).settlement
+    }
+
+    /// Where an entity sits on the board; the zero cell = it has no
+    /// cells (or there's no such entity).
+    pub fn anchor(&self, id: EntityId) -> CellPos {
+        self.world.map.anchor(id)
+    }
+
     /// The per-frame bridge: dump the sim state the UI script binds to.
     /// Read-only, called once per render — never from inside `tick`. Binds
     /// only sim-owned globals; the external clock binds its own.
@@ -269,6 +354,16 @@ impl Game {
                 ActivityVerb::Idle => String::new(),
                 ActivityVerb::Rest => {
                     format!("· resting ({}d)", world.epoch.0 - activity.start.0)
+                }
+                ActivityVerb::Travel => {
+                    // Destinations are cells; a settlement's blob names it.
+                    let place = world.map.cell(activity.target).settlement;
+                    match world.ids.is_alive(place) {
+                        true => {
+                            format!("· travelling to {}", world.names.get(&world.ids, place))
+                        }
+                        false => "· travelling".to_string(),
+                    }
                 }
             };
             data.bind("ACTIVITY", &doing);
@@ -394,24 +489,29 @@ mod tests {
     use super::*;
 
     const TEST_CAST: &str = r#"
-        settlement = { id = v name = "Vicus" }
-        character = { id = a name = "Aulus" age = 20 tag = player married = b located = v }
-        character = { id = b name = "Betua" age = 30 located = v }
+        settlement = { id = v name = "Wicstow" }
+        settlement = { id = w name = "Hamtun" }
+        character = { id = a name = "Alfric" age = 20 tag = player married = b located = v }
+        character = { id = b name = "Beorhtgifu" age = 30 located = v }
         character = { id = c name = "Methuselah" age = 95 }
     "#;
 
     const TEST_MAP: &str = "
         ~....
-        ~v#..
+        ~v##w
         ~....
         v = v
+        w = w
     ";
 
     fn game() -> Game {
         let mut world = init_world(7);
         world.epoch = START_EPOCH;
         bootstrap(&mut world, TEST_CAST, TEST_MAP);
-        Game { world }
+        Game {
+            world,
+            pathfinding: Pathfinding::default(),
+        }
     }
 
     /// A command built the way the harness builds them: parsed from a UI
@@ -455,7 +555,7 @@ mod tests {
     fn the_old_die_on_their_birthdays_and_the_young_do_not() {
         let mut game = game();
 
-        // Methuselah (95) is past certain death; Aulus (20) and Betua (30)
+        // Methuselah (95) is past certain death; Alfric (20) and Beorhtgifu (30)
         // are below the ramp. One year of days reaches everyone's birthday.
         rest_and_tick_days(&mut game, 360);
         assert_eq!(game.world.sets.iter(Set::People).count(), 2);
@@ -514,7 +614,7 @@ mod tests {
                 .map(|b| data.text(b.value))
                 .unwrap()
         };
-        assert_eq!(get("NAME"), "Aulus");
+        assert_eq!(get("NAME"), "Alfric");
         assert_eq!(get("AGE"), "20");
         assert_eq!(get("ACTIVITY"), "");
         // The ID binding round-trips back to the live entity.
@@ -543,5 +643,67 @@ mod tests {
         // A stale id parses fine and does nothing.
         game.tick(command(&format!("remove {player}")));
         assert_eq!(game.world.sets.iter(Set::People).count(), 2);
+    }
+
+    #[test]
+    fn travel_walks_the_road_and_arrival_halts_time() {
+        let mut game = game();
+        let player = game.world.tags.lookup("player").unwrap();
+        let vicus = game.entity_at(CellPos { x: 1, y: 1 });
+        let wick = game.entity_at(CellPos { x: 4, y: 1 });
+        let destination = game.anchor(wick);
+
+        // The exact string a board click produces. The order lands the
+        // same tick; walking starts with the days.
+        game.tick(command(&format!("travel {destination}")));
+        assert_eq!(
+            game.world.activities.get(player).verb,
+            ActivityVerb::Travel
+        );
+
+        // One day, one cell: onto the road, out of Wicstow — both halves of
+        // place move together.
+        game.tick(Command::advance_time());
+        let pos: CellPos = game.world.uvars.get(&game.world.ids, player, UVar::Position);
+        assert_eq!(pos, CellPos { x: 2, y: 1 });
+        assert_eq!(
+            game.world
+                .relations
+                .get(player, Relation::LocatedIn, vicus),
+            0.0
+        );
+
+        // Two more days reach Hamtun: position on its anchor, LocatedIn
+        // mirroring it, the journey resolved back to Idle.
+        game.tick(Command::advance_time());
+        game.tick(Command::advance_time());
+        let pos: CellPos = game.world.uvars.get(&game.world.ids, player, UVar::Position);
+        assert_eq!(pos, destination);
+        assert_eq!(
+            game.world.relations.get(player, Relation::LocatedIn, wick),
+            1.0
+        );
+        assert_eq!(game.world.activities.get(player).verb, ActivityVerb::Idle);
+
+        // Arrived and idle: the sim declines further time.
+        let epoch = game.world.epoch;
+        game.tick(Command::advance_time());
+        assert_eq!(game.world.epoch, epoch);
+    }
+
+    #[test]
+    fn travel_orders_parse_and_garbage_does_not() {
+        let mut command = Command::default();
+        command.parse(&format!("travel {}", CellPos { x: 4, y: 1 }));
+        assert_eq!(command.activity, Some(ActivityVerb::Travel));
+        assert_eq!(command.destination, CellPos { x: 4, y: 1 });
+
+        // Garbage and "nowhere" alike order nothing.
+        let mut command = Command::default();
+        command.parse("travel elsewhere");
+        command.parse("travel 0");
+        command.parse("travel");
+        assert_eq!(command.activity, None);
+        assert_eq!(command.destination, CellPos::default());
     }
 }

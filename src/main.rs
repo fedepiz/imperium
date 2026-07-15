@@ -5,14 +5,98 @@ use macroquad::prelude as mq;
 use ui::{ir, layout, run, style};
 
 fn main() {
-    let conf = mq::Conf {
-        window_title: "Imperium".to_string(),
-        window_width: 1600,
-        window_height: 900,
-        high_dpi: true,
+    let (window, conf) = load_conf();
+    macroquad::Window::from_config(window, amain(conf));
+}
+
+/// The launch knobs that outlive window creation and configure the app
+/// itself, conf.txt's other half (the window half is `mq::Conf`).
+#[derive(Clone, Copy)]
+struct AppConf {
+    /// Side of one map cell on screen, in world points.
+    map_tile_size: f32,
+}
+
+/// Launch knobs from `data/conf.txt` — the settings that must be known
+/// before the window exists (backend, vsync, resolution) plus the app's
+/// own ([`AppConf`]), tabula like all data. In the usual style, nothing
+/// here can fail: a missing file or key means the default below, junk
+/// warns and the default stands.
+fn load_conf() -> (mq::Conf, AppConf) {
+    use macroquad::miniquad::conf::{AppleGfxApi, Platform};
+
+    // Scratch arena for the parse; the tree dies with this function.
+    let arena = Arena::new();
+    let path = "data/conf.txt";
+    let source = std::fs::read_to_string(path).unwrap_or_default();
+    let parsed = tabula::parse(&arena, &source);
+    for error in parsed.errors {
+        eprintln!("{path}: {error}");
+    }
+    // A synthetic block over the file's roots, so the node accessors
+    // apply to the top level too.
+    let root = tabula::Node {
+        children: parsed.roots,
         ..Default::default()
     };
-    macroquad::Window::from_config(conf, amain());
+
+    // On macOS the opengl backend leaves vsync off by design (it paces
+    // frames with CVDisplayLink, which doesn't stop mid-scan swaps —
+    // visible tearing); metal presents display-synced. Kept switchable
+    // in data in case Metal misbehaves somewhere.
+    let apple_gfx_api = match root.get_text("apple_api") {
+        Some("metal") | None => AppleGfxApi::Metal,
+        Some("opengl") => AppleGfxApi::OpenGl,
+        Some(other) => {
+            eprintln!("{path}: unknown apple_api '{other}', using metal");
+            AppleGfxApi::Metal
+        }
+    };
+
+    // The GL platforms' vsync hint (Windows/Linux); macOS ignores it.
+    let swap_interval = match root.get_text("vsync") {
+        Some("yes") | None => 1,
+        Some("no") => 0,
+        Some(other) => {
+            eprintln!("{path}: unknown vsync '{other}', using yes");
+            1
+        }
+    };
+
+    // resolution = { width height }, in points.
+    let mut resolution = (1600, 900);
+    if let Some(node) = root.get("resolution") {
+        match node.children {
+            [w, h] if w.value.is_number && h.value.is_number => {
+                resolution = (w.value.number as i32, h.value.number as i32);
+            }
+            _ => eprintln!("{path}: resolution wants two numbers, using {resolution:?}"),
+        }
+    }
+
+    // Zero or negative would collapse or mirror the board.
+    let map_tile_size = match root.get_number("map_tile_size") {
+        Some(size) if size > 0.0 => size,
+        None => 48.0,
+        Some(bad) => {
+            eprintln!("{path}: map_tile_size {bad} is not positive, using 48");
+            48.0
+        }
+    };
+
+    let window = mq::Conf {
+        window_title: "Imperium".to_string(),
+        window_width: resolution.0,
+        window_height: resolution.1,
+        high_dpi: true,
+        platform: Platform {
+            apple_gfx_api,
+            swap_interval: Some(swap_interval),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    (window, AppConf { map_tile_size })
 }
 
 /// The external half of time: converts real seconds into `AdvanceTime`
@@ -131,13 +215,20 @@ impl AppCommand {
     }
 }
 
-/// The map layer's viewport state: a pan position driven by WASD, in
-/// logical points. Velocity chases the keys' intent through exponential
-/// smoothing, so panning eases in and out instead of snapping.
+/// The map layer's viewport: a pan position driven by WASD, in logical
+/// points, wrapped around the real `mq::Camera2D` both directions go
+/// through — drawing (`set_camera`) and picking (`screen_to_world`) use
+/// the same lens, so they can't disagree. Velocity chases the keys'
+/// intent through exponential smoothing, so panning eases in and out
+/// instead of snapping.
 #[derive(Default)]
 struct MapCamera {
+    camera: mq::Camera2D,
     pos: mq::Vec2,
     velocity: mq::Vec2,
+    /// Side of one map cell in world points, from conf.txt. Board
+    /// geometry lives on the lens so drawing and picking share it.
+    tile_size: f32,
 }
 
 impl MapCamera {
@@ -147,48 +238,60 @@ impl MapCamera {
     const RATE: f32 = 10.0;
 
     /// Integrate one frame: the command's pan intent is the target
-    /// direction; this never reads input devices itself.
+    /// direction; this never reads input devices itself. Also refits the
+    /// lens to the current window: a view logical-points wide, y flipped
+    /// to run down, top-left at `pos`.
     fn update(&mut self, command: &AppCommand, dt: f32) {
         let target = command.pan.normalize_or_zero() * Self::PAN_SPEED;
         // Frame-rate independent lerp toward the target velocity.
         let blend = 1.0 - (-dt * Self::RATE).exp();
         self.velocity += (target - self.velocity) * blend;
         self.pos += self.velocity * dt;
+
+        let dpi = mq::screen_dpi_scale();
+        let logical = mq::vec2(mq::screen_width(), mq::screen_height()) / dpi;
+        self.camera.target = self.pos + logical * 0.5;
+        self.camera.zoom = mq::vec2(2.0 / logical.x, -2.0 / logical.y);
+    }
+
+    /// The cell under a screen point (`mouse_position()` units), through
+    /// the same lens the map is drawn with. The negative quadrant — which
+    /// u32 can't say — reads as the zero cell, "nowhere"; anything beyond
+    /// the grid is the void to `Map::cell` anyway.
+    fn pick_cell(&self, point: mq::Vec2) -> game::CellPos {
+        let world = self.camera.screen_to_world(point);
+        let cell = (world - mq::vec2(MARGIN, MARGIN)) / self.tile_size;
+        if cell.x < 0.0 || cell.y < 0.0 {
+            return game::CellPos::default();
+        }
+        game::CellPos {
+            x: cell.x as u32,
+            y: cell.y as u32,
+        }
     }
 }
+
+/// Where the map's top-left sits with the camera at rest, world points.
+/// The tile size half of the board's geometry is `MapCamera::tile_size`.
+const MARGIN: f32 = 48.0;
 
 /// Rasterize the sim's map render-model, under the UI: plain rectangles
 /// and dots, every decision (colors, what has a dot) already made by the
 /// sim in `DrawMap`. World units are logical points; the camera maps them
 /// to the screen, y down like everything else.
 fn draw_map_layer(map: &game::DrawMap, camera: &MapCamera) {
-    const CELL_SIZE: f32 = 48.0;
-    /// Where the map's top-left sits with the camera at rest.
-    const MARGIN: f32 = 48.0;
+    mq::set_camera(&camera.camera);
 
-    let dpi = mq::screen_dpi_scale();
-    let logical = mq::vec2(mq::screen_width(), mq::screen_height()) / dpi;
-    mq::set_camera(&mq::Camera2D {
-        target: camera.pos + logical * 0.5,
-        // A view logical-points wide, y flipped to run down.
-        zoom: mq::vec2(2.0 / logical.x, -2.0 / logical.y),
-        ..Default::default()
-    });
-
+    let tile = camera.tile_size;
     let color = |c: game::Rgba| mq::Color::new(c.r, c.g, c.b, c.a);
     for y in 0..map.height {
         for x in 0..map.width {
             let cell = map.cells[(y * map.width + x) as usize];
-            let px = MARGIN + x as f32 * CELL_SIZE;
-            let py = MARGIN + y as f32 * CELL_SIZE;
-            mq::draw_rectangle(px, py, CELL_SIZE, CELL_SIZE, color(cell.fill));
+            let px = MARGIN + x as f32 * tile;
+            let py = MARGIN + y as f32 * tile;
+            mq::draw_rectangle(px, py, tile, tile, color(cell.fill));
             if cell.dot.a > 0.0 {
-                mq::draw_circle(
-                    px + CELL_SIZE * 0.5,
-                    py + CELL_SIZE * 0.5,
-                    CELL_SIZE * 0.3,
-                    color(cell.dot),
-                );
+                mq::draw_circle(px + tile * 0.5, py + tile * 0.5, tile * 0.3, color(cell.dot));
             }
         }
     }
@@ -245,7 +348,7 @@ impl ImageMap {
     }
 }
 
-async fn amain() {
+async fn amain(conf: AppConf) {
     let mut layout = layout::Engine::default();
 
     let mut font = mq::load_ttf_font("assets/fonts/default.ttf").await.unwrap();
@@ -271,7 +374,10 @@ async fn amain() {
 
     let mut game = game::Game::new();
     let mut clock = Clock::default();
-    let mut camera = MapCamera::default();
+    let mut camera = MapCamera {
+        tile_size: conf.map_tile_size,
+        ..Default::default()
+    };
     // Last tick's report, carried across the frame boundary: input at the
     // top of a frame reacts to what the sim said last.
     let mut game_output = game::Output::default();
@@ -366,8 +472,24 @@ async fn amain() {
             return;
         }
 
+        // A click on the board picks whatever entity sits there, and the
+        // pick becomes an action string like any button press — riding
+        // the same one-frame pipeline, no special path into the sim.
         if mq::is_mouse_button_pressed(mq::MouseButton::Left) && !output.is_pointer_over_ui() {
-            println!("Clicked")
+            let destination = camera.pick_cell(mq::mouse_position().into());
+            // Temporary pick diagnostics: every unit assumption in one line.
+            println!(
+                "pick {:?} | mouse {:?} dpi {} screen {:?} camera.pos {:?} world {:?}",
+                destination,
+                mq::mouse_position(),
+                mq::screen_dpi_scale(),
+                (mq::screen_width(), mq::screen_height()),
+                camera.pos,
+                camera.camera.screen_to_world(mq::mouse_position().into()),
+            );
+            if destination != game::CellPos::default() {
+                pending_actions.push(format!("travel {destination}"));
+            }
         }
 
         mq::next_frame().await;

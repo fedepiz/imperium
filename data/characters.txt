@@ -1,4 +1,4 @@
-# Starting cast for the vertical slice. Year 700 AUC (~54 BC).
+# Starting cast for the vertical slice. Sub-Roman Britain, AD 493.
 #
 # settlement = {
 #     id = <key other entries reference>
@@ -15,62 +15,77 @@
 # }
 
 settlement = {
-	id = roma
-	name = "Roma"
+	id = beornford
+	name = "Beornford"
 }
 
 settlement = {
-	id = samarobriva
-	name = "Samarobriva"
+	id = wealdham
+	name = "Wealdham"
+}
+
+settlement = {
+	id = aescburh
+	name = "Æscburh"
+}
+
+settlement = {
+	id = seolforwic
+	name = "Seolforwic"
+}
+
+settlement = {
+	id = meretun
+	name = "Meretun"
 }
 
 character = {
-	id = caesar
-	name = "Gaius Julius Caesar"
+	id = cenred
+	name = "Cenred"
 	age = 46
 	tag = player
-	married = calpurnia
+	married = eadgyth
 	gender = male
-	located = samarobriva
+	located = wealdham
 }
 
 character = {
-	id = calpurnia
-	name = "Calpurnia Pisonis"
+	id = eadgyth
+	name = "Eadgyth"
 	age = 30
 	gender = female
-	located = roma
+	located = beornford
 }
 
 character = {
-	id = crassus
-	name = "Marcus Licinius Crassus"
+	id = wulfhere
+	name = "Wulfhere"
 	age = 61
 	gender = male
-	located = roma
+	located = beornford
 }
 
 character = {
-	id = pompeius
-	name = "Gnaeus Pompeius Magnus"
+	id = osric
+	name = "Osric"
 	age = 52
-	married = iulia
+	married = leofrun
 	gender = male
-	located = roma
+	located = aescburh
 }
 
 character = {
-	id = iulia
-	name = "Iulia Caesaris"
+	id = leofrun
+	name = "Leofrun"
 	age = 22
 	gender = female
-	located = roma
+	located = aescburh
 }
 
 character = {
-	id = cicero
-	name = "Marcus Tullius Cicero"
+	id = aethelstan
+	name = "Æthelstan"
 	age = 52
 	gender = male
-	located = roma
+	located = seolforwic
 }

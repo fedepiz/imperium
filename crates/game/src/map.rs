@@ -14,7 +14,7 @@ use entities::{Bits64, EntityId};
 /// A cell coordinate. Packs into a uvar slot; ZII with a caveat: the zero
 /// position is the map's top-left corner, which authored maps keep void,
 /// so zero reads as "nowhere" in practice.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
 pub struct CellPos {
     pub x: u32,
     pub y: u32,
@@ -30,6 +30,23 @@ impl Bits64 for CellPos {
             x: (bits >> 32) as u32,
             y: bits as u32,
         }
+    }
+}
+
+/// Formats as the packed bits so positions embed directly in UI action
+/// strings, like `EntityId`; [`FromStr`](core::str::FromStr) reverses
+/// the trip. The zero position ("nowhere") is "0", both ways.
+impl core::fmt::Display for CellPos {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&self.to_bits(), f)
+    }
+}
+
+impl core::str::FromStr for CellPos {
+    type Err = core::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(CellPos::from_bits(s.parse::<u64>()?))
     }
 }
 
@@ -281,6 +298,16 @@ mod tests {
         assert_eq!(town.settlement, home());
         assert_eq!(map.anchor(home()), CellPos { x: 2, y: 2 });
         assert_eq!(map.anchor(EntityId::NULL), CellPos::default());
+    }
+
+    #[test]
+    fn positions_round_trip_through_bits_and_strings() {
+        let pos = CellPos { x: 7, y: 3 };
+        assert_eq!(CellPos::from_bits(pos.to_bits()), pos);
+        assert_eq!(pos.to_string().parse::<CellPos>(), Ok(pos));
+        // ZII: nowhere is "0", both ways.
+        assert_eq!(CellPos::default().to_bits(), 0);
+        assert_eq!("0".parse::<CellPos>(), Ok(CellPos::default()));
     }
 
     #[test]
