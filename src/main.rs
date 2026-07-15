@@ -84,29 +84,123 @@ struct AppCommand {
     /// Speed level to set, 1..=MAX_SPEED; 0 = leave the speed alone.
     set_speed: i32,
     toggle_pause: bool,
+    /// Map pan intent, ±1 per axis; zero = leave the camera alone.
+    pan: mq::Vec2,
     /// The sim's share of the command.
     game: game::Command,
 }
 
+/// The keyboard's share of the frame's intent, layered onto a command
+/// that other sources (UI actions, say) may also have filled: keys only
+/// populate fields here; each consumer interprets its own share.
+fn gather_keyboard(command: &mut AppCommand, forced_paused: bool) {
+    // While the sim force-pauses, the pause controls are locked: the key
+    // mirrors the disabled button.
+    if mq::is_key_pressed(mq::KeyCode::Space) && !forced_paused {
+        command.toggle_pause = true;
+    }
+    if mq::is_key_down(mq::KeyCode::W) {
+        command.pan.y += 1.0;
+    }
+    if mq::is_key_down(mq::KeyCode::S) {
+        command.pan.y -= 1.0;
+    }
+    if mq::is_key_down(mq::KeyCode::A) {
+        command.pan.x -= 1.0;
+    }
+    if mq::is_key_down(mq::KeyCode::D) {
+        command.pan.x += 1.0;
+    }
+}
+
 impl AppCommand {
-    fn parse(action: &str) -> AppCommand {
+    /// Folds one UI action into the frame's command, the actions' twin of
+    /// `gather_keyboard`: every source writes into the same singular
+    /// command, built fresh each frame from `default()`.
+    fn parse(&mut self, action: &str) {
         if let Some(level) = action.strip_prefix("time_speed ") {
-            return AppCommand {
-                set_speed: level.trim().parse().unwrap_or(0),
-                ..AppCommand::default()
-            };
+            self.set_speed = level.trim().parse().unwrap_or(0);
+            return;
         }
         match action {
-            "time_toggle" => AppCommand {
-                toggle_pause: true,
-                ..AppCommand::default()
-            },
-            _ => AppCommand {
-                game: game::Command::parse(action),
-                ..AppCommand::default()
-            },
+            "time_toggle" => self.toggle_pause = true,
+            _ => {
+                let game = game::Command::parse(action);
+                // The command holds one sim verb; garbage (Idle) never
+                // clobbers a real one, and a real collision warns.
+                if game.verb != game::Verb::Idle {
+                    if self.game.verb != game::Verb::Idle {
+                        eprintln!("two sim commands in one frame; keeping '{action}'");
+                    }
+                    self.game = game;
+                }
+            }
         }
     }
+}
+
+/// The map layer's viewport state: a pan position driven by WASD, in
+/// logical points. Velocity chases the keys' intent through exponential
+/// smoothing, so panning eases in and out instead of snapping.
+#[derive(Default)]
+struct MapCamera {
+    pos: mq::Vec2,
+    velocity: mq::Vec2,
+}
+
+impl MapCamera {
+    /// Full pan speed, logical points per second.
+    const PAN_SPEED: f32 = 700.0;
+    /// Smoothing rate: higher = snappier. ~1/RATE seconds to mostly catch up.
+    const RATE: f32 = 10.0;
+
+    /// Integrate one frame: the command's pan intent is the target
+    /// direction; this never reads input devices itself.
+    fn update(&mut self, command: &AppCommand, dt: f32) {
+        let target = command.pan.normalize_or_zero() * Self::PAN_SPEED;
+        // Frame-rate independent lerp toward the target velocity.
+        let blend = 1.0 - (-dt * Self::RATE).exp();
+        self.velocity += (target - self.velocity) * blend;
+        self.pos += self.velocity * dt;
+    }
+}
+
+/// Rasterize the sim's map render-model, under the UI: plain rectangles
+/// and dots, every decision (colors, what has a dot) already made by the
+/// sim in `DrawMap`. World units are logical points; the camera maps them
+/// to the screen, y down like everything else.
+fn draw_map_layer(map: &game::DrawMap, camera: &MapCamera) {
+    const CELL_SIZE: f32 = 48.0;
+    /// Where the map's top-left sits with the camera at rest.
+    const MARGIN: f32 = 48.0;
+
+    let dpi = mq::screen_dpi_scale();
+    let logical = mq::vec2(mq::screen_width(), mq::screen_height()) / dpi;
+    mq::set_camera(&mq::Camera2D {
+        target: camera.pos + logical * 0.5,
+        // A view logical-points wide, y flipped to run down.
+        zoom: mq::vec2(2.0 / logical.x, -2.0 / logical.y),
+        ..Default::default()
+    });
+
+    let color = |c: game::Rgba| mq::Color::new(c.r, c.g, c.b, c.a);
+    for y in 0..map.height {
+        for x in 0..map.width {
+            let cell = map.cells[(y * map.width + x) as usize];
+            let px = MARGIN + x as f32 * CELL_SIZE;
+            let py = MARGIN + y as f32 * CELL_SIZE;
+            mq::draw_rectangle(px, py, CELL_SIZE, CELL_SIZE, color(cell.fill));
+            if cell.dot.a > 0.0 {
+                mq::draw_circle(
+                    px + CELL_SIZE * 0.5,
+                    py + CELL_SIZE * 0.5,
+                    CELL_SIZE * 0.3,
+                    color(cell.dot),
+                );
+            }
+        }
+    }
+    mq::set_default_camera();
 }
 
 /// How the renderer fills an element's bounds with a texture. A property of
@@ -185,9 +279,13 @@ async fn amain() {
 
     let mut game = game::Game::new();
     let mut clock = Clock::default();
+    let mut camera = MapCamera::default();
     // Last tick's report, carried across the frame boundary: input at the
     // top of a frame reacts to what the sim said last.
     let mut game_output = game::Output::default();
+    // UI actions surface mid-frame (after the tick), so they fold into
+    // the *next* frame's command — a frame of latency nobody can see.
+    let mut pending_actions: Vec<String> = Vec::new();
 
     loop {
         if mq::is_key_pressed(mq::KeyCode::R) {
@@ -198,12 +296,13 @@ async fn amain() {
         // once more per command; it never renders, rendering never mutates.
         // Real time never enters the sim: the clock converts it into
         // AdvanceTime requests, which the game is free to decline.
+        // The frame's singular command: default, then every source folds
+        // its share in — last frame's UI actions, then the keyboard.
         let mut command = AppCommand::default();
-        // While the sim force-pauses, the pause controls are locked: the
-        // key mirrors the disabled button.
-        if mq::is_key_pressed(mq::KeyCode::Space) && !game_output.forced_paused {
-            command.toggle_pause = true;
+        for action in pending_actions.drain(..) {
+            command.parse(&action);
         }
+        gather_keyboard(&mut command, game_output.forced_paused);
         clock.apply(&command);
         game_output = game.tick(command.game);
         for _ in 0..clock.due_days(mq::get_frame_time()) {
@@ -212,6 +311,10 @@ async fn amain() {
 
         mq::clear_background(mq::BLACK);
         frame_arena.reset();
+
+        // The map layer, under the UI.
+        camera.update(&command, mq::get_frame_time());
+        draw_map_layer(&game.draw_map(), &camera);
 
         let mut ui_data = ir::UiData::default();
         game.fill_ui_data(&mut ui_data);
@@ -265,13 +368,7 @@ async fn amain() {
         }
         render_ui_commands(output, &font, &images);
 
-        for action in events {
-            // Every action becomes one AppCommand; the clock and the sim
-            // each take their share, no routing.
-            let command = AppCommand::parse(&action);
-            clock.apply(&command);
-            game_output = game.tick(command.game);
-        }
+        pending_actions = events;
 
         if mq::is_key_pressed(mq::KeyCode::Escape) {
             return;

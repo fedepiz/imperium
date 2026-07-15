@@ -58,6 +58,22 @@ choices; follow them even where std-idiomatic Rust would do otherwise.
   minimize pointer chasing. Accept wasted bytes per instance as the price of
   simplicity and cache-friendly iteration.
 
+## Testing
+
+- Do **not** write small behavioural tests for complex game behavior —
+  scenario tests that pin "from this state, this command yields that state".
+  A sim's state space is too large for point examples to cover anything, and
+  they fail on intentional design change rather than on regressions.
+- Sim correctness is tested by other means: exemplar (golden-master) runs — a
+  checked-in seed and command stream replayed over long stretches of sim
+  time, diffed against a blessed transcript and re-blessed on intentional
+  change; invariants as `debug_assert!` inside the sim code itself, so every
+  run validates them; random-command soak tests that let those asserts do the
+  judging, with a determinism check (same seed and commands twice → identical
+  history) folded in; and playtesting for content and feel.
+- Ordinary unit tests are fine for components — library crates and isolated
+  pieces with stable contracts.
+
 ## General
 
 - When adding types or APIs, ask: is the zero value valid (ZII)? Can it live

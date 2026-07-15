@@ -1,12 +1,28 @@
 # Starting cast for the vertical slice. Year 700 AUC (~54 BC).
 #
+# settlement = {
+#     id = <key other entries reference>
+#     name = <display name>
+# }
+#
 # character = {
 #     id = <key other entries reference>
 #     name = <display name>
 #     age = <years>
 #     tag = <optional singleton tag, e.g. player>
 #     married = <id of spouse, declared on one side only>
+#     located = <id of the settlement the character starts in>
 # }
+
+settlement = {
+	id = roma
+	name = "Roma"
+}
+
+settlement = {
+	id = samarobriva
+	name = "Samarobriva"
+}
 
 character = {
 	id = caesar
@@ -15,6 +31,7 @@ character = {
 	tag = player
 	married = calpurnia
 	gender = male
+	located = samarobriva
 }
 
 character = {
@@ -22,6 +39,7 @@ character = {
 	name = "Calpurnia Pisonis"
 	age = 30
 	gender = female
+	located = roma
 }
 
 character = {
@@ -29,6 +47,7 @@ character = {
 	name = "Marcus Licinius Crassus"
 	age = 61
 	gender = male
+	located = roma
 }
 
 character = {
@@ -37,6 +56,7 @@ character = {
 	age = 52
 	married = iulia
 	gender = male
+	located = roma
 }
 
 character = {
@@ -44,6 +64,7 @@ character = {
 	name = "Iulia Caesaris"
 	age = 22
 	gender = female
+	located = roma
 }
 
 character = {
@@ -51,4 +72,5 @@ character = {
 	name = "Marcus Tullius Cicero"
 	age = 52
 	gender = male
+	located = roma
 }

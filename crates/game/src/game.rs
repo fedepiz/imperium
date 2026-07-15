@@ -5,6 +5,7 @@ use ui::ir;
 
 use crate::date::{days_between, Date, DAYS_PER_YEAR};
 use crate::defs::{init_world, Relation, Set, UVar, Var};
+use crate::map::{CellPos, Map};
 use crate::world::{Activity, ActivityVerb, Epoch, World};
 use entities::*;
 
@@ -125,8 +126,9 @@ impl Game {
     pub fn new() -> Game {
         let mut world = init_world(7);
         world.epoch = START_EPOCH;
-        let source = std::fs::read_to_string("data/characters.txt").unwrap_or_default();
-        bootstrap(&mut world, &source);
+        let characters = std::fs::read_to_string("data/characters.txt").unwrap_or_default();
+        let map = std::fs::read_to_string("data/map.txt").unwrap_or_default();
+        bootstrap(&mut world, &characters, &map);
         Game { world }
     }
 
@@ -242,6 +244,13 @@ impl Game {
         }
     }
 
+    /// The map's per-frame bridge, `fill_ui_data`'s sibling for the layer
+    /// under the UI: read-only, once per render, all drawing decisions
+    /// made sim-side.
+    pub fn draw_map(&self) -> crate::draw_map::DrawMap {
+        crate::draw_map::build(&self.world)
+    }
+
     /// The per-frame bridge: dump the sim state the UI script binds to.
     /// Read-only, called once per render — never from inside `tick`. Binds
     /// only sim-owned globals; the external clock binds its own.
@@ -274,6 +283,13 @@ impl Game {
                 }
             };
             data.bind("ACTIVITY", &doing);
+            // Where they stand, spoken as a settlement name; unbound when
+            // they're nowhere or on no one's cells.
+            let pos: CellPos = world.uvars.get(&world.ids, id, UVar::Position);
+            let place = world.map.cell(pos).settlement;
+            if world.ids.is_alive(place) {
+                data.bind("PLACE", world.names.get(&world.ids, place));
+            }
             if world.vars.get(&world.ids, id, Var::Gender) > 0. {
                 data.bind("IS_MALE", "yes");
             }
@@ -281,18 +297,41 @@ impl Game {
     }
 }
 
-/// Spawn the starting cast from `data/characters.txt`. Two passes: all
-/// characters first, then relations, so forward references resolve.
-fn bootstrap(world: &mut World, source: &str) {
+/// Spawn the starting world from `data/characters.txt` and `data/map.txt`.
+/// Settlements first, then the map (its legend references them), then
+/// characters and their relations, so forward references resolve.
+fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
     let arena = Arena::new();
-    let result = tabula::parse(&arena, source);
+    let result = tabula::parse(&arena, characters_source);
     for error in result.errors {
         eprintln!("data/characters.txt: {error}");
     }
 
     let characters = || result.roots.iter().filter(|node| node.key == "character");
+    let settlements = || result.roots.iter().filter(|node| node.key == "settlement");
 
+    // Settlements first: characters reference them by key. One key namespace
+    // for everything spawnable, so collisions are caught wherever they occur.
     let mut by_key: HashMap<&str, EntityId> = HashMap::new();
+    for node in settlements() {
+        let id = world.spawn();
+        let name = world.names.add(node.get_text("name").unwrap_or("Nowhere"));
+        world.names.set(&world.ids, id, name);
+        world.sets.add(&world.ids, Set::Settlements, id);
+        if let Some(key) = node.get_text("id") {
+            if by_key.insert(key, id).is_some() {
+                eprintln!("data/characters.txt: duplicate id '{key}'");
+            }
+        }
+    }
+
+    // The map's legend speaks in the same keys the settlement pass filed.
+    let (map, map_errors) = Map::parse(map_source, |key| by_key.get(key).copied());
+    for error in map_errors {
+        eprintln!("data/map.txt: {error}");
+    }
+    world.map = map;
+
     for node in characters() {
         let id = world.spawn();
         let name = world.names.add(node.get_text("name").unwrap_or("Anonymous"));
@@ -316,7 +355,7 @@ fn bootstrap(world: &mut World, source: &str) {
         }
         if let Some(key) = node.get_text("id") {
             if by_key.insert(key, id).is_some() {
-                eprintln!("data/characters.txt: duplicate character id '{key}'");
+                eprintln!("data/characters.txt: duplicate id '{key}'");
             }
         }
     }
@@ -336,6 +375,24 @@ fn bootstrap(world: &mut World, source: &str) {
                 None => eprintln!("data/characters.txt: '{key}' married unknown id '{spouse}'"),
             }
         }
+        // "located" sets both halves of place: the position (spatial
+        // truth, the settlement's anchor cell) and the LocatedIn relation
+        // (its logical mirror). Movement code must keep doing likewise.
+        if let Some(place) = node.get_text("located") {
+            match by_key.get(place) {
+                Some(&target) => {
+                    let anchor = world.map.anchor(target);
+                    if anchor == CellPos::default() {
+                        eprintln!("data/map.txt: '{place}' has no cells on the map");
+                    }
+                    world.uvars.set(&world.ids, source_id, UVar::Position, anchor);
+                    world
+                        .relations
+                        .set(&world.ids, source_id, Relation::LocatedIn, target, 1.0);
+                }
+                None => eprintln!("data/characters.txt: '{key}' located unknown id '{place}'"),
+            }
+        }
     }
 }
 
@@ -344,15 +401,23 @@ mod tests {
     use super::*;
 
     const TEST_CAST: &str = r#"
-        character = { id = a name = "Aulus" age = 20 tag = player married = b }
-        character = { id = b name = "Betua" age = 30 }
+        settlement = { id = v name = "Vicus" }
+        character = { id = a name = "Aulus" age = 20 tag = player married = b located = v }
+        character = { id = b name = "Betua" age = 30 located = v }
         character = { id = c name = "Methuselah" age = 95 }
     "#;
+
+    const TEST_MAP: &str = "
+        ~....
+        ~vv#.
+        ~....
+        v = v
+    ";
 
     fn game() -> Game {
         let mut world = init_world(7);
         world.epoch = START_EPOCH;
-        bootstrap(&mut world, TEST_CAST);
+        bootstrap(&mut world, TEST_CAST, TEST_MAP);
         Game { world }
     }
 
@@ -363,27 +428,6 @@ mod tests {
         for _ in 0..days {
             game.tick(Command::ADVANCE_TIME);
         }
-    }
-
-    #[test]
-    fn bootstrap_spawns_cast_with_vars_tags_and_relations() {
-        let game = game();
-        let world = &game.world;
-        let player = world.tags.lookup("player").unwrap();
-        assert_eq!(world.names.get(&world.ids, player), "Aulus");
-        assert_eq!(
-            world.uvars.get::<Epoch>(&world.ids, player, UVar::BirthEpoch),
-            Epoch(START_EPOCH.0 - 20 * 360)
-        );
-        assert_eq!(age(&game.world, player), 20);
-        assert_eq!(world.sets.iter(Set::People).count(), 3);
-
-        let spouses: Vec<_> = world
-            .relations
-            .get_related_via(player, Relation::Married)
-            .collect();
-        assert_eq!(spouses.len(), 1);
-        assert_eq!(world.names.get(&world.ids, spouses[0].0), "Betua");
     }
 
     #[test]

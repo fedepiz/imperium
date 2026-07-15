@@ -39,6 +39,10 @@ pub enum UVar {
     /// The epoch a person was born at. Age and
     /// birthdays are derived from this, never stored.
     BirthEpoch,
+    /// The cell an entity stands on, as a packed [`crate::map::CellPos`].
+    /// Which settlement someone is "in" is derived from this via the map,
+    /// never stored. Zero = nowhere (the map's void corner).
+    Position,
 }
 
 impl UVar {
@@ -46,6 +50,7 @@ impl UVar {
         match self {
             Self::Dummy => "Dummy",
             Self::BirthEpoch => "BirthEpoch",
+            Self::Position => "Position",
         }
     }
 }
@@ -60,12 +65,18 @@ impl From<UVar> for UVarId {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, EnumCount, EnumIter, TryFromPrimitive)]
 pub enum Relation {
     Married,
+    /// Character → settlement, the logical mirror of spatial truth: kept
+    /// for relation-side processing (who is here / where is he), but it
+    /// *follows* [`UVar::Position`] — whatever moves an entity across a
+    /// blob boundary updates both. Weight unused.
+    LocatedIn,
 }
 
 impl Relation {
     fn name(&self) -> &'static str {
         match self {
             Relation::Married => "Married",
+            Relation::LocatedIn => "LocatedIn",
         }
     }
 
@@ -88,12 +99,14 @@ impl From<Relation> for RelationId {
 pub enum Set {
     #[default]
     People,
+    Settlements,
 }
 
 impl Set {
     fn name(&self) -> &'static str {
         match self {
             Set::People => "People",
+            Set::Settlements => "Settlements",
         }
     }
 
@@ -151,14 +164,16 @@ mod tests {
     #[test]
     fn relation_from_u16() {
         assert!(matches!(Relation::try_from(0), Ok(Relation::Married)));
-        assert!(Relation::try_from(1).is_err());
+        assert!(matches!(Relation::try_from(1), Ok(Relation::LocatedIn)));
+        assert!(Relation::try_from(2).is_err());
         assert!(Relation::try_from(u16::MAX).is_err());
     }
 
     #[test]
     fn set_from_u16() {
         assert!(matches!(Set::try_from(0), Ok(Set::People)));
-        assert!(Set::try_from(1).is_err());
+        assert!(matches!(Set::try_from(1), Ok(Set::Settlements)));
+        assert!(Set::try_from(2).is_err());
         assert!(Set::try_from(u16::MAX).is_err());
         assert!(matches!(Set::from_id(SetId(0)), Some(Set::People)));
     }

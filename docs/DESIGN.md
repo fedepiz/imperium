@@ -63,6 +63,30 @@ Rome is the shadow, not the stage.
    trace back to people: *he* refused because *you* shamed his brother.
    Not opaque global modifiers.
 
+## The map
+
+Taken, like much else, from ROTK VII: the world is a grid of square
+cells, and the map is the authored truth about space.
+
+- Every cell is painted as one of: part of a settlement or other
+  location (settlements are *blobs* — a contiguous group of cells
+  bearing the same place), road, or impassable.
+- Underneath lies a logical graph — places as nodes, road-cell chains
+  as edges — but it is *derived* from the painted grid, never authored
+  separately, so the two cannot disagree.
+- Position is a cell, not a graph node. A traveler is on some road cell
+  partway between places — visible, meetable, interruptible — and
+  "being in a settlement" simply means standing on one of its cells.
+  The graph answers questions (distance, direction); bodies live on
+  the grid.
+- Passability is a movement *cost*, not a boolean, with zero meaning
+  impassable — so later variation (water travel for those who can
+  sail, trackless wilds) is a tweak, not a redesign. For now,
+  impassable is absolute.
+- Cell scale is tentatively 5–10 km — a few road cells per day of
+  walking, so multi-day journeys show progress each tick. Not yet
+  committed.
+
 ## Scale and texture
 
 - A cast of a few thousand living entities — characters, settlements,
@@ -78,6 +102,8 @@ Rome is the shadow, not the stage.
 ## Open questions
 
 - Which setting to commit to (post-Roman Britain currently leading).
+- The map cell scale (5–10 km is the working guess), and with it how
+  many cells a day's travel covers.
 - What the player's verb set is at each station of life (retainer,
   householder, lord...).
 - How reputation/legend is measured and what it buys.

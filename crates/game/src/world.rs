@@ -1,3 +1,4 @@
+use crate::map::Map;
 use entities::*;
 use util::Rng;
 
@@ -67,6 +68,9 @@ pub struct World {
     /// same command stream = same history.
     pub rng: Rng,
     pub activities: Table<Activity>,
+    /// The world's geography: authored cells, ZII (the empty map is all
+    /// void). Not per-entity state — spawn/sweep never touch it.
+    pub map: Map,
     // Future typed columns go here, and get one reset line in `spawn`.
 }
 
@@ -83,6 +87,7 @@ impl World {
             tags: Tags::default(),
             rng: Rng(seed),
             activities: Table::new(),
+            map: Map::default(),
             defs,
         }
     }

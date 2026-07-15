@@ -8,7 +8,7 @@
 
 panel = {
 	# Centered on screen (fraction of the screen, 0.5 = middle)
-	x_pos = 0.5
+	x_pos = 0.99
 	y_pos = 0.5
 
 	width = 42%
