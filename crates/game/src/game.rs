@@ -27,10 +27,9 @@ const MORTALITY_SPAN: f32 = 30.0;
 pub struct Command {
     /// Request one day to pass; the sim declines while the player idles.
     pub advance_time: bool,
-    /// Give the player this activity; Idle = no order given.
-    pub activity: ActivityVerb,
-    /// Cancel the player's current activity, back to Idle.
-    pub stop: bool,
+    /// Order the player into this activity; None = no order given.
+    /// Stopping is not its own thing: an order of Idle is the stop.
+    pub activity: Option<ActivityVerb>,
     /// Despawn this entity; null = nobody.
     pub remove: EntityId,
     /// Set this entity's gender to female; null = nobody.
@@ -66,8 +65,8 @@ impl Command {
         };
         match verb {
             "advance_time" => self.advance_time = true,
-            "rest" => self.activity = ActivityVerb::Rest,
-            "stop" => self.stop = true,
+            "rest" => self.activity = Some(ActivityVerb::Rest),
+            "stop" => self.activity = Some(ActivityVerb::Idle),
             "remove" => self.remove = target(),
             "femalify" => self.femalify = target(),
             _ => eprintln!("unhandled ui action: {action}"),
@@ -107,7 +106,7 @@ fn is_birthday(world: &World, id: EntityId) -> bool {
 /// `AdvanceTime` gets pumped at all — is the clock's, outside the sim.)
 fn time_may_flow(world: &World) -> bool {
     match world.tags.lookup("player") {
-        Some(player) => world.activities.get(&world.ids, player).verb != ActivityVerb::Idle,
+        Some(player) => world.activities.get(player).verb != ActivityVerb::Idle,
         None => false,
     }
 }
@@ -129,13 +128,23 @@ impl Game {
     /// liveness checks, false bools skip). Rendering never happens in
     /// here.
     pub fn tick(&mut self, command: Command) -> Output {
-        // The player's orders: stop, then a fresh activity — a command
-        // carrying both lands on the new activity.
-        if command.stop {
-            self.set_player_activity(ActivityVerb::Idle);
-        }
-        if command.activity != ActivityVerb::Idle {
-            self.set_player_activity(command.activity);
+        // The player's orders: an ordered activity replaces the current
+        // one (an order of Idle is the stop); no order, no change.
+        if let Some(player) = self.world.tags.lookup("player") {
+            let current_verb = self.world.activities.get(player).verb;
+            let next_verb = command.activity.unwrap_or(current_verb);
+            if next_verb != current_verb {
+                // Start activity
+                let activity = match next_verb {
+                    ActivityVerb::Idle => Activity::default(),
+                    verb => Activity {
+                        verb,
+                        start: self.world.epoch,
+                        until: Epoch(0), // open-ended
+                    },
+                };
+                self.world.activities.set(player, activity);
+            }
         }
 
         // Removal. Stale ids parse fine and fail the liveness check — a
@@ -172,7 +181,7 @@ impl Game {
             // something, not just people. Completion effects go here as
             // verbs gain them.
             if day_passes {
-                let activity = self.world.activities.get(&self.world.ids, id);
+                let activity = self.world.activities.get(id);
                 if activity.until != Epoch(0) && activity.until <= self.world.epoch {
                     self.world.activities.reset(id);
                 }
@@ -193,24 +202,6 @@ impl Game {
         Output {
             forced_paused: !time_may_flow(&self.world),
         }
-    }
-
-    /// Giving yourself an order replaces whatever you were doing;
-    /// interruption is just overwrite. Idle = the zero activity.
-    fn set_player_activity(&mut self, verb: ActivityVerb) {
-        let Some(player) = self.world.tags.lookup("player") else {
-            eprintln!("no player to command");
-            return;
-        };
-        let activity = match verb {
-            ActivityVerb::Idle => Activity::default(),
-            verb => Activity {
-                verb,
-                start: self.world.epoch,
-                until: Epoch(0), // open-ended
-            },
-        };
-        self.world.activities.set(&self.world.ids, player, activity);
     }
 
     /// Placeholder death reaction: console obituary. Runs before the sweep
@@ -262,7 +253,7 @@ impl Game {
         // which hides anything `visible = "$HAS_PLAYER"`.
         if let Some(player) = world.tags.lookup("player") {
             data.bind_global("HAS_PLAYER", "yes");
-            let idle = world.activities.get(&world.ids, player).verb == ActivityVerb::Idle;
+            let idle = world.activities.get(player).verb == ActivityVerb::Idle;
             data.bind_global("PLAYER_BUTTON", if idle { "Rest" } else { "Stop" });
             data.bind_global("PLAYER_ACTION", if idle { "rest" } else { "stop" });
         }
@@ -273,7 +264,7 @@ impl Game {
             data.bind("ID", &format!("{}", id));
             data.bind("NAME", world.names.get(&world.ids, id));
             data.bind("AGE", &format!("{}", age(&self.world, id)));
-            let activity = world.activities.get(&world.ids, id);
+            let activity = world.activities.get(id);
             let doing = match activity.verb {
                 ActivityVerb::Idle => String::new(),
                 ActivityVerb::Rest => {

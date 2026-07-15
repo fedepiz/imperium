@@ -2,13 +2,14 @@ use crate::id::{EntityId, Ids};
 
 /// A dense per-entity column of typed POD rows, indexed by entity slot —
 /// the home for structured state every entity has and the sim touches every
-/// step (where name-addressed `Vars` would be the wrong shape). Unused
-/// slots hold `T::default()` (ZII); like `Vars`, slot hygiene comes from
-/// the spawner calling [`Table::reset`] on each column, so reused slots
-/// start clean.
+/// step (where name-addressed `Vars` would be the wrong shape). Each row
+/// carries its owner's id, so stale access is caught right here with no
+/// look into `Ids`. Rows hold `T::default()` until set (ZII); like `Vars`,
+/// slot hygiene comes from the spawner calling [`Table::reset`] on each
+/// column, which claims the slot for the fresh id with a zero row.
 #[derive(Clone)]
 pub struct Table<T> {
-    rows: Vec<T>,
+    rows: Vec<(EntityId, T)>,
 }
 
 impl<T: Copy + Default> Default for Table<T> {
@@ -20,23 +21,24 @@ impl<T: Copy + Default> Default for Table<T> {
 impl<T: Copy + Default> Table<T> {
     pub fn new() -> Table<T> {
         Table {
-            rows: vec![T::default(); Ids::CAPACITY],
+            rows: vec![Default::default(); Ids::CAPACITY],
         }
     }
 
-    pub fn get(&self, ids: &Ids, id: EntityId) -> T {
-        assert!(ids.is_alive(id));
-        self.rows[id.index()]
+    pub fn get(&self, id: EntityId) -> &T {
+        let entry = &self.rows[id.index()];
+        assert!(entry.0 == id);
+        &entry.1
     }
 
-    pub fn set(&mut self, ids: &Ids, id: EntityId, row: T) {
-        assert!(ids.is_alive(id));
-        self.rows[id.index()] = row;
+    pub fn set(&mut self, id: EntityId, row: T) {
+        self.rows[id.index()] = (id, row);
     }
 
-    /// Zero one slot's row. Called on spawn, so reused slots start clean.
+    /// Claim a slot for a fresh id with the zero row. Called on spawn, so
+    /// reused slots start clean and the old occupant's id stops matching.
     pub fn reset(&mut self, id: EntityId) {
-        self.rows[id.index()] = T::default();
+        self.rows[id.index()] = (id, Default::default());
     }
 }
 
@@ -56,21 +58,21 @@ mod tests {
         let mut table: Table<Row> = Table::new();
         let id = ids.spawn();
         let other = ids.spawn();
+        table.reset(id);
 
-        assert_eq!(table.get(&ids, id), Row::default());
+        assert_eq!(*table.get(id), Row::default());
         table.set(
-            &ids,
             id,
             Row {
                 kind: 3,
                 target: other,
             },
         );
-        assert_eq!(table.get(&ids, id).kind, 3);
-        assert_eq!(table.get(&ids, id).target, other);
+        assert_eq!(table.get(id).kind, 3);
+        assert_eq!(table.get(id).target, other);
 
         table.reset(id);
-        assert_eq!(table.get(&ids, id), Row::default());
+        assert_eq!(*table.get(id), Row::default());
     }
 
     #[test]
@@ -78,20 +80,23 @@ mod tests {
         let mut ids = Ids::new();
         let mut table: Table<Row> = Table::new();
         let stale = ids.spawn();
-        table.set(&ids, stale, Row { kind: 7, ..Default::default() });
+        table.reset(stale);
+        table.set(
+            stale,
+            Row {
+                kind: 7,
+                ..Default::default()
+            },
+        );
         ids.mark_despawn(stale);
         ids.sweep();
 
         let replacement = ids.spawn();
         table.reset(replacement);
-        assert_eq!(table.get(&ids, replacement), Row::default());
+        assert_eq!(*table.get(replacement), Row::default());
 
-        assert!(std::panic::catch_unwind(|| table.get(&ids, stale)).is_err());
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                table.set(&ids, stale, Row::default())
-            }))
-            .is_err()
-        );
+        // The reused slot carries the replacement's id, so the stale id
+        // fails the row's own id check — no `Ids` needed.
+        assert!(std::panic::catch_unwind(|| table.get(stale)).is_err());
     }
 }

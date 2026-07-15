@@ -167,7 +167,6 @@ mod tests {
         let stale = world.spawn();
         world.vars.set(&world.ids, stale, VarId(0), 1.0);
         world.activities.set(
-            &world.ids,
             stale,
             Activity {
                 verb: ActivityVerb::Rest,
@@ -183,10 +182,7 @@ mod tests {
         assert!(!world.ids.is_alive(stale));
         assert_eq!(world.vars.get(&world.ids, replacement, VarId(0)), 0.0);
         assert_eq!(world.names.get(&world.ids, replacement), "");
-        assert_eq!(
-            world.activities.get(&world.ids, replacement).verb,
-            ActivityVerb::Idle
-        );
+        assert_eq!(world.activities.get(replacement).verb, ActivityVerb::Idle);
 
         // The stale id can't reach the reused slot.
         assert!(
