@@ -31,6 +31,12 @@ impl<T: Copy + Default> Table<T> {
         &entry.1
     }
 
+    pub fn get_mut(&mut self, id: EntityId) -> &mut T {
+        let entry = &mut self.rows[id.index()];
+        assert!(entry.0 == id);
+        &mut entry.1
+    }
+
     pub fn set(&mut self, id: EntityId, row: T) {
         self.rows[id.index()] = (id, row);
     }

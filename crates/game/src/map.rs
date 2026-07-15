@@ -108,6 +108,11 @@ impl Map {
             .unwrap_or_default()
     }
 
+    /// Every settlement with cells on the map, and where its anchor is.
+    pub fn anchors(&self) -> &[(EntityId, CellPos)] {
+        &self.anchors
+    }
+
     /// Parse the ASCII format. `resolve` turns a legend entry's data key
     /// into the settlement spawned for it, or None if the key is unknown.
     /// Problems are reported as strings; broken cells parse to the void.

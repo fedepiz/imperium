@@ -31,6 +31,9 @@ pub struct Command {
     /// Order the player into this activity; None = no order given.
     /// Stopping is not its own thing: an order of Idle is the stop.
     pub activity: Option<ActivityVerb>,
+    /// Let time pass while otherwise unoccupied: an idle player rests
+    /// through the coming day, and a waiting rest is extended by it.
+    pub wait: bool,
     /// Where an ordered Travel goes; zero = nowhere. Only meaningful
     /// alongside `activity = Some(Travel)`.
     pub destination: CellPos,
@@ -179,22 +182,49 @@ impl Game {
         // a genuinely new activity — different verb or target — starts,
         // so repeating an order doesn't restart its clock, while
         // retargeting an ongoing travel does take effect.
-        if let (Some(next_verb), Some(player)) =
-            (command.activity, self.world.tags.lookup("player"))
-        {
-            let current = *self.world.activities.get(player);
-            let next = match next_verb {
-                ActivityVerb::Idle => Activity::default(),
-                verb => Activity {
-                    verb,
-                    start: self.world.epoch,
-                    until: Epoch(0), // open-ended
-                    // Zero for the verbs that don't want one.
-                    target: command.destination,
-                },
-            };
-            if next.verb != current.verb || next.target != current.target {
-                self.world.activities.set(player, next);
+        let player = self.world.tags.lookup("player");
+        if let Some(player) = player {
+            if let Some(next_verb) = command.activity {
+                let current = *self.world.activities.get(player);
+                let next = match next_verb {
+                    ActivityVerb::Idle => Activity::default(),
+                    verb => Activity {
+                        verb,
+                        start: self.world.epoch,
+                        until: Epoch::MAX, // open-ended
+                        // Zero for the verbs that don't want one.
+                        target: command.destination,
+                    },
+                };
+                if next.verb != current.verb || next.target != current.target {
+                    self.world.activities.set(player, next);
+                }
+            }
+
+            // Waiting: an idle player rests through the coming day. The
+            // horizon sits one day past whatever this tick advances to,
+            // so a held wait outlives each day's advance (no expiring and
+            // re-arming every day, which read as a one-frame pause) and
+            // resolves one day after the waiting stops.
+            if command.wait {
+                let horizon = self.world.epoch + 1 + command.advance_time as u64;
+                let activity = self.world.activities.get_mut(player);
+                match activity.verb {
+                    ActivityVerb::Idle => {
+                        *activity = Activity {
+                            verb: ActivityVerb::Rest,
+                            start: self.world.epoch,
+                            until: horizon,
+                            ..Activity::default()
+                        };
+                    }
+                    // Extend a finite rest; an open-ended one (until MAX,
+                    // ordered explicitly) absorbs the max unchanged.
+                    ActivityVerb::Rest => {
+                        activity.until = activity.until.max(horizon);
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -227,14 +257,17 @@ impl Game {
         // run between mark and sweep, while the corpse's relations are
         // still queryable.
         let entities: Vec<_> = self.world.ids.iter_alive().collect();
-        for &id in &entities {
+        for &this in &entities {
+            let is_player = this == player.unwrap_or_default();
+            let is_person = self.world.ids.in_set(this, Set::People);
+
             // Resolve an activity that came due — anything can be doing
             // something, not just people. Completion effects go here as
             // verbs gain them.
             if day_passes {
-                let activity = self.world.activities.get(id);
-                if activity.until != Epoch(0) && activity.until <= self.world.epoch {
-                    self.world.activities.reset(id);
+                let activity = self.world.activities.get(this);
+                if activity.until <= self.world.epoch {
+                    self.world.activities.reset(this);
                 }
             }
 
@@ -242,29 +275,59 @@ impl Game {
             // nobody stores a route; each step re-asks from the current
             // cell, so retargeting and detours cost nothing extra.
             if day_passes {
-                let activity = *self.world.activities.get(id);
+                let activity = *self.world.activities.get(this);
                 if activity.verb == ActivityVerb::Travel {
-                    let pos: CellPos = self.world.uvars.get(&self.world.ids, id, UVar::Position);
-                    let next = self.pathfinding.next_step(&self.world.map, pos, activity.target);
+                    let pos: CellPos = self.world.uvars.get(&self.world.ids, this, UVar::Position);
+                    let next = self
+                        .pathfinding
+                        .next_step(&self.world.map, pos, activity.target);
                     if next == CellPos::default() {
                         // Already there, or no way there: the journey ends.
-                        self.world.activities.reset(id);
+                        self.world.activities.reset(this);
                     } else {
-                        move_entity(&mut self.world, id, pos, next);
+                        move_entity(&mut self.world, this, pos, next);
                         if next == activity.target {
-                            self.world.activities.reset(id);
+                            self.world.activities.reset(this);
                         }
                     }
                 }
             }
 
-            // On birthdays, roll the mortality ramp. Only people age.
-            if day_passes && self.world.ids.in_set(id, Set::People) && is_birthday(&self.world, id)
+            // People randomly travel if idle. Gated on the day like every
+            // other roll: the rng is world state, so drawing from it on
+            // dayless ticks would fork histories that share a command
+            // stream.
+            if day_passes
+                && !is_player
+                && is_person
+                && self.world.activities.get(this).verb == ActivityVerb::Idle
+                && self.world.rng.chance(0.01)
             {
-                let hazard = (age(&self.world, id) as f32 - MORTALITY_AGE) / MORTALITY_SPAN;
+                // Pick a random city and travel to it. Picking the city
+                // they're already in is a valid draw — the journey just
+                // resolves on its first step.
+                let count = self.world.map.anchors().len();
+                if count > 0 {
+                    let pick = self.world.rng.next_u64() as usize % count;
+                    let (_, target) = self.world.map.anchors()[pick];
+                    self.world.activities.set(
+                        this,
+                        Activity {
+                            verb: ActivityVerb::Travel,
+                            start: self.world.epoch,
+                            until: Epoch::MAX, // open-ended, ends on arrival
+                            target,
+                        },
+                    );
+                }
+            }
+
+            // On birthdays, roll the mortality ramp. Only people age.
+            if day_passes && is_person && is_birthday(&self.world, this) {
+                let hazard = (age(&self.world, this) as f32 - MORTALITY_AGE) / MORTALITY_SPAN;
                 if self.world.rng.chance(hazard) {
-                    self.world.ids.mark_despawn(id);
-                    self.report_death(id);
+                    self.world.ids.mark_despawn(this);
+                    self.report_death(this);
                 }
             }
         }
@@ -656,20 +719,18 @@ mod tests {
         // The exact string a board click produces. The order lands the
         // same tick; walking starts with the days.
         game.tick(command(&format!("travel {destination}")));
-        assert_eq!(
-            game.world.activities.get(player).verb,
-            ActivityVerb::Travel
-        );
+        assert_eq!(game.world.activities.get(player).verb, ActivityVerb::Travel);
 
         // One day, one cell: onto the road, out of Wicstow — both halves of
         // place move together.
         game.tick(Command::advance_time());
-        let pos: CellPos = game.world.uvars.get(&game.world.ids, player, UVar::Position);
+        let pos: CellPos = game
+            .world
+            .uvars
+            .get(&game.world.ids, player, UVar::Position);
         assert_eq!(pos, CellPos { x: 2, y: 1 });
         assert_eq!(
-            game.world
-                .relations
-                .get(player, Relation::LocatedIn, vicus),
+            game.world.relations.get(player, Relation::LocatedIn, vicus),
             0.0
         );
 
@@ -677,7 +738,10 @@ mod tests {
         // mirroring it, the journey resolved back to Idle.
         game.tick(Command::advance_time());
         game.tick(Command::advance_time());
-        let pos: CellPos = game.world.uvars.get(&game.world.ids, player, UVar::Position);
+        let pos: CellPos = game
+            .world
+            .uvars
+            .get(&game.world.ids, player, UVar::Position);
         assert_eq!(pos, destination);
         assert_eq!(
             game.world.relations.get(player, Relation::LocatedIn, wick),

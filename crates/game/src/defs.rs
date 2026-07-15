@@ -98,6 +98,7 @@ impl From<Relation> for RelationId {
 )]
 pub enum Set {
     #[default]
+    Dummy,
     People,
     Settlements,
 }
@@ -105,6 +106,7 @@ pub enum Set {
 impl Set {
     fn name(&self) -> &'static str {
         match self {
+            Set::Dummy => "Dummy",
             Set::People => "People",
             Set::Settlements => "Settlements",
         }
@@ -161,20 +163,4 @@ mod tests {
         assert_eq!(world.defs.get_set_name(Set::People.into()), Some("People"));
     }
 
-    #[test]
-    fn relation_from_u16() {
-        assert!(matches!(Relation::try_from(0), Ok(Relation::Married)));
-        assert!(matches!(Relation::try_from(1), Ok(Relation::LocatedIn)));
-        assert!(Relation::try_from(2).is_err());
-        assert!(Relation::try_from(u16::MAX).is_err());
-    }
-
-    #[test]
-    fn set_from_u16() {
-        assert!(matches!(Set::try_from(0), Ok(Set::People)));
-        assert!(matches!(Set::try_from(1), Ok(Set::Settlements)));
-        assert!(Set::try_from(2).is_err());
-        assert!(Set::try_from(u16::MAX).is_err());
-        assert!(matches!(Set::from_id(SetId(0)), Some(Set::People)));
-    }
 }

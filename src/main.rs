@@ -195,6 +195,9 @@ fn gather_keyboard(command: &mut AppCommand, forced_paused: bool) {
     if mq::is_key_down(mq::KeyCode::D) {
         command.pan.x += 1.0;
     }
+    if mq::is_key_down(mq::KeyCode::LeftShift) {
+        command.game.wait = true;
+    }
 }
 
 impl AppCommand {
@@ -291,7 +294,12 @@ fn draw_map_layer(map: &game::DrawMap, camera: &MapCamera) {
             let py = MARGIN + y as f32 * tile;
             mq::draw_rectangle(px, py, tile, tile, color(cell.fill));
             if cell.dot.a > 0.0 {
-                mq::draw_circle(px + tile * 0.5, py + tile * 0.5, tile * 0.3, color(cell.dot));
+                mq::draw_circle(
+                    px + tile * 0.5,
+                    py + tile * 0.5,
+                    tile * 0.3,
+                    color(cell.dot),
+                );
             }
         }
     }

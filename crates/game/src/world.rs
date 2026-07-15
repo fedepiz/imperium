@@ -10,8 +10,19 @@ use util::Rng;
 pub struct Epoch(pub u64);
 
 impl Epoch {
+    /// The far end of time: a deadline of MAX is "never".
+    pub const MAX: Epoch = Epoch(u64::MAX);
+
     pub fn advance(&mut self) {
         self.0 += 1;
+    }
+}
+
+impl std::ops::Add<u64> for Epoch {
+    type Output = Epoch;
+
+    fn add(self, rhs: u64) -> Self::Output {
+        Epoch(self.0 + rhs)
     }
 }
 
@@ -38,8 +49,9 @@ pub enum ActivityVerb {
 /// What an entity is doing: a command extended in time, a superset of the
 /// verbs' fields — `target` is Travel's, zero for the verbs that don't
 /// want one. ZII: the zero activity is Idle. `until` is the epoch it
-/// resolves at; 0 = open-ended (never resolves — it ends only by being
-/// replaced, or, for Travel, by arrival).
+/// resolves at; `Epoch::MAX` = open-ended (never resolves — it ends only
+/// by being replaced, or, for Travel, by arrival). The zero `until` is
+/// always due, which resolves the zero activity to Idle: a no-op.
 #[derive(Clone, Copy, Default)]
 pub struct Activity {
     pub verb: ActivityVerb,
