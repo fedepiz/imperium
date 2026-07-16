@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use arena::Arena;
 use ui::ir;
 
+use crate::Gender;
 use crate::date::{DAYS_PER_YEAR, Date, days_between};
-use crate::defs::{Relation, Set, UVar, Var, init_world};
+use crate::defs::{Relation, Set, UVar, init_world};
 use crate::interaction::Interaction;
 use crate::map::{CellPos, Map};
 use crate::pathfinding::Pathfinding;
@@ -155,7 +156,8 @@ impl Game {
             if world.ids.is_alive(place) {
                 data.bind("PLACE", world.names.get(place));
             }
-            if world.vars.get(id, Var::Gender) > 0. {
+
+            if world.uvars.get::<Gender>(id, UVar::Gender) == Gender::Male {
                 data.bind("IS_MALE", "yes");
             }
         }
@@ -210,11 +212,11 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
         world.uvars.set(id, UVar::BirthEpoch, birth);
 
         let gender = match node.get_text("gender").unwrap_or_default() {
-            "female" => 0.0,
-            "male" => 1.0,
-            _ => 0.0,
+            "female" => Gender::Female,
+            "male" => Gender::Male,
+            _ => Gender::default(),
         };
-        world.vars.set(id, Var::Gender, gender);
+        world.uvars.set(id, UVar::Gender, gender);
 
         world.sets.add(&mut world.ids, Set::People, id);
         if let Some(tag) = node.get_text("tag") {
@@ -272,9 +274,7 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
                     if anchor == CellPos::default() {
                         eprintln!("data/map.txt: '{place}' has no cells on the map");
                     }
-                    world
-                        .uvars
-                        .set(source_id, UVar::Position, anchor);
+                    world.uvars.set(source_id, UVar::Position, anchor);
                     world
                         .relations
                         .set(&world.ids, source_id, Relation::LocatedIn, target, 1.0);
@@ -467,10 +467,7 @@ mod tests {
         // One day, one cell: onto the road, out of Wicstow — both halves of
         // place move together.
         tick(&mut game, Command::advance_time());
-        let pos: CellPos = game
-            .world
-            .uvars
-            .get(player, UVar::Position);
+        let pos: CellPos = game.world.uvars.get(player, UVar::Position);
         assert_eq!(pos, CellPos { x: 2, y: 1 });
         assert_eq!(
             game.world.relations.get(player, Relation::LocatedIn, vicus),
@@ -481,10 +478,7 @@ mod tests {
         // mirroring it, the journey resolved back to Idle.
         tick(&mut game, Command::advance_time());
         tick(&mut game, Command::advance_time());
-        let pos: CellPos = game
-            .world
-            .uvars
-            .get(player, UVar::Position);
+        let pos: CellPos = game.world.uvars.get(player, UVar::Position);
         assert_eq!(pos, destination);
         assert_eq!(
             game.world.relations.get(player, Relation::LocatedIn, wick),

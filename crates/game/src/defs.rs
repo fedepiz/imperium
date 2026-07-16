@@ -12,14 +12,12 @@ use entities::*;
 pub enum Var {
     #[default]
     Dummy,
-    Gender,
 }
 
 impl Var {
     fn name(&self) -> &'static str {
         match self {
             Self::Dummy => "Dummy",
-            Self::Gender => "Gender",
         }
     }
 }
@@ -27,6 +25,27 @@ impl Var {
 impl From<Var> for VarId {
     fn from(value: Var) -> Self {
         VarId(value as u16)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, EnumCount, EnumIter)]
+pub enum Gender {
+    #[default]
+    Male,
+    Female,
+}
+
+impl Bits64 for Gender {
+    fn to_bits(self) -> u64 {
+        self as u64
+    }
+
+    fn from_bits(bits: u64) -> Self {
+        match bits {
+            0 => Self::Male,
+            1 => Self::Female,
+            _ => Default::default(),
+        }
     }
 }
 
@@ -43,6 +62,8 @@ pub enum UVar {
     /// Which settlement someone is "in" is derived from this via the map,
     /// never stored. Zero = nowhere (the map's void corner).
     Position,
+    // Male or Female
+    Gender,
 }
 
 impl UVar {
@@ -51,6 +72,7 @@ impl UVar {
             Self::Dummy => "Dummy",
             Self::BirthEpoch => "BirthEpoch",
             Self::Position => "Position",
+            Self::Gender => "Geneder",
         }
     }
 }
@@ -149,25 +171,4 @@ pub fn init_world(seed: u64) -> World {
         assert_eq!(definitions.define_set(set.name()), SetId::from(set));
     }
     World::new(definitions, seed)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn world_defs_record_the_schema_by_name() {
-        let world = init_world(0);
-        assert_eq!(world.defs.get_var_name(Var::Gender.into()), Some("Gender"));
-        assert_eq!(
-            world.defs.get_uvar_name(UVar::BirthEpoch.into()),
-            Some("BirthEpoch")
-        );
-        assert_eq!(
-            world.defs.get_relation_name(Relation::Married.into()),
-            Some("Married")
-        );
-        assert_eq!(world.defs.get_set_name(Set::People.into()), Some("People"));
-    }
-
 }

@@ -4,7 +4,8 @@
 //! records all live here.
 
 use crate::date::Date;
-use crate::defs::{Relation, Set, UVar, Var};
+use crate::defs::Gender;
+use crate::defs::{Relation, Set, UVar};
 use crate::game::{Game, age, is_birthday};
 use crate::interaction::{self, ChoiceParams};
 use crate::map::CellPos;
@@ -275,7 +276,9 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
     }
 
     if game.world.ids.is_alive(command.femalify) {
-        game.world.vars.set(command.femalify, Var::Gender, 0.0);
+        game.world
+            .uvars
+            .set(command.femalify, UVar::Gender, Gender::Female);
     }
 
     // Time. A request, not an imperative: declined outright when the
