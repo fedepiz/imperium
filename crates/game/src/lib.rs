@@ -8,12 +8,7 @@ mod pathfinding;
 mod tick;
 mod world;
 
-pub use date::*;
-pub use defs::*;
 pub use draw_map::*;
 pub use game::*;
-pub use interaction::*;
-pub use map::*;
-pub use pathfinding::*;
+pub use map::CellPos;
 pub use tick::*;
-pub use world::*;

@@ -3,9 +3,8 @@ use std::collections::HashMap;
 use arena::Arena;
 use ui::ir;
 
-use crate::Gender;
 use crate::date::{DAYS_PER_YEAR, Date, days_between};
-use crate::defs::{Relation, Set, UVar, init_world};
+use crate::defs::{Gender, Relation, Set, UVar, init_world};
 use crate::interaction::Interaction;
 use crate::map::{CellPos, Map};
 use crate::pathfinding::Pathfinding;
