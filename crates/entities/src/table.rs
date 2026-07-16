@@ -47,6 +47,16 @@ impl<T: Copy + Default> Table<T> {
         self.rows[id.index()] = (id, Default::default());
     }
 
+    /// Every row in slot order, each with its owner stamp — dead and
+    /// never-used slots included (a corpse keeps its bits until slot
+    /// reuse; a fresh slot's stamp is null). The whole-column channel
+    /// for scans that touch every row (index rebuilds): stream the dense
+    /// array and gate on `is_alive(owner)`, instead of querying row by
+    /// row.
+    pub fn iter(&self) -> impl Iterator<Item = (EntityId, T)> + '_ {
+        self.rows.iter().copied()
+    }
+
     /// Copy a range of slots' rows wholesale from another store — the
     /// double buffer's carry-forward, called chunk by chunk by the day
     /// pass before per-entity updates overwrite their own rows.

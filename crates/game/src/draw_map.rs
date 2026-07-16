@@ -3,7 +3,7 @@
 //! sim-side. The harness just rasterizes rectangles and dots; it never
 //! looks at world state.
 
-use crate::defs::{Set, UVar};
+use crate::defs::Set;
 use crate::map::{CellPos, Terrain};
 use crate::world::World;
 
@@ -69,7 +69,7 @@ pub fn build(world: &World) -> DrawMap {
     // player's dot outshines anyone sharing the cell.
     let player = world.tags.lookup("player");
     for id in world.ids.iter_set(Set::People) {
-        let pos: CellPos = world.get_uvar(id, UVar::Position);
+        let pos = world.position(id);
         // The zero position is "nowhere", not the corner cell.
         if pos == CellPos::default() || pos.x >= map.width || pos.y >= map.height {
             continue;

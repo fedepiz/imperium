@@ -5,6 +5,7 @@ mod game;
 mod interaction;
 mod map;
 mod pathfinding;
+mod spatial_map;
 mod tick;
 mod world;
 

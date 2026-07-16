@@ -8,6 +8,7 @@ use crate::defs::{Gender, Relation, Set, UVar, init_world, is_derived_id, locate
 use crate::interaction::Interaction;
 use crate::map::{CellPos, Map};
 use crate::pathfinding::Pathfinding;
+use crate::spatial_map::SpatialMap;
 use crate::world::{ActivityVerb, Epoch, World, WorldState};
 use entities::*;
 
@@ -25,6 +26,9 @@ pub struct Game {
     /// Derived route memory, not world state: outside the save/clone
     /// unit, rebuilt from nothing.
     pub(crate) pathfinding: Pathfinding,
+    /// The cell → entities index, pathfinding's sibling: derived, outside
+    /// the save unit, re-derived from the settled world after every tick.
+    pub(crate) spatial_map: SpatialMap,
     /// The open interaction, if any: modal choice state beside the
     /// world, not in it — never saved, replaced or cleared, never
     /// suspended. While one is open, time does not flow.
@@ -58,10 +62,13 @@ impl Game {
         // The staging buffer starts zeroed (ZII): the first pass fully
         // overwrites it, so no clone is needed.
         let staging = WorldState::new(&world.defs);
+        let mut spatial_map = SpatialMap::default();
+        spatial_map.rebuild(&world);
         Game {
             world,
             staging,
             pathfinding: Pathfinding::default(),
+            spatial_map,
             interaction: None,
         }
     }
@@ -85,6 +92,21 @@ impl Game {
     /// cells (or there's no such entity).
     pub fn anchor(&self, id: EntityId) -> CellPos {
         self.world.map.anchor(id)
+    }
+
+    /// Everyone standing on this cell, in slot order; empty for nowhere
+    /// and out of bounds. [`Game::entity_at`]'s plural sibling: that one
+    /// picks the board's owner, this lists who's physically there.
+    pub fn entities_at(&self, pos: CellPos) -> &[EntityId] {
+        let found = self.spatial_map.at(pos);
+        // The index is re-derived after anything that moves or removes
+        // people; a stale answer here means a write path skipped that.
+        debug_assert!(
+            found
+                .iter()
+                .all(|&id| self.world.ids.is_alive(id) && self.world.position(id) == pos)
+        );
+        found
     }
 
     /// The per-frame bridge: dump the sim state the UI script binds to.
@@ -159,8 +181,7 @@ impl Game {
             data.bind("ACTIVITY", &doing);
             // Where they stand, spoken as a settlement name; unbound when
             // they're nowhere or on no one's cells.
-            let pos: CellPos = world.get_uvar(id, UVar::Position);
-            let place = world.map.cell(pos).settlement;
+            let place = world.map.cell(world.position(id)).settlement;
             if world.ids.is_alive(place) {
                 data.bind("PLACE", world.names.get(place));
             }
@@ -281,7 +302,7 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
                     if anchor == CellPos::default() {
                         eprintln!("data/map.txt: '{place}' has no cells on the map");
                     }
-                    world.set_uvar(source_id, UVar::Position, anchor);
+                    world.set_position(source_id, anchor);
                 }
                 None => eprintln!("data/characters.txt: '{key}' located unknown id '{place}'"),
             }
@@ -289,7 +310,7 @@ fn bootstrap(world: &mut World, characters_source: &str, map_source: &str) {
     }
 
     for id in world.ids.iter_alive() {
-        let place = located_at(world.get_uvar(id, UVar::Position), &world.map, &world.ids);
+        let place = located_at(world.position(id), &world.map, &world.ids);
         if place != EntityId::NULL {
             edges.push(RelationEntry {
                 source: id,
@@ -333,10 +354,13 @@ mod tests {
         world.epoch = START_EPOCH;
         bootstrap(&mut world, TEST_CAST, TEST_MAP);
         let staging = WorldState::new(&world.defs);
+        let mut spatial_map = SpatialMap::default();
+        spatial_map.rebuild(&world);
         Game {
             world,
             staging,
             pathfinding: Pathfinding::default(),
+            spatial_map,
             interaction: None,
         }
     }
@@ -491,16 +515,14 @@ mod tests {
         // One day, one cell: onto the road, out of Wicstow — both halves of
         // place move together.
         tick(&mut game, Command::advance_time());
-        let pos: CellPos = game.world.get_uvar(player, UVar::Position);
-        assert_eq!(pos, CellPos { x: 2, y: 1 });
+        assert_eq!(game.world.position(player), CellPos { x: 2, y: 1 });
         assert_eq!(game.world.relation(player, Relation::LocatedIn, vicus), 0.0);
 
         // Two more days reach Hamtun: position on its anchor, LocatedIn
         // mirroring it, the journey resolved back to Idle.
         tick(&mut game, Command::advance_time());
         tick(&mut game, Command::advance_time());
-        let pos: CellPos = game.world.get_uvar(player, UVar::Position);
-        assert_eq!(pos, destination);
+        assert_eq!(game.world.position(player), destination);
         assert_eq!(game.world.relation(player, Relation::LocatedIn, wick), 1.0);
         assert_eq!(game.world.activity(player).verb, ActivityVerb::Idle);
 

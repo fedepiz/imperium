@@ -58,10 +58,6 @@ pub enum UVar {
     /// The epoch a person was born at. Age and
     /// birthdays are derived from this, never stored.
     BirthEpoch,
-    /// The cell an entity stands on, as a packed [`crate::map::CellPos`].
-    /// Which settlement someone is "in" is derived from this via the map,
-    /// never stored. Zero = nowhere (the map's void corner).
-    Position,
     // Male or Female
     Gender,
 }
@@ -71,7 +67,6 @@ impl UVar {
         match self {
             Self::Dummy => "Dummy",
             Self::BirthEpoch => "BirthEpoch",
-            Self::Position => "Position",
             Self::Gender => "Geneder",
         }
     }
@@ -89,8 +84,8 @@ pub enum Relation {
     Married,
     /// Character → settlement, the logical mirror of spatial truth: kept
     /// for relation-side processing (who is here / where is he), but it
-    /// *follows* [`UVar::Position`] — whatever moves an entity across a
-    /// blob boundary updates both. Weight unused.
+    /// *follows* the positions column — whatever moves an entity across
+    /// a blob boundary updates both. Weight unused.
     LocatedIn,
     /// Character → character: a personal oath of service. Weight unused.
     SwornTo,

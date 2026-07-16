@@ -67,7 +67,7 @@ choices; follow them even where std-idiomatic Rust would do otherwise.
 
 - `World` splits in two: single-instance state mutated only in *direct
   mode* (epoch, seed, ids, names, tags, map) and the double-buffered
-  `WorldState` (vars, uvars, activities, relations) — the per-entity
+  `WorldState` (vars, uvars, positions, activities, relations) — the per-entity
   state the day pass rewrites. Two buffers exist: `world.state` (the
   current one) and `Game::staging` (the write buffer), swapped after
   each pass. Staging is dead scratch between ticks; never read it.

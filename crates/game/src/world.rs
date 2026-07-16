@@ -1,4 +1,4 @@
-use crate::map::Map;
+use crate::map::{CellPos, Map};
 use entities::*;
 
 /// A point on the sim's clock: how many `AdvanceTime` commands have been
@@ -69,6 +69,11 @@ pub struct Activity {
 pub struct WorldState {
     pub vars: Vars,
     pub uvars: UVars,
+    /// The cell each entity stands on — spatial truth, engine-structural
+    /// rather than content, hence a typed column and not a uvar. Zero =
+    /// nowhere (the map's void corner). Which settlement someone is "in"
+    /// is derived from this via the map, never stored.
+    pub positions: Table<CellPos>,
     pub activities: Table<Activity>,
     pub relations: Relations,
     // Future typed columns go here, and get one reset line in `spawn`,
@@ -80,6 +85,7 @@ impl WorldState {
         WorldState {
             vars: Vars::new(defs),
             uvars: UVars::new(defs),
+            positions: Table::new(),
             activities: Table::new(),
             relations: Relations::new(defs),
         }
@@ -133,6 +139,7 @@ impl World {
         let id = self.ids.spawn();
         self.state.vars.reset(id);
         self.state.uvars.reset(id);
+        self.state.positions.reset(id);
         self.state.activities.reset(id);
         id
     }
@@ -168,6 +175,14 @@ impl World {
 
     pub fn set_uvar<T: Bits64>(&mut self, id: EntityId, uvar: impl Into<UVarId>, value: T) {
         self.state.uvars.set(id, uvar, value);
+    }
+
+    pub fn position(&self, id: EntityId) -> CellPos {
+        *self.state.positions.get(id)
+    }
+
+    pub fn set_position(&mut self, id: EntityId, pos: CellPos) {
+        self.state.positions.set(id, pos);
     }
 
     pub fn activity(&self, id: EntityId) -> Activity {

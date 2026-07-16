@@ -313,6 +313,9 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
                 .uvars
                 .copy_chunk_from(&world.state.uvars, slots.clone());
             staging
+                .positions
+                .copy_chunk_from(&world.state.positions, slots.clone());
+            staging
                 .activities
                 .copy_chunk_from(&world.state.activities, slots.clone());
             for slot in slots {
@@ -365,6 +368,10 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
         }
     }
     game.world.sweep();
+
+    // Everything that moves or removes people has run; re-derive the
+    // cell → entities index from the settled world.
+    game.spatial_map.rebuild(&game.world);
 
     Output {
         forced_paused: game.interaction.is_some() || !time_may_flow(&game.world),
@@ -438,7 +445,7 @@ fn update_entity(
     // and of dayless ticks.
     let mut rng = Rng::at(world.seed, world.epoch.0, this.to_bits());
     let mut activity = world.activity(this);
-    let mut pos: CellPos = world.get_uvar(this, UVar::Position);
+    let mut pos = world.position(this);
 
     // Resolve an activity that came due — anything can be doing
     // something, not just people. Completion effects go here as verbs
@@ -457,7 +464,7 @@ fn update_entity(
             activity = Activity::default();
         } else {
             pos = next;
-            out.uvars.set(this, UVar::Position, next);
+            out.positions.set(this, next);
             if next == activity.destination {
                 activity = Activity::default();
                 let place = world.map.cell(next).settlement;
@@ -523,8 +530,5 @@ fn decide_destination(this: EntityId, world: &World, rng: &mut Rng) -> Option<De
             reason,
             destination,
         })
-        .filter(|decision| {
-            let current_position: CellPos = world.get_uvar(this, UVar::Position);
-            decision.destination != current_position
-        })
+        .filter(|decision| decision.destination != world.position(this))
 }
