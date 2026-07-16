@@ -5,12 +5,14 @@
 
 use crate::date::Date;
 use crate::defs::Gender;
-use crate::defs::{Relation, Set, UVar};
+use crate::defs::{Relation, Set, UVar, is_derived_id, located_at};
 use crate::game::{Game, age, is_birthday};
 use crate::interaction::{self, ChoiceParams};
 use crate::map::CellPos;
-use crate::world::{Activity, ActivityVerb, Epoch, World};
+use crate::pathfinding::Pathfinding;
+use crate::world::{Activity, ActivityVerb, Epoch, World, WorldState};
 use entities::*;
+use util::Rng;
 
 /// Mortality ramp, rolled once a year on each person's birthday: no chance
 /// of death up to this age, certain death `MORTALITY_SPAN` years later.
@@ -112,8 +114,8 @@ fn parse_arg<T: core::str::FromStr + Default>(arg: &str, action: &str) -> T {
 pub enum EventKind {
     /// `subject` completed a journey at settlement `target`.
     Arrival,
-    /// `subject` died; they are marked but not yet swept, so reactions
-    /// can still read them.
+    /// `subject` dies today. The pass only records it; the event phase
+    /// marks, so reactions read the corpse between mark and sweep.
     Death,
 }
 
@@ -129,33 +131,12 @@ pub struct Event {
     pub target: EntityId,
 }
 
-/// The one mover: sets the spatial truth (`Position`) and keeps its
-/// logical mirror (`LocatedIn`) in step across blob boundaries — the
-/// contract the bootstrap's `located` handling establishes.
-fn move_entity(world: &mut World, id: EntityId, from: CellPos, to: CellPos) {
-    world.uvars.set(id, UVar::Position, to);
-    let old = world.map.cell(from).settlement;
-    let new = world.map.cell(to).settlement;
-    if old != new {
-        // Removal (weight 0) is a no-op when there's no such edge, so a
-        // null `old` (stepping off a road) needs no special case.
-        world
-            .relations
-            .set(&world.ids, id, Relation::LocatedIn, old, 0.0);
-        if new != EntityId::NULL {
-            world
-                .relations
-                .set(&world.ids, id, Relation::LocatedIn, new, 1.0);
-        }
-    }
-}
-
 /// The internal half of the pause story: the sim declines to step while
 /// the player is idle or absent. (The external half — whether
 /// `AdvanceTime` gets pumped at all — is the clock's, outside the sim.)
 fn time_may_flow(world: &World) -> bool {
     match world.tags.lookup("player") {
-        Some(player) => world.activities.get(player).verb != ActivityVerb::Idle,
+        Some(player) => world.activity(player).verb != ActivityVerb::Idle,
         None => false,
     }
 }
@@ -166,13 +147,11 @@ fn report_death(world: &World, id: EntityId) {
     let name = world.names.get(id);
     // Marriage is declared one-way in the data; look both directions.
     let spouses: Vec<&str> = world
-        .relations
-        .get_related_via(id, Relation::Married)
+        .related_via(id, Relation::Married)
         .map(|(other, _)| other)
         .chain(
             world
-                .relations
-                .get_related_to_via(id, Relation::Married)
+                .related_to_via(id, Relation::Married)
                 .map(|(other, _)| other),
         )
         .map(|other| world.names.get(other))
@@ -224,7 +203,7 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
     // actions; they land here and do nothing).
     if let (Some(player), true) = (player, game.interaction.is_none()) {
         if let Some(next_verb) = command.activity {
-            let current = *game.world.activities.get(player);
+            let current = game.world.activity(player);
             let next = match next_verb {
                 ActivityVerb::Idle => Activity::default(),
                 verb => Activity {
@@ -236,7 +215,7 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
                 },
             };
             if next.verb != current.verb || next.destination != current.destination {
-                game.world.activities.set(player, next);
+                game.world.set_activity(player, next);
             }
         }
 
@@ -247,10 +226,10 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
         // resolves one day after the waiting stops.
         if command.wait {
             let horizon = game.world.epoch + 1 + command.advance_time as u64;
-            let activity = game.world.activities.get_mut(player);
+            let mut activity = game.world.activity(player);
             match activity.verb {
                 ActivityVerb::Idle => {
-                    *activity = Activity {
+                    activity = Activity {
                         verb: ActivityVerb::Rest,
                         start: game.world.epoch,
                         until: horizon,
@@ -264,6 +243,7 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
                 }
                 _ => {}
             }
+            game.world.set_activity(player, activity);
         }
     }
 
@@ -277,8 +257,7 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
 
     if game.world.ids.is_alive(command.femalify) {
         game.world
-            .uvars
-            .set(command.femalify, UVar::Gender, Gender::Female);
+            .set_uvar(command.femalify, UVar::Gender, Gender::Female);
     }
 
     // Time. A request, not an imperative: declined outright when the
@@ -290,100 +269,78 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
         game.world.epoch.advance();
     }
 
-    // Globally observable mutations don't happen mid-traversal: the
-    // pass records events, resolved after the loop.
+    // The buffered day pass: read the frozen current world, write the
+    // staging buffer, copying as it goes — each chunk's rows are carried
+    // forward wholesale, then each live entity's update overwrites its
+    // own rows and contributes its relation row. Nothing global mutates
+    // mid-pass: whatever the day changes beyond an entity's own slots is
+    // recorded as an event and resolved after the swap.
     let mut events: Vec<Event> = Vec::new();
+    if day_passes {
+        let Game {
+            world,
+            staging,
+            pathfinding,
+            ..
+        } = game;
+        let world = &*world;
 
-    // The entity pass: one uniform loop over every live entity — no
-    // kinds — where each runs every check, GPU-style, written from
-    // the entity's point of view. Checks gate themselves, on the day
-    // advancing (right now, all of them) or on a set-membership bit,
-    // and only where a check genuinely doesn't apply. Death reactions
-    // run between mark and sweep, while the corpse's relations are
-    // still queryable.
-    let entities: Vec<_> = game.world.ids.iter_alive().collect();
-    for &this in &entities {
-        let is_player = this == player.unwrap_or_default();
-        let is_person = game.world.ids.in_set(this, Set::People);
+        // Relation *changes* land here: what the updates send through the
+        // outbox (locations today; oaths and marriages one day) plus, in
+        // time, direct-mode decrees taken at the pass boundary. The
+        // rebuild below merges them over the carried base — relations are
+        // never mutated in place, only reconstructed.
+        let mut changes: Vec<RelationEntry> = Vec::new();
+        let mut pass = Pass {
+            events: &mut events,
+            changes: &mut changes,
+            pathfinding,
+        };
 
-        // Resolve an activity that came due — anything can be doing
-        // something, not just people. Completion effects go here as
-        // verbs gain them.
-        if day_passes {
-            let activity = game.world.activities.get(this);
-            if activity.until <= game.world.epoch {
-                game.world.activities.reset(this);
-            }
-        }
-
-        // Travel: one cell per day toward the target. Stateless —
-        // nobody stores a route; each step re-asks from the current
-        // cell, so retargeting and detours cost nothing extra.
-        if day_passes {
-            let activity = *game.world.activities.get(this);
-            if activity.verb == ActivityVerb::Travel {
-                let pos: CellPos = game.world.uvars.get(this, UVar::Position);
-                let next = game
-                    .pathfinding
-                    .next_step(&game.world.map, pos, activity.destination);
-                if next == CellPos::default() {
-                    // Already there, or no way there: the journey ends.
-                    game.world.activities.reset(this);
-                } else {
-                    move_entity(&mut game.world, this, pos, next);
-                    if next == activity.destination {
-                        game.world.activities.reset(this);
-                        let place = game.world.map.cell(next).settlement;
-                        if game.world.ids.is_alive(place) {
-                            events.push(Event {
-                                kind: EventKind::Arrival,
-                                subject: this,
-                                target: place,
-                            });
-                        }
-                    }
+        // NOTE: the future threading seam. One chunk = one task: an
+        // update reads only the frozen world and writes only its own
+        // entity's slots in `staging`; per-chunk event vecs would then
+        // concatenate in chunk order to keep resolution deterministic.
+        // The pathfinding memo is the one shared &mut to shard first,
+        // and the wander println!s become events.
+        const CHUNK_SIZE: usize = 1024;
+        for chunk in (0..Ids::CAPACITY).step_by(CHUNK_SIZE) {
+            let slots = chunk..(chunk + CHUNK_SIZE).min(Ids::CAPACITY);
+            staging
+                .vars
+                .copy_chunk_from(&world.state.vars, slots.clone());
+            staging
+                .uvars
+                .copy_chunk_from(&world.state.uvars, slots.clone());
+            staging
+                .activities
+                .copy_chunk_from(&world.state.activities, slots.clone());
+            for slot in slots {
+                let this = world.ids.id_at(slot);
+                if !this.is_valid() {
+                    continue;
                 }
+                update_entity(this, player, world, staging, &mut pass);
             }
         }
+        // Carried kinds flow forward from the old matrix with the changes
+        // on top; kinds that don't carry (LocatedIn) exist only as far as
+        // the updates re-emitted them above.
+        staging.relations.rebuild(
+            &world.state.relations,
+            &world.ids,
+            &mut changes,
+            |kind| !is_derived_id(kind),
+        );
 
-        // People randomly travel if idle. Gated on the day like every
-        // other roll: the rng is world state, so drawing from it on
-        // dayless ticks would fork histories that share a command
-        // stream.
-        if day_passes && !is_player && is_person {
-            if let Some(decision) = decide_destination(this, &mut game.world) {
-                let name = game.world.names.get(this);
-                println!("{name}: {}", decision.reason);
-                game.world.activities.set(
-                    this,
-                    Activity {
-                        verb: ActivityVerb::Travel,
-                        start: game.world.epoch,
-                        until: Epoch::MAX, // open-ended, ends on arrival
-                        destination: decision.destination,
-                    },
-                );
-            }
-        }
-
-        // On birthdays, roll the mortality ramp. Only people age.
-        if day_passes && is_person && is_birthday(&game.world, this) {
-            let hazard = (age(&game.world, this) as f32 - MORTALITY_AGE) / MORTALITY_SPAN;
-            if game.world.rng.chance(hazard) {
-                game.world.ids.mark_despawn(this);
-                events.push(Event {
-                    kind: EventKind::Death,
-                    subject: this,
-                    target: EntityId::NULL,
-                });
-            }
-        }
+        // The pass's output becomes the world; the old state lingers as
+        // the next pass's scratch, never read meanwhile.
+        std::mem::swap(&mut game.world.state, &mut game.staging);
     }
 
     // Resolve the pass's events, one by one in the order recorded —
-    // between mark and sweep, so death reactions can still read the
-    // corpse. The world moved since an event was recorded, so
-    // re-check what it refers to.
+    // direct mode on the new current world. The world moved since an
+    // event was recorded, so re-check what it refers to.
     for event in events {
         match event.kind {
             EventKind::Arrival => {
@@ -399,7 +356,12 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
                     game.interaction = interaction::arrival(&mut game.world, params);
                 }
             }
-            EventKind::Death => report_death(&game.world, event.subject),
+            // Death lands here, not in the pass: mark, then react while
+            // the corpse is still readable — the sweep below despawns.
+            EventKind::Death => {
+                game.world.ids.mark_despawn(event.subject);
+                report_death(&game.world, event.subject);
+            }
         }
     }
     game.world.sweep();
@@ -409,46 +371,160 @@ pub fn tick(game: &mut Game, command: Command) -> Output {
     }
 }
 
+/// The day pass's kit, handed to every update: the bridge between one
+/// entity's tick and everything that isn't its own rows. Consequences an
+/// update can't apply locally go out through the methods here — events
+/// resolve serially after the swap, relation changes merge in the
+/// rebuild — and the pass's shared scratch (the route memo) rides along.
+/// Updates gain new consequences as methods, not signature changes.
+/// Under threading, each chunk gets its own, sinks drained in chunk
+/// order.
+struct Pass<'a> {
+    events: &'a mut Vec<Event>,
+    changes: &'a mut Vec<RelationEntry>,
+    pathfinding: &'a mut Pathfinding,
+}
+
+impl Pass<'_> {
+    /// `who` stands in `place` at day's end — becomes the LocatedIn
+    /// change. A null place is nowhere: no relation at all.
+    fn locate(&mut self, who: EntityId, place: EntityId) {
+        if place != EntityId::NULL {
+            self.changes.push(RelationEntry {
+                source: who,
+                relation: Relation::LocatedIn.into(),
+                target: place,
+                value: 1.0,
+            });
+        }
+    }
+
+    /// `who` completed a journey at settlement `place`.
+    fn arrive(&mut self, who: EntityId, place: EntityId) {
+        self.events.push(Event {
+            kind: EventKind::Arrival,
+            subject: who,
+            target: place,
+        });
+    }
+
+    /// `who` dies today; the event phase marks the despawn.
+    fn die(&mut self, who: EntityId) {
+        self.events.push(Event {
+            kind: EventKind::Death,
+            subject: who,
+            target: EntityId::NULL,
+        });
+    }
+}
+
+/// One entity's day, from its own point of view: read the frozen world,
+/// write only this entity's rows in `out` (which already carry
+/// yesterday's values, copied by the pass). The activity evolves as a
+/// local so later checks see earlier effects — a rest that ends today
+/// frees today's wander roll — and lands in `out` exactly once. Anything
+/// beyond the entity's own rows goes through the pass kit.
+fn update_entity(
+    this: EntityId,
+    player: Option<EntityId>,
+    world: &World,
+    out: &mut WorldState,
+    pass: &mut Pass,
+) {
+    let is_player = Some(this) == player;
+    let is_person = world.ids.in_set(this, Set::People);
+    // This entity's rng for the day, derived — not world state — so every
+    // entity's rolls are independent of everyone else's, of draw order,
+    // and of dayless ticks.
+    let mut rng = Rng::at(world.seed, world.epoch.0, this.to_bits());
+    let mut activity = world.activity(this);
+    let mut pos: CellPos = world.get_uvar(this, UVar::Position);
+
+    // Resolve an activity that came due — anything can be doing
+    // something, not just people. Completion effects go here as verbs
+    // gain them.
+    if activity.until <= world.epoch {
+        activity = Activity::default();
+    }
+
+    // Travel: one cell per day toward the target. Stateless — nobody
+    // stores a route; each step re-asks from the current cell, so
+    // retargeting and detours cost nothing extra.
+    if activity.verb == ActivityVerb::Travel {
+        let next = pass.pathfinding.next_step(&world.map, pos, activity.destination);
+        if next == CellPos::default() {
+            // Already there, or no way there: the journey ends.
+            activity = Activity::default();
+        } else {
+            pos = next;
+            out.uvars.set(this, UVar::Position, next);
+            if next == activity.destination {
+                activity = Activity::default();
+                let place = world.map.cell(next).settlement;
+                if world.ids.is_alive(place) {
+                    pass.arrive(this, place);
+                }
+            }
+        }
+    }
+
+    // People randomly travel if idle.
+    if !is_player && is_person && activity.verb == ActivityVerb::Idle {
+        if let Some(decision) = decide_destination(this, world, &mut rng) {
+            let name = world.names.get(this);
+            println!("{name}: {}", decision.reason);
+            activity = Activity {
+                verb: ActivityVerb::Travel,
+                start: world.epoch,
+                until: Epoch::MAX, // open-ended, ends on arrival
+                destination: decision.destination,
+            };
+        }
+    }
+
+    // On birthdays, roll the mortality ramp. Only people age.
+    if is_person && is_birthday(world, this) {
+        let hazard = (age(world, this) as f32 - MORTALITY_AGE) / MORTALITY_SPAN;
+        if rng.chance(hazard) {
+            pass.die(this);
+        }
+    }
+
+    out.activities.set(this, activity);
+    pass.locate(this, located_at(pos, &world.map, &world.ids));
+}
+
 struct DecideDestination {
     reason: &'static str,
     destination: CellPos,
 }
 
-fn decide_destination(this: EntityId, world: &mut World) -> Option<DecideDestination> {
-    // People randomly travel if idle. Gated on the day like every
-    // other roll: the rng is world state, so drawing from it on
-    // dayless ticks would fork histories that share a command
-    // stream.
-    if world.activities.get(this).verb == ActivityVerb::Idle && world.rng.chance(0.05) {
-        // If I am a ruler of a place, go to that place
-        let reason;
-        let destination = match world
-            .relations
-            .get_related_via(this, Relation::Rules)
-            .next()
-        {
-            Some((x, _)) => {
-                reason = "to return to the land ruled";
-                Some(world.map.anchor(x))
-            }
-            None => {
-                reason = "as random travel";
-                let count = world.map.anchors().len();
-                let pick = world.rng.next_u64() as usize % count;
-                world.map.anchors().get(pick).map(|(_, x)| *x)
-            }
-        };
-
-        destination
-            .map(|destination| DecideDestination {
-                reason,
-                destination,
-            })
-            .filter(|decision| {
-                let current_position: CellPos = world.uvars.get(this, UVar::Position);
-                decision.destination != current_position
-            })
-    } else {
-        None
+fn decide_destination(this: EntityId, world: &World, rng: &mut Rng) -> Option<DecideDestination> {
+    if !rng.chance(0.05) {
+        return None;
     }
+    // If I am a ruler of a place, go to that place
+    let reason;
+    let destination = match world.related_via(this, Relation::Rules).next() {
+        Some((x, _)) => {
+            reason = "to return to the land ruled";
+            Some(world.map.anchor(x))
+        }
+        None => {
+            reason = "as random travel";
+            let count = world.map.anchors().len();
+            let pick = rng.next_u64() as usize % count;
+            world.map.anchors().get(pick).map(|(_, x)| *x)
+        }
+    };
+
+    destination
+        .map(|destination| DecideDestination {
+            reason,
+            destination,
+        })
+        .filter(|decision| {
+            let current_position: CellPos = world.get_uvar(this, UVar::Position);
+            decision.destination != current_position
+        })
 }

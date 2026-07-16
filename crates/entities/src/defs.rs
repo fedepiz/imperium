@@ -43,6 +43,9 @@ impl Definitions {
     pub fn define_set(&mut self, name: impl Into<String>) -> SetId {
         let id = SetId(u16::try_from(self.set_names.len()).unwrap());
         self.set_names.push(name.into());
+        // Membership lives in each entity's inline BitSet<1>: one bit per
+        // set. Plenty for now; if it ever transpires, widen the BitSet.
+        assert!(self.set_names.len() <= 64);
         id
     }
 

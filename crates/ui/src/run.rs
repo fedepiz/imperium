@@ -266,6 +266,7 @@ fn element(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
     let interactive = !disabled
         && (!action.is_empty()
             || node.hover_background.a > 0.0
+            || node.press_background.a > 0.0
             || node.scroll_x
             || node.scroll_y
             || !node.tooltip.is_empty());
@@ -295,7 +296,9 @@ fn element(ctx: &mut Ctx<'_>, ui: &mut ui::Ui<'_, '_>, node: UiNode) {
         .padding(node.padding)
         .gap(node.gap)
         .corner_radius(node.corner_radius);
-    let background = if sense.hovered && node.hover_background.a > 0.0 {
+    let background = if sense.held && node.press_background.a > 0.0 {
+        node.press_background
+    } else if sense.hovered && node.hover_background.a > 0.0 {
         node.hover_background
     } else {
         dimmed(paint(ctx, node.background), disabled)

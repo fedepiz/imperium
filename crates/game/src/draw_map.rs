@@ -68,8 +68,8 @@ pub fn build(world: &World) -> DrawMap {
     // settlement is presumed occupied, its fill is marker enough. The
     // player's dot outshines anyone sharing the cell.
     let player = world.tags.lookup("player");
-    for id in world.sets.iter(Set::People) {
-        let pos: CellPos = world.uvars.get(id, UVar::Position);
+    for id in world.ids.iter_set(Set::People) {
+        let pos: CellPos = world.get_uvar(id, UVar::Position);
         // The zero position is "nowhere", not the corner cell.
         if pos == CellPos::default() || pos.x >= map.width || pos.y >= map.height {
             continue;

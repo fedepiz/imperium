@@ -63,16 +63,48 @@ choices; follow them even where std-idiomatic Rust would do otherwise.
   minimize pointer chasing. Accept wasted bytes per instance as the price of
   simplicity and cache-friendly iteration.
 
-## Mutation locality in sim passes
+## Mutation locality: the double-buffered day pass
 
-- The more globally observable a mutation is, the further outside the
-  inner loop it must be performed. Entity passes may write per-entity
-  state in place; anything world-scale or modal is recorded as an
-  `Event` (tick.rs) during traversal and resolved one by one after the
-  loop, in the order recorded. Deaths and arrivals (which can raise an
-  interaction) already work this way; new global effects join the enum.
-- When in doubt, defer: post-traversal resolution keeps the pass a
-  pure sweep and makes the order of global effects explicit.
+- `World` splits in two: single-instance state mutated only in *direct
+  mode* (epoch, seed, ids, names, tags, map) and the double-buffered
+  `WorldState` (vars, uvars, activities, relations) — the per-entity
+  state the day pass rewrites. Two buffers exist: `world.state` (the
+  current one) and `Game::staging` (the write buffer), swapped after
+  each pass. Staging is dead scratch between ticks; never read it.
+- Direct mode is everything outside the pass — command handling,
+  interaction effects, event resolution, bootstrap — and mutates the
+  world in place, whole-world writes allowed, through the `World`
+  accessors (`get_var`/`set_uvar`/`activity`/`related_via`…).
+- The day pass is a pure function of the frozen world: a chunked slot
+  loop where each chunk first memcpys its rows forward
+  (`copy_chunk_from`), then each live entity's update reads only
+  `&World` and writes only its *own* slots in staging. Everyone acts on
+  yesterday's world; everything within a day is simultaneous. A new
+  `WorldState` field gets one reset line in `spawn` and one
+  copy_chunk_from line in the pass.
+- Every update receives the pass kit, `Pass` (tick.rs): the bridge
+  between one entity's tick and everything that isn't its own rows.
+  Consequences go out through its methods (`locate`, `arrive`, `die` —
+  new consequences become methods, never signature changes) into the
+  pass's sinks: events resolve serially after the swap, in recorded
+  order; relation changes merge in the rebuild. Shared scratch (the
+  route memo) rides along in it. The chunk loop is the threading seam
+  (see the NOTE in tick.rs); per-chunk kits with sinks drained in
+  chunk order keep resolution deterministic when that day comes.
+- Relations are never mutated in place: a CSR matrix pair, and every
+  rebuild is `merge(carry(old), changes)`. Kinds that *carry*
+  (Married, SwornTo, Rules) flow forward from the old matrix with the
+  changes on top — the last write to a key wins, a zero value deletes;
+  kinds that don't (`Relation::is_derived`: LocatedIn) exist only as
+  far as each update's Outcome re-emits them. Bootstrap is the same
+  call over an empty base. There is no `set()`; a future direct-mode
+  write path (oaths, marriages) accumulates change entries for the
+  next rebuild to merge. Queries filter dead endpoints and owner-stamp
+  against slot reuse, so edges stale since a death are unreadable.
+- No rng state: every roll derives its stream via
+  `Rng::at(world.seed, epoch, n)` — one per entity per day
+  (`n = id.to_bits()`) — so draws are independent of iteration order,
+  of other entities, and of dayless ticks.
 
 ## Testing
 

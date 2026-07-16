@@ -11,12 +11,6 @@ impl EntityId {
         generation: 0,
     };
 
-    /// Sorts after every real id — the upper bound for range scans.
-    pub(crate) const MAX: EntityId = EntityId {
-        index: u16::MAX,
-        generation: u16::MAX,
-    };
-
     pub fn is_valid(&self) -> bool {
         self.index != 0 && self.generation % 2 == 1
     }
@@ -65,10 +59,9 @@ impl core::str::FromStr for EntityId {
 #[derive(Default, Clone, Copy)]
 struct EntityData {
     id: EntityId,
-    /// Inline set memberships, one bit per `SetId`: the fast half of
-    /// membership, kept in lockstep with `Sets`' ordered keys (which
-    /// exist for iteration). ZII: no bits, no memberships — despawn
-    /// clears them, so reused slots start clean.
+    /// Inline set memberships, one bit per `SetId` — the sole truth of
+    /// membership. ZII: no bits, no memberships — despawn clears them,
+    /// so reused slots start clean.
     sets: util::bitset::BitSet<1>,
 }
 
@@ -131,6 +124,13 @@ impl Ids {
         self.marked.push(id);
     }
 
+    /// The id currently occupying a slot — the live id if the slot is
+    /// spawned, otherwise a dead placeholder that fails `is_valid`.
+    /// Slot-driven passes use this to name their per-slot data.
+    pub fn id_at(&self, slot: usize) -> EntityId {
+        self.entries[slot].id
+    }
+
     /// An id is alive iff its slot still holds the same generation.
     pub fn is_alive(&self, id: EntityId) -> bool {
         id.is_valid()
@@ -141,8 +141,7 @@ impl Ids {
     }
 
     /// Fast membership check against the inline bits: O(1), the entity's
-    /// slot and one bit. Dead and stale ids are in no set; `Sets` is the
-    /// writer that keeps the bits true.
+    /// slot and one bit. Dead and stale ids are in no set.
     pub fn in_set(&self, id: EntityId, set: impl Into<crate::defs::SetId>) -> bool {
         self.is_alive(id)
             && self.entries[id.index as usize]
@@ -150,13 +149,34 @@ impl Ids {
                 .get(set.into().0 as usize)
     }
 
-    /// Flip a live entity's inline membership bit; `Sets::add`/`remove`
-    /// call this in lockstep with their ordered keys.
-    pub(crate) fn set_membership(&mut self, id: EntityId, set: crate::defs::SetId, member: bool) {
+    /// Make a live entity a member of a set. Joining twice is harmless.
+    pub fn join(&mut self, set: impl Into<crate::defs::SetId>, id: EntityId) {
         assert!(self.is_alive(id));
         self.entries[id.index as usize]
             .sets
-            .set(set.0 as usize, member);
+            .set(set.into().0 as usize, true);
+    }
+
+    /// Remove a live entity from a set. Leaving twice is harmless.
+    pub fn leave(&mut self, set: impl Into<crate::defs::SetId>, id: EntityId) {
+        assert!(self.is_alive(id));
+        self.entries[id.index as usize]
+            .sets
+            .set(set.into().0 as usize, false);
+    }
+
+    /// All live members of a set, in slot order — a full scan of every
+    /// slot, like `iter_alive`: the cost is `CAPACITY` every time,
+    /// predictable beats adaptive.
+    pub fn iter_set(
+        &self,
+        set: impl Into<crate::defs::SetId>,
+    ) -> impl Iterator<Item = EntityId> + '_ {
+        let bit = set.into().0 as usize;
+        self.entries
+            .iter()
+            .filter(move |entry| entry.id.is_valid() && entry.sets.get(bit))
+            .map(|entry| entry.id)
     }
 
     /// All live entities, in slot order — a full scan of every slot, by
@@ -277,6 +297,52 @@ mod tests {
         let reused = ids.spawn();
         assert_eq!(reused.index, b.index);
         assert_eq!(ids.iter_alive().collect::<Vec<_>>(), [a, reused, c]);
+    }
+
+    #[test]
+    fn set_membership_joins_leaves_and_iterates_in_slot_order() {
+        use crate::defs::SetId;
+        let mut ids = Ids::new();
+        let first = ids.spawn();
+        let second = ids.spawn();
+
+        ids.join(SetId(0), first);
+        ids.join(SetId(0), first); // joining twice is harmless
+        ids.join(SetId(0), second);
+        assert!(ids.in_set(first, SetId(0)));
+        assert_eq!(ids.iter_set(SetId(0)).collect::<Vec<_>>(), [first, second]);
+
+        ids.leave(SetId(0), first);
+        ids.leave(SetId(0), first); // leaving twice is harmless
+        assert!(!ids.in_set(first, SetId(0)));
+        assert_eq!(ids.iter_set(SetId(0)).collect::<Vec<_>>(), [second]);
+    }
+
+    #[test]
+    fn sweep_clears_memberships_and_joining_the_dead_panics() {
+        use crate::defs::SetId;
+        let mut ids = Ids::new();
+        let dead = ids.spawn();
+        ids.join(SetId(0), dead);
+        ids.mark_despawn(dead);
+
+        // Marked but not yet swept: still a member.
+        assert!(ids.in_set(dead, SetId(0)));
+
+        ids.sweep();
+        assert!(!ids.in_set(dead, SetId(0)));
+        assert_eq!(ids.iter_set(SetId(0)).count(), 0);
+
+        // The reused slot's inline bits start clean.
+        let replacement = ids.spawn();
+        assert!(!ids.in_set(replacement, SetId(0)));
+
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ids.join(SetId(0), dead)
+            }))
+            .is_err()
+        );
     }
 
     #[test]

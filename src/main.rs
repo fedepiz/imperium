@@ -580,6 +580,7 @@ fn build_ui<'a>(
             y: mouse_y / dpi,
         },
         mouse_pressed: mq::is_mouse_button_pressed(mq::MouseButton::Left),
+        mouse_down: mq::is_mouse_button_down(mq::MouseButton::Left),
         wheel: layout::V2 {
             x: wheel_x / dpi,
             y: wheel_y / dpi,

@@ -19,6 +19,7 @@ pub struct Style {
     pub palette: Palette,
     pub button_background: Color,
     pub button_hover: Color,
+    pub button_press: Color,
     /// `0.0` = borderless buttons.
     pub button_border_thickness: f32,
     pub button_border_color: Color,
@@ -54,6 +55,7 @@ impl Default for Style {
             },
             button_background: Color::rgba(0.08, 0.68, 0.72, 1.0),
             button_hover: Color::rgba(0.16, 0.86, 0.90, 1.0),
+            button_press: Color::rgba(0.38, 0.95, 0.98, 1.0),
             button_border_thickness: 0.0,
             button_border_color: Color::rgba(0.0, 0.0, 0.0, 1.0),
             button_corner_radius: 10.0,
@@ -154,6 +156,7 @@ pub fn parse<'a>(arena: &'a Arena, source: &str) -> StyleModule<'a> {
             "accent" => &mut style.palette.accent,
             "button_background" => &mut style.button_background,
             "button_hover" => &mut style.button_hover,
+            "button_press" => &mut style.button_press,
             "button_border_color" => &mut style.button_border_color,
             "tooltip_background" => &mut style.tooltip_background,
             "tooltip_ink" => &mut style.tooltip_ink,

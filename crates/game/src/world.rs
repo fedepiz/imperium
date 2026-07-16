@@ -1,6 +1,5 @@
 use crate::map::Map;
 use entities::*;
-use util::Rng;
 
 /// A point on the sim's clock: how many `AdvanceTime` commands have been
 /// accepted. Unitless — what one epoch *means* (a day, a year, a tenth of
@@ -61,10 +60,37 @@ pub struct Activity {
     pub destination: crate::map::CellPos,
 }
 
-/// THE authoritative sim state: every piece of world state is a field here,
-/// nothing lives outside. Plain data — `Clone` is save, ZII throughout;
-/// game code addresses the stores directly (`world.vars.set(…)`).
-/// The only methods are the cross-store coordinators, `spawn` and `sweep`.
+/// The double-buffered half of the world: exactly the per-entity state
+/// the day pass rewrites. Two instances exist — `World::state`, the
+/// current one, and the staging buffer the pass writes into — swapped
+/// after each pass. Everything else on [`World`] is a single instance,
+/// mutated only in direct mode (outside the pass).
+#[derive(Clone)]
+pub struct WorldState {
+    pub vars: Vars,
+    pub uvars: UVars,
+    pub activities: Table<Activity>,
+    pub relations: Relations,
+    // Future typed columns go here, and get one reset line in `spawn`,
+    // one copy_chunk_from line in the pass.
+}
+
+impl WorldState {
+    pub fn new(defs: &Definitions) -> WorldState {
+        WorldState {
+            vars: Vars::new(defs),
+            uvars: UVars::new(defs),
+            activities: Table::new(),
+            relations: Relations::new(defs),
+        }
+    }
+}
+
+/// THE authoritative sim state: every piece of world state is a field
+/// here or on [`WorldState`], nothing lives outside. Plain data — `Clone`
+/// is save, ZII throughout. Game code goes through the accessors below;
+/// the stores under `state` are what the day pass double-buffers, the
+/// rest is mutated only in direct mode.
 #[derive(Clone)]
 pub struct World {
     /// The sim's clock. Whatever drives the passage of time lives outside
@@ -75,19 +101,17 @@ pub struct World {
     #[allow(dead_code)]
     pub defs: Definitions,
     pub names: Names,
-    pub vars: Vars,
-    pub uvars: UVars,
-    pub relations: Relations,
-    pub sets: Sets,
     pub tags: Tags,
-    /// Deterministic randomness is world state like any other: same seed +
-    /// same command stream = same history.
-    pub rng: Rng,
-    pub activities: Table<Activity>,
+    /// The root of all randomness: every roll derives its rng from
+    /// (seed, turn, n) via [`util::Rng::at`], so draws are reproducible
+    /// and independent of each other — same seed + same command stream =
+    /// same history, with no rng state to thread through the world.
+    pub seed: u64,
     /// The world's geography: authored cells, ZII (the empty map is all
     /// void). Not per-entity state — spawn/sweep never touch it.
     pub map: Map,
-    // Future typed columns go here, and get one reset line in `spawn`.
+    /// The double-buffered per-entity state.
+    pub state: WorldState,
 }
 
 impl World {
@@ -96,14 +120,10 @@ impl World {
             epoch: Epoch::default(),
             ids: Ids::new(),
             names: Names::new(),
-            vars: Vars::new(&defs),
-            uvars: UVars::new(&defs),
-            relations: Relations::new(&defs),
-            sets: Sets::new(&defs),
             tags: Tags::default(),
-            rng: Rng(seed),
-            activities: Table::new(),
+            seed,
             map: Map::default(),
+            state: WorldState::new(&defs),
             defs,
         }
     }
@@ -111,25 +131,86 @@ impl World {
     /// Allocate an entity and give it a clean slate in every dense store.
     pub fn spawn(&mut self) -> EntityId {
         let id = self.ids.spawn();
-        self.vars.reset(id);
-        self.uvars.reset(id);
-        self.activities.reset(id);
+        self.state.vars.reset(id);
+        self.state.uvars.reset(id);
+        self.state.activities.reset(id);
         id
     }
 
-    /// Despawn every entity marked since the last sweep, purging it from
-    /// every store in the same breath. Call once per frame: reads don't
-    /// filter for liveness, so "no store holds a dead id" — this function's
-    /// invariant — depends on marks not outliving the frame that made them.
+    /// Despawn every entity marked since the last sweep. Names and tags
+    /// purge here; dense stores keep their rows (reads gate on liveness,
+    /// spawn resets on reuse); relations filter dead endpoints at query
+    /// time until the next build drops them physically.
     pub fn sweep(&mut self) {
         let dead = self.ids.sweep();
         if dead.is_empty() {
             return;
         }
         self.names.purge(&dead);
-        self.relations.purge(&dead);
-        self.sets.purge(&dead);
         self.tags.purge(&self.ids);
+    }
+
+    // Accessors: the stores under `state` and the relation queries (with
+    // `&self.ids` supplied) so call sites stay one layer deep. See the
+    // store methods for semantics.
+
+    pub fn get_var(&self, id: EntityId, var: impl Into<VarId>) -> f32 {
+        self.state.vars.get(id, var)
+    }
+
+    pub fn set_var(&mut self, id: EntityId, var: impl Into<VarId>, value: f32) {
+        self.state.vars.set(id, var, value);
+    }
+
+    pub fn get_uvar<T: Bits64>(&self, id: EntityId, uvar: impl Into<UVarId>) -> T {
+        self.state.uvars.get(id, uvar)
+    }
+
+    pub fn set_uvar<T: Bits64>(&mut self, id: EntityId, uvar: impl Into<UVarId>, value: T) {
+        self.state.uvars.set(id, uvar, value);
+    }
+
+    pub fn activity(&self, id: EntityId) -> Activity {
+        *self.state.activities.get(id)
+    }
+
+    pub fn set_activity(&mut self, id: EntityId, activity: Activity) {
+        self.state.activities.set(id, activity);
+    }
+
+    pub fn relation(
+        &self,
+        source: EntityId,
+        relation: impl Into<RelationId>,
+        target: EntityId,
+    ) -> f32 {
+        self.state.relations.get(&self.ids, source, relation, target)
+    }
+
+    pub fn related(&self, source: EntityId) -> impl Iterator<Item = RelationEntry> + '_ {
+        self.state.relations.get_related(&self.ids, source)
+    }
+
+    pub fn related_via(
+        &self,
+        source: EntityId,
+        relation: impl Into<RelationId>,
+    ) -> impl Iterator<Item = (EntityId, f32)> + '_ {
+        self.state.relations.get_related_via(&self.ids, source, relation)
+    }
+
+    pub fn related_to(&self, target: EntityId) -> impl Iterator<Item = RelationEntry> + '_ {
+        self.state.relations.get_related_to(&self.ids, target)
+    }
+
+    pub fn related_to_via(
+        &self,
+        target: EntityId,
+        relation: impl Into<RelationId>,
+    ) -> impl Iterator<Item = (EntityId, f32)> + '_ {
+        self.state
+            .relations
+            .get_related_to_via(&self.ids, target, relation)
     }
 }
 
@@ -150,11 +231,20 @@ mod tests {
         let mut world = world();
         let doomed = world.spawn();
         let widow = world.spawn();
-        world.sets.add(&mut world.ids, SetId(0), doomed);
+        world.ids.join(SetId(0), doomed);
         world.tags.bind(&world.ids, "emperor", doomed);
-        world
-            .relations
-            .set(&world.ids, doomed, RelationId(0), widow, 1.0);
+        let empty = Relations::new(&world.defs);
+        world.state.relations.rebuild(
+            &empty,
+            &world.ids,
+            &mut vec![RelationEntry {
+                source: doomed,
+                relation: RelationId(0),
+                target: widow,
+                value: 1.0,
+            }],
+            |_| true,
+        );
         let name = world.names.add("Cuthbert");
         world.names.set(doomed, name);
 
@@ -162,27 +252,27 @@ mod tests {
 
         // Marked but unswept: visible everywhere, like any live entity.
         assert!(world.ids.is_alive(doomed));
-        assert!(world.sets.contains(&world.ids, SetId(0), doomed));
+        assert!(world.ids.in_set(doomed, SetId(0)));
         assert_eq!(world.tags.lookup("emperor"), Some(doomed));
-        assert_eq!(world.relations.get_related(doomed).count(), 1);
+        assert_eq!(world.related(doomed).count(), 1);
         assert_eq!(world.names.get(doomed), "Cuthbert");
 
         world.sweep();
 
         // Swept: gone from every store at once.
         assert!(!world.ids.is_alive(doomed));
-        assert!(!world.sets.contains(&world.ids, SetId(0), doomed));
+        assert!(!world.ids.in_set(doomed, SetId(0)));
         assert_eq!(world.tags.lookup("emperor"), None);
-        assert_eq!(world.relations.get_related(doomed).count(), 0);
-        assert_eq!(world.relations.get_related_to(widow).count(), 0);
+        assert_eq!(world.related(doomed).count(), 0);
+        assert_eq!(world.related_to(widow).count(), 0);
     }
 
     #[test]
     fn reused_slots_start_with_a_clean_slate() {
         let mut world = world();
         let stale = world.spawn();
-        world.vars.set(stale, VarId(0), 1.0);
-        world.activities.set(
+        world.set_var(stale, VarId(0), 1.0);
+        world.set_activity(
             stale,
             Activity {
                 verb: ActivityVerb::Rest,
@@ -196,8 +286,8 @@ mod tests {
 
         let replacement = world.spawn();
         assert!(!world.ids.is_alive(stale));
-        assert_eq!(world.vars.get(replacement, VarId(0)), 0.0);
+        assert_eq!(world.get_var(replacement, VarId(0)), 0.0);
         assert_eq!(world.names.get(replacement), "");
-        assert_eq!(world.activities.get(replacement).verb, ActivityVerb::Idle);
+        assert_eq!(world.activity(replacement).verb, ActivityVerb::Idle);
     }
 }

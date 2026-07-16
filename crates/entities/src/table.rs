@@ -46,6 +46,13 @@ impl<T: Copy + Default> Table<T> {
     pub fn reset(&mut self, id: EntityId) {
         self.rows[id.index()] = (id, Default::default());
     }
+
+    /// Copy a range of slots' rows wholesale from another store — the
+    /// double buffer's carry-forward, called chunk by chunk by the day
+    /// pass before per-entity updates overwrite their own rows.
+    pub fn copy_chunk_from(&mut self, src: &Table<T>, slots: core::ops::Range<usize>) {
+        self.rows[slots.clone()].copy_from_slice(&src.rows[slots]);
+    }
 }
 
 #[cfg(test)]

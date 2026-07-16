@@ -262,11 +262,13 @@ pub struct Input {
     pub mouse_pos: V2,
     /// The primary button went down this frame.
     pub mouse_pressed: bool,
+    /// The primary button is currently held.
+    pub mouse_down: bool,
     /// Scroll delta for this frame; positive `y` (wheel up) scrolls back
     /// toward the start of the content.
     pub wheel: V2,
-    // TODO: Add held/released buttons, drag, touch, and pointer-capture
-    // state when something consumes them.
+    // TODO: Add released buttons, drag, touch, and pointer-capture state
+    // when something consumes them.
 }
 
 #[derive(Clone, Copy, PartialEq, PartialOrd, Default, Debug)]
@@ -735,6 +737,7 @@ impl<'a> ElementConf<'a> {
 pub struct Sense {
     pub clicked: bool,
     pub hovered: bool,
+    pub held: bool,
 }
 
 pub struct Ui<'arena, 'frame> {
@@ -852,6 +855,7 @@ impl<'arena, 'frame> Ui<'arena, 'frame> {
         Sense {
             hovered,
             clicked: hovered && self.input.mouse_pressed,
+            held: hovered && self.input.mouse_down,
         }
     }
 }
@@ -2324,6 +2328,7 @@ mod tests {
         let mut second_input = input(200.0, 100.0);
         second_input.mouse_pos = V2 { x: 50.0, y: 20.0 };
         second_input.mouse_pressed = true;
+        second_input.mouse_down = true;
         let _ = engine.layout(
             second_input,
             |_, _| V2::default(),
@@ -2336,6 +2341,7 @@ mod tests {
             Sense {
                 hovered: true,
                 clicked: true,
+                held: true,
             }
         );
     }
@@ -2784,9 +2790,11 @@ mod tests {
         let mut probe = input(200.0, 200.0);
         probe.mouse_pos = V2 { x: 50.0, y: 125.0 };
         probe.mouse_pressed = true;
+        probe.mouse_down = true;
         let mut sensed = Sense {
             hovered: true,
             clicked: true,
+            held: true,
         };
         let output = engine.layout(
             probe,
@@ -2976,6 +2984,7 @@ mod tests {
         let mut probe = input(200.0, 100.0);
         probe.mouse_pos = V2 { x: 50.0, y: 20.0 };
         probe.mouse_pressed = true;
+        probe.mouse_down = true;
         let mut before = Sense::default();
         let mut after = Sense::default();
         let _ = engine.layout(
@@ -2992,6 +3001,7 @@ mod tests {
             Sense {
                 hovered: true,
                 clicked: true,
+                held: true,
             }
         );
         assert_eq!(before, after);

@@ -109,10 +109,33 @@ impl Relation {
         }
     }
 
-    #[allow(dead_code)]
     pub fn from_id(id: RelationId) -> Option<Relation> {
         Relation::try_from(id.0).ok()
     }
+
+    /// Derived relations are never written: every rebuild recomputes them
+    /// from world state, so they can't drift from what they mirror.
+    pub const fn is_derived(self) -> bool {
+        matches!(self, Relation::LocatedIn)
+    }
+}
+
+/// Whether a raw relation id names a derived kind — the rebuild's fold
+/// skips these when carrying edges forward, and re-derives them instead.
+pub fn is_derived_id(id: RelationId) -> bool {
+    Relation::from_id(id).is_some_and(Relation::is_derived)
+}
+
+/// The settlement an entity standing at `pos` is in — the live blob
+/// owner of the cell, or null: the zero position is nowhere, and cells
+/// outside any blob carry no settlement. The LocatedIn relation is this
+/// value, re-emitted every rebuild.
+pub fn located_at(pos: crate::map::CellPos, map: &crate::map::Map, ids: &Ids) -> EntityId {
+    if pos == crate::map::CellPos::default() {
+        return EntityId::NULL;
+    }
+    let place = map.cell(pos).settlement;
+    if ids.is_alive(place) { place } else { EntityId::NULL }
 }
 
 impl From<Relation> for RelationId {

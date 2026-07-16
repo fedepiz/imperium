@@ -134,7 +134,8 @@ decisions live only in style.txt. Current scheme: "Vellum & Oxblood"
 as a chronicle; see docs/DESIGN.md for why).
 
 Beyond the palette, style.txt sets button visuals (background, hover,
-border, corner radius, default size caps), tooltip background and its
+press — shown while the mouse is held on the button — border, corner
+radius, default size caps), tooltip background and its
 own text color (`tooltip_ink` — separate from `ink`, since the bubble
 keeps its own ground), role font sizes (`heading_size`, `section_size`,
 `text_size`, `tooltip_size`), and container metrics (`padding`, `gap`,

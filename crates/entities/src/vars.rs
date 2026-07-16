@@ -37,6 +37,15 @@ impl Vars {
         let begin = id.index() * self.stride;
         self.values[begin..begin + self.stride].fill(0.0);
     }
+
+    /// Copy a range of slots' rows wholesale from another store — the
+    /// double buffer's carry-forward, called chunk by chunk by the day
+    /// pass before per-entity updates overwrite their own rows.
+    pub fn copy_chunk_from(&mut self, src: &Vars, slots: core::ops::Range<usize>) {
+        debug_assert!(self.stride == src.stride);
+        let range = slots.start * self.stride..slots.end * self.stride;
+        self.values[range.clone()].copy_from_slice(&src.values[range]);
+    }
 }
 
 #[cfg(test)]

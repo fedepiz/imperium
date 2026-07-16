@@ -201,6 +201,9 @@ pub struct UiNode {
     pub background: Paint,
     /// Replaces `background` while hovered; alpha 0 = no hover skin.
     pub hover_background: Color,
+    /// Replaces both while the pointer holds the element down — for the
+    /// whole press, not just its first frame; alpha 0 = no press skin.
+    pub press_background: Color,
     /// `0.0` = no border.
     pub border_width: f32,
     pub border_color: Color,
@@ -1031,6 +1034,7 @@ impl Compiler {
             padding: Padding::symmetric(10.0, 4.0),
             background: Paint::of(style.button_background),
             hover_background: style.button_hover,
+            press_background: style.button_press,
             border_width: style.button_border_thickness,
             border_color: style.button_border_color,
             corner_radius: style.button_corner_radius,

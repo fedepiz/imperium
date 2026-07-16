@@ -46,8 +46,7 @@ pub fn close(_world: &mut World, _params: ChoiceParams) -> Option<Interaction> {
 fn company_names(world: &World, place: EntityId) -> Vec<&str> {
     let player = world.tags.lookup("player");
     world
-        .relations
-        .get_related_to_via(place, Relation::LocatedIn)
+        .related_to_via(place, Relation::LocatedIn)
         .filter(|&(other, _)| Some(other) != player)
         .map(|(other, _)| world.names.get(other))
         .collect()
@@ -61,11 +60,7 @@ fn describe_person(out: &mut String, this: EntityId, world: &World) {
 
     let name = world.names.get(this);
     write!(out, "{}", name).unwrap();
-    if let Some((master, _)) = world
-        .relations
-        .get_related_to_via(this, Relation::SwornTo)
-        .next()
-    {
+    if let Some((master, _)) = world.related_to_via(this, Relation::SwornTo).next() {
         let name = world.names.get(master);
         write!(out, ", who is sworn to {name}").unwrap();
     }
@@ -77,8 +72,7 @@ pub fn arrival(world: &mut World, params: ChoiceParams) -> Option<Interaction> {
 
     let mut text = format!("You arrive at {name}.");
     let (ruler, _) = world
-        .relations
-        .get_related_to_via(params.target, Relation::Rules)
+        .related_to_via(params.target, Relation::Rules)
         .next()
         .unwrap_or_default();
 
@@ -134,7 +128,7 @@ fn company(world: &mut World, params: ChoiceParams) -> Option<Interaction> {
 /// An open-ended rest, same as the Rest button orders.
 fn rest_here(world: &mut World, _params: ChoiceParams) -> Option<Interaction> {
     if let Some(player) = world.tags.lookup("player") {
-        world.activities.set(
+        world.set_activity(
             player,
             Activity {
                 verb: ActivityVerb::Rest,

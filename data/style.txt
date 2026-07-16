@@ -11,6 +11,7 @@ muted = { 0.44 0.38 0.28 }
 accent = { 0.55 0.13 0.10 }
 button_background = { 0.72 0.62 0.44 }
 button_hover = { 0.80 0.70 0.50 }
+button_press = { 0.90 0.81 0.60 }
 button_border_thickness = 2
 button_border_color = { 0.45 0.36 0.24 }
 button_corner_radius = 10

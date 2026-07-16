@@ -5,7 +5,24 @@
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Rng(pub u64);
 
+/// splitmix64's finalizer: a bijective scramble, zero maps to zero.
+fn mix(x: u64) -> u64 {
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 impl Rng {
+    /// The rng of one derived stream: a pure function of its key, so a
+    /// draw anywhere is reproducible without threading rng state through
+    /// the world — and streams with different keys are independent of
+    /// each other and of draw order. The all-zero key yields state 0,
+    /// which `next_u64` remaps like any zeroed Rng (ZII holds).
+    pub fn at(seed: u64, turn: u64, n: u64) -> Rng {
+        Rng(mix(mix(mix(seed).wrapping_add(turn)).wrapping_add(n)))
+    }
+
     pub fn next_u64(&mut self) -> u64 {
         if self.0 == 0 {
             self.0 = 0x9E37_79B9_7F4A_7C15;
@@ -62,6 +79,23 @@ mod tests {
             let x = rng.next_f32();
             assert!((0.0..1.0).contains(&x));
         }
+    }
+
+    #[test]
+    fn derived_streams_are_reproducible_and_independent() {
+        // Same key, same stream.
+        let mut a = Rng::at(7, 100, 3);
+        let mut b = Rng::at(7, 100, 3);
+        assert_eq!(a.next_u64(), b.next_u64());
+
+        // Any word of the key differing diverges the stream.
+        let base = Rng::at(7, 100, 3).next_u64();
+        assert_ne!(Rng::at(8, 100, 3).next_u64(), base);
+        assert_ne!(Rng::at(7, 101, 3).next_u64(), base);
+        assert_ne!(Rng::at(7, 100, 4).next_u64(), base);
+
+        // The all-zero key is the zeroed Rng: valid, ZII.
+        assert_eq!(Rng::at(0, 0, 0), Rng::default());
     }
 
     #[test]
