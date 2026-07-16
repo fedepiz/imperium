@@ -67,7 +67,7 @@ impl UVar {
         match self {
             Self::Dummy => "Dummy",
             Self::BirthEpoch => "BirthEpoch",
-            Self::Gender => "Geneder",
+            Self::Gender => "Gender",
         }
     }
 }
