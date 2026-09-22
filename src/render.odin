@@ -10,6 +10,13 @@ RENDER_MAX_CLIPS :: 1024
 Texture_Id :: distinct u16
 Clip_Id :: distinct u16
 
+// Tightly packed, top-to-bottom RGBA8 pixels. Storage is owned by the caller.
+Bitmap :: struct {
+	pixels: [][4]u8,
+	width:  int,
+	height: int,
+}
+
 // Core information relating to a render instance.
 // Small and compact.
 Render_Key :: struct {
@@ -162,11 +169,7 @@ render_max_texture_size :: proc() -> int {
 	return int(size)
 }
 
-render_create_atlas_texture :: proc(
-	ctx: ^Render_Ctx,
-	id: Texture_Id,
-	bitmap: Bitmap,
-) {
+render_create_atlas_texture :: proc(ctx: ^Render_Ctx, id: Texture_Id, bitmap: Bitmap) {
 	assert(id != 0)
 	assert(bitmap.width > 0 && bitmap.height > 0)
 	assert(len(bitmap.pixels) == bitmap.width * bitmap.height)
@@ -176,7 +179,17 @@ render_create_atlas_texture :: proc(
 	gl.GenTextures(1, &texture)
 	gl.BindTexture(gl.TEXTURE_2D, texture)
 	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, i32(bitmap.width), i32(bitmap.height), 0, gl.RGBA, gl.UNSIGNED_BYTE, raw_data(bitmap.pixels))
+	gl.TexImage2D(
+		gl.TEXTURE_2D,
+		0,
+		gl.RGBA8,
+		i32(bitmap.width),
+		i32(bitmap.height),
+		0,
+		gl.RGBA,
+		gl.UNSIGNED_BYTE,
+		raw_data(bitmap.pixels),
+	)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
