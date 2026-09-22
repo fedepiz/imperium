@@ -1,15 +1,28 @@
-package odin
+package main
 
 import "core:fmt"
+import "core:mem"
 import gl "vendor:OpenGL"
 import sdl "vendor:sdl3"
 
 GLOBAL: struct {
 	input:       Input,
 	render_data: Render_Data,
+	render_ctx:  Render_Ctx,
+	sprites:     Sprites,
+}
+
+Font_Name :: enum {
+	Default,
+}
+
+Image_Name :: enum {
+	Logo,
 }
 
 main :: proc() {
+	context.allocator = mem.panic_allocator()
+
 	if !sdl.Init({.VIDEO}) {
 		fmt.eprintf("SDL initialization failed: %s\n", sdl.GetError())
 		return
@@ -44,15 +57,15 @@ main :: proc() {
 		return
 	}
 	gl.load_up_to(3, 3, sdl.gl_set_proc_address)
-	render_ctx := new(Render_Ctx)
-	defer free(render_ctx)
+	render_ctx := &GLOBAL.render_ctx
 	if !render_init(render_ctx) {
 		return
 	}
 	defer render_destroy(render_ctx)
 
-	example_texture := populate_render_examples(&GLOBAL.render_data, render_ctx)
-	defer gl.DeleteTextures(1, &example_texture)
+	sprites_font_define(&GLOBAL.sprites, Font_Id(Font_Name.Default), "MeathFLF", 24)
+	sprites_image_define(&GLOBAL.sprites, Image_Id(Image_Name.Logo), "logo")
+	sprites_load(&GLOBAL.sprites, render_ctx)
 
 	if !sdl.GL_SetSwapInterval(1) {
 		fmt.eprintf("Enabling VSync failed: %s\n", sdl.GetError())
@@ -61,6 +74,8 @@ main :: proc() {
 
 	keep_going := true
 	for keep_going {
+		free_all(context.temp_allocator)
+
 		event: sdl.Event
 
 		GLOBAL.input.keys[.Old] = GLOBAL.input.keys[.New]
@@ -116,109 +131,68 @@ main :: proc() {
 		}
 
 		render_ctx.view_size = {f32(logical_width), f32(logical_height)}
+
+		{
+			draw: Draw_Ctx
+			clip_span := span_from_array(&GLOBAL.render_data.clips)
+			span_advance(&clip_span) // Clip zero means unclipped.
+			draw_begin(
+				&draw,
+				&GLOBAL.render_data,
+				&GLOBAL.sprites,
+				span_from_array(&GLOBAL.render_data.instances),
+				clip_span,
+			)
+
+			draw_image(&draw, Image_Id(Image_Name.Logo), {1040, 80, 224, 224}, {1, 1, 1, 1})
+			draw_rectangle(&draw, {80, 80, 240, 180}, {0.2, 0.65, 1.0, 1.0})
+			draw_rectangle_lines(
+				&draw,
+				{360, 80, 280, 180},
+				{1.0, 0.3, 0.4, 1.0},
+				6,
+				radius = 40,
+				softness = 1,
+			)
+			draw_rectangle(
+				&draw,
+				{680, 80, 300, 180},
+				{0.75, 0.4, 1.0, 1.0},
+				radius = 90,
+				softness = 18,
+			)
+
+			draw.layer = 2
+			draw_rectangle(&draw, {180, 370, 260, 180}, {1.0, 0.3, 0.2, 0.6})
+			draw.layer = 1
+			draw_rectangle(&draw, {80, 320, 260, 180}, {0.1, 0.6, 0.9, 1.0})
+			draw.layer = 0
+			draw_rectangle(&draw, {500, 320, 260, 220}, {0.15, 0.2, 0.28, 1.0})
+			draw_clip_push(&draw, {500, 320, 260, 220})
+			draw_rectangle(&draw, {460, 370, 380, 120}, {0.3, 0.9, 0.55, 1.0})
+			draw_clip_pop(&draw)
+
+			draw_text(
+				&draw,
+				Font_Id(Font_Name.Default),
+				"MeathFLF - The quick brown fox",
+				{80, 590},
+				{1, 1, 1, 1},
+			)
+			draw_text_wrapped(
+				&draw,
+				Font_Id(Font_Name.Default),
+				"A font is defined by name, loaded once, and drawn from its atlas. This paragraph wraps to the available width.",
+				{80, 630},
+				420,
+				{0.8, 0.85, 0.9, 1},
+			)
+		}
+
 		render(render_ctx, GLOBAL.render_data)
 
 		sdl.GL_SwapWindow(window)
 	}
-}
-
-// Returns the example texture, which the caller owns and deletes after rendering.
-@(private = "file")
-populate_render_examples :: proc(data: ^Render_Data, render_ctx: ^Render_Ctx) -> u32 {
-	// Solid rectangle.
-	data.instances[0].dst = {80, 80, 240, 180}
-	for corner in Corner {
-		data.instances[0].color[corner] = {0.2, 0.65, 1.0, 1.0}
-	}
-
-	// Bilinear color gradient with a different radius at each corner.
-	data.instances[1] = {
-		dst = {360, 80, 280, 180},
-		color = {
-			.Top_Left = {1.0, 0.3, 0.4, 1.0},
-			.Top_Right = {1.0, 0.8, 0.2, 1.0},
-			.Bot_Right = {0.2, 0.85, 0.5, 1.0},
-			.Bot_Left = {0.4, 0.3, 1.0, 1.0},
-		},
-		radii = {.Top_Left = 8, .Top_Right = 40, .Bot_Right = 70, .Bot_Left = 24},
-	}
-
-	// Soft inward edge on a pill-shaped rectangle.
-	data.instances[2] = {
-		dst = {680, 80, 300, 180},
-		radii = {.Top_Left = 90, .Top_Right = 90, .Bot_Right = 90, .Bot_Left = 90},
-		softness = 18,
-	}
-	for corner in Corner {
-		data.instances[2].color[corner] = {0.75, 0.4, 1.0, 1.0}
-	}
-
-	// Draw the earlier array entry on top using its higher layer.
-	data.keys[3] = {
-		layer = 2,
-	}
-	data.instances[3].dst = {180, 370, 260, 180}
-	data.keys[4] = {
-		layer = 1,
-	}
-	data.instances[4].dst = {80, 320, 260, 180}
-	for corner in Corner {
-		data.instances[3].color[corner] = {1.0, 0.3, 0.2, 0.6}
-		data.instances[4].color[corner] = {0.1, 0.6, 0.9, 1.0}
-	}
-
-	// Dark backing shows the clip bounds; the green quad extends beyond them.
-	data.instances[5].dst = {500, 320, 260, 220}
-	data.clips[1] = {500, 320, 260, 220}
-	data.keys[6] = {
-		sequence = 1,
-		clip     = 1,
-	}
-	data.instances[6].dst = {460, 370, 380, 120}
-	for corner in Corner {
-		data.instances[5].color[corner] = {0.15, 0.2, 0.28, 1.0}
-		data.instances[6].color[corner] = {0.3, 0.9, 0.55, 1.0}
-	}
-
-	// A tiny texture enlarged with nearest filtering and rounded corners.
-	example_texture: u32
-	gl.GenTextures(1, &example_texture)
-	gl.BindTexture(gl.TEXTURE_2D, example_texture)
-	example_pixels := [16]u8 {
-		255,
-		200,
-		60,
-		255,
-		60,
-		160,
-		255,
-		255,
-		240,
-		80,
-		140,
-		255,
-		80,
-		220,
-		160,
-		255,
-	}
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, &example_pixels)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-	gl.BindTexture(gl.TEXTURE_2D, 0)
-	render_ctx.textures[1] = example_texture
-	data.keys[7] = {
-		texture = 1,
-	}
-	data.instances[7] = {
-		src = {0, 0, 2, 2},
-		dst = {840, 320, 220, 220},
-		radii = {.Top_Left = 32, .Top_Right = 32, .Bot_Right = 32, .Bot_Left = 32},
-	}
-	for corner in Corner {
-		data.instances[7].color[corner] = {1, 1, 1, 1}
-	}
-	return example_texture
 }
 
 Old_New :: enum {

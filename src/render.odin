@@ -1,4 +1,4 @@
-package odin
+package main
 
 import "core:fmt"
 import "core:slice"
@@ -30,11 +30,12 @@ Corner :: enum {
 }
 
 Render_Instance :: struct {
-	src:      [4]f32,
-	dst:      [4]f32,
-	color:    [Corner][4]f32,
-	radii:    [Corner]f32,
-	softness: f32,
+	src:       [4]f32,
+	dst:       [4]f32,
+	color:     [Corner][4]f32,
+	radii:     [Corner]f32,
+	softness:  f32,
+	thickness: f32, // Zero fills the shape; positive widths draw an inward border.
 }
 
 Render_Data :: struct {
@@ -121,7 +122,7 @@ render :: proc(ctx: ^Render_Ctx, data: Render_Data) {
 
 @(private = "file")
 render_bind_instances :: proc(first: int) {
-	offsets := [8]uintptr {
+	offsets := [9]uintptr {
 		offset_of(Render_Instance, src),
 		offset_of(Render_Instance, dst),
 		offset_of(Render_Instance, color),
@@ -130,10 +131,11 @@ render_bind_instances :: proc(first: int) {
 		offset_of(Render_Instance, color) + 48,
 		offset_of(Render_Instance, radii),
 		offset_of(Render_Instance, softness),
+		offset_of(Render_Instance, thickness),
 	}
 	for offset, i in offsets {
 		components: i32 = 4
-		if i == 7 do components = 1
+		if i >= 7 do components = 1
 		gl.VertexAttribPointer(
 			u32(i),
 			components,
@@ -152,6 +154,36 @@ render_destroy :: proc(ctx: ^Render_Ctx) {
 	gl.DeleteBuffers(1, &ctx.vbo)
 	gl.DeleteVertexArrays(1, &ctx.vao)
 	gl.DeleteProgram(ctx.program)
+}
+
+render_max_texture_size :: proc() -> int {
+	size: i32
+	gl.GetIntegerv(gl.MAX_TEXTURE_SIZE, &size)
+	return int(size)
+}
+
+render_create_atlas_texture :: proc(
+	ctx: ^Render_Ctx,
+	id: Texture_Id,
+	bitmap: Bitmap,
+) {
+	assert(id != 0)
+	assert(bitmap.width > 0 && bitmap.height > 0)
+	assert(len(bitmap.pixels) == bitmap.width * bitmap.height)
+	assert(ctx.textures[id] == 0, "Texture ID is already registered")
+
+	texture: u32
+	gl.GenTextures(1, &texture)
+	gl.BindTexture(gl.TEXTURE_2D, texture)
+	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
+	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, i32(bitmap.width), i32(bitmap.height), 0, gl.RGBA, gl.UNSIGNED_BYTE, raw_data(bitmap.pixels))
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4)
+	gl.BindTexture(gl.TEXTURE_2D, 0)
+	ctx.textures[id] = texture
 }
 
 @(private = "file")
@@ -225,6 +257,7 @@ layout(location=4) in vec4 color_br;
 layout(location=5) in vec4 color_bl;
 layout(location=6) in vec4 radii;
 layout(location=7) in float softness;
+layout(location=8) in float inst_thickness;
 uniform vec2 view_size;
 out vec2 position;
 out vec2 local_position;
@@ -233,6 +266,7 @@ flat out vec2 rect_size;
 flat out vec4 colors[4];
 flat out vec4 corner_radii;
 flat out float edge_softness;
+flat out float thickness;
 const vec2 corners[6] = vec2[6](
     vec2(0,0), vec2(1,0), vec2(1,1),
     vec2(0,0), vec2(1,1), vec2(0,1));
@@ -246,6 +280,7 @@ void main() {
     colors[2] = color_br; colors[3] = color_bl;
     corner_radii = radii;
     edge_softness = softness;
+    thickness = inst_thickness;
 }
 `
 
@@ -262,7 +297,11 @@ flat in vec2 rect_size;
 flat in vec4 colors[4];
 flat in vec4 corner_radii;
 flat in float edge_softness;
+flat in float thickness;
 out vec4 out_color;
+float rect_sdf(vec2 p, vec2 half_size, float radius) {
+    return length(max(abs(p) - half_size + radius, 0.0)) - radius;
+}
 void main() {
     if (clipped && (any(lessThan(position, clip_rect.xy)) ||
                     any(greaterThanEqual(position, clip_rect.xy + clip_rect.zw)))) discard;
@@ -278,11 +317,21 @@ void main() {
     float r = p.y < 0.0 ? (p.x < 0.0 ? corner_radii.x : corner_radii.y)
                         : (p.x < 0.0 ? corner_radii.w : corner_radii.z);
     r = clamp(r, 0.0, min(half_size.x, half_size.y));
-    vec2 q = abs(p) - half_size + r;
-    float distance_to_edge = length(max(q, 0.0)) + min(max(q.x,q.y),0.0) - r;
-    // Fade inward so geometry stays inside the destination rectangle.
-    float feather = max(max(edge_softness, 0.0), fwidth(distance_to_edge));
-    float coverage = 1.0 - smoothstep(-max(feather, 0.0001), 0.0, distance_to_edge);
-    out_color = vec4(color.rgb, color.a * coverage);
+    // Inset the shape to fit a 2*softness fade inside the supplied quad.
+    float softness = max(edge_softness, 0.0);
+    float feather = max(2.0 * softness, 0.0001);
+    vec2 shape_half_size = half_size - vec2(2.0 * softness);
+    float border = 1.0;
+    if (thickness > 0.0) {
+        float inner = rect_sdf(p, shape_half_size - vec2(thickness), max(r - thickness, 0.0));
+        border = smoothstep(0.0, feather, inner);
+    }
+    // Plain image/text quads use texture coverage without an additional edge fade.
+    float corner = 1.0;
+    if (r > 0.0 || softness > 0.75) {
+        float outer = rect_sdf(p, shape_half_size, r);
+        corner = 1.0 - smoothstep(0.0, feather, outer);
+    }
+    out_color = vec4(color.rgb, color.a * corner * border);
 }
 `
