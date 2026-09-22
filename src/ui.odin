@@ -108,7 +108,9 @@ UI_Draw_Kind :: enum {
 	Swatch,
 }
 
-UI_Style :: struct {
+// Transient construction description; never stored on a box or a stack.
+@(private = "file")
+UI_Build_Style :: struct {
 	size:           [2]UI_Size,
 	size_min:       [2]f32,
 	position:       [2]f32,
@@ -121,15 +123,28 @@ UI_Style :: struct {
 	softness:       f32,
 	opacity:        f32,
 	text_align:     UI_Align,
-	colors:         UI_Palette,
-	color_override: bit_set[UI_Color;u16],
+	colors:         [UI_Color]UI_Color_Binding,
 }
-UI_Style_Field :: enum {
-	All,
-	Width,
-	Height,
-	Position,
-	Font,
+// Zero inherits the destination role. A literal may be transparent black.
+UI_Color_Binding :: struct {
+	literal: bool,
+	role:    UI_Color,
+	value:   [4]f32,
+}
+UI_Property_Stack :: struct($T: typeid) {
+	values:   [UI_STACK_MAX]T,
+	depth:    int,
+	next:     T,
+	has_next: bool,
+}
+UI_Properties :: struct {
+	width, height:                          UI_Property_Stack(UI_Size),
+	size_min, position, padding:             UI_Property_Stack([2]f32),
+	gap, radius, thickness, softness, opacity: UI_Property_Stack(f32),
+	axis:                                   UI_Property_Stack(UI_Axis),
+	font:                                   UI_Property_Stack(Font_Id),
+	text_align:                             UI_Property_Stack(UI_Align),
+	colors:                                 [UI_Color]UI_Property_Stack(UI_Color_Binding),
 }
 
 UI_Signal_Flag :: enum {
@@ -225,7 +240,18 @@ UI_Box :: struct {
 	sibling_next:  UI_Box_Id,
 	order:         int,
 	flags:         UI_Box_Flags,
-	style:         UI_Style,
+	size:          [2]UI_Size,
+	size_min:      [2]f32,
+	position:      [2]f32,
+	padding:       [2]f32,
+	gap:           f32,
+	axis:          UI_Axis,
+	font:          Font_Id,
+	radius:        f32,
+	thickness:     f32,
+	softness:      f32,
+	opacity:       f32,
+	text_align:    UI_Align,
 	tags:          UI_Tags,
 	surface:       UI_Surface,
 	text:          Span,
@@ -241,7 +267,8 @@ UI_Box :: struct {
 	drag_rect:     [4]f32,
 	color_previous: [4]f32,
 	hsv:           [3]f32,
-	colors:        UI_Palette,
+	colors:        UI_Palette, // Persistent displayed colors.
+	colors_target: UI_Palette, // Resolved anew during construction each frame.
 	hot_t:         f32,
 	active_t:      f32,
 	focus_t:       f32,
@@ -283,10 +310,7 @@ UI :: struct {
 	key_depth:       int,
 	tag_stack:       [UI_STACK_MAX]UI_Tag_Id,
 	tag_depth:       int,
-	style_stack:     [UI_STACK_MAX]UI_Style,
-	style_depth:     int,
-	style_next:      UI_Style,
-	style_next_mask: bit_set[UI_Style_Field;u8],
+	properties:      UI_Properties,
 	table_stack:     [UI_TABLE_DEPTH_MAX]UI_Table_Build,
 	table_depth:     int,
 	frame:           u64,
@@ -509,34 +533,151 @@ ui_init :: proc(ui: ^UI, font: Font_Id, heading: Font_Id = 0) {
 	}
 }
 
-ui_style_top :: proc(ctx: ^UI_Ctx) -> UI_Style {
-	return ctx.ui.style_stack[min(ctx.ui.style_depth, UI_STACK_MAX) - 1]
+@(private = "file")
+ui_property_push :: proc(stack: ^UI_Property_Stack($T), value: T) {
+	assert(stack.depth < UI_STACK_MAX, "UI property stack overflow")
+	if stack.depth >= UI_STACK_MAX {return}
+	stack.values[stack.depth] = value
+	stack.depth += 1
 }
-ui_style_push :: proc(ctx: ^UI_Ctx, style: UI_Style) {
-	depth := ctx.ui.style_depth
-	ctx.ui.style_depth += 1
-	if depth < UI_STACK_MAX {ctx.ui.style_stack[depth] = style}
+@(private = "file")
+ui_property_pop :: proc(stack: ^UI_Property_Stack($T)) {
+	assert(stack.depth > 1, "Unbalanced UI property pop")
+	if stack.depth > 1 {stack.depth -= 1}
 }
-ui_style_pop :: proc(ctx: ^UI_Ctx) {ctx.ui.style_depth = max(1, ctx.ui.style_depth - 1)}
-ui_style_next :: proc(ctx: ^UI_Ctx, style: UI_Style) {
-	ctx.ui.style_next = style
-	ctx.ui.style_next_mask = {.All}
+// Next is independent of scoped pushes/pops. Last assignment wins; construction consumes it.
+@(private = "file")
+ui_property_next :: proc(stack: ^UI_Property_Stack($T), value: T) {
+	stack.next, stack.has_next = value, true
 }
-ui_width_next :: proc(ctx: ^UI_Ctx, size: UI_Size) {
-	ctx.ui.style_next.size[0] = size
-	ctx.ui.style_next_mask += {.Width}
+@(private = "file")
+ui_property_top :: proc(stack: ^UI_Property_Stack($T)) -> T {
+	assert(stack.depth > 0)
+	return stack.values[stack.depth-1]
 }
-ui_height_next :: proc(ctx: ^UI_Ctx, size: UI_Size) {
-	ctx.ui.style_next.size[1] = size
-	ctx.ui.style_next_mask += {.Height}
+@(private = "file")
+ui_property_resolve :: proc(stack: ^UI_Property_Stack($T), fallback: T) -> T {
+	result := stack.next if stack.has_next else fallback
+	stack.has_next = false
+	return result
 }
-ui_font_next :: proc(ctx: ^UI_Ctx, font: Font_Id) {
-	ctx.ui.style_next.font = font
-	ctx.ui.style_next_mask += {.Font}
+@(private = "file")
+ui_property_reset :: proc(stack: ^UI_Property_Stack($T), value: T) {
+	stack.depth, stack.has_next = 1, false
+	stack.values[0] = value
 }
-ui_position_next :: proc(ctx: ^UI_Ctx, position: [2]f32) {
-	ctx.ui.style_next.position = position
-	ctx.ui.style_next_mask += {.Position}
+@(private = "file")
+ui_property_check :: proc(stack: ^UI_Property_Stack($T)) {
+	assert(stack.depth == 1, "Unbalanced UI property scope")
+	assert(!stack.has_next, "Unconsumed UI next property")
+}
+
+ui_width_push :: proc(ctx: ^UI_Ctx, value: UI_Size) {ui_property_push(&ctx.ui.properties.width, value)}
+ui_width_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.width)}
+ui_width_next :: proc(ctx: ^UI_Ctx, value: UI_Size) {ui_property_next(&ctx.ui.properties.width, value)}
+ui_height_push :: proc(ctx: ^UI_Ctx, value: UI_Size) {ui_property_push(&ctx.ui.properties.height, value)}
+ui_height_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.height)}
+ui_height_next :: proc(ctx: ^UI_Ctx, value: UI_Size) {ui_property_next(&ctx.ui.properties.height, value)}
+ui_size_min_push :: proc(ctx: ^UI_Ctx, value: [2]f32) {ui_property_push(&ctx.ui.properties.size_min, value)}
+ui_size_min_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.size_min)}
+ui_size_min_next :: proc(ctx: ^UI_Ctx, value: [2]f32) {ui_property_next(&ctx.ui.properties.size_min, value)}
+ui_position_push :: proc(ctx: ^UI_Ctx, value: [2]f32) {ui_property_push(&ctx.ui.properties.position, value)}
+ui_position_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.position)}
+ui_position_next :: proc(ctx: ^UI_Ctx, value: [2]f32) {ui_property_next(&ctx.ui.properties.position, value)}
+ui_padding_push :: proc(ctx: ^UI_Ctx, value: [2]f32) {ui_property_push(&ctx.ui.properties.padding, value)}
+ui_padding_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.padding)}
+ui_padding_next :: proc(ctx: ^UI_Ctx, value: [2]f32) {ui_property_next(&ctx.ui.properties.padding, value)}
+ui_gap_push :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_push(&ctx.ui.properties.gap, value)}
+ui_gap_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.gap)}
+ui_gap_next :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_next(&ctx.ui.properties.gap, value)}
+ui_axis_push :: proc(ctx: ^UI_Ctx, value: UI_Axis) {ui_property_push(&ctx.ui.properties.axis, value)}
+ui_axis_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.axis)}
+ui_axis_next :: proc(ctx: ^UI_Ctx, value: UI_Axis) {ui_property_next(&ctx.ui.properties.axis, value)}
+ui_font_push :: proc(ctx: ^UI_Ctx, value: Font_Id) {ui_property_push(&ctx.ui.properties.font, value)}
+ui_font_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.font)}
+ui_font_next :: proc(ctx: ^UI_Ctx, value: Font_Id) {ui_property_next(&ctx.ui.properties.font, value)}
+ui_radius_push :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_push(&ctx.ui.properties.radius, value)}
+ui_radius_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.radius)}
+ui_radius_next :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_next(&ctx.ui.properties.radius, value)}
+ui_thickness_push :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_push(&ctx.ui.properties.thickness, value)}
+ui_thickness_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.thickness)}
+ui_thickness_next :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_next(&ctx.ui.properties.thickness, value)}
+ui_softness_push :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_push(&ctx.ui.properties.softness, value)}
+ui_softness_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.softness)}
+ui_softness_next :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_next(&ctx.ui.properties.softness, value)}
+ui_opacity_push :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_push(&ctx.ui.properties.opacity, value)}
+ui_opacity_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.opacity)}
+ui_opacity_next :: proc(ctx: ^UI_Ctx, value: f32) {ui_property_next(&ctx.ui.properties.opacity, value)}
+ui_text_align_push :: proc(ctx: ^UI_Ctx, value: UI_Align) {ui_property_push(&ctx.ui.properties.text_align, value)}
+ui_text_align_pop :: proc(ctx: ^UI_Ctx) {ui_property_pop(&ctx.ui.properties.text_align)}
+ui_text_align_next :: proc(ctx: ^UI_Ctx, value: UI_Align) {ui_property_next(&ctx.ui.properties.text_align, value)}
+
+// Every color role has its own stack. Literal colors are animation targets, like theme colors.
+ui_color_push :: proc(ctx: ^UI_Ctx, role: UI_Color, value: [4]f32) {ui_property_push(&ctx.ui.properties.colors[role], UI_Color_Binding{literal = true, value = value})}
+ui_color_pop :: proc(ctx: ^UI_Ctx, role: UI_Color) {ui_property_pop(&ctx.ui.properties.colors[role])}
+ui_color_next :: proc(ctx: ^UI_Ctx, role: UI_Color, value: [4]f32) {ui_property_next(&ctx.ui.properties.colors[role], UI_Color_Binding{literal = true, value = value})}
+// Source None restores theme inheritance for the destination role within this scope/box.
+ui_color_role_push :: proc(ctx: ^UI_Ctx, role, source: UI_Color) {ui_property_push(&ctx.ui.properties.colors[role], UI_Color_Binding{role = source})}
+ui_color_role_next :: proc(ctx: ^UI_Ctx, role, source: UI_Color) {ui_property_next(&ctx.ui.properties.colors[role], UI_Color_Binding{role = source})}
+ui_text_color_push :: proc(ctx: ^UI_Ctx, value: [4]f32) {ui_color_push(ctx, .Text, value)}
+ui_text_color_pop :: proc(ctx: ^UI_Ctx) {ui_color_pop(ctx, .Text)}
+ui_text_color_next :: proc(ctx: ^UI_Ctx, value: [4]f32) {ui_color_next(ctx, .Text, value)}
+
+@(private = "file")
+ui_build_style :: proc(ctx: ^UI_Ctx) -> (s: UI_Build_Style) {
+	p := &ctx.ui.properties
+	s.size = {ui_property_top(&p.width), ui_property_top(&p.height)}
+	s.size_min = ui_property_top(&p.size_min)
+	s.position = ui_property_top(&p.position)
+	s.padding = ui_property_top(&p.padding)
+	s.gap = ui_property_top(&p.gap)
+	s.axis = ui_property_top(&p.axis)
+	s.font = ui_property_top(&p.font)
+	s.radius = ui_property_top(&p.radius)
+	s.thickness = ui_property_top(&p.thickness)
+	s.softness = ui_property_top(&p.softness)
+	s.opacity = ui_property_top(&p.opacity)
+	s.text_align = ui_property_top(&p.text_align)
+	for role in UI_Color {s.colors[role] = ui_property_top(&p.colors[role])}
+	return
+}
+
+@(private = "file")
+ui_properties_begin :: proc(ui: ^UI) {
+	p := &ui.properties
+	ui_property_reset(&p.width, ui_text_size())
+	ui_property_reset(&p.height, ui_text_size())
+	ui_property_reset(&p.size_min, [2]f32{})
+	ui_property_reset(&p.position, [2]f32{})
+	ui_property_reset(&p.padding, [2]f32{8, 5})
+	ui_property_reset(&p.gap, f32(8))
+	ui_property_reset(&p.axis, UI_Axis.Y)
+	ui_property_reset(&p.font, ui.font_default)
+	ui_property_reset(&p.radius, f32(5))
+	ui_property_reset(&p.thickness, f32(1))
+	ui_property_reset(&p.softness, f32(0.8))
+	ui_property_reset(&p.opacity, f32(1))
+	ui_property_reset(&p.text_align, UI_Align.Start)
+	for &stack in p.colors {ui_property_reset(&stack, UI_Color_Binding{})}
+}
+
+@(private = "file")
+ui_properties_check :: proc(ui: ^UI) {
+	p := &ui.properties
+	ui_property_check(&p.width)
+	ui_property_check(&p.height)
+	ui_property_check(&p.size_min)
+	ui_property_check(&p.position)
+	ui_property_check(&p.padding)
+	ui_property_check(&p.gap)
+	ui_property_check(&p.axis)
+	ui_property_check(&p.font)
+	ui_property_check(&p.radius)
+	ui_property_check(&p.thickness)
+	ui_property_check(&p.softness)
+	ui_property_check(&p.opacity)
+	ui_property_check(&p.text_align)
+	for &stack in p.colors {ui_property_check(&stack)}
 }
 ui_parent_push :: proc(ctx: ^UI_Ctx, box: UI_Box_Id) {
 	depth := ctx.ui.parent_depth
@@ -576,16 +717,24 @@ ui_key_push_u64 :: proc(ctx: ^UI_Ctx, value: u64) {
 ui_key_pop :: proc(ctx: ^UI_Ctx) {ctx.ui.key_depth = max(0, ctx.ui.key_depth - 1)}
 
 @(private = "file")
-ui_box_make :: proc(ctx: ^UI_Ctx, key: UI_Key, flags: UI_Box_Flags, style: UI_Style) -> UI_Box_Id {
+ui_box_make :: proc(ctx: ^UI_Ctx, key: UI_Key, flags: UI_Box_Flags, style: UI_Build_Style) -> UI_Box_Id {
 	ui := ctx.ui
 	s := style
-	m := ui.style_next_mask
-	if .All in m {s = ui.style_next}
-	if .Width in m {s.size[0] = ui.style_next.size[0]}
-	if .Height in m {s.size[1] = ui.style_next.size[1]}
-	if .Position in m {s.position = ui.style_next.position}
-	if .Font in m {s.font = ui.style_next.font}
-	ui.style_next_mask = {}
+	// Caller next values win over widget defaults, even when allocation fails.
+	p := &ui.properties
+	s.size = {ui_property_resolve(&p.width, s.size[0]), ui_property_resolve(&p.height, s.size[1])}
+	s.size_min = ui_property_resolve(&p.size_min, s.size_min)
+	s.position = ui_property_resolve(&p.position, s.position)
+	s.padding = ui_property_resolve(&p.padding, s.padding)
+	s.gap = ui_property_resolve(&p.gap, s.gap)
+	s.axis = ui_property_resolve(&p.axis, s.axis)
+	s.font = ui_property_resolve(&p.font, s.font)
+	s.radius = ui_property_resolve(&p.radius, s.radius)
+	s.thickness = ui_property_resolve(&p.thickness, s.thickness)
+	s.softness = ui_property_resolve(&p.softness, s.softness)
+	s.opacity = ui_property_resolve(&p.opacity, s.opacity)
+	s.text_align = ui_property_resolve(&p.text_align, s.text_align)
+	for role in UI_Color {s.colors[role] = ui_property_resolve(&p.colors[role], s.colors[role])}
 	id := ui_box_find(ui, key)
 	key := key
 	if id != 0 && ui.boxes[id].frame == ui.frame {id, key = 0, 0}
@@ -604,7 +753,11 @@ ui_box_make :: proc(ctx: ^UI_Ctx, key: UI_Key, flags: UI_Box_Flags, style: UI_St
 		b.parent =
 			ui.parent_stack[min(ui.parent_depth, UI_STACK_MAX) - 1] if ui.parent_depth > 0 else 0
 		b.child_first, b.child_last, b.sibling_next = 0, 0, 0
-		b.flags, b.style, b.surface = flags, s, ui.surface
+		b.flags, b.surface = flags, ui.surface
+		b.size, b.size_min, b.position, b.padding = s.size, s.size_min, s.position, s.padding
+		b.gap, b.axis, b.font = s.gap, s.axis, s.font
+		b.radius, b.thickness, b.softness = s.radius, s.thickness, s.softness
+		b.opacity, b.text_align = s.opacity, s.text_align
 		b.text, b.runs, b.value, b.tags = {}, {}, {}, {}
 		b.image, b.draw_kind = 0, .Normal
 		for i in 0 ..< min(ui.tag_depth, UI_STACK_MAX) {ui_tags_add(&b.tags, ui.tag_stack[i])}
@@ -618,18 +771,19 @@ ui_box_make :: proc(ctx: ^UI_Ctx, key: UI_Key, flags: UI_Box_Flags, style: UI_St
 			   0 {parent.child_first = id} else {ui.boxes[parent.child_last].sibling_next = id}
 			parent.child_last = id
 		}
-		if fresh {
-			for role in UI_Color {
-				b.colors[role] = s.colors[role] if role in s.color_override else ui_theme_color(ui, b.tags, role)
-			}
+		for role in UI_Color {
+			binding := s.colors[role]
+			source := binding.role if binding.role != .None else role
+			b.colors_target[role] = binding.value if binding.literal else ui_theme_color(ui, b.tags, source)
 		}
+		if fresh {b.colors = b.colors_target}
 		ui.signals[id].box = id
 	}
 	return id
 }
 
 ui_box :: proc(ctx: ^UI_Ctx, label: string, flags: UI_Box_Flags) -> UI_Box_Id {
-	id := ui_box_make(ctx, ui_key_from_string(ui_seed(ctx), label), flags, ui_style_top(ctx))
+	id := ui_box_make(ctx, ui_key_from_string(ui_seed(ctx), label), flags, ui_build_style(ctx))
 	if id != 0 && .Text in flags {
 		end := strings.index(label, "##")
 		if end < 0 {end = len(label)}
@@ -810,9 +964,9 @@ ui_interact :: proc(ctx: ^UI_Ctx) {
 		if ui.scroll_drag > 0 {
 			axis := ui.scroll_drag - 1
 			b := &ui.boxes[active]
-			view := max(1, b.rect[axis + 2] - 2*b.style.padding[axis])
+			view := max(1, b.rect[axis + 2] - 2*b.padding[axis])
 			content := max(view, b.content_size[axis])
-			fraction := clamp((ctx.input.pos[axis] - b.rect[axis] - b.style.padding[axis]) / view, 0, 1)
+			fraction := clamp((ctx.input.pos[axis] - b.rect[axis] - b.padding[axis]) / view, 0, 1)
 			b.scroll_target[axis] = max(0, fraction * content - view/2)
 		}
 	}
@@ -838,12 +992,9 @@ ui_begin :: proc(ctx: ^UI_Ctx, ui: ^UI, draw: ^Draw_Ctx, input: ^Input, view_siz
 	ui.order, ui.order_next = {}, 0
 	ui.text_next, ui.run_next = 0, 0
 	ui.parent_depth, ui.key_depth, ui.tag_depth, ui.table_depth = 0, 0, 0, 0
-	ui.style_depth, ui.style_next_mask, ui.surface = 1, {}, .Main
-	ui.style_stack[0] = {
-		size = {ui_text_size(), ui_text_size()}, padding = {8, 5}, gap = 8,
-		axis = .Y, font = ui.font_default, radius = 5, thickness = 1, softness = 0.8, opacity = 1,
-	}
-	root_style := ui_style_top(ctx)
+	ui.surface = .Main
+	ui_properties_begin(ui)
+	root_style := ui_build_style(ctx)
 	root_style.size = {ui_px(view_size.x), ui_px(view_size.y)}
 	root_style.padding = {20, 20}
 	root_style.gap = 12
@@ -853,7 +1004,7 @@ ui_begin :: proc(ctx: ^UI_Ctx, ui: ^UI, draw: ^Draw_Ctx, input: ^Input, view_siz
 
 @(private = "file")
 ui_box_padding :: proc(b: UI_Box) -> [2]f32 {
-	return b.style.padding * 2 + [2]f32{12 if .Scroll_Y in b.flags else 0, 12 if .Scroll_X in b.flags else 0}
+	return b.padding * 2 + [2]f32{12 if .Scroll_Y in b.flags else 0, 12 if .Scroll_X in b.flags else 0}
 }
 
 // A zero-span writer reuses wrapped layout without writes, allocations, or a renderer.
@@ -874,8 +1025,8 @@ ui_text_dimensions :: proc(ctx: ^UI_Ctx, b: UI_Box, width: f32 = 0) -> (size: [2
 		text := ui_text_get(ctx.ui, b.text)
 		if .Wrap in b.flags && width > 0 {
 			sink := Draw_Ctx{sprites = ctx.draw.sprites}
-			size = draw_text_wrapped(&sink, b.style.font, text, {}, width, {})
-		} else {size = text_measure(ctx.draw.sprites, b.style.font, text)}
+			size = draw_text_wrapped(&sink, b.font, text, {}, width, {})
+		} else {size = text_measure(ctx.draw.sprites, b.font, text)}
 	} else if .Image in b.flags {
 		region := ctx.draw.sprites.regions[sprite_of_image(b.image)]
 		size = {region.source.z, region.source.w}
@@ -892,7 +1043,7 @@ ui_layout :: proc(ctx: ^UI_Ctx) {
 		for id in ui.order {
 			if id != 0 {
 				b := &ui.boxes[id]
-				pref := b.style.size[axis]
+				pref := b.size[axis]
 				pad := ui_box_padding(b^)
 				size: f32
 				switch pref.kind {
@@ -902,11 +1053,11 @@ ui_layout :: proc(ctx: ^UI_Ctx) {
 					size = dim[axis] + pad[axis] + pref.value
 				case .Parent:
 					parent := b.parent
-					for parent != 0 && ui.boxes[parent].style.size[axis].kind == .Children {parent = ui.boxes[parent].parent}
+					for parent != 0 && ui.boxes[parent].size[axis].kind == .Children {parent = ui.boxes[parent].parent}
 					if parent != 0 {size = max(0, ui.boxes[parent].rect[axis+2] - ui_box_padding(ui.boxes[parent])[axis]) * pref.value}
 				case .Children, .Fill:
 				}
-				b.rect[axis+2] = max(size, b.style.size_min[axis])
+				b.rect[axis+2] = max(size, b.size_min[axis])
 			}
 		}
 		// Children-derived sizes, in reverse construction order.
@@ -914,18 +1065,18 @@ ui_layout :: proc(ctx: ^UI_Ctx) {
 			id := ui.order[i]
 			if id != 0 {
 				b := &ui.boxes[id]
-				if b.style.size[axis].kind == .Children {
+				if b.size[axis].kind == .Children {
 					size: f32
 					count := 0
 					for child := b.child_first; child != 0; child = ui.boxes[child].sibling_next {
 						c := ui.boxes[child]
 						if .Floating not_in c.flags {
-							if int(b.style.axis) == axis {size += c.rect[axis+2]} else {size = max(size, c.rect[axis+2])}
+							if int(b.axis) == axis {size += c.rect[axis+2]} else {size = max(size, c.rect[axis+2])}
 							count += 1
 						}
 					}
-					if int(b.style.axis) == axis {size += f32(max(0, count-1)) * b.style.gap}
-					b.rect[axis+2] = max(b.style.size_min[axis], size + ui_box_padding(b^)[axis])
+					if int(b.axis) == axis {size += f32(max(0, count-1)) * b.gap}
+					b.rect[axis+2] = max(b.size_min[axis], size + ui_box_padding(b^)[axis])
 				}
 			}
 		}
@@ -934,7 +1085,7 @@ ui_layout :: proc(ctx: ^UI_Ctx) {
 			if id != 0 {
 				b := &ui.boxes[id]
 				available := max(0, b.rect[axis+2] - ui_box_padding(b^)[axis])
-				along := axis == int(b.style.axis)
+				along := axis == int(b.axis)
 				overflow := (.Scroll_X in b.flags) if axis == 0 else (.Scroll_Y in b.flags)
 				total, flexible, weights: f32
 				count := 0
@@ -942,25 +1093,25 @@ ui_layout :: proc(ctx: ^UI_Ctx) {
 					c := &ui.boxes[child]
 					if .Floating not_in c.flags {
 						count += 1
-						if c.style.size[axis].kind == .Parent && b.style.size[axis].kind != .Children {
-							c.rect[axis+2] = max(c.style.size_min[axis], available * c.style.size[axis].value)
+						if c.size[axis].kind == .Parent && b.size[axis].kind != .Children {
+							c.rect[axis+2] = max(c.size_min[axis], available * c.size[axis].value)
 						}
-						if c.style.size[axis].kind == .Fill {weights += max(0, c.style.size[axis].value)} else {total += c.rect[axis+2]}
-						flexible += max(0, c.rect[axis+2] - c.style.size_min[axis]) * (1 - clamp(c.style.size[axis].strictness, 0, 1))
+						if c.size[axis].kind == .Fill {weights += max(0, c.size[axis].value)} else {total += c.rect[axis+2]}
+						flexible += max(0, c.rect[axis+2] - c.size_min[axis]) * (1 - clamp(c.size[axis].strictness, 0, 1))
 					}
 				}
-				if along {total += f32(max(0, count-1)) * b.style.gap}
+				if along {total += f32(max(0, count-1)) * b.gap}
 				shrink := clamp((total - available) / flexible, 0, 1) if flexible > 0 && !overflow else 0
 				for child := b.child_first; child != 0; child = ui.boxes[child].sibling_next {
 					c := &ui.boxes[child]
 					if .Floating not_in c.flags {
 						size := c.rect[axis+2]
-						if c.style.size[axis].kind == .Fill {
-							size = max(0, available - total) * c.style.size[axis].value / weights if along && weights > 0 else available
+						if c.size[axis].kind == .Fill {
+							size = max(0, available - total) * c.size[axis].value / weights if along && weights > 0 else available
 						} else if along {
-							size -= max(0, size - c.style.size_min[axis]) * (1 - clamp(c.style.size[axis].strictness, 0, 1)) * shrink
+							size -= max(0, size - c.size_min[axis]) * (1 - clamp(c.size[axis].strictness, 0, 1)) * shrink
 						} else if !overflow {size = min(size, available)}
-						c.rect[axis+2] = max(c.style.size_min[axis], size)
+						c.rect[axis+2] = max(c.size_min[axis], size)
 					}
 				}
 			}
@@ -973,7 +1124,7 @@ ui_layout :: proc(ctx: ^UI_Ctx) {
 		if id != 0 {
 			b := &ui.boxes[id]
 			if b.surface != .Main && .Floating in b.flags {
-				pos := b.style.position
+				pos := b.position
 				if b.key == ui.popup_key {
 					anchor := ui_box_find(ui, ui.popup_anchor)
 					pos = ui.popup_position
@@ -984,13 +1135,13 @@ ui_layout :: proc(ctx: ^UI_Ctx) {
 			}
 			cursor: f32
 			bounds: [2]f32
-			axis := int(b.style.axis)
+			axis := int(b.axis)
 			for child := b.child_first; child != 0; child = ui.boxes[child].sibling_next {
 				c := &ui.boxes[child]
 				if .Floating not_in c.flags {
 					bounds[axis] = cursor + c.rect[axis+2]
 					bounds[1-axis] = max(bounds[1-axis], c.rect[3-axis])
-					cursor += c.rect[axis+2] + b.style.gap
+					cursor += c.rect[axis+2] + b.gap
 				}
 			}
 			b.content_size = bounds
@@ -1000,8 +1151,8 @@ ui_layout :: proc(ctx: ^UI_Ctx) {
 			cursor = 0
 			for child := b.child_first; child != 0; child = ui.boxes[child].sibling_next {
 				c := &ui.boxes[child]
-				pos := [2]f32{b.rect.x, b.rect.y} + b.style.padding - b.scroll
-				if .Floating in c.flags {pos = c.style.position} else {pos[axis] += cursor; cursor += c.rect[axis+2] + b.style.gap}
+				pos := [2]f32{b.rect.x, b.rect.y} + b.padding - b.scroll
+				if .Floating in c.flags {pos = c.position} else {pos[axis] += cursor; cursor += c.rect[axis+2] + b.gap}
 				if ui.popup_key != 0 && c.key == ui.popup_key {
 					anchor := ui_box_find(ui, ui.popup_anchor)
 					pos = ui.popup_position
@@ -1023,13 +1174,13 @@ ui_label :: proc(ctx: ^UI_Ctx, text: string) -> UI_Signal {
 	return ui_signal(ctx, id)
 }
 ui_label_wrapped :: proc(ctx: ^UI_Ctx, text: string) -> UI_Signal {
-	ui_width_next(ctx, ui_pct())
+	if !ctx.ui.properties.width.has_next {ui_width_next(ctx, ui_pct())}
 	id := ui_box(ctx, text, {.Text, .Wrap})
 	return ui_signal(ctx, id)
 }
 ui_heading :: proc(ctx: ^UI_Ctx, text: string) -> UI_Signal {
 	ui_tag_push(ctx, "heading")
-	ui_font_next(ctx, ctx.ui.font_heading)
+	if !ctx.ui.properties.font.has_next {ui_font_next(ctx, ctx.ui.font_heading)}
 	id := ui_box(ctx, text, {.Text, .Ellipsis})
 	ui_tag_pop(ctx)
 	return ui_signal(ctx, id)
@@ -1065,7 +1216,7 @@ ui_label_rich :: proc(ctx: ^UI_Ctx, key: string, parts: []UI_Run_Desc) -> UI_Sig
 		for part in parts {
 			if ctx.ui.run_next < UI_RUN_MAX {
 				size := part.size
-				if part.is_image && size.y == 0 {size.y = f32(ctx.draw.sprites.fonts[b.style.font].size)}
+				if part.is_image && size.y == 0 {size.y = f32(ctx.draw.sprites.fonts[b.font].size)}
 				if part.is_image && size.x == 0 {
 					region := ctx.draw.sprites.regions[sprite_of_image(part.image)]
 					size.x = size.y * region.source.z / region.source.w if region.source.w > 0 else 0
@@ -1081,7 +1232,7 @@ ui_label_rich :: proc(ctx: ^UI_Ctx, key: string, parts: []UI_Run_Desc) -> UI_Sig
 
 @(private = "file")
 ui_group_begin :: proc(ctx: ^UI_Ctx, key: string, axis: UI_Axis, flags: UI_Box_Flags, padding: [2]f32) -> UI_Box_Id {
-	style := ui_style_top(ctx)
+	style := ui_build_style(ctx)
 	style.axis, style.padding = axis, padding
 	style.size = {ui_pct(), ui_children_size()}
 	id := ui_box_make(ctx, ui_key_from_string(ui_seed(ctx), key), flags, style)
@@ -1098,7 +1249,7 @@ ui_panel_begin :: proc(ctx: ^UI_Ctx, key: string) -> UI_Box_Id {
 }
 ui_panel_end :: proc(ctx: ^UI_Ctx) {ui_parent_pop(ctx); ui_tag_pop(ctx)}
 ui_scrollpane_begin :: proc(ctx: ^UI_Ctx, key: string, height: f32, horizontal: bool = false) -> UI_Box_Id {
-	ui_height_next(ctx, ui_px(height))
+	if !ctx.ui.properties.height.has_next {ui_height_next(ctx, ui_px(height))}
 	id := ui_panel_begin(ctx, key)
 	if id != 0 {
 		ctx.ui.boxes[id].flags += {.Scroll_Y}
@@ -1109,28 +1260,27 @@ ui_scrollpane_begin :: proc(ctx: ^UI_Ctx, key: string, height: f32, horizontal: 
 ui_scrollpane_end :: proc(ctx: ^UI_Ctx) {ui_panel_end(ctx)}
 
 ui_spacer :: proc(ctx: ^UI_Ctx, size: UI_Size) {
-	style := ui_style_top(ctx)
+	style := ui_build_style(ctx)
 	parent := ctx.ui.parent_stack[min(ctx.ui.parent_depth, UI_STACK_MAX) - 1]
 	style.size = {ui_px(0), ui_px(0)}
-	style.size[int(ctx.ui.boxes[parent].style.axis)] = size
+	style.size[int(ctx.ui.boxes[parent].axis)] = size
 	style.padding = {}
 	ui_box_make(ctx, 0, {}, style)
 }
 ui_divider :: proc(ctx: ^UI_Ctx, thickness: f32 = 1) {
-	style := ui_style_top(ctx)
+	style := ui_build_style(ctx)
 	parent := ctx.ui.parent_stack[min(ctx.ui.parent_depth, UI_STACK_MAX) - 1]
-	axis := int(ctx.ui.boxes[parent].style.axis)
+	axis := int(ctx.ui.boxes[parent].axis)
 	style.size = {ui_pct(), ui_pct()}
 	style.size[axis] = ui_px(thickness)
-	style.colors[.Background] = ui_theme_color(ctx.ui, {}, .Border)
-	style.color_override += {.Background}
+	style.colors[.Background] = {role = .Border}
 	style.radius, style.softness, style.padding = 0, 0, {}
 	ui_box_make(ctx, 0, {.Background}, style)
 }
 
 ui_slider :: proc(ctx: ^UI_Ctx, label: string, value: ^f32, low, high: f32, step: f32 = 0) -> UI_Signal {
 	ui_tag_push(ctx, "button")
-	style := ui_style_top(ctx)
+	style := ui_build_style(ctx)
 	style.size = {ui_pct(), ui_px(56)}
 	id := ui_box_make(ctx, ui_key_from_string(ui_seed(ctx), label), {.Background, .Border, .Text, .Clickable, .Focusable, .Adjustable}, style)
 	ui_box_text(ctx, id, label[:strings.index(label, "##")] if strings.index(label, "##") >= 0 else label)
@@ -1153,7 +1303,7 @@ ui_slider :: proc(ctx: ^UI_Ctx, label: string, value: ^f32, low, high: f32, step
 }
 
 ui_scrollbar :: proc(ctx: ^UI_Ctx, key: string, axis: UI_Axis, offset: ^f32, content, view: f32) -> UI_Signal {
-	style := ui_style_top(ctx)
+	style := ui_build_style(ctx)
 	style.padding = {}
 	style.size = {ui_pct(), ui_px(12)} if axis == .X else [2]UI_Size{ui_px(12), ui_pct()}
 	id := ui_box_make(ctx, ui_key_from_string(ui_seed(ctx), key), {.Clickable, .Focusable, .Adjustable}, style)
@@ -1176,7 +1326,7 @@ ui_scrollbar :: proc(ctx: ^UI_Ctx, key: string, axis: UI_Axis, offset: ^f32, con
 // A floating panel can be moved from its unused background and resized at its bottom-right corner.
 ui_pane_begin :: proc(ctx: ^UI_Ctx, key: string, rect: ^[4]f32) -> UI_Box_Id {
 	ui_tag_push(ctx, "panel")
-	style := ui_style_top(ctx)
+	style := ui_build_style(ctx)
 	style.position, style.size = {rect.x, rect.y}, {ui_px(rect.z), ui_px(rect.w)}
 	style.padding = {12, 12}
 	id := ui_box_make(ctx, ui_key_from_string(ui_seed(ctx), key), {.Background, .Border, .Clip, .Floating, .Movable, .Shadow}, style)
@@ -1188,7 +1338,7 @@ ui_pane_begin :: proc(ctx: ^UI_Ctx, key: string, rect: ^[4]f32) -> UI_Box_Id {
 			if ctx.ui.drag_start.x > start.x + start.z - 18 && ctx.ui.drag_start.y > start.y + start.w - 18 {
 				rect.z, rect.w = max(100, start.z + s.drag.x), max(60, start.w + s.drag.y)
 			} else {rect.x, rect.y = start.x + s.drag.x, start.y + s.drag.y}
-			b.style.position, b.style.size = {rect.x, rect.y}, {ui_px(rect.z), ui_px(rect.w)}
+			b.position, b.size = {rect.x, rect.y}, {ui_px(rect.z), ui_px(rect.w)}
 		}
 	}
 	ui_parent_push(ctx, id)
@@ -1212,7 +1362,7 @@ ui_popup_begin :: proc(ctx: ^UI_Ctx, key: string, width: f32 = 240) -> bool {
 	ui_tag_push(ctx, "popup")
 	ui_parent_push(ctx, ctx.ui.root)
 	ctx.ui.surface = .Popup
-	style := ui_style_top(ctx)
+	style := ui_build_style(ctx)
 	style.position = ctx.ui.popup_position
 	style.size, style.padding = {ui_px(width), ui_children_size()}, {6, 6}
 	style.axis = .Y
@@ -1227,7 +1377,7 @@ ui_popup_end :: proc(ctx: ^UI_Ctx) {
 	ctx.ui.surface = .Main
 }
 ui_menu_item :: proc(ctx: ^UI_Ctx, label: string) -> UI_Signal {
-	ui_width_next(ctx, ui_pct())
+	if !ctx.ui.properties.width.has_next {ui_width_next(ctx, ui_pct())}
 	s := ui_button(ctx, label)
 	if .Clicked in s.flags {ui_popup_close(ctx)}
 	return s
@@ -1238,7 +1388,7 @@ ui_tooltip :: proc(ctx: ^UI_Ctx, anchor: UI_Box_Id, text: string, width: f32 = 2
 		ctx.ui.surface = .Tooltip
 		ui_tag_push(ctx, "tooltip")
 		ui_parent_push(ctx, ctx.ui.root)
-		style := ui_style_top(ctx)
+		style := ui_build_style(ctx)
 		style.position = ctx.input.pos + [2]f32{16, 20}
 		style.size = {ui_px(width), ui_children_size()}
 		style.padding = {8, 8}
@@ -1265,12 +1415,10 @@ ui_table_begin :: proc(ctx: ^UI_Ctx, key: string, weights: []f32) -> UI_Box_Id {
 ui_table_end :: proc(ctx: ^UI_Ctx) {ui_col_end(ctx); ctx.ui.table_depth = max(0, ctx.ui.table_depth - 1)}
 ui_table_row_begin :: proc(ctx: ^UI_Ctx, key: string = "") -> UI_Box_Id {
 	if ctx.ui.table_depth > 0 && ctx.ui.table_depth <= UI_TABLE_DEPTH_MAX {ctx.ui.table_stack[ctx.ui.table_depth-1].column_next = 0}
-	style := ui_style_top(ctx)
-	style.gap = 0
-	ui_style_push(ctx, style)
+	ui_gap_push(ctx, 0)
 	return ui_row_begin(ctx, key)
 }
-ui_table_row_end :: proc(ctx: ^UI_Ctx) {ui_row_end(ctx); ui_style_pop(ctx)}
+ui_table_row_end :: proc(ctx: ^UI_Ctx) {ui_row_end(ctx); ui_gap_pop(ctx)}
 ui_table_cell_begin :: proc(ctx: ^UI_Ctx) -> UI_Box_Id {
 	weight: f32
 	if ctx.ui.table_depth > 0 && ctx.ui.table_depth <= UI_TABLE_DEPTH_MAX {
@@ -1278,13 +1426,13 @@ ui_table_cell_begin :: proc(ctx: ^UI_Ctx) -> UI_Box_Id {
 		if t.column_next < t.column_len && t.weight_sum > 0 {weight = t.weights[t.column_next] / t.weight_sum}
 		t.column_next += 1
 	}
-	ui_width_next(ctx, ui_pct(weight))
+	if !ctx.ui.properties.width.has_next {ui_width_next(ctx, ui_pct(weight))}
 	return ui_col_begin(ctx)
 }
 ui_table_cell_end :: proc(ctx: ^UI_Ctx) {ui_col_end(ctx)}
 
 ui_list_item :: proc(ctx: ^UI_Ctx, label: string, selected: bool) -> UI_Signal {
-	ui_width_next(ctx, ui_pct())
+	if !ctx.ui.properties.width.has_next {ui_width_next(ctx, ui_pct())}
 	s := ui_button(ctx, label)
 	if s.box != 0 && selected {ctx.ui.boxes[s.box].flags += {.Selected}}
 	return s
@@ -1327,7 +1475,7 @@ ui_color_picker :: proc(ctx: ^UI_Ctx, key: string, color: ^[4]f32) -> (signal: U
 	controls: [3]UI_Box_Id
 	old := color^
 	for kind in 0..<3 {
-		style := ui_style_top(ctx)
+		style := ui_build_style(ctx)
 		style.size = {ui_pct(), ui_px(140 if kind == 0 else 20)}
 		style.padding, style.radius = {}, 0
 		name := "sv" if kind == 0 else ("hue" if kind == 1 else "alpha")
@@ -1408,7 +1556,7 @@ ui_draw_text :: proc(ctx: ^UI_Ctx, b: UI_Box, position: [2]f32, width: f32, colo
 		x := position.x
 		for run in ctx.ui.runs[b.runs.begin:b.runs.begin + b.runs.len] {
 			tint := run.color
-			tint.w *= b.style.opacity * (1 - b.disabled_t*0.5)
+			tint.w *= b.opacity * (1 - b.disabled_t*0.5)
 			if run.is_image {
 				draw_image(ctx.draw, run.image, {x, position.y + ascent - run.size.y, run.size.x, run.size.y}, tint)
 				x += run.size.x
@@ -1419,20 +1567,20 @@ ui_draw_text :: proc(ctx: ^UI_Ctx, b: UI_Box, position: [2]f32, width: f32, colo
 			}
 		}
 	} else if .Wrap in b.flags {
-		if width > 0 {draw_text_wrapped(ctx.draw, b.style.font, text, position, width, color)}
-	} else if .Ellipsis in b.flags && text_measure(ctx.draw.sprites, b.style.font, text).x > width {
-		trailer := text_measure(ctx.draw.sprites, b.style.font, "...").x
+		if width > 0 {draw_text_wrapped(ctx.draw, b.font, text, position, width, color)}
+	} else if .Ellipsis in b.flags && text_measure(ctx.draw.sprites, b.font, text).x > width {
+		trailer := text_measure(ctx.draw.sprites, b.font, "...").x
 		advance: f32
 		end := len(text)
 		for ch, offset in text {
 			amount: f32
-			if sprite, ok := sprite_of_glyph(ctx.draw.sprites, b.style.font, ch); ok {amount = ctx.draw.sprites.glyphs[sprite].advance}
+			if sprite, ok := sprite_of_glyph(ctx.draw.sprites, b.font, ch); ok {amount = ctx.draw.sprites.glyphs[sprite].advance}
 			if ch == '\n' || advance + amount + trailer > width {end = offset; break}
 			advance += amount
 		}
-		draw_text(ctx.draw, b.style.font, text[:end], position, color)
-		if trailer <= width {draw_text(ctx.draw, b.style.font, "...", position + [2]f32{advance, 0}, color)}
-	} else {draw_text(ctx.draw, b.style.font, text, position, color)}
+		draw_text(ctx.draw, b.font, text[:end], position, color)
+		if trailer <= width {draw_text(ctx.draw, b.font, "...", position + [2]f32{advance, 0}, color)}
+	} else {draw_text(ctx.draw, b.font, text, position, color)}
 }
 
 @(private = "file")
@@ -1455,7 +1603,7 @@ ui_paint :: proc(ctx: ^UI_Ctx) {
 			ctx.draw.layer = base_layer + u16(b.surface)
 			draw_clip_push(ctx.draw, b.clip)
 			palette := b.colors
-			for role in UI_Color {palette[role].w *= b.style.opacity * (1 - b.disabled_t*0.5)}
+			for role in UI_Color {palette[role].w *= b.opacity * (1 - b.disabled_t*0.5)}
 			bg := palette[.Background]
 			if .Clickable in b.flags {
 				bg += (palette[.Hot] - bg)*b.hot_t
@@ -1463,13 +1611,13 @@ ui_paint :: proc(ctx: ^UI_Ctx) {
 			}
 			if .Shadow in b.flags {
 				r := b.rect
-				draw_rectangle(ctx.draw, {r.x-8,r.y-4,r.z+16,r.w+16}, palette[.Shadow], radius=b.style.radius+8, softness=4)
+				draw_rectangle(ctx.draw, {r.x-8,r.y-4,r.z+16,r.w+16}, palette[.Shadow], radius=b.radius+8, softness=4)
 			}
-			if .Background in b.flags {draw_rectangle(ctx.draw, b.rect, bg, radius=b.style.radius, softness=b.style.softness)}
-			if .Border in b.flags {draw_rectangle_lines(ctx.draw, b.rect, palette[.Border], b.style.thickness, radius=b.style.radius, softness=b.style.softness)}
-			content := [4]f32{b.rect.x+b.style.padding.x,b.rect.y+b.style.padding.y,
+			if .Background in b.flags {draw_rectangle(ctx.draw, b.rect, bg, radius=b.radius, softness=b.softness)}
+			if .Border in b.flags {draw_rectangle_lines(ctx.draw, b.rect, palette[.Border], b.thickness, radius=b.radius, softness=b.softness)}
+			content := [4]f32{b.rect.x+b.padding.x,b.rect.y+b.padding.y,
 				max(0,b.rect.z-ui_box_padding(b).x),max(0,b.rect.w-ui_box_padding(b).y)}
-			if .Image in b.flags {draw_image(ctx.draw, b.image, content, {1,1,1,b.style.opacity*(1-b.disabled_t*0.5)})}
+			if .Image in b.flags {draw_image(ctx.draw, b.image, content, {1,1,1,b.opacity*(1-b.disabled_t*0.5)})}
 			#partial switch b.draw_kind {
 			case .Checkbox, .Expander:
 				d := min(18, content.w)
@@ -1494,14 +1642,14 @@ ui_paint :: proc(ctx: ^UI_Ctx) {
 			case .Saturation_Value:
 				hue := ui_hsv_rgb({b.value.x,1,1})
 				ui_draw_gradient(ctx.draw,b.rect,{
-					.Top_Left={1,1,1,b.style.opacity}, .Top_Right={hue.x,hue.y,hue.z,b.style.opacity},
-					.Bot_Left={0,0,0,b.style.opacity}, .Bot_Right={0,0,0,b.style.opacity},
+					.Top_Left={1,1,1,b.opacity}, .Top_Right={hue.x,hue.y,hue.z,b.opacity},
+					.Bot_Left={0,0,0,b.opacity}, .Bot_Right={0,0,0,b.opacity},
 				})
 				draw_rectangle_lines(ctx.draw,{b.rect.x+b.value.y*b.rect.z-4,b.rect.y+(1-b.value.z)*b.rect.w-4,8,8},{1,1,1,1},1,radius=4,softness=0.5)
 			case .Hue:
 				for segment in 0..<6 {
 					a,b_color := ui_hsv_rgb({f32(segment)/6,1,1}),ui_hsv_rgb({f32(segment+1)/6,1,1})
-					left,right := [4]f32{a.x,a.y,a.z,b.style.opacity},[4]f32{b_color.x,b_color.y,b_color.z,b.style.opacity}
+					left,right := [4]f32{a.x,a.y,a.z,b.opacity},[4]f32{b_color.x,b_color.y,b_color.z,b.opacity}
 					ui_draw_gradient(ctx.draw,{b.rect.x+f32(segment)*b.rect.z/6,b.rect.y,b.rect.z/6,b.rect.w},
 						{.Top_Left=left,.Bot_Left=left,.Top_Right=right,.Bot_Right=right})
 				}
@@ -1510,20 +1658,20 @@ ui_paint :: proc(ctx: ^UI_Ctx) {
 				for row in 0..<2 {
 					for col in 0..<16 {
 						v: f32 = 0.4 if (row+col)%2 == 0 else 0.7
-						draw_rectangle(ctx.draw,{b.rect.x+f32(col)*b.rect.z/16,b.rect.y+f32(row)*b.rect.w/2,b.rect.z/16,b.rect.w/2},{v,v,v,b.style.opacity})
+						draw_rectangle(ctx.draw,{b.rect.x+f32(col)*b.rect.z/16,b.rect.y+f32(row)*b.rect.w/2,b.rect.z/16,b.rect.w/2},{v,v,v,b.opacity})
 					}
 				}
 				rgb := ui_hsv_rgb({b.value.x,b.value.y,b.value.z})
-				a,z := [4]f32{rgb.x,rgb.y,rgb.z,0},[4]f32{rgb.x,rgb.y,rgb.z,b.style.opacity}
+				a,z := [4]f32{rgb.x,rgb.y,rgb.z,0},[4]f32{rgb.x,rgb.y,rgb.z,b.opacity}
 				ui_draw_gradient(ctx.draw,b.rect,{.Top_Left=a,.Bot_Left=a,.Top_Right=z,.Bot_Right=z})
 				draw_rectangle_lines(ctx.draw,{b.rect.x+b.value.w*b.rect.z-3,b.rect.y,6,b.rect.w},{1,1,1,1},1)
 			case .Swatch:
-				draw_rectangle(ctx.draw,content,b.value,radius=b.style.radius)
+				draw_rectangle(ctx.draw,content,b.value,radius=b.radius)
 			}
 			if .Text in b.flags {
 				dim := ui_text_dimensions(ctx,b,content.z)
 				if b.draw_kind == .Checkbox || b.draw_kind == .Expander {dim.x -= 26}
-				align: f32 = 0 if b.style.text_align == .Start else (0.5 if b.style.text_align == .Center else 1)
+				align: f32 = 0 if b.text_align == .Start else (0.5 if b.text_align == .Center else 1)
 				pos := [2]f32{content.x+max(0,content.z-dim.x)*align,content.y+max(0,content.w-dim.y)/2}
 				draw_clip_push(ctx.draw, content)
 				ui_draw_text(ctx,b,pos,content.z,palette[.Text])
@@ -1534,15 +1682,15 @@ ui_paint :: proc(ctx: ^UI_Ctx) {
 				if scroll {
 					view := max(1,b.rect[axis+2]-ui_box_padding(b)[axis])
 					total := max(view,b.content_size[axis])
-					r := [4]f32{b.rect.x+b.style.padding.x,b.rect.y+b.rect.w-10,view,6} if axis == 0 else
-						[4]f32{b.rect.x+b.rect.z-10,b.rect.y+b.style.padding.y,6,view}
+					r := [4]f32{b.rect.x+b.padding.x,b.rect.y+b.rect.w-10,view,6} if axis == 0 else
+						[4]f32{b.rect.x+b.rect.z-10,b.rect.y+b.padding.y,6,view}
 					ui_draw_scrollbar(ctx.draw,r,axis,b.scroll[axis]/total,view/total,palette[.Border],palette[.Muted])
 				}
 			}
 			if b.focus_t > 0.001 {
 				color := palette[.Focus]
 				color.w *= b.focus_t
-				draw_rectangle_lines(ctx.draw,b.rect,color,2,radius=b.style.radius,softness=0.7)
+				draw_rectangle_lines(ctx.draw,b.rect,color,2,radius=b.radius,softness=0.7)
 			}
 			draw_clip_pop(ctx.draw)
 		}
@@ -1551,14 +1699,14 @@ ui_paint :: proc(ctx: ^UI_Ctx) {
 }
 
 ui_end :: proc(ctx: ^UI_Ctx) {
+	ui_properties_check(ctx.ui)
 	ui_layout(ctx)
 	ui := ctx.ui
 	rate := f32(1 - math.exp(-16*f64(ctx.dt)))
 	for &b in ui.boxes {
 		if b.frame == ui.frame {
 			for role in UI_Color {
-				target := b.style.colors[role] if role in b.style.color_override else ui_theme_color(ui,b.tags,role)
-				b.colors[role] += (target-b.colors[role])*rate
+				b.colors[role] += (b.colors_target[role]-b.colors[role])*rate
 			}
 			b.hot_t += ((1 if b.key != 0 && b.key == ui.hot else 0)-b.hot_t)*rate
 			b.active_t += ((1 if (b.key != 0 && b.key == ui.active) || .Selected in b.flags else 0)-b.active_t)*rate
@@ -1590,7 +1738,7 @@ ui_end :: proc(ctx: ^UI_Ctx) {
 				for axis in 0..<2 {
 					scroll := (.Scroll_X in b.flags) if axis == 0 else (.Scroll_Y in b.flags)
 					if scroll {
-						lo := b.rect[axis] + b.style.padding[axis]
+						lo := b.rect[axis] + b.padding[axis]
 						hi := lo + b.rect[axis+2] - ui_box_padding(b^)[axis]
 						delta := min(0, r[axis]-lo) + max(0, r[axis]+r[axis+2]-hi)
 						b.scroll_target[axis] = b.scroll[axis] + delta

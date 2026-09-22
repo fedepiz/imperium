@@ -41,7 +41,12 @@ main :: proc() {
 		return
 	}
 
-	window := sdl.CreateWindow("Imperium - UI", 1600, 900, {.OPENGL, .HIGH_PIXEL_DENSITY, .RESIZABLE})
+	window := sdl.CreateWindow(
+		"Imperium - UI",
+		1600,
+		900,
+		{.OPENGL, .HIGH_PIXEL_DENSITY, .RESIZABLE},
+	)
 	if window == nil {
 		fmt.eprintf("Window creation failed: %s\n", sdl.GetError())
 		return
@@ -72,8 +77,12 @@ main :: proc() {
 	sprites_load(&GLOBAL.sprites, render_ctx)
 	ui_init(&GLOBAL.ui, Font_Id(Font_Name.Default), Font_Id(Font_Name.Heading))
 	GLOBAL.ui_demo = {
-		enabled = true, details = true, amount = 0.4, selected = -1,
-		color = {0.88, 0.66, 0.3, 1}, pane_rect = {1130, 555, 360, 320},
+		enabled   = true,
+		details   = true,
+		amount    = 0.4,
+		selected  = -1,
+		color     = {0.88, 0.66, 0.3, 1},
+		pane_rect = {1130, 555, 360, 320},
 	}
 
 	if !sdl.GL_SetSwapInterval(1) {
@@ -118,7 +127,15 @@ main :: proc() {
 				GLOBAL.input.btns[.New][.Pressed][id] = !GLOBAL.input.btns[.Old][.Down][id]
 				GLOBAL.input.pos = {event.button.x, event.button.y}
 				GLOBAL.input.pos_is_valid = true
-				ui_input_push(&GLOBAL.ui, {kind = .Press, pos = GLOBAL.input.pos, button = id, clicks = event.button.clicks})
+				ui_input_push(
+					&GLOBAL.ui,
+					{
+						kind = .Press,
+						pos = GLOBAL.input.pos,
+						button = id,
+						clicks = event.button.clicks,
+					},
+				)
 			case .MOUSE_BUTTON_UP:
 				id := event.button.button
 				GLOBAL.input.btns[.New][.Down][id] = false
@@ -131,16 +148,22 @@ main :: proc() {
 				GLOBAL.input.pos_is_valid = false
 			case .MOUSE_WHEEL:
 				direction: f32 = -1 if event.wheel.direction == .FLIPPED else 1
-				ui_input_push(&GLOBAL.ui, {
-					kind = .Scroll, pos = {event.wheel.mouse_x, event.wheel.mouse_y},
-					delta = {event.wheel.x * direction, event.wheel.y * direction},
-				})
+				ui_input_push(
+					&GLOBAL.ui,
+					{
+						kind = .Scroll,
+						pos = {event.wheel.mouse_x, event.wheel.mouse_y},
+						delta = {event.wheel.x * direction, event.wheel.y * direction},
+					},
+				)
 			case .WINDOW_FOCUS_LOST:
 				GLOBAL.input.keys[.New][.Down] = {}
 				GLOBAL.input.btns[.New][.Down] = {}
 				ui_input_push(&GLOBAL.ui, {kind = .Cancel})
 			}
 		}
+
+		keep_going &= !key_is_pressed(GLOBAL.input, .ESCAPE)
 
 		if !keep_going {
 			break
@@ -203,9 +226,9 @@ UI_Demo :: struct {
 @(private = "file")
 ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	ui_row_begin(ctx, "header")
-	logo_style := ui_style_top(ctx)
-	logo_style.size, logo_style.padding = {ui_px(72), ui_px(72)}, {}
-	ui_style_next(ctx, logo_style)
+	ui_width_next(ctx, ui_px(72))
+	ui_height_next(ctx, ui_px(72))
+	ui_padding_next(ctx, {})
 	ui_image(ctx, "logo", Image_Id(Image_Name.Logo))
 	ui_width_next(ctx, ui_fill())
 	ui_col_begin(ctx, "title")
@@ -215,7 +238,12 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	ui_tag_pop(ctx)
 	ui_col_end(ctx)
 	ui_width_next(ctx, ui_px(220))
-	if theme := ui_combo(ctx, "theme", &demo.theme, []string{"Midnight", "Daylight", "High contrast"}); .Changed in theme.flags {
+	if theme := ui_combo(
+		ctx,
+		"theme",
+		&demo.theme,
+		[]string{"Midnight", "Daylight", "High contrast"},
+	); .Changed in theme.flags {
 		ui_theme_select(ctx.ui, UI_Theme_Id(demo.theme))
 	}
 	ui_row_end(ctx)
@@ -235,7 +263,11 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	button := ui_button(ctx, "Press me")
 	if .Clicked in button.flags {demo.clicks += 1}
 	ui_tag_pop(ctx)
-	ui_tooltip(ctx, button.box, "This button keeps its identity across frames. Try Tab and Enter, too.")
+	ui_tooltip(
+		ctx,
+		button.box,
+		"This button keeps its identity across frames. Try Tab and Enter, too.",
+	)
 	ui_tag_push(ctx, "danger")
 	if reset := ui_button(ctx, "Reset"); .Clicked in reset.flags {demo.clicks = 0}
 	ui_tag_pop(ctx)
@@ -250,7 +282,10 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	ui_label(ctx, fmt.tprintf("Value: %.2f###amount_value", demo.amount))
 	ui_expander(ctx, "Details", &demo.details)
 	if demo.details {
-		ui_label_wrapped(ctx, "Boxes combine layout, appearance and interaction. Children inherit clipping and disabled state.")
+		ui_label_wrapped(
+			ctx,
+			"Boxes combine layout, appearance and interaction. Children inherit clipping and disabled state.",
+		)
 	}
 	ui_panel_end(ctx)
 	ui_panel_begin(ctx, "table_panel")
@@ -259,7 +294,7 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	resource_names := [4]string{"Resource", "Boxes", "Events", "Text bytes"}
 	resource_sizes := [4]string{"Storage", "512", "128", "65536"}
 	resource_lifetimes := [4]string{"Lifetime", "Retained", "Frame", "Frame"}
-	for row in 0..<4 {
+	for row in 0 ..< 4 {
 		ui_key_push_u64(ctx, u64(row))
 		ui_table_row_begin(ctx)
 		ui_table_cell_begin(ctx)
@@ -286,15 +321,17 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	ui_heading(ctx, "Scrolling and selection")
 	ui_label(ctx, "Wheel to scroll; click a row.")
 	ui_scrollpane_begin(ctx, "list", 290)
-	for row in 0..<40 {
+	for row in 0 ..< 40 {
 		ui_key_push_u64(ctx, u64(row))
-		item := ui_list_item(ctx, fmt.tprintf("Item %02d###item", row+1), demo.selected == row)
+		item := ui_list_item(ctx, fmt.tprintf("Item %02d###item", row + 1), demo.selected == row)
 		if .Clicked in item.flags {demo.selected = row}
 		if .Right_Pressed in item.flags {ui_popup_open(ctx, "row_menu", item.box)}
 		if ui_popup_begin(ctx, "row_menu") {
-			ui_label(ctx, fmt.tprintf("Item %d", row+1))
-			if choice := ui_menu_item(ctx, "Select"); .Clicked in choice.flags {demo.selected = row}
-			if choice := ui_menu_item(ctx, "Clear selection"); .Clicked in choice.flags {demo.selected = -1}
+			ui_label(ctx, fmt.tprintf("Item %d", row + 1))
+			if choice := ui_menu_item(ctx, "Select");
+			   .Clicked in choice.flags {demo.selected = row}
+			if choice := ui_menu_item(ctx, "Clear selection");
+			   .Clicked in choice.flags {demo.selected = -1}
 			ui_popup_end(ctx)
 		}
 		ui_key_pop(ctx)
@@ -303,12 +340,28 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	ui_panel_end(ctx)
 	ui_panel_begin(ctx, "text_panel")
 	ui_heading(ctx, "Text and images")
-	ui_label_rich(ctx, "rich", []UI_Run_Desc{
-		{is_image=true, image=Image_Id(Image_Name.Logo), size={28,28}, color={1,1,1,1}},
-		{text="  One ", font=Font_Id(Font_Name.Default), color={0.65,0.8,1,1}},
-		{text="shared baseline", font=Font_Id(Font_Name.Default), color={0.95,0.73,0.35,1}},
-	})
-	ui_label_wrapped(ctx, "This paragraph is measured at its available width before the children-sized panel is resolved. Resize the window to see the layout respond.")
+	ui_label_rich(
+		ctx,
+		"rich",
+		[]UI_Run_Desc {
+			{
+				is_image = true,
+				image = Image_Id(Image_Name.Logo),
+				size = {28, 28},
+				color = {1, 1, 1, 1},
+			},
+			{text = "  One ", font = Font_Id(Font_Name.Default), color = {0.65, 0.8, 1, 1}},
+			{
+				text = "shared baseline",
+				font = Font_Id(Font_Name.Default),
+				color = {0.95, 0.73, 0.35, 1},
+			},
+		},
+	)
+	ui_label_wrapped(
+		ctx,
+		"This paragraph is measured at its available width before the children-sized panel is resolved. Resize the window to see the layout respond.",
+	)
 	ui_width_next(ctx, ui_px(220))
 	ui_label(ctx, "A deliberately long label that is truncated with an ellipsis.")
 	ui_panel_end(ctx)
@@ -320,7 +373,10 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	if appearance != 0 {ctx.ui.boxes[appearance].flags += {.Clip, .Scroll_Y}}
 	ui_panel_begin(ctx, "theme_panel")
 	ui_heading(ctx, "Theme tags")
-	ui_label_wrapped(ctx, "Scoped tags choose the most specific matching rule. Changing themes animates colors without changing the boxes.")
+	ui_label_wrapped(
+		ctx,
+		"Scoped tags choose the most specific matching rule. Changing themes animates colors without changing the boxes.",
+	)
 	ui_row_begin(ctx)
 	ui_button(ctx, "Ordinary")
 	ui_tag_push(ctx, "primary")
@@ -332,7 +388,10 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	ui_tag_pop(ctx)
 	ui_spacer(ctx, ui_px(8))
 	ui_tag_push(ctx, "muted")
-	ui_label_wrapped(ctx, "Tab / Shift-Tab: focus. Arrows: navigate or adjust. Enter / Space: activate. Escape: dismiss menus.")
+	ui_label_wrapped(
+		ctx,
+		"Tab / Shift-Tab: focus. Arrows: navigate or adjust. Enter / Space: activate. Escape: dismiss menus.",
+	)
 	ui_tag_pop(ctx)
 	ui_panel_end(ctx)
 	ui_panel_begin(ctx, "popup_panel")
@@ -342,7 +401,8 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	ui_tooltip(ctx, menu.box, "Menus float above the main UI and capture input until dismissed.")
 	if ui_popup_begin(ctx, "actions") {
 		if action := ui_menu_item(ctx, "Add ten"); .Clicked in action.flags {demo.clicks += 10}
-		if action := ui_menu_item(ctx, "Toggle details"); .Clicked in action.flags {demo.details = !demo.details}
+		if action := ui_menu_item(ctx, "Toggle details");
+		   .Clicked in action.flags {demo.details = !demo.details}
 		ui_popup_end(ctx)
 	}
 	ui_panel_end(ctx)
@@ -350,7 +410,14 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 	ui_row_end(ctx)
 
 	ui_tag_push(ctx, "muted")
-	ui_label(ctx, fmt.tprintf("%d boxes | %d text bytes | fixed storage###stats", ctx.ui.order_next, ctx.ui.text_next))
+	ui_label(
+		ctx,
+		fmt.tprintf(
+			"%d boxes | %d text bytes | fixed storage###stats",
+			ctx.ui.order_next,
+			ctx.ui.text_next,
+		),
+	)
 	ui_tag_pop(ctx)
 	ui_pane_begin(ctx, "palette", &demo.pane_rect)
 	ui_heading(ctx, "Color laboratory")
@@ -362,17 +429,28 @@ ui_demo_build :: proc(ctx: ^UI_Ctx, demo: ^UI_Demo) {
 @(private = "file")
 ui_action_from_key :: proc(key: sdl.Scancode, mods: sdl.Keymod) -> UI_Action {
 	#partial switch key {
-	case .TAB: return .Previous if .LSHIFT in mods || .RSHIFT in mods else .Next
-	case .RETURN, .KP_ENTER, .SPACE: return .Accept
-	case .ESCAPE: return .Cancel
-	case .LEFT: return .Left
-	case .RIGHT: return .Right
-	case .UP: return .Up
-	case .DOWN: return .Down
-	case .HOME: return .Home
-	case .END: return .End
-	case .PAGEUP: return .Page_Up
-	case .PAGEDOWN: return .Page_Down
+	case .TAB:
+		return .Previous if .LSHIFT in mods || .RSHIFT in mods else .Next
+	case .RETURN, .KP_ENTER, .SPACE:
+		return .Accept
+	case .BACKSPACE:
+		return .Cancel
+	case .LEFT:
+		return .Left
+	case .RIGHT:
+		return .Right
+	case .UP:
+		return .Up
+	case .DOWN:
+		return .Down
+	case .HOME:
+		return .Home
+	case .END:
+		return .End
+	case .PAGEUP:
+		return .Page_Up
+	case .PAGEDOWN:
+		return .Page_Down
 	}
 	return .None
 }
@@ -409,3 +487,4 @@ button_is_down :: proc(input: Input, button: u8) -> bool {
 button_is_pressed :: proc(input: Input, button: u8) -> bool {
 	return bool(input.btns[.New][.Pressed][button])
 }
+
