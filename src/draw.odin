@@ -8,7 +8,6 @@ Draw_Ctx :: struct {
 	list:          ^Render_List,
 	// Remaining writable range; consuming slots advances begin and reduces len.
 	instance_span: Span,
-	layer:         u16,
 	// Clip rects stamped on every instance; the bottom entry is the clip given to draw_begin.
 	clip_stack:    [DRAW_CLIP_DEPTH_MAX][4]f32,
 	clip_depth:    int,
@@ -91,7 +90,6 @@ draw_instance :: proc(ctx: ^Draw_Ctx, texture: Texture_Id, instance: Render_Inst
 	if ctx.instance_span.len > 0 {
 		index := ctx.instance_span.begin
 		ctx.list.keys[index] = {
-			layer   = ctx.layer,
 			texture = texture,
 		}
 		ctx.list.instances[index] = instance

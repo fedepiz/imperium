@@ -1,7 +1,6 @@
 package main
 
 import "core:fmt"
-import "core:slice"
 import gl "vendor:OpenGL"
 
 RENDER_MAX_INSTANCES :: 8192
@@ -15,15 +14,9 @@ Bitmap :: struct {
 	height: int,
 }
 
-// Core information relating to a render instance.
-// Small and compact.
+// What batches a render instance: consecutive instances sharing it draw in one call.
 Render_Key :: struct {
-	// Layer is stronger then sequence. Draw in sorted order, by (layer, sequence)
-	layer:    u16,
-	sequence: u16,
-	// Ids into 'batch' parameters.
-	// Batch on breaks in this.
-	texture:  Texture_Id,
+	texture: Texture_Id,
 }
 
 Corner :: enum {
@@ -56,33 +49,15 @@ Renderer :: struct {
 	view_size:                                                     [2]f32,
 	// Borrowed OpenGL texture handles. Slot zero always means untextured.
 	textures:                                                      [65536]u32,
-	order:                                                         [RENDER_MAX_INSTANCES]Render_Order,
-	sorted:                                                        [RENDER_MAX_INSTANCES]Render_Instance,
-}
-
-@(private = "file")
-Render_Order :: struct {
-	key:   Render_Key,
-	index: int,
 }
 
 // src, dst and clip are [x, y, width, height], with a top-left origin.
 // src uses texture pixels; dst, clip, radii and softness use logical pixels.
 // Textures should have their top row at v=0. Colors use straight alpha.
-render :: proc(renderer: ^Renderer, list: Render_List) {
+// Instances draw in the order they sit in the list.
+render :: proc(renderer: ^Renderer, list: ^Render_List) {
 	if renderer.view_size.x <= 0 || renderer.view_size.y <= 0 {
 		return
-	}
-	for key, i in list.keys {
-		renderer.order[i] = {key, i}
-	}
-	slice.sort_by(renderer.order[:], proc(a, b: Render_Order) -> bool {
-		if a.key.layer != b.key.layer do return a.key.layer < b.key.layer
-		if a.key.sequence != b.key.sequence do return a.key.sequence < b.key.sequence
-		return a.index < b.index
-	})
-	for entry, i in renderer.order {
-		renderer.sorted[i] = list.instances[entry.index]
 	}
 
 	gl.Disable(gl.DEPTH_TEST)
@@ -96,14 +71,14 @@ render :: proc(renderer: ^Renderer, list: Render_List) {
 	gl.ActiveTexture(gl.TEXTURE0)
 	gl.BindVertexArray(renderer.vao)
 	gl.BindBuffer(gl.ARRAY_BUFFER, renderer.vbo)
-	gl.BufferData(gl.ARRAY_BUFFER, size_of(renderer.sorted), raw_data(renderer.sorted[:]), gl.STREAM_DRAW)
+	gl.BufferData(gl.ARRAY_BUFFER, size_of(list.instances), raw_data(list.instances[:]), gl.STREAM_DRAW)
 
 	for first := 0; first < RENDER_MAX_INSTANCES; {
 		// Untextured instances sample nothing, so they join a batch of any texture; the first textured one picks it.
 		batch_texture: Texture_Id
 		end := first
 		for end < RENDER_MAX_INSTANCES {
-			texture := renderer.order[end].key.texture
+			texture := list.keys[end].texture
 			if texture != 0 {
 				if batch_texture == 0 {
 					batch_texture = texture

@@ -160,7 +160,7 @@ main :: proc() {
 		}
 
 		renderer.view_size = {f32(logical_width), f32(logical_height)}
-		render(renderer, GLOBAL.render_list)
+		render(renderer, &GLOBAL.render_list)
 		sdl.GL_SwapWindow(window)
 	}
 }

@@ -81,7 +81,7 @@ TEXTS: struct {
 // Forgets every text of the last frame.
 text_begin :: proc() {
 	assert(!TEXTS.open)
-	TEXTS.text_count = 1
+	TEXTS.text_count = 0
 	TEXTS.run_count = 0
 	TEXTS.piece_count = 0
 	TEXTS.blob_len = 0
@@ -116,10 +116,11 @@ text_add_image :: proc(
 // Closes the open text and returns its id.
 text_end :: proc() -> Text_Id {
 	assert(TEXTS.open)
-	assert(TEXTS.text_count < TEXT_MAX)
 	TEXTS.open = false
-	id := Text_Id(TEXTS.text_count)
+	// Counted before use, so ids start at 1 and 0 stays the empty text, even before the first text_begin.
 	TEXTS.text_count += 1
+	assert(TEXTS.text_count < TEXT_MAX)
+	id := Text_Id(TEXTS.text_count)
 	TEXTS.texts[id] = {
 		runs = span_from_range(TEXTS.open_begin, TEXTS.run_count),
 	}
