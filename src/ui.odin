@@ -640,8 +640,6 @@ ui_layout :: proc(sprites: ^Sprites) {
 			child.pos_computed = parent.pos_computed + parent.padding
 			child.pos_computed[axis] += offset
 
-			cross := ui_axis_flip(axis)
-
 			offset += child.size_computed[axis] + parent.gap
 		}
 	}
@@ -978,7 +976,10 @@ ui_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Sign
 	checked_t := ui_anim("checked", checked, checked)
 
 	// Spacers above and below center the square in the row's height.
-	column, _ := ui_box_make({}, {width = ui_fit(), height = ui_grow(), padding = [2]f32{0, 0}, gap = 0})
+	column, _ := ui_box_make(
+		{},
+		{width = ui_fit(), height = ui_grow(), padding = [2]f32{0, 0}, gap = 0},
+	)
 	UI.boxes[column].child_axis = .Y
 	ui_parent_push(column)
 	ui_spacer(ui_grow())
@@ -997,7 +998,10 @@ ui_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Sign
 	if checked_t > 0.001 {
 		mark_color.a *= checked_t
 		ui_parent_push(square)
-		mark, _ := ui_box_make({}, {width = ui_grow(), height = ui_grow(), background = mark_color, radius = 2})
+		mark, _ := ui_box_make(
+			{},
+			{width = ui_grow(), height = ui_grow(), background = mark_color, radius = 2},
+		)
 		UI.boxes[mark].flags += {.Background}
 		ui_parent_pop()
 	}
@@ -1008,7 +1012,13 @@ ui_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Sign
 
 	text, _ := ui_box_make(
 		{},
-		{width = ui_text_dim(), height = ui_grow(), padding = [2]f32{0, 0}, font = font, text_color = ink},
+		{
+			width = ui_text_dim(),
+			height = ui_grow(),
+			padding = [2]f32{0, 0},
+			font = font,
+			text_color = ink,
+		},
 	)
 	UI.boxes[text].flags += {.Text}
 	UI.boxes[text].text = ui_intern_text(label)

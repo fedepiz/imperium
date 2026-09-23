@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:slice"
 import gl "vendor:OpenGL"
 
-RENDER_MAX_INSTANCES :: 8912
+RENDER_MAX_INSTANCES :: 8192
 RENDER_MAX_CLIPS :: 1024
 
 Texture_Id :: distinct u16
