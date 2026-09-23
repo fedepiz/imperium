@@ -7,63 +7,50 @@ DRAW_CLIP_DEPTH_MAX :: 32
 Draw_Ctx :: struct {
 	render:        ^Render_Data,
 	sprites:       ^Sprites,
-	// Remaining writable ranges; consuming slots advances begin and reduces len.
+	// Remaining writable range; consuming slots advances begin and reduces len.
 	instance_span: Span,
-	clip_span:     Span,
 	layer:         u16,
-	clip_stack:    [DRAW_CLIP_DEPTH_MAX]Clip_Id,
-	clip_depth:    int, // Zero means unclipped.
+	// Clip rects stamped on every instance; the bottom entry is the clip given to draw_begin.
+	clip_stack:    [DRAW_CLIP_DEPTH_MAX][4]f32,
+	clip_depth:    int,
 }
 
 // Initializes the writer and clears its assigned instance_span.
-// Reserves clip_span for clip records; clip_span.begin must be nonzero.
-// Resets the clip stack. Instance and clip ranges must not overlap other writers.
+// Everything drawn is clipped to clip. Instance ranges must not overlap other writers.
 draw_begin :: proc(
 	ctx: ^Draw_Ctx,
 	render: ^Render_Data,
 	sprites: ^Sprites,
-	instance_span, clip_span: Span,
+	instance_span: Span,
+	clip: [4]f32,
 ) {
 	assert(instance_span.begin >= 0 && instance_span.len >= 0)
 	assert(instance_span.begin + instance_span.len <= RENDER_MAX_INSTANCES)
-	assert(clip_span.begin > 0 && clip_span.len >= 0)
-	assert(clip_span.begin + clip_span.len <= RENDER_MAX_CLIPS)
 	ctx^ = {
 		render        = render,
 		sprites       = sprites,
 		instance_span = instance_span,
-		clip_span     = clip_span,
 	}
+	ctx.clip_stack[0] = clip
 	mem.zero_slice(render.keys[instance_span.begin:instance_span.begin + instance_span.len])
 	mem.zero_slice(render.instances[instance_span.begin:instance_span.begin + instance_span.len])
-	mem.zero_slice(render.clips[clip_span.begin:clip_span.begin + clip_span.len])
 }
 
-// Intersects rect with the current clip and pushes a new clip-table record.
-// Excess pushes still advance depth; exhausted storage preserves the current clip.
+// Intersects rect with the current clip and makes it current until the matching pop.
+// Excess pushes still advance depth, and keep the deepest clip that fit.
 draw_clip_push :: proc(ctx: ^Draw_Ctx, rect: [4]f32) {
 	parent := draw_clip_current(ctx)
-	depth := ctx.clip_depth
 	ctx.clip_depth += 1
-	if depth < DRAW_CLIP_DEPTH_MAX {
-		ctx.clip_stack[depth] = parent
-		if ctx.clip_span.len > 0 {
-			lo := [2]f32{rect.x, rect.y}
-			hi := lo + [2]f32{max(rect.z, 0), max(rect.w, 0)}
-			if parent != 0 {
-				p := ctx.render.clips[parent]
-				lo = {max(lo.x, p.x), max(lo.y, p.y)}
-				hi = {min(hi.x, p.x + p.z), min(hi.y, p.y + p.w)}
-			}
-			id := Clip_Id(ctx.clip_span.begin)
-			ctx.render.clips[id] = {lo.x, lo.y, max(hi.x - lo.x, 0), max(hi.y - lo.y, 0)}
-			ctx.clip_stack[depth] = id
-			span_advance(&ctx.clip_span)
+	if ctx.clip_depth < DRAW_CLIP_DEPTH_MAX {
+		lo := [2]f32{max(rect.x, parent.x), max(rect.y, parent.y)}
+		hi := [2]f32 {
+			min(rect.x + rect.z, parent.x + parent.z),
+			min(rect.y + rect.w, parent.y + parent.w),
 		}
+		ctx.clip_stack[ctx.clip_depth] = {lo.x, lo.y, max(hi.x - lo.x, 0), max(hi.y - lo.y, 0)}
 	}
 }
 
-// Restores the parent clip without reclaiming records referenced by earlier draws.
 draw_clip_pop :: proc(ctx: ^Draw_Ctx) {
 	ctx.clip_depth = max(ctx.clip_depth - 1, 0)
 }
@@ -126,10 +113,8 @@ draw_text_wrapped :: proc(
 }
 
 @(private = "file")
-draw_clip_current :: proc(ctx: ^Draw_Ctx) -> Clip_Id {
-	return(
-		ctx.clip_stack[min(ctx.clip_depth, DRAW_CLIP_DEPTH_MAX) - 1] if ctx.clip_depth > 0 else 0 \
-	)
+draw_clip_current :: proc(ctx: ^Draw_Ctx) -> [4]f32 {
+	return ctx.clip_stack[min(ctx.clip_depth, DRAW_CLIP_DEPTH_MAX - 1)]
 }
 
 // A full destination span absorbs additional writes; the renderer still traverses its whole table.
@@ -140,9 +125,9 @@ draw_instance :: proc(ctx: ^Draw_Ctx, texture: Texture_Id, instance: Render_Inst
 		ctx.render.keys[index] = {
 			layer   = ctx.layer,
 			texture = texture,
-			clip    = draw_clip_current(ctx),
 		}
 		ctx.render.instances[index] = instance
+		ctx.render.instances[index].clip = draw_clip_current(ctx)
 		span_advance(&ctx.instance_span)
 	}
 }

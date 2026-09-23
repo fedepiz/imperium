@@ -142,14 +142,12 @@ main :: proc() {
 
 		{
 			draw: Draw_Ctx
-			clip_span := span_from_array(&GLOBAL.render_data.clips)
-			span_advance(&clip_span) // Clip zero means unclipped.
 			draw_begin(
 				&draw,
 				&GLOBAL.render_data,
 				&GLOBAL.sprites,
 				span_from_array(&GLOBAL.render_data.instances),
-				clip_span,
+				{0, 0, f32(logical_width), f32(logical_height)},
 			)
 
 			ui_begin({f32(logical_width), f32(logical_height)})

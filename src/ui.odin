@@ -93,6 +93,8 @@ Ui_Box_Flag :: enum {
 	Focusable,
 	// Gets no hover, press or focus, still blocks the mouse, and is drawn faded; inherited by children
 	Disabled,
+	// Clips the content
+	Clip,
 }
 
 // A partial set of box fields. Nil fields leave whatever was set before them alone.
@@ -1024,3 +1026,4 @@ ui_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Sign
 	UI.boxes[text].text = ui_intern_text(label)
 	return signal
 }
+

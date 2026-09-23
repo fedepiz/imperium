@@ -5,10 +5,8 @@ import "core:slice"
 import gl "vendor:OpenGL"
 
 RENDER_MAX_INSTANCES :: 8192
-RENDER_MAX_CLIPS :: 1024
 
 Texture_Id :: distinct u16
-Clip_Id :: distinct u16
 
 // Tightly packed, top-to-bottom RGBA8 pixels. Storage is owned by the caller.
 Bitmap :: struct {
@@ -26,7 +24,6 @@ Render_Key :: struct {
 	// Ids into 'batch' parameters.
 	// Batch on breaks in this.
 	texture:  Texture_Id,
-	clip:     Clip_Id,
 }
 
 Corner :: enum {
@@ -39,6 +36,8 @@ Corner :: enum {
 Render_Instance :: struct {
 	src:       [4]f32,
 	dst:       [4]f32,
+	// Only the part of dst inside clip is drawn.
+	clip:      [4]f32,
 	color:     [Corner][4]f32,
 	radii:     [Corner]f32,
 	softness:  f32,
@@ -48,12 +47,11 @@ Render_Instance :: struct {
 Render_Data :: struct {
 	keys:      [RENDER_MAX_INSTANCES]Render_Key,
 	instances: [RENDER_MAX_INSTANCES]Render_Instance,
-	clips:     [RENDER_MAX_CLIPS][4]f32,
 }
 
 Render_Ctx :: struct {
 	program, vao, vbo, white_texture:                              u32,
-	view_uniform, clip_uniform, clipped_uniform, textured_uniform: i32,
+	view_uniform, textured_uniform: i32,
 	// Logical window dimensions, matching SDL mouse coordinates.
 	view_size:                                                     [2]f32,
 	// Borrowed OpenGL texture handles. Slot zero always means untextured.
@@ -68,8 +66,8 @@ Render_Order :: struct {
 	index: int,
 }
 
-// src, dst and clips are [x, y, width, height], with a top-left origin.
-// src uses texture pixels; dst, clips, radii and softness use logical pixels.
+// src, dst and clip are [x, y, width, height], with a top-left origin.
+// src uses texture pixels; dst, clip, radii and softness use logical pixels.
 // Textures should have their top row at v=0. Colors use straight alpha.
 render :: proc(ctx: ^Render_Ctx, data: Render_Data) {
 	if ctx.view_size.x <= 0 || ctx.view_size.y <= 0 {
@@ -104,19 +102,14 @@ render :: proc(ctx: ^Render_Ctx, data: Render_Data) {
 		key := ctx.order[first].key
 		end := first + 1
 		for end < RENDER_MAX_INSTANCES &&
-		    ctx.order[end].key.texture == key.texture &&
-		    ctx.order[end].key.clip == key.clip {
+		    ctx.order[end].key.texture == key.texture {
 			end += 1
 		}
-		assert(int(key.clip) < RENDER_MAX_CLIPS, "Clip ID out of range")
 		texture := ctx.textures[key.texture]
 		assert(key.texture == 0 || texture != 0, "Texture ID has no registered OpenGL texture")
 		if key.texture == 0 do texture = ctx.white_texture
 		gl.BindTexture(gl.TEXTURE_2D, texture)
 		gl.Uniform1i(ctx.textured_uniform, i32(key.texture != 0))
-		gl.Uniform1i(ctx.clipped_uniform, i32(key.clip != 0))
-		clip := data.clips[key.clip]
-		gl.Uniform4f(ctx.clip_uniform, clip.x, clip.y, clip.z, clip.w)
 		render_bind_instances(first)
 		gl.DrawArraysInstanced(gl.TRIANGLES, 0, 6, i32(end - first))
 		first = end
@@ -129,9 +122,10 @@ render :: proc(ctx: ^Render_Ctx, data: Render_Data) {
 
 @(private = "file")
 render_bind_instances :: proc(first: int) {
-	offsets := [9]uintptr {
+	offsets := [10]uintptr {
 		offset_of(Render_Instance, src),
 		offset_of(Render_Instance, dst),
+		offset_of(Render_Instance, clip),
 		offset_of(Render_Instance, color),
 		offset_of(Render_Instance, color) + 16,
 		offset_of(Render_Instance, color) + 32,
@@ -142,7 +136,7 @@ render_bind_instances :: proc(first: int) {
 	}
 	for offset, i in offsets {
 		components: i32 = 4
-		if i >= 7 do components = 1
+		if i >= 8 do components = 1
 		gl.VertexAttribPointer(
 			u32(i),
 			components,
@@ -241,8 +235,6 @@ render_init :: proc(ctx: ^Render_Ctx) -> bool {
 		return false
 	}
 	ctx.view_uniform = gl.GetUniformLocation(ctx.program, "view_size")
-	ctx.clip_uniform = gl.GetUniformLocation(ctx.program, "clip_rect")
-	ctx.clipped_uniform = gl.GetUniformLocation(ctx.program, "clipped")
 	ctx.textured_uniform = gl.GetUniformLocation(ctx.program, "textured")
 	gl.UseProgram(ctx.program)
 	gl.Uniform1i(gl.GetUniformLocation(ctx.program, "image"), 0)
@@ -264,13 +256,14 @@ render_init :: proc(ctx: ^Render_Ctx) -> bool {
 RENDER_VERTEX_SOURCE: cstring = `#version 330 core
 layout(location=0) in vec4 src;
 layout(location=1) in vec4 dst;
-layout(location=2) in vec4 color_tl;
-layout(location=3) in vec4 color_tr;
-layout(location=4) in vec4 color_br;
-layout(location=5) in vec4 color_bl;
-layout(location=6) in vec4 radii;
-layout(location=7) in float softness;
-layout(location=8) in float inst_thickness;
+layout(location=2) in vec4 clip;
+layout(location=3) in vec4 color_tl;
+layout(location=4) in vec4 color_tr;
+layout(location=5) in vec4 color_br;
+layout(location=6) in vec4 color_bl;
+layout(location=7) in vec4 radii;
+layout(location=8) in float softness;
+layout(location=9) in float inst_thickness;
 uniform vec2 view_size;
 out vec2 position;
 out vec2 local_position;
@@ -284,8 +277,11 @@ const vec2 corners[6] = vec2[6](
     vec2(0,0), vec2(1,0), vec2(1,1),
     vec2(0,0), vec2(1,1), vec2(0,1));
 void main() {
-    local_position = corners[gl_VertexID] * dst.zw;
-    position = dst.xy + local_position;
+    // The quad shrinks to its part inside the clip; nothing inside moves, as local_position stays relative to dst.
+    vec2 lo = max(dst.xy, clip.xy);
+    vec2 hi = max(min(dst.xy + dst.zw, clip.xy + clip.zw), lo);
+    position = mix(lo, hi, corners[gl_VertexID]);
+    local_position = position - dst.xy;
     gl_Position = vec4(position / view_size * vec2(2,-2) + vec2(-1,1), 0, 1);
     rect_src = src;
     rect_size = dst.zw;
@@ -301,9 +297,6 @@ void main() {
 RENDER_FRAGMENT_SOURCE: cstring = `#version 330 core
 uniform sampler2D image;
 uniform bool textured;
-uniform bool clipped;
-uniform vec4 clip_rect;
-in vec2 position;
 in vec2 local_position;
 flat in vec4 rect_src;
 flat in vec2 rect_size;
@@ -316,8 +309,6 @@ float rect_sdf(vec2 p, vec2 half_size, float radius) {
     return length(max(abs(p) - half_size + radius, 0.0)) - radius;
 }
 void main() {
-    if (clipped && (any(lessThan(position, clip_rect.xy)) ||
-                    any(greaterThanEqual(position, clip_rect.xy + clip_rect.zw)))) discard;
     vec2 t = local_position / rect_size;
     vec4 color = mix(mix(colors[0], colors[1], t.x),
                      mix(colors[3], colors[2], t.x), t.y);
