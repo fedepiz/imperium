@@ -4,27 +4,6 @@ import "core:mem"
 
 DRAW_CLIP_DEPTH_MAX :: 32
 
-// A half-open index range [begin, begin + len).
-Span :: struct {
-	begin: int,
-	len:   int,
-}
-
-span_from_range :: proc(begin, end: int) -> Span {
-	return {begin, end - begin}
-}
-
-span_from_array :: proc(array: ^[$N]$T) -> Span {
-	return {0, len(array^)}
-}
-
-span_advance :: proc(span: ^Span) {
-	if span.len > 0 {
-		span.begin += 1
-		span.len -= 1
-	}
-}
-
 Draw_Ctx :: struct {
 	render:        ^Render_Data,
 	sprites:       ^Sprites,
@@ -108,22 +87,6 @@ draw_rectangle :: proc(
 		instance.radii[corner] = radius
 	}
 	draw_instance(ctx, 0, instance)
-}
-
-// Border lies inside rect. Nonpositive widths produce a neutral instance.
-draw_rectangle_lines :: proc(
-	ctx: ^Draw_Ctx,
-	rect: [4]f32,
-	color: [4]f32,
-	thickness: f32,
-	radius: f32 = 0,
-	softness: f32 = 0,
-) {
-	if thickness > 0 {
-		draw_rectangle(ctx, rect, color, radius, thickness, softness)
-	} else {
-		draw_instance(ctx, 0, {})
-	}
 }
 
 draw_image :: proc(

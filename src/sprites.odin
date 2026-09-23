@@ -159,7 +159,11 @@ sprites_load :: proc(sprites: ^Sprites, render_ctx: ^Render_Ctx) {
 			continue
 		}
 		if len(file_data) == 0 || len(file_data) > int(max(c.int)) {
-			fmt.eprintf("WARNING: Could not load image file %q: unsupported file size (%d bytes)\n", filename, len(file_data))
+			fmt.eprintf(
+				"WARNING: Could not load image file %q: unsupported file size (%d bytes)\n",
+				filename,
+				len(file_data),
+			)
 			continue
 		}
 
@@ -173,7 +177,11 @@ sprites_load :: proc(sprites: ^Sprites, render_ctx: ^Render_Ctx) {
 			4,
 		)
 		if pixels == nil {
-			fmt.eprintf("WARNING: Could not decode image file %q: %s\n", filename, stbi.failure_reason())
+			fmt.eprintf(
+				"WARNING: Could not decode image file %q: %s\n",
+				filename,
+				stbi.failure_reason(),
+			)
 			continue
 		}
 		workspace.images[image_index] = {
