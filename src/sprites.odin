@@ -68,32 +68,6 @@ Font_Info :: struct {
 	line_gap: f32,
 }
 
-// Unwrapped logical size at the font's canonical size, including trailing spaces.
-// LF starts a new line; CR is ignored for CRLF input. Unmapped runes add no advance.
-// Empty text has zero size; a trailing LF adds an empty line.
-text_measure :: proc(sprites: ^Sprites, font: Font_Id, text: string) -> (size: [2]f32) {
-	assert(int(font) < FONTS_MAX)
-	if len(text) == 0 {return}
-	info := sprites.fonts[font].info
-	size.y = info.ascent - info.descent
-	line_width: f32
-	for ch in text {
-		switch ch {
-		case '\r':
-		case '\n':
-			size.x = max(size.x, line_width)
-			line_width = 0
-			size.y += info.ascent - info.descent + info.line_gap
-		case:
-			if sprite, found := sprite_of_glyph(sprites, font, ch); found {
-				line_width += sprites.glyphs[sprite].advance
-			}
-		}
-	}
-	size.x = max(size.x, line_width)
-	return
-}
-
 @(private = "file")
 Sprite_Loaded_Font :: struct {
 	info:  stbtt.fontinfo,

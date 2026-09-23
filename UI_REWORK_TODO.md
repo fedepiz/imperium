@@ -2,7 +2,8 @@
 
 Read this first when picking the UI work back up on another machine. It records how we
 work, what exists in `src/ui.odin`, why it is shaped that way, and what comes next.
-Everything here was true as of commit `232c876` (clipping, scrolling, scrollbar, drag).
+Everything here was true as of the commit after `12daac1` (tree-walked box order, floating
+boxes, tooltip, combo, the standalone text stack with wrapping).
 
 ---
 
@@ -66,6 +67,12 @@ What that means concretely:
   (`ui_text_dim()`), like RAD's `ui_text_dim`.
 - **Grow weights stand in for percentages**: proportional splits (the scrollbar thumb) are
   Grow children with weights; percent sizing is still deliberately absent.
+- **Features split into independent pieces** (user's preference): floating = "out of the
+  flow" flag + a `position`; overlays = those pieces plus being a child of the right root
+  child. Prefer such compositions over dedicated mechanisms (e.g. no layer field, no
+  separate roots).
+- **Concepts that aren't UI live outside the UI**: text layout is its own layer
+  (`text.odin`), usable by the whole game; the UI only asks it for sizes and to draw.
 
 `src/ui2.odin` (+ `src/ui_demo.odin`) is the older AI-written version, kept for reference
 only (commented out / not built). The user liked its demo buttons (Midnight theme); the
@@ -83,11 +90,42 @@ demo in `main.odin` now approximates that look.
   Pushes are free and never break batches, so push/pop per box is fine.
 - `Render_Key.sequence` is never set (order falls back to index) — undecided whether it
   stays.
+- `draw_sprite(ctx, sprite, rect, tint, ...)` is public: glyphs and images are both sprites.
+  **Draw knows nothing about text** (`draw_text*` were removed).
+
+**Text** (`text.odin`, standalone; layers: render → draw → sprites → text → ui):
+- `Text_Ctx` (explicit context, in `GLOBAL.text`): per-frame tables of texts, runs, laid-out
+  pieces, plus a blob run strings are copied into. `text_init(ctx, sprites)` once,
+  `text_begin(ctx)` each frame (before `ui_begin`).
+- Builder: `text_start` → `text_add(str, font, color)` / `text_add_image(image, font, color)`
+  → `id := text_end` (runs contiguous by construction; nesting asserts);
+  `text_from_string` helper. `Text_Id` 0 = empty text.
+- `text_measure(ctx, id, width)` / `text_draw(ctx, draw, id, pos, width, tint)`; width 0 =
+  no wrapping. Each text caches its layout for the last width asked (measure then draw at
+  the same width lays out once).
+- Layout: words break at spaces/tabs, over-long words split between runes, words may span
+  runs, an image is its own word one line of its font tall (aspect from its region), each
+  line sits on one baseline under its tallest run; with wrapping, spaces at line edges are
+  dropped; `TEXT_WRAP_SLACK` stops text laid out at its own width from wrapping. A full
+  piece table drops pieces but keeps the size right.
+- Internals (`Text_Run`, `Text_Piece`, `Text`, table sizes) are file-private; only the API
+  and `Text_Ctx`/`Text_Id` are public.
+- Glyphs are rasterized at the font's fixed size: world-space text under a zooming camera
+  would blur — keep map labels in screen space or pick among a few font sizes.
 
 **Storage** (all fixed tables in the `UI` global, no heap):
 - `boxes[UI_BOX_MAX]` (id 0 = nil, all zeros — lookups that miss read it harmlessly), free
-  stack, `box_order` (pre-order build order), `blob` (interned text, reset each frame),
-  parent stack, style stack + `style_next`, `sprites: ^Sprites`.
+  stack, parent stack, style stack + `style_next`, `sprites: ^Sprites`, `text: ^Text_Ctx`.
+- **`box_order` is computed, not appended**: `ui_compute_box_order` (start of `ui_end`)
+  walks the tree from `UI.root` parents-first, stackless (down to `child_first`, else up
+  to the nearest ancestor with a `sibling_next`, stopping at the root). Draw, hit test and
+  layout all use this one order; it equals build order unless boxes are parented
+  elsewhere (overlays).
+- **Root and its two children** (made in `ui_begin`): `UI.root` (viewport) → `UI.content`
+  (Grow, pushed as the parent the app builds under) then `UI.overlay` (floating, at 0,0,
+  viewport-sized). Content is attached first, so everything under the overlay comes last
+  in `box_order`: drawn on top, hit-tested first, clipped only by the viewport — whatever
+  the build order. `ui_end` pops two parents.
 - **No separate memo table**: `Ui_Box` is flat, in RAD-style sections — per-build fields,
   layout results, persistent fields (`hot_t`, `active_t`, `focus_t`, `disabled_t`,
   `scroll`, `scroll_target`). In `ui_begin`, a kept keyed box has only `key`, `flags`, the
@@ -118,12 +156,19 @@ array literals can't be positional; `[2]T` can still be indexed by `Axis`).
   ignored, as in RAD). No min/max (removed in favor of strictness).
 - **A parent with `.Scroll_X/.Scroll_Y` on an axis skips shrink and cross clamp on that
   axis** (RAD's AllowOverflow folded into the scroll flag, as is ViewClamp).
-- Passes: independent sizes → X (bottom-up fit, top-down grow/shrink) → [TODO wrap slot] →
-  Y → placement in `box_order` (absolute positions, padding + gap, start-aligned, minus the
+- Passes: independent sizes → X (bottom-up fit, top-down grow/shrink) → text heights at
+  final width → Y → placement in `box_order` (absolute positions, padding + gap, start-aligned, minus the
   parent's `scroll` floored to whole pixels). Placement also computes `content_size`
   (children + gaps + padding) and `clip`.
 - **Every box clips**: `clip = parent.clip ∩ own rect`, root clip = its own rect. There is
-  no `.Clip` flag. Floating boxes (future) are the one planned exception.
+  no `.Clip` flag and no exception (overlay boxes are clipped by the overlay = viewport).
+- **`.Floating`** (out of the flow): skipped by the parent's fit, grow/shrink and cross
+  clamp, and by the placement cursor / `content_size`; placed at
+  `parent.pos + position − scroll`. `position` is a style field (base style sets `{0,0}`).
+- **Text sizes**: `.Text` kinds measure the text on one line (`text_measure(..., 0)`); the
+  former TODO slot after the X pass re-measures `.Text` heights at the box's final inner
+  width (`ui_text_width` = width − 2·padding.x). Every text box wraps at its inner width;
+  text-sized labels never wrap; fixed-height boxes show the first lines, clipped.
 - A Fit container blocks Grow children from getting space — by design (user considered and
   rejected "transparent Fit").
 - Percent-of-parent was deliberately **not** added (ui2's version had messy Fit
@@ -131,7 +176,7 @@ array literals can't be positional; `[2]T` can still be indexed by `Axis`).
 
 **Style**: `Ui_Style` is a struct of `Maybe` fields (width, height, padding, gap,
 background, hot_background, active_background, border, focus_border, thickness, radius,
-font, text_color, disabled). Boxes hold plain inlined fields. `ui_style_push/pop`,
+font, text_color, disabled, position). Boxes hold plain inlined fields. `ui_style_push/pop`,
 `ui_style_next` (accumulates), every widget takes `style := Ui_Style{}` which is routed
 through `next`. Typed literals needed inside Maybe (`[2]f32{8, 8}`, not `{8, 8}`). Styles
 containing a `Ui_Size` can't be compile-time constants → package globals. We rejected an
@@ -140,7 +185,8 @@ enum-indexed `[Var]Maybe(f32)` style (worse for readers) and a ui2-style tag/the
 
 **Drawing** (`ui_draw`, in `box_order` = painter's order): per box `draw_clip_push(box.clip)`
 / pop, then background (faded toward hot/active by `hot_t`/`active_t` for `.Hot_Effects`
-boxes), border, text (left at `padding.x`, vertically centered), focus ring (2px,
+boxes), border, text (`box.text != 0` — there is no `.Text` flag; `text_draw` at the
+inner width, left at `padding.x`, vertically centered, tint alpha for disabled), focus ring (2px,
 `focus_border` × `focus_t`). Everything × `alpha = 1 − 0.5 × disabled_t`.
 `draw_rectangle` thickness 0 = fill. The shader clamps radius to half the short side, so a
 large style radius on a thin box gives a pill (the scrollbar gets it for free).
@@ -153,7 +199,12 @@ frame of latency, accepted for simplicity):
   `active_box` (press → release; while held nothing else is hot), `pressed` (one frame),
   `focus_box` (any press moves focus to the pressed `.Focusable` box or clears it).
   Active/focus are dropped if their box vanished or became disabled.
-- **Wheel routing**: topmost box whose clip contains the mouse, then per axis walk up
+- `UI.pressed_any` (a left press this frame, anywhere; the combo uses it) and
+  `UI.hovered_any` (mouse over any clickable box, disabled included) —
+  `ui_hovered_any()` is public so the game can ignore mouse input over the UI (as of the
+  last `ui_end`; it does not count a held box whose mouse left it).
+- **Wheel routing**: topmost *clickable or scrolling* box whose clip contains the mouse
+  (others, like the overlay, let it through), then per axis walk up
   parents to the first box scrolling on that axis and add `ui_scroll_from_wheel` (sign
   flip × `UI_SCROLL_STEP` × em of that box's font) to its `scroll_target`.
 - `Ui_Signal { hovered, pressed, held, focused, drag, wheel }`. `drag` = mouse − press
@@ -176,34 +227,48 @@ via `ui_anim("checked", ...)` keyed under the row).
   the scroll axis) → pane (keyed `"scroll pane"`, scrolls, Grow, takes the panel's gap,
   holds the caller's children) + scrollbar built by `ui_scroll_panel_end` after the
   children. Content is clipped inside the panel's padding.
+- `ui_tooltip(style)` (container): pushes the overlay, keyed floating column (background,
+  border) at `UI.mouse + UI_TOOLTIP_OFFSET`, flipped per axis using its last-frame size to
+  stay in the viewport. Use inside `if signal.hovered { if ui_tooltip(...) {...} }`; size
+  comes from the caller's style.
+- `ui_combo(label, ^selection, ^open, choices, style)`: button keyed by `label` showing
+  the choice; press toggles the caller-owned `open`; while open, a keyed floating list in
+  the overlay under the button (button's last-frame layout, same width) of `ui_button`s
+  with the button's padding; picking selects; any press other than on the button closes
+  (list built before the check). Choices are keys, so they must differ. **No dropdown
+  marker yet** — plan: a chevron image box (step 4). ui2's combo had no marker either.
+- Box text: `ui_box_text(box, label)` makes a `Text_Id` in the box's font/color, hiding
+  `##…`. The old UI blob / `ui_intern_text` are gone.
 - `ui_scrollbar(pane_label, axis, style)`: finds the pane by key, reads its last-frame
   `size_computed/content_size/scroll`, builds track (`UI_SCROLLBAR_SIZE`, background) with
   Grow-weighted spacer / thumb (track's `border` color, `.Hot_Effects`) / spacer. Thumb
   drag sets the pane's target and snaps `scroll`; wheel over track or thumb scrolls the
   pane. The bar is always shown (hiding it would make the layout jump).
 
-**main.odin**: `ui_init(&GLOBAL.sprites)`, per frame `draw_begin(..., viewport)` →
-`ui_begin(view)` → `demo_build(&demo)` → `ui_end(GLOBAL.input, &draw, dt)`. `Input.wheel`
+**main.odin**: `text_init(&GLOBAL.text, &GLOBAL.sprites)`, `ui_init(&GLOBAL.sprites,
+&GLOBAL.text)`, per frame `draw_begin(..., viewport)` → `text_begin` → `ui_begin(view)` → `demo_build(&demo)` → `ui_end(GLOBAL.input, &draw, dt)`. `Input.wheel`
 accumulates `MOUSE_WHEEL` events per frame (notches, SDL sign: +y away from the user; no
 un-flipping of natural scrolling). The demo pushes `MIDNIGHT` and uses
 `demo_label/demo_button/demo_checkbox` helpers; its third panel is a 180px scroll panel of
-20 buttons.
+20 buttons; "Press me" has a tooltip with a wrapped 14em paragraph; the Styles panel has a
+Difficulty combo. **Descriptive demo labels are lorem ipsum on purpose** (the user shows
+the demo to others and didn't want AI-sounding copy) — keep new demo text neutral.
 
 ## 4. Next steps (agreed order)
 
-1. ~~**Clipping + scrolling.**~~ **Done** (`161f0cb`, `232c876`): per-instance clip, every
+1. ~~**Clipping + scrolling.**~~ **Done** (`161f0cb`, `12daac1`): per-instance clip, every
    box clips, scroll flags + eased/clamped offsets, wheel input and routing, scroll panel,
    scrollbar with drag and wheel.
-2. **Floating boxes** (menus, popups, tooltips — likely the most important remaining piece
-   for a strategy game): excluded from parent fit/grow/cursor, absolute or anchored
-   position (anchoring can read another box's last-frame layout by key), clip starts from
-   their layer's root instead of `parent.clip`, higher draw layer (`Draw_Ctx.layer`),
-   hit-tested first and blocking underneath, close-on-outside-press, clamp to viewport.
-   Root boxes currently always start at (0,0).
-3. **Wrapped text** in the `TODO: Width-dependent measurements` slot: re-measure height of
-   wrap boxes from their final width; needs a measure-only variant of `draw_text_wrapped`.
-4. **Images**: an image box first (portraits/icons; `draw_image` exists), then rich text
-   with inline icon runs (ui2 had `runs`).
+2. ~~**Floating boxes.**~~ **Done**: `.Floating` + `position`, overlay child of the root,
+   tree-walked `box_order`, `ui_tooltip`, `ui_combo`, `ui_hovered_any`. Deliberately not
+   built (user found it too advanced for now): general popups/menus with open state,
+   anchoring helpers, a shared viewport clamp, multiple overlay layers.
+3. ~~**Wrapped text.**~~ **Done**, as a standalone text stack (see §3 Text) rather than
+   UI code.
+4. **Images**: an image box (portraits/icons, and the combo's chevron). Inline icons in
+   text already exist in the text layout (`text_add_image`) but are **untested**, and the
+   UI can't take a prebuilt `Text_Id` yet (`ui_label` takes a string) — a small API for
+   rich labels is the natural first test.
 5. Then: ~~drag delta in the signal~~ (done; sliders, splitters and movable windows can
    build on it), right-click / double-click, keyboard focus nav (Tab moves `focus_box`,
    Enter/Space activates), ellipsis truncation, eventually a text input field (biggest
@@ -216,6 +281,11 @@ track to page.
 
 ## 5. Known leftovers / gotchas
 
+- Tooltip keyed `"tooltip"` under the nearest keyed ancestor: two open at once under the
+  same one collide. On its first frame it has no last-frame size, so the edge flip can be
+  wrong for one frame.
+- Text: multi-run texts and inline images are untested; a trailing newline's empty line
+  takes the newline's font height (untested).
 - Scrolling: no hand-off between nested scroll panes (a pane at its end still eats the
   wheel); the thumb has no minimum size; the wheel over a scroll panel's padding does
   nothing; the wheel over the bar reaches the pane one frame late.

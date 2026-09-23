@@ -10,6 +10,7 @@ GLOBAL: struct {
 	render_data: Render_Data,
 	render_ctx:  Render_Ctx,
 	sprites:     Sprites,
+	text:        Text_Ctx,
 }
 
 Font_Name :: enum {
@@ -68,7 +69,8 @@ main :: proc() {
 	sprites_font_define(&GLOBAL.sprites, Font_Id(Font_Name.Heading), "MeathFLF", 32)
 	sprites_image_define(&GLOBAL.sprites, Image_Id(Image_Name.Logo), "logo")
 	sprites_load(&GLOBAL.sprites, render_ctx)
-	ui_init(&GLOBAL.sprites)
+	text_init(&GLOBAL.text, &GLOBAL.sprites)
+	ui_init(&GLOBAL.sprites, &GLOBAL.text)
 
 	if !sdl.GL_SetSwapInterval(1) {
 		fmt.eprintf("Enabling VSync failed: %s\n", sdl.GetError())
@@ -155,6 +157,7 @@ main :: proc() {
 				{0, 0, f32(logical_width), f32(logical_height)},
 			)
 
+			text_begin(&GLOBAL.text)
 			ui_begin({f32(logical_width), f32(logical_height)})
 			demo_build(&demo)
 			ui_end(GLOBAL.input, &draw, dt)
@@ -203,9 +206,13 @@ button_is_pressed :: proc(input: Input, button: u8) -> bool {
 
 // A small showcase in the colors of ui2's "Midnight" theme.
 Demo :: struct {
-	presses: int,
-	locked:  bool,
+	presses:         int,
+	locked:          bool,
+	difficulty:      int,
+	difficulty_open: bool,
 }
+
+DEMO_DIFFICULTIES := []string{"Easy", "Normal", "Hard"}
 
 MIDNIGHT_BACKGROUND :: [4]f32{0.07, 0.09, 0.13, 1}
 MIDNIGHT_PANEL :: [4]f32{0.105, 0.125, 0.165, 1}
@@ -269,7 +276,7 @@ demo_build :: proc(demo: ^Demo) {
 	if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{24, 20}, gap = 16}) {
 		if ui_column({width = ui_fit(), height = ui_fit(), gap = 2}) {
 			demo_label("Imperium", MIDNIGHT_HEADING)
-			demo_label("Immediate boxes. Fixed tables. No heap.", MIDNIGHT_MUTED_TEXT)
+			demo_label("Lorem ipsum dolor sit amet.", MIDNIGHT_MUTED_TEXT)
 		}
 
 		if ui_row({width = ui_fit(), height = ui_fit(), gap = 16}) {
@@ -277,8 +284,18 @@ demo_build :: proc(demo: ^Demo) {
 				demo_label("Controls", MIDNIGHT_HEADING)
 				demo_label(fmt.tprintf("Button presses: %d", demo.presses))
 				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
-					if demo_button("Press me", MIDNIGHT_PRIMARY_BUTTON).pressed {
+					press := demo_button("Press me", MIDNIGHT_PRIMARY_BUTTON)
+					if press.pressed {
 						demo.presses += 1
+					}
+					if press.hovered {
+						if ui_tooltip(MIDNIGHT_PANEL_STYLE) {
+							demo_label("Lorem ipsum dolor sit amet.")
+							demo_label(
+								"Consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+								{width = ui_em(14), height = ui_text_dim(), text_color = MIDNIGHT_MUTED},
+							)
+						}
 					}
 					if demo_button("Reset", MIDNIGHT_DANGER_BUTTON).pressed {
 						demo.presses = 0
@@ -288,12 +305,12 @@ demo_build :: proc(demo: ^Demo) {
 					demo_checkbox("Locked", &demo.locked)
 					demo_button("Guarded", {disabled = demo.locked})
 				}
-				demo_label("Locked disables the button next to it.", MIDNIGHT_MUTED_TEXT)
+				demo_label("Sed do eiusmod tempor incididunt.", MIDNIGHT_MUTED_TEXT)
 			}
 
 			if ui_panel("styles", MIDNIGHT_PANEL_STYLE) {
 				demo_label("Styles", MIDNIGHT_HEADING)
-				demo_label("Plain values: push them, or pass them.")
+				demo_label("Ut enim ad minim veniam.")
 				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
 					demo_button("Ordinary")
 					demo_button("Primary", MIDNIGHT_PRIMARY_BUTTON)
@@ -302,7 +319,17 @@ demo_build :: proc(demo: ^Demo) {
 					demo_button("Danger", MIDNIGHT_DANGER_BUTTON)
 					demo_button("Unavailable", {disabled = true})
 				}
-				demo_label("Click a button to give it focus.", MIDNIGHT_MUTED_TEXT)
+				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
+					demo_label("Difficulty")
+					ui_combo(
+						"difficulty",
+						&demo.difficulty,
+						&demo.difficulty_open,
+						DEMO_DIFFICULTIES,
+						{width = ui_px(120), padding = [2]f32{10, 0}},
+					)
+				}
+				demo_label("Quis nostrud exercitation.", MIDNIGHT_MUTED_TEXT)
 			}
 
 			ui_style_next(MIDNIGHT_PANEL_STYLE)

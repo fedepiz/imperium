@@ -88,30 +88,6 @@ draw_image :: proc(
 	draw_sprite(ctx, sprite_of_image(image), rect, tint, radii, thickness, softness)
 }
 
-// Position is the logical top-left of the text block; returns its logical size.
-draw_text :: proc(
-	ctx: ^Draw_Ctx,
-	font: Font_Id,
-	text: string,
-	position: [2]f32,
-	color: [4]f32,
-) -> [2]f32 {
-	return draw_text_internal(ctx, font, text, position, color, 0)
-}
-
-// Word wrapping at spaces/tabs, splitting oversized words between runes.
-// Line-edge separators are omitted. Nonpositive width means no automatic wrapping.
-draw_text_wrapped :: proc(
-	ctx: ^Draw_Ctx,
-	font: Font_Id,
-	text: string,
-	position: [2]f32,
-	width: f32,
-	color: [4]f32,
-) -> [2]f32 {
-	return draw_text_internal(ctx, font, text, position, color, width)
-}
-
 @(private = "file")
 draw_clip_current :: proc(ctx: ^Draw_Ctx) -> [4]f32 {
 	return ctx.clip_stack[min(ctx.clip_depth, DRAW_CLIP_DEPTH_MAX - 1)]
@@ -132,7 +108,7 @@ draw_instance :: proc(ctx: ^Draw_Ctx, texture: Texture_Id, instance: Render_Inst
 	}
 }
 
-@(private = "file")
+// Draws a sprite from the atlas into rect, tinted; glyphs and images are both sprites.
 draw_sprite :: proc(
 	ctx: ^Draw_Ctx,
 	sprite: Sprite_Id,
@@ -155,83 +131,4 @@ draw_sprite :: proc(
 		for corner in Corner {instance.color[corner] = tint}
 	}
 	draw_instance(ctx, region.texture, instance)
-}
-
-@(private = "file")
-draw_text_internal :: proc(
-	ctx: ^Draw_Ctx,
-	font: Font_Id,
-	text: string,
-	position: [2]f32,
-	color: [4]f32,
-	width: f32,
-) -> (
-	size: [2]f32,
-) {
-	assert(int(font) < FONTS_MAX)
-	if len(text) == 0 {return}
-	info := ctx.sprites.fonts[font].info
-	size.y = info.ascent - info.descent
-	line_height := size.y + info.line_gap
-	baseline := position.y + info.ascent
-	line_width, separator_width: f32
-	word_start := true
-	for ch, offset in text {
-		switch ch {
-		case '\r':
-		case '\n':
-			size.x = max(size.x, line_width)
-			size.y += line_height
-			baseline += line_height
-			line_width, separator_width = 0, 0
-			word_start = true
-		case:
-			sprite, found := sprite_of_glyph(ctx.sprites, font, ch)
-			glyph: Sprite_Glyph
-			if found {glyph = ctx.sprites.glyphs[sprite]}
-			if width > 0 {
-				if ch == ' ' || ch == '\t' {
-					separator_width += glyph.advance
-					word_start = true
-					continue
-				}
-				advance := glyph.advance
-				if word_start {
-					advance = 0
-					for next in text[offset:] {
-						if next == ' ' || next == '\t' || next == '\n' {break}
-						if next == '\r' {continue}
-						if id, ok := sprite_of_glyph(ctx.sprites, font, next); ok {
-							advance += ctx.sprites.glyphs[id].advance
-						}
-					}
-				}
-				if line_width > 0 && line_width + separator_width + advance > width {
-					size.x = max(size.x, line_width)
-					size.y += line_height
-					baseline += line_height
-					line_width = 0
-				}
-				if line_width > 0 {line_width += separator_width}
-				separator_width = 0
-				word_start = false
-			}
-			if found {
-				draw_sprite(
-					ctx,
-					sprite,
-					{
-						position.x + line_width + glyph.offset.x,
-						baseline + glyph.offset.y,
-						glyph.size.x,
-						glyph.size.y,
-					},
-					color,
-				)
-			}
-			line_width += glyph.advance
-		}
-	}
-	size.x = max(size.x, line_width)
-	return
 }

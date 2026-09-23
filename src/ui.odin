@@ -11,32 +11,36 @@ UI_DEPTH_MAX :: 32
 // Maximum number of animated values alive at once
 UI_ANIM_MAX :: 1024
 
-UI_BLOB_SIZE :: 1_000_000
-
 @(private = "file")
 UI: struct {
 	boxes:           [UI_BOX_MAX]Ui_Box,
 	// Free stack of boxes
 	box_free:        [UI_BOX_MAX]Ui_Id,
 	box_free_count:  int,
-	// Order of boxes, from bottom to top
+	// Order of boxes, from bottom to top: the tree walked parents first, computed in ui_end
 	box_order:       [UI_BOX_MAX]Ui_Id,
 	box_order_count: int,
+	// The box everything else is built under, and its two children: what the app builds, then what floats over it
+	root:            Ui_Id,
+	// This box contains all "ground layer" ui elements
+	content:         Ui_Id,
+	// This box contains all the overlay stuff, such as the tooltip
+	overlay:         Ui_Id,
+	viewport:        [2]f32,
 	// Key -> Id hashmap
 	key_hash_table:  Ui_Key_Hashtable,
 	// Parent stack
 	parent_stack:    [UI_DEPTH_MAX]Ui_Id,
 	parent_depth:    int,
-	// byte blob (primarily string buffer)
-	blob:            [UI_BLOB_SIZE]byte,
-	blob_len:        int,
 	// Style stack: the base style sits at the bottom, and each entry already includes the ones below it
 	style_stack:     [UI_DEPTH_MAX]Ui_Style,
 	style_depth:     int,
 	// Overrides for the next box only
 	style_next:      Ui_Style,
-	// Font metrics, for text measurement and em sizes
+	// Font metrics, for em sizes
 	sprites:         ^Sprites,
+	// Where box texts are built, measured and drawn
+	text:            ^Text_Ctx,
 	// Global interaction state
 	hot_box:         Ui_Key,
 	// Owns the mouse from the press until the release, wherever the mouse goes
@@ -50,6 +54,10 @@ UI: struct {
 	drag_start:      [2]f32,
 	// Wheel movement in the last ui_end, in notches
 	wheel:           [2]f32,
+	// The last ui_end saw a left press, wherever it landed
+	pressed_any:     bool,
+	// The mouse was over a box that takes it in the last ui_end, disabled ones included
+	hovered_any:     bool,
 	// Saved by the widget being dragged, usually its value when the drag began
 	drag_value:      [2]f32,
 	// Animated values, kept alive by being asked for every frame
@@ -89,7 +97,6 @@ Ui_Size :: struct {
 Ui_Box_Flag :: enum {
 	Background,
 	Border,
-	Text,
 	// Takes part in mouse hit testing; the box needs a key
 	Clickable,
 	// Fades the background toward hot_background and active_background while hovered and held
@@ -101,6 +108,8 @@ Ui_Box_Flag :: enum {
 	// Children may overflow along the axis, and the wheel moves them through the box; the box needs a key
 	Scroll_X,
 	Scroll_Y,
+	// Out of the flow: the parent neither sizes around the box nor places it; it sits at position from the parent's corner
+	Floating,
 }
 
 // Distance moved per wheel notch, in multiples of the scrolled box's font size
@@ -125,6 +134,8 @@ Ui_Style :: struct {
 	text_color:        Maybe([4]f32),
 	// Sets or clears Ui_Box_Flag.Disabled; a disabled parent still disables its children
 	disabled:          Maybe(bool),
+	// Where a floating box's top-left corner sits, from its parent's
+	position:          Maybe([2]f32),
 }
 
 // A ui box. Keyed boxes keep their slot, and so their persistent fields, for as long as they are built every frame.
@@ -138,6 +149,8 @@ Ui_Box :: struct {
 	padding:           [2]f32,
 	// Space between consecutive children along the child axis
 	gap:               f32,
+	// Where a floating box's top-left corner sits, from its parent's
+	position:          [2]f32,
 	// Box tree hierarchy
 	parent:            Ui_Id,
 	child_first:       Ui_Id,
@@ -152,7 +165,7 @@ Ui_Box :: struct {
 	thickness:         f32,
 	radius:            f32,
 	// Text
-	text:              Span, //span into the blob
+	text:              Text_Id,
 	font:              Font_Id,
 	text_color:        [4]f32,
 	// Layout results: until this frame's layout runs, they are last frame's
@@ -183,6 +196,11 @@ Ui_Signal :: struct {
 	drag:    [2]f32,
 	// Wheel movement in notches, while hovered
 	wheel:   [2]f32,
+}
+
+// The mouse is over the ui, as of the last ui_end: whatever is drawn under it should ignore the mouse.
+ui_hovered_any :: proc() -> bool {
+	return UI.hovered_any
 }
 
 // Saves a value for the box being dragged, usually its value when the press happened.
@@ -358,19 +376,17 @@ ui_box_alloc :: proc(key: Ui_Key) -> Ui_Id {
 	return id
 }
 
+// Gives the box a text in its font and color, showing the label up to any "##".
 @(private = "file")
-ui_intern_text :: proc(text: string) -> Span {
-	head, _, _ := strings.partition(text, "##")
-	// copy stops at the shorter side, so a full blob truncates the text instead of overflowing.
-	n := copy(UI.blob[UI.blob_len:], head)
-	span := Span{UI.blob_len, n}
-	UI.blob_len += n
-	return span
+ui_box_text :: proc(box: ^Ui_Box, label: string) {
+	head, _, _ := strings.partition(label, "##")
+	box.text = text_from_string(UI.text, head, box.font, box.text_color)
 }
 
-ui_init :: proc(sprites: ^Sprites) {
+ui_init :: proc(sprites: ^Sprites, text: ^Text_Ctx) {
 	UI = {}
 	UI.sprites = sprites
+	UI.text = text
 }
 
 ui_begin :: proc(viewport: [2]f32) {
@@ -380,12 +396,6 @@ ui_begin :: proc(viewport: [2]f32) {
 
 	UI.parent_stack = {}
 	UI.parent_depth = 0
-
-	UI.box_order = {}
-	UI.box_order_count = 0
-
-	// Empty the ui blob
-	UI.blob_len = 0
 
 	UI.style_depth = 0
 	UI.style_next = {}
@@ -426,21 +436,32 @@ ui_begin :: proc(viewport: [2]f32) {
 	// Popped in ui_end
 	ui_style_push(ui_style_base())
 
-	{
-		id, _ := ui_box_make({}, {width = ui_px(viewport.x), height = ui_px(viewport.y)})
-		ui_parent_push(id)
+	// The content is attached before the overlay, so everything floating over it comes later in box_order.
+	UI.viewport = viewport
+	viewport_size := Ui_Style {
+		width  = ui_px(viewport.x),
+		height = ui_px(viewport.y),
 	}
+	UI.root, _ = ui_box_make({}, viewport_size)
+	ui_parent_push(UI.root)
+	UI.content, _ = ui_box_make({}, {width = ui_grow(), height = ui_grow()})
+	UI.overlay, _ = ui_box_make({}, viewport_size)
+	UI.boxes[UI.overlay].flags += {.Floating}
+	ui_parent_push(UI.content)
 }
 
 ui_end :: proc(input: Input, draw_ctx: ^Draw_Ctx, dt: f32) {
-	// Pop the root element and the base style
+	// Pop the content, the root and the base style
+	ui_parent_pop()
 	ui_parent_pop()
 	ui_style_pop()
 
 	assert(UI.parent_depth == 0)
 	assert(UI.style_depth == 0)
 
-	ui_layout(UI.sprites)
+	ui_compute_box_order()
+
+	ui_layout()
 
 	ui_update_interaction(input)
 
@@ -497,6 +518,7 @@ ui_update_interaction :: proc(input: Input) {
 	UI.mouse = mouse_pos
 	UI.wheel = input.wheel
 	UI.hot_box = {}
+	UI.hovered_any = false
 	hot_focusable := false
 	// With the mouse outside the window, nothing is under it.
 	for i := UI.box_order_count; i > 0 && input.pos_is_valid; i -= 1 {
@@ -504,6 +526,7 @@ ui_update_interaction :: proc(input: Input) {
 		if .Clickable not_in box.flags {continue}
 		assert(box.key != UI_KEY_NIL, "clickable boxes need a key to receive signals")
 		if rect_contains(box.clip, mouse_pos) {
+			UI.hovered_any = true
 			// A disabled box stops the search without becoming hot, so the mouse reaches nothing.
 			if .Disabled not_in box.flags {
 				UI.hot_box = box.key
@@ -515,10 +538,13 @@ ui_update_interaction :: proc(input: Input) {
 
 	// The wheel moves the nearest box under the mouse that scrolls along each axis.
 	if input.wheel != {} {
+		// Only boxes that take the mouse or scroll count; the rest, like the overlay, let it through.
 		under: Ui_Id
 		for i := UI.box_order_count; i > 0; i -= 1 {
 			id := UI.box_order[i - 1]
-			if rect_contains(UI.boxes[id].clip, mouse_pos) {
+			box := &UI.boxes[id]
+			if .Clickable not_in box.flags && box.flags & {.Scroll_X, .Scroll_Y} == {} {continue}
+			if rect_contains(box.clip, mouse_pos) {
 				under = id
 				break
 			}
@@ -538,6 +564,7 @@ ui_update_interaction :: proc(input: Input) {
 	left_pressed := input.btns[.New][.Pressed][sdl3.BUTTON_LEFT]
 	left_released :=
 		input.btns[.Old][.Down][sdl3.BUTTON_LEFT] && !input.btns[.New][.Down][sdl3.BUTTON_LEFT]
+	UI.pressed_any = bool(left_pressed)
 
 	UI.pressed = {}
 	if UI.active_box != UI_KEY_NIL {
@@ -561,6 +588,23 @@ ui_update_interaction :: proc(input: Input) {
 
 }
 
+// Fills box_order by walking the tree from the root, parents before children.
+@(private = "file")
+ui_compute_box_order :: proc() {
+	UI.box_order_count = 0
+	for id := UI.root; id != 0; {
+		UI.box_order[UI.box_order_count] = id
+		UI.box_order_count += 1
+
+		// Down to the first child, else across to the next sibling of the nearest ancestor that has one.
+		next := UI.boxes[id].child_first
+		for p := id; next == 0 && p != UI.root; p = UI.boxes[p].parent {
+			next = UI.boxes[p].sibling_next
+		}
+		id = next
+	}
+}
+
 @(private = "file")
 ui_box_make :: proc(key: Ui_Key, forced: Ui_Style) -> (Ui_Id, Ui_Signal) {
 	id := ui_box_alloc(key)
@@ -575,9 +619,6 @@ ui_box_make :: proc(key: Ui_Key, forced: Ui_Style) -> (Ui_Id, Ui_Signal) {
 		UI.boxes[id].flags += {.Disabled}
 	}
 	UI.style_next = {}
-
-	UI.box_order[UI.box_order_count] = id
-	UI.box_order_count += 1
 
 	if parent != 0 {
 		p_box := &UI.boxes[parent]
@@ -673,6 +714,7 @@ ui_style_merge :: proc(dst: ^Ui_Style, src: Ui_Style) {
 	if src.font != nil {dst.font = src.font}
 	if src.text_color != nil {dst.text_color = src.text_color}
 	if src.disabled != nil {dst.disabled = src.disabled}
+	if src.position != nil {dst.position = src.position}
 }
 
 @(private = "file")
@@ -693,15 +735,22 @@ ui_style_apply :: proc(dst: ^Ui_Box, src: Ui_Style) {
 	if v, ok := src.disabled.?; ok {
 		if v {dst.flags += {.Disabled}} else {dst.flags -= {.Disabled}}
 	}
+	if v, ok := src.position.?; ok {dst.position = v}
 }
 
 @(private = "file")
-ui_layout :: proc(sprites: ^Sprites) {
-	ui_compute_independent_sizes(sprites)
+ui_layout :: proc() {
+	ui_compute_independent_sizes()
 
 	ui_compute_dependent_sizes(.X)
 
-	// TODO: Width-dependent measurements here...
+	// Text breaks into lines at its box's final width, and boxes sized by their text take its height.
+	for i := 0; i < UI.box_order_count; i += 1 {
+		box := &UI.boxes[UI.box_order[i]]
+		if box.text == 0 || box.size.y.kind != .Text {continue}
+		box.size_computed.y =
+			text_measure(UI.text, box.text, ui_text_row_width(box)).y + 2 * box.padding.y
+	}
 
 	ui_compute_dependent_sizes(.Y)
 
@@ -720,15 +769,20 @@ ui_layout :: proc(sprites: ^Sprites) {
 		scroll := parent.scroll
 		scroll = {math.floor(scroll.x), math.floor(scroll.y)}
 		offset, extent: f32
+		placed := 0
 
 		for id := parent.child_first; id != 0; id = UI.boxes[id].sibling_next {
 			child := &UI.boxes[id]
 
-			child.pos_computed = parent.pos_computed + parent.padding - scroll
-			child.pos_computed[axis] += offset
-
-			offset += child.size_computed[axis] + parent.gap
-			extent = max(extent, child.size_computed[cross])
+			if .Floating in child.flags {
+				child.pos_computed = parent.pos_computed + child.position - scroll
+			} else {
+				child.pos_computed = parent.pos_computed + parent.padding - scroll
+				child.pos_computed[axis] += offset
+				offset += child.size_computed[axis] + parent.gap
+				extent = max(extent, child.size_computed[cross])
+				placed += 1
+			}
 
 			child.clip = rect_intersect(
 				parent.clip,
@@ -736,7 +790,7 @@ ui_layout :: proc(sprites: ^Sprites) {
 			)
 		}
 
-		if parent.child_first != 0 {offset -= parent.gap}
+		if placed > 0 {offset -= parent.gap}
 		parent.content_size[axis] = offset + 2 * parent.padding[axis]
 		parent.content_size[cross] = extent + 2 * parent.padding[cross]
 	}
@@ -779,6 +833,12 @@ ui_scroll_flag :: proc(axis: Axis) -> Ui_Box_Flag {
 	return out
 }
 
+// The width a box's text breaks its lines at: the box's, inside the padding.
+@(private = "file")
+ui_text_row_width :: proc(box: ^Ui_Box) -> f32 {
+	return max(0, box.size_computed.x - 2 * box.padding.x)
+}
+
 @(private = "file")
 ui_axis_flip :: proc(axis: Axis) -> Axis {
 	out: Axis
@@ -792,28 +852,19 @@ ui_axis_flip :: proc(axis: Axis) -> Axis {
 }
 
 @(private = "file")
-ui_compute_independent_sizes :: proc(sprites: ^Sprites) {
+ui_compute_independent_sizes :: proc() {
 	for &box in UI.boxes {
 		size := box.size
 		value: [2]f32
-
-		text_dims: [2]f32
-		has_text: bool
-
 
 		for axis in Axis {
 			#partial switch size[axis].kind {
 			case .Pixels:
 				value[axis] = size[axis].value
 			case .Text:
-				if !has_text {
-					text: string = span_string(UI.blob[:], box.text)
-					text_dims = text_measure(sprites, box.font, text)
-					has_text = true
-				}
-				value[axis] = text_dims[axis] + 2 * box.padding[axis]
+				// On one line; a narrower final width wraps it and recomputes the height.
+				value[axis] = text_measure(UI.text, box.text, 0)[axis] + 2 * box.padding[axis]
 			}
-
 		}
 
 		box.size_computed = value
@@ -834,6 +885,7 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 			value = 0
 			count := 0
 			for child := box.child_first; child != 0; child = UI.boxes[child].sibling_next {
+				if .Floating in UI.boxes[child].flags {continue}
 				child_value := UI.boxes[child].size_computed[axis]
 				if axis == box.child_axis {
 					value += child_value
@@ -862,6 +914,7 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 			// Cross-axis children each have the parent's full extent available, and no more.
 			for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
 				child := &UI.boxes[kid]
+				if .Floating in child.flags {continue}
 				if child.size[axis].kind == .Grow {
 					child.size_computed[axis] = available
 				}
@@ -876,6 +929,7 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 		count := 0
 		for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
 			child := &UI.boxes[kid]
+			if .Floating in child.flags {continue}
 			total += child.size_computed[axis]
 			if child.size[axis].kind == .Grow && child.size[axis].value > 0 {
 				total_weight += child.size[axis].value
@@ -889,6 +943,7 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 			// Leftover space goes to Grow children by weight.
 			for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
 				child := &UI.boxes[kid]
+				if .Floating in child.flags {continue}
 				size := child.size[axis]
 				if size.kind == .Grow && size.value > 0 {
 					child.size_computed[axis] += remaining * (size.value / total_weight)
@@ -899,12 +954,14 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 			budget: f32
 			for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
 				child := &UI.boxes[kid]
+				if .Floating in child.flags {continue}
 				budget += child.size_computed[axis] * (1 - child.size[axis].strictness)
 			}
 			if budget > 0 {
 				fraction := min(1, -remaining / budget)
 				for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
 					child := &UI.boxes[kid]
+					if .Floating in child.flags {continue}
 					give := child.size_computed[axis] * (1 - child.size[axis].strictness)
 					child.size_computed[axis] -= give * fraction
 				}
@@ -951,16 +1008,14 @@ ui_draw :: proc(ctx: ^Draw_Ctx) {
 			border.a *= alpha
 			draw_rectangle(ctx, bounds, border, box.radius, box.thickness, SOFTNESS)
 		}
-		if Ui_Box_Flag.Text in box.flags {
-			text := span_string(UI.blob[:], box.text)
-			wh := text_measure(ctx.sprites, box.font, text)
+		if box.text != 0 {
+			width := ui_text_row_width(box)
+			size := text_measure(UI.text, box.text, width)
 			// Left-aligned after the padding, centered vertically; never starts before the box.
 			pos := box.pos_computed
 			pos.x += box.padding.x
-			pos.y += max(0, box.size_computed.y - wh.y) / 2
-			text_color := box.text_color
-			text_color.a *= alpha
-			draw_text(ctx, box.font, text, pos, text_color)
+			pos.y += max(0, box.size_computed.y - size.y) / 2
+			text_draw(UI.text, ctx, box.text, pos, width, {1, 1, 1, alpha})
 		}
 		if .Focusable in box.flags {
 			focus_t := box.focus_t
@@ -992,6 +1047,8 @@ UI_FOCUS_BORDER :: [4]f32{0.72, 0.50, 0.20, 1}
 // The checkbox square and the space between it and its label
 UI_CHECK_SIZE :: 18
 UI_CHECK_GAP :: 8
+// Where a tooltip sits from the mouse
+UI_TOOLTIP_OFFSET :: [2]f32{16, 16}
 // The thickness of a scrollbar
 UI_SCROLLBAR_SIZE :: 8
 // The label of the box a scroll panel's children scroll in
@@ -1017,6 +1074,7 @@ ui_style_base :: proc() -> Ui_Style {
 		radius = 4,
 		font = font,
 		text_color = UI_LABEL_COLOR,
+		position = [2]f32{0, 0},
 	}
 }
 
@@ -1162,6 +1220,40 @@ ui_scrollbar :: proc(pane_label: string, axis: Axis, style := Ui_Style{}) {
 	}
 }
 
+// A column floating over everything near the mouse, kept inside the window. Build it while its anchor is hovered.
+@(deferred_out = ui_tooltip_end)
+ui_tooltip :: proc(style := Ui_Style{}) -> bool {
+	ui_parent_push(UI.overlay)
+	key := ui_key_from_string("tooltip")
+	// Last frame's size decides whether it fits to the right of and below the mouse.
+	size := UI.boxes[ui_hashtable_find(&UI.key_hash_table, key)].size_computed
+	position := UI.mouse + UI_TOOLTIP_OFFSET
+	flipped := UI.mouse - UI_TOOLTIP_OFFSET - size
+	for axis in Axis {
+		if position[axis] + size[axis] > UI.viewport[axis] {
+			position[axis] = flipped[axis]
+		}
+		position[axis] = max(0, position[axis])
+	}
+	ui_style_next(style)
+	id, _ := ui_box_make(key, {position = position})
+	box := &UI.boxes[id]
+	box.flags += {.Floating, .Background, .Border}
+	box.child_axis = .Y
+	ui_parent_push(id)
+	return true
+}
+
+@(private = "file")
+ui_tooltip_end :: proc(open: bool) {
+	if open {
+		// Ends the tooltip
+		ui_parent_pop()
+		// And ends the UI.overlay scope
+		ui_parent_pop()
+	}
+}
+
 // Empty space along the parent's child axis, and none across it.
 ui_spacer :: proc(size: Ui_Size) {
 	forced: Ui_Style
@@ -1181,8 +1273,7 @@ ui_label :: proc(text: string, style := Ui_Style{}) -> Ui_Signal {
 	ui_style_next(style)
 	id, signal := ui_box_make({}, {})
 	box := &UI.boxes[id]
-	box.flags += {.Text}
-	box.text = ui_intern_text(text)
+	ui_box_text(box, text)
 	return signal
 }
 
@@ -1191,8 +1282,60 @@ ui_button :: proc(label: string, style := Ui_Style{}) -> Ui_Signal {
 	ui_style_next(style)
 	id, signal := ui_box_make(ui_key_from_string(label), {})
 	box := &UI.boxes[id]
-	box.flags += {.Background, .Border, .Text, .Clickable, .Hot_Effects, .Focusable}
-	box.text = ui_intern_text(label)
+	box.flags += {.Background, .Border, .Clickable, .Hot_Effects, .Focusable}
+	ui_box_text(box, label)
+	return signal
+}
+
+// A button showing the selected choice; pressing it opens the choices under it, floating over everything.
+// Picking one selects it, and any press closes the list. The label is only the key; choices must differ.
+ui_combo :: proc(
+	label: string,
+	selection: ^int,
+	open: ^bool,
+	choices: []string,
+	style := Ui_Style{},
+) -> Ui_Signal {
+	ui_style_next(style)
+	key := ui_key_from_string(label)
+	id, signal := ui_box_make(key, {})
+	button := &UI.boxes[id]
+	button.flags += {.Background, .Border, .Clickable, .Hot_Effects, .Focusable}
+	if selection^ >= 0 && selection^ < len(choices) {
+		ui_box_text(button, choices[selection^])
+	}
+	if signal.pressed {
+		open^ = !open^
+	}
+
+	if open^ {
+		// Right under the button and as wide, from its layout last frame
+		ui_parent_push(UI.overlay)
+		list, _ := ui_box_make(
+			ui_key_from_string_seeded("choices", u64(key)),
+			{
+				position = button.pos_computed + {0, button.size_computed.y},
+				width = ui_px(button.size_computed.x),
+				height = ui_fit(),
+			},
+		)
+		UI.boxes[list].flags += {.Floating, .Background, .Border, .Clickable}
+		UI.boxes[list].child_axis = .Y
+		ui_parent_push(list)
+		for choice, i in choices {
+			// Laid out like the button, across the list
+			if ui_button(choice, {width = ui_grow(), padding = button.padding}).pressed {
+				selection^ = i
+			}
+		}
+		ui_parent_pop()
+		ui_parent_pop()
+
+		// Built first, so a press on a choice was read before the list closes.
+		if UI.pressed_any && !signal.pressed {
+			open^ = false
+		}
+	}
 	return signal
 }
 
@@ -1261,8 +1404,7 @@ ui_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Sign
 			text_color = ink,
 		},
 	)
-	UI.boxes[text].flags += {.Text}
-	UI.boxes[text].text = ui_intern_text(label)
+	ui_box_text(&UI.boxes[text], label)
 	return signal
 }
 
