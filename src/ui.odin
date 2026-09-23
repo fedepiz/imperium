@@ -8,8 +8,6 @@ import "vendor:sdl3"
 // Maximum number of ui boxes supported by the system
 UI_BOX_MAX :: 2048
 UI_DEPTH_MAX :: 32
-// Maximum number of keyed runs of text in one frame
-UI_TEXT_KEYS_MAX :: 1024
 // Maximum number of animated values alive at once
 UI_ANIM_MAX :: 1024
 
@@ -54,9 +52,6 @@ UI: struct {
 	// The mouse as of the last ui_end, and where the press that made the active box happened
 	mouse:           [2]f32,
 	drag_start:      [2]f32,
-	// Keys of the runs of text built this frame, which take the mouse like boxes do
-	text_keys:       [UI_TEXT_KEYS_MAX]Ui_Key,
-	text_key_count:  int,
 	// Wheel movement in the last ui_end, in notches
 	wheel:           [2]f32,
 	// The last ui_end saw a left press, wherever it landed
@@ -413,9 +408,6 @@ ui_box_set_text :: proc(box: ^Ui_Box, parts: []Ui_Text) {
 		tag: u64
 		if len(part.key) > 0 && .Disabled not_in box.flags {
 			key := ui_key_from_string(part.key)
-			assert(UI.text_key_count < UI_TEXT_KEYS_MAX)
-			UI.text_keys[UI.text_key_count] = key
-			UI.text_key_count += 1
 			box.flags += {.Hover_Text}
 			tag = u64(key)
 			hot_t = ui_anim_from_key(key, 1 if UI.hot == key else 0)
@@ -447,7 +439,6 @@ ui_begin :: proc(viewport: [2]f32) {
 	UI.style_depth = 0
 	UI.style_next = {}
 
-	UI.text_key_count = 0
 
 	// Keyed boxes built last frame keep their slot and are ready to be built again; the rest are freed.
 	UI.boxes[0] = {}
@@ -514,11 +505,12 @@ ui_end :: proc(input: Input, draw_ctx: ^Draw_Ctx, dt: f32) {
 
 	ui_update_interaction(input)
 
-	// Ease the persistent state of every box built this frame
-	for &box in UI.boxes {
+	// Ease the persistent state of every keyed box built this frame, and every live anim
+	rate := 1 - math.exp(-16 * dt)
+	for i := 0; i < UI.box_order_count; i += 1 {
+		box := &UI.boxes[UI.box_order[i]]
 		key := box.key
-		if key == {} {continue}
-		rate := 1 - math.exp(-16 * dt)
+		if key == UI_KEY_NIL {continue}
 		box.hot_t += ((key == UI.hot ? 1 : 0) - box.hot_t) * rate
 		box.active_t += ((key == UI.active ? 1 : 0) - box.active_t) * rate
 		box.focus_t += ((key == UI.focus ? 1 : 0) - box.focus_t) * rate
@@ -536,10 +528,8 @@ ui_end :: proc(input: Input, draw_ctx: ^Draw_Ctx, dt: f32) {
 		box.scroll += (box.scroll_target - box.scroll) * rate
 	}
 
-	// Ease every live anim toward its target
 	for &anim in UI.anims {
 		if anim.key == UI_KEY_NIL {continue}
-		rate := 1 - math.exp(-16 * dt)
 		anim.current += (anim.target - anim.current) * rate
 	}
 
@@ -549,21 +539,10 @@ ui_end :: proc(input: Input, draw_ctx: ^Draw_Ctx, dt: f32) {
 @(private = "file")
 ui_update_interaction :: proc(input: Input) {
 	// A box that disappeared or became disabled can no longer be released or lose focus, so let go of it.
-	active_seen, focus_seen: bool
-	for i := 0; i < UI.box_order_count; i += 1 {
-		box := &UI.boxes[UI.box_order[i]]
-		if box.key == UI_KEY_NIL || .Disabled in box.flags {continue}
-		active_seen |= box.key == UI.active
-		focus_seen |= box.key == UI.focus
-	}
-	for key in UI.text_keys[:UI.text_key_count] {
-		active_seen |= key == UI.active
-		focus_seen |= key == UI.focus
-	}
-	if !active_seen {
+	if !ui_key_is_enabled_box(UI.active) {
 		UI.active = {}
 	}
-	if !focus_seen {
+	if !ui_key_is_enabled_box(UI.focus) {
 		UI.focus = {}
 	}
 
@@ -572,45 +551,45 @@ ui_update_interaction :: proc(input: Input) {
 	UI.wheel = input.wheel
 	UI.hot = {}
 	UI.hovered_any = false
-	hot_focusable := false
+	// Only boxes can be pressed or focused; keyed text is only hovered.
+	hot_is_box, hot_focusable := false, false
+	// From the top down, the first clickable box or keyed run of text under the mouse is hot, and the wheel
+	// starts from the first box under it that is clickable or scrolls. Other boxes, like the overlay, let the mouse through.
 	// With the mouse outside the window, nothing is under it.
+	hot_found := false
+	under: Ui_Id
 	for i := UI.box_order_count; i > 0 && input.pos_is_valid; i -= 1 {
-		box := &UI.boxes[UI.box_order[i - 1]]
-		// Hovering over interactive text
-		if .Hover_Text in box.flags && rect_contains(box.clip, mouse_pos) {
+		id := UI.box_order[i - 1]
+		box := &UI.boxes[id]
+		if !rect_contains(box.clip, mouse_pos) {continue}
+		clickable := .Clickable in box.flags
+		if under == 0 && (clickable || box.flags & {.Scroll_X, .Scroll_Y} != {}) {
+			under = id
+		}
+		if !hot_found && .Hover_Text in box.flags {
 			local := mouse_pos - ui_text_origin(box)
 			if tag := text_tag_at(UI.text, box.text, ui_text_room(box), local); tag != 0 {
 				UI.hot = Ui_Key(tag)
 				UI.hovered_any = true
-				break
+				hot_found = true
 			}
 		}
-		if .Clickable not_in box.flags {continue}
-		assert(box.key != UI_KEY_NIL, "clickable boxes need a key to receive signals")
-		if rect_contains(box.clip, mouse_pos) {
+		if !hot_found && clickable {
+			assert(box.key != UI_KEY_NIL, "clickable boxes need a key to receive signals")
 			UI.hovered_any = true
 			// A disabled box stops the search without becoming hot, so the mouse reaches nothing.
 			if .Disabled not_in box.flags {
 				UI.hot = box.key
+				hot_is_box = true
 				hot_focusable = .Focusable in box.flags
 			}
-			break
+			hot_found = true
 		}
+		if hot_found && under != 0 {break}
 	}
 
-	// The wheel moves the nearest box under the mouse that scrolls along each axis.
+	// The wheel moves the nearest box from there up that scrolls along each axis.
 	if input.wheel != {} {
-		// Only boxes that take the mouse or scroll count; the rest, like the overlay, let it through.
-		under: Ui_Id
-		for i := UI.box_order_count; i > 0; i -= 1 {
-			id := UI.box_order[i - 1]
-			box := &UI.boxes[id]
-			if .Clickable not_in box.flags && box.flags & {.Scroll_X, .Scroll_Y} == {} {continue}
-			if rect_contains(box.clip, mouse_pos) {
-				under = id
-				break
-			}
-		}
 		for axis in Axis {
 			if input.wheel[axis] == 0 {continue}
 			for id := under; id != 0; id = UI.boxes[id].parent {
@@ -637,7 +616,7 @@ ui_update_interaction :: proc(input: Input) {
 		if left_released {
 			UI.active = {}
 		}
-	} else if left_pressed && UI.hot != UI_KEY_NIL {
+	} else if left_pressed && hot_is_box {
 		UI.active = UI.hot
 		UI.pressed = UI.hot
 		UI.drag_start = mouse_pos
@@ -693,6 +672,13 @@ ui_box_make :: proc(key: Ui_Key, forced: Ui_Style) -> (Ui_Id, Ui_Signal) {
 	}
 
 	return id, ui_signal_from_key(key)
+}
+
+// A box was built this frame with key, and is not disabled.
+@(private = "file")
+ui_key_is_enabled_box :: proc(key: Ui_Key) -> bool {
+	box := &UI.boxes[ui_hashtable_find(&UI.key_hash_table, key)]
+	return key != UI_KEY_NIL && box.key == key && .Disabled not_in box.flags
 }
 
 // The signal of whatever carries the label's key in the current scope: a box, or a keyed run of text.
@@ -822,7 +808,7 @@ ui_layout :: proc() {
 	for i := 0; i < UI.box_order_count; i += 1 {
 		box := &UI.boxes[UI.box_order[i]]
 		if box.text == 0 || box.size.y.kind != .Text {continue}
-		room := [2]f32{ui_text_row_width(box), math.INF_F32}
+		room := [2]f32{ui_text_room(box).x, math.INF_F32}
 		box.size_computed.y = text_measure(UI.text, box.text, room).y + 2 * box.padding.y
 	}
 
@@ -870,6 +856,26 @@ ui_layout :: proc() {
 	}
 }
 
+// The first child of parent in the flow, and the next one after id: floating boxes are skipped.
+@(private = "file")
+ui_flow_first :: proc(parent: ^Ui_Box) -> Ui_Id {
+	return ui_flow_skip(parent.child_first)
+}
+
+@(private = "file")
+ui_flow_next :: proc(id: Ui_Id) -> Ui_Id {
+	return ui_flow_skip(UI.boxes[id].sibling_next)
+}
+
+@(private = "file")
+ui_flow_skip :: proc(id: Ui_Id) -> Ui_Id {
+	id := id
+	for id != 0 && (.Floating in UI.boxes[id].flags) {
+		id = UI.boxes[id].sibling_next
+	}
+	return id
+}
+
 // How far the wheel moves a scrolling box's content, in pixels.
 @(private = "file")
 ui_scroll_from_wheel :: proc(box: ^Ui_Box, wheel: [2]f32) -> [2]f32 {
@@ -901,16 +907,10 @@ ui_text_origin :: proc(box: ^Ui_Box) -> [2]f32 {
 	return pos
 }
 
-// The width a box's text breaks its lines at: the box's, inside the padding.
-@(private = "file")
-ui_text_row_width :: proc(box: ^Ui_Box) -> f32 {
-	return max(0, box.size_computed.x - 2 * box.padding.x)
-}
-
 // The room a box's text is laid out in: the box inside its padding. Text that does not fit ends in an ellipsis.
 @(private = "file")
 ui_text_room :: proc(box: ^Ui_Box) -> [2]f32 {
-	return {ui_text_row_width(box), max(0, box.size_computed.y - 2 * box.padding.y)}
+	return {max(0, box.size_computed.x - 2 * box.padding.x), max(0, box.size_computed.y - 2 * box.padding.y)}
 }
 
 @(private = "file")
@@ -927,7 +927,8 @@ ui_axis_flip :: proc(axis: Axis) -> Axis {
 
 @(private = "file")
 ui_compute_independent_sizes :: proc() {
-	for &box in UI.boxes {
+	for i := 0; i < UI.box_order_count; i += 1 {
+		box := &UI.boxes[UI.box_order[i]]
 		size := box.size
 		value: [2]f32
 
@@ -958,8 +959,7 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 		case .Fit, .Grow:
 			value = 0
 			count := 0
-			for child := box.child_first; child != 0; child = UI.boxes[child].sibling_next {
-				if .Floating in UI.boxes[child].flags {continue}
+			for child := ui_flow_first(box); child != 0; child = ui_flow_next(child) {
 				child_value := UI.boxes[child].size_computed[axis]
 				if axis == box.child_axis {
 					value += child_value
@@ -986,9 +986,8 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 
 		if axis != parent.child_axis {
 			// Cross-axis children each have the parent's full extent available, and no more.
-			for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
+			for kid := ui_flow_first(parent); kid != 0; kid = ui_flow_next(kid) {
 				child := &UI.boxes[kid]
-				if .Floating in child.flags {continue}
 				if child.size[axis].kind == .Grow {
 					child.size_computed[axis] = available
 				}
@@ -1001,9 +1000,8 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 
 		total, total_weight: f32
 		count := 0
-		for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
+		for kid := ui_flow_first(parent); kid != 0; kid = ui_flow_next(kid) {
 			child := &UI.boxes[kid]
-			if .Floating in child.flags {continue}
 			total += child.size_computed[axis]
 			if child.size[axis].kind == .Grow && child.size[axis].value > 0 {
 				total_weight += child.size[axis].value
@@ -1015,9 +1013,8 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 
 		if remaining > 0 && total_weight > 0 {
 			// Leftover space goes to Grow children by weight.
-			for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
+			for kid := ui_flow_first(parent); kid != 0; kid = ui_flow_next(kid) {
 				child := &UI.boxes[kid]
-				if .Floating in child.flags {continue}
 				size := child.size[axis]
 				if size.kind == .Grow && size.value > 0 {
 					child.size_computed[axis] += remaining * (size.value / total_weight)
@@ -1026,16 +1023,14 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 		} else if remaining < 0 && !scrolls {
 			// Overflow is taken from each child in proportion to the size it is willing to give up.
 			budget: f32
-			for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
+			for kid := ui_flow_first(parent); kid != 0; kid = ui_flow_next(kid) {
 				child := &UI.boxes[kid]
-				if .Floating in child.flags {continue}
 				budget += child.size_computed[axis] * (1 - child.size[axis].strictness)
 			}
 			if budget > 0 {
 				fraction := min(1, -remaining / budget)
-				for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
+				for kid := ui_flow_first(parent); kid != 0; kid = ui_flow_next(kid) {
 					child := &UI.boxes[kid]
-					if .Floating in child.flags {continue}
 					give := child.size_computed[axis] * (1 - child.size[axis].strictness)
 					child.size_computed[axis] -= give * fraction
 				}
