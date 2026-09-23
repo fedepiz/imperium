@@ -5,8 +5,7 @@ import "core:mem"
 DRAW_CLIP_DEPTH_MAX :: 32
 
 Draw_Ctx :: struct {
-	render:        ^Render_Data,
-	sprites:       ^Sprites,
+	list:          ^Render_List,
 	// Remaining writable range; consuming slots advances begin and reduces len.
 	instance_span: Span,
 	layer:         u16,
@@ -19,21 +18,19 @@ Draw_Ctx :: struct {
 // Everything drawn is clipped to clip. Instance ranges must not overlap other writers.
 draw_begin :: proc(
 	ctx: ^Draw_Ctx,
-	render: ^Render_Data,
-	sprites: ^Sprites,
+	list: ^Render_List,
 	instance_span: Span,
 	clip: [4]f32,
 ) {
 	assert(instance_span.begin >= 0 && instance_span.len >= 0)
 	assert(instance_span.begin + instance_span.len <= RENDER_MAX_INSTANCES)
 	ctx^ = {
-		render        = render,
-		sprites       = sprites,
+		list          = list,
 		instance_span = instance_span,
 	}
 	ctx.clip_stack[0] = clip
-	mem.zero_slice(render.keys[instance_span.begin:instance_span.begin + instance_span.len])
-	mem.zero_slice(render.instances[instance_span.begin:instance_span.begin + instance_span.len])
+	mem.zero_slice(list.keys[instance_span.begin:instance_span.begin + instance_span.len])
+	mem.zero_slice(list.instances[instance_span.begin:instance_span.begin + instance_span.len])
 }
 
 // Intersects rect with the current clip and makes it current until the matching pop.
@@ -93,12 +90,12 @@ draw_clip_current :: proc(ctx: ^Draw_Ctx) -> [4]f32 {
 draw_instance :: proc(ctx: ^Draw_Ctx, texture: Texture_Id, instance: Render_Instance) {
 	if ctx.instance_span.len > 0 {
 		index := ctx.instance_span.begin
-		ctx.render.keys[index] = {
+		ctx.list.keys[index] = {
 			layer   = ctx.layer,
 			texture = texture,
 		}
-		ctx.render.instances[index] = instance
-		ctx.render.instances[index].clip = draw_clip_current(ctx)
+		ctx.list.instances[index] = instance
+		ctx.list.instances[index].clip = draw_clip_current(ctx)
 		span_advance(&ctx.instance_span)
 	}
 }
@@ -113,7 +110,7 @@ draw_sprite :: proc(
 	thickness: f32 = 0,
 	softness: f32 = 0,
 ) {
-	region := ctx.sprites.regions[sprite]
+	region := sprite_region(sprite)
 	instance: Render_Instance
 	if region.source.z > 0 && region.source.w > 0 {
 		instance = {

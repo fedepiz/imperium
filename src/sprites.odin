@@ -21,11 +21,15 @@ Font_Id :: distinct u8
 Image_Id :: distinct u16
 Sprite_Id :: distinct u16
 
-Sprites :: struct {
+// The atlas: every font and image, loaded once by sprites_load
+@(private = "file")
+SPRITES: struct {
 	fonts:   [FONTS_MAX]Font_Desc,
 	images:  [IMAGES_MAX]Image_Desc,
 	regions: [SPRITES_MAX]Sprite_Region,
 	glyphs:  [SPRITES_MAX]Sprite_Glyph,
+	// Set by sprites_load; everything that reads the atlas needs it first
+	loaded:  bool,
 }
 
 // Logical description of an image
@@ -93,9 +97,9 @@ Sprite_Load_Workspace :: struct {
 }
 
 // Defines printable ASCII by default. The codepoint table can be edited before loading.
-sprites_font_define :: proc(sprites: ^Sprites, id: Font_Id, name: string, size: u16) {
+sprites_font_define :: proc(id: Font_Id, name: string, size: u16) {
 	if id < FONTS_MAX {
-		font := &sprites.fonts[id]
+		font := &SPRITES.fonts[id]
 		assert(len(font.name) == 0)
 		font.name = name
 		font.size = size
@@ -105,25 +109,25 @@ sprites_font_define :: proc(sprites: ^Sprites, id: Font_Id, name: string, size: 
 	}
 }
 
-sprites_image_define :: proc(sprites: ^Sprites, id: Image_Id, name: string) {
-	sprites.images[id] = {
+sprites_image_define :: proc(id: Image_Id, name: string) {
+	SPRITES.images[id] = {
 		name = name,
 	}
 }
 
 // Startup load. Only derived metrics/regions and GPU textures survive a temp reset.
 // Image glyph metrics may be supplied by the caller for inline icons.
-sprites_load :: proc(sprites: ^Sprites, render_ctx: ^Render_Ctx) {
+sprites_load :: proc(renderer: ^Renderer) {
 	workspace := Sprite_Load_Workspace {
 		images = make([]Bitmap, IMAGES_MAX, context.temp_allocator),
 		fonts  = make([]Sprite_Loaded_Font, FONTS_MAX, context.temp_allocator),
 		items  = make([]Sprite_Atlas_Item, SPRITES_MAX, context.temp_allocator),
 	}
 	atlas_is_used: [ATLAS_MAX]bool
-	mem.zero_slice(sprites.regions[:])
-	mem.zero_slice(sprites.glyphs[IMAGES_MAX:])
+	mem.zero_slice(SPRITES.regions[:])
+	mem.zero_slice(SPRITES.glyphs[IMAGES_MAX:])
 
-	for image, image_index in sprites.images {
+	for image, image_index in SPRITES.images {
 		if image.name == "" {continue}
 		assert(int(image.atlas) < ATLAS_MAX)
 		filename := fmt.tprintf("assets/gfx/%v.png", image.name)
@@ -172,7 +176,7 @@ sprites_load :: proc(sprites: ^Sprites, render_ctx: ^Render_Ctx) {
 	}
 
 	max_glyph_pixels := 0
-	for &desc, font_index in sprites.fonts {
+	for &desc, font_index in SPRITES.fonts {
 		slice.sort(desc.codepoints[:])
 		desc.info = {}
 		if desc.name == "" {continue}
@@ -216,7 +220,7 @@ sprites_load :: proc(sprites: ^Sprites, render_ctx: ^Render_Ctx) {
 			sprite_index := IMAGES_MAX + font_index * FONT_GLYPHS_MAX + codepoint_index
 			sprite := Sprite_Id(sprite_index)
 			glyph := font_glyph_metrics(loaded, codepoint)
-			sprites.glyphs[sprite] = glyph
+			SPRITES.glyphs[sprite] = glyph
 			width, height := int(glyph.size.x), int(glyph.size.y)
 			if width == 0 || height == 0 {
 				continue
@@ -238,8 +242,9 @@ sprites_load :: proc(sprites: ^Sprites, render_ctx: ^Render_Ctx) {
 	workspace.glyph_pixels = make([]u8, max_glyph_pixels, context.temp_allocator)
 	for used, atlas_index in atlas_is_used {
 		if !used {continue}
-		sprites_load_atlas(sprites, render_ctx, Atlas_Id(atlas_index), &workspace)
+		sprites_load_atlas(renderer, Atlas_Id(atlas_index), &workspace)
 	}
+	SPRITES.loaded = true
 
 	// Release image memory
 	for image in workspace.images {
@@ -289,8 +294,7 @@ sprites_pack_rectangles :: proc(rects: []stbrp.Rect, nodes: []stbrp.Node, max_si
 
 @(private = "file")
 sprites_load_atlas :: proc(
-	sprites: ^Sprites,
-	render_ctx: ^Render_Ctx,
+	renderer: ^Renderer,
 	atlas: Atlas_Id,
 	workspace: ^Sprite_Load_Workspace,
 ) {
@@ -318,7 +322,7 @@ sprites_load_atlas :: proc(
 	for rect in rects {
 		item := workspace.items[rect.id]
 		x, y := int(rect.x) + 1, int(rect.y) + 1
-		sprites.regions[rect.id] = {
+		SPRITES.regions[rect.id] = {
 			texture = texture_id,
 			source  = {f32(x), f32(y), f32(item.width), f32(item.height)},
 		}
@@ -333,13 +337,13 @@ sprites_load_atlas :: proc(
 				y,
 				item,
 				&workspace.fonts[font],
-				sprites.fonts[font].codepoints[slot],
+				SPRITES.fonts[font].codepoints[slot],
 				workspace.glyph_pixels,
 			)
 		}
 	}
 
-	render_create_atlas_texture(render_ctx, texture_id, bitmap)
+	render_create_atlas_texture(renderer, texture_id, bitmap)
 }
 
 @(private = "file")
@@ -385,21 +389,39 @@ sprites_rasterize_glyph :: proc(
 	}
 }
 
+// Where a sprite sits in its atlas.
+sprite_region :: proc(sprite: Sprite_Id) -> Sprite_Region {
+	assert(SPRITES.loaded, "sprites_load comes first")
+	return SPRITES.regions[sprite]
+}
+
+// Where a glyph's sprite sits on the pen, and how far it moves it.
+sprite_glyph :: proc(sprite: Sprite_Id) -> Sprite_Glyph {
+	assert(SPRITES.loaded, "sprites_load comes first")
+	return SPRITES.glyphs[sprite]
+}
+
+// A font's ascent, descent and line gap.
+font_info :: proc(font: Font_Id) -> Font_Info {
+	assert(SPRITES.loaded, "sprites_load comes first")
+	return SPRITES.fonts[font].info
+}
+
+// A font's size in pixels: one em.
+font_size :: proc(font: Font_Id) -> f32 {
+	assert(SPRITES.loaded, "sprites_load comes first")
+	return f32(SPRITES.fonts[font].size)
+}
+
 sprite_of_image :: proc(image: Image_Id) -> Sprite_Id {
 	assert(int(image) < IMAGES_MAX)
 	return Sprite_Id(image)
 }
 
-sprite_of_glyph :: proc(
-	sprites: ^Sprites,
-	font: Font_Id,
-	ch: rune,
-) -> (
-	sprite: Sprite_Id,
-	ok: bool,
-) #optional_ok {
+sprite_of_glyph :: proc(font: Font_Id, ch: rune) -> (sprite: Sprite_Id, ok: bool) #optional_ok {
+	assert(SPRITES.loaded, "sprites_load comes first")
 	assert(int(font) < FONTS_MAX)
-	index, found := slice.binary_search(sprites.fonts[font].codepoints[:], ch)
+	index, found := slice.binary_search(SPRITES.fonts[font].codepoints[:], ch)
 	if !found {
 		return {}, false
 	}

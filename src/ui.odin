@@ -37,10 +37,6 @@ UI: struct {
 	style_depth:     int,
 	// Overrides for the next box only
 	style_next:      Ui_Style,
-	// Font metrics, for em sizes
-	sprites:         ^Sprites,
-	// Where box texts are built, measured and drawn
-	text:            ^Text_Ctx,
 	// Global interaction state, by key: a box, or a keyed run of text
 	hot:             Ui_Key,
 	// Owns the mouse from the press until the release, wherever the mouse goes
@@ -230,7 +226,7 @@ ui_px :: proc(value: f32, strictness: f32 = 1) -> Ui_Size {
 // Pixels in multiples of the current font's size, resolved when called.
 ui_em :: proc(value: f32, strictness: f32 = 1) -> Ui_Size {
 	font := ui_style_top().font.? or_else Font_Id(0)
-	return ui_px(value * f32(UI.sprites.fonts[font].size), strictness)
+	return ui_px(value * font_size(font), strictness)
 }
 
 // The size of the box's text, plus its padding.
@@ -396,7 +392,7 @@ ui_box_set_label :: proc(box: ^Ui_Box, label: string) {
 // Gives the box a text made of parts, in the box's font and color where a part sets none.
 @(private = "file")
 ui_box_set_text :: proc(box: ^Ui_Box, parts: []Ui_Text) {
-	text_new(UI.text)
+	text_new()
 	// A Hot_Effects box's text fades with the box; a keyed run fades with its own hover, eased under its key.
 	box_hot_t := box.hot_t if .Hot_Effects in box.flags else 0
 	for part in parts {
@@ -414,18 +410,16 @@ ui_box_set_text :: proc(box: ^Ui_Box, parts: []Ui_Text) {
 		}
 		color += (hot_color - color) * hot_t
 		if image, is_image := part.image.?; is_image {
-			text_add_image(UI.text, image, font, color, tag, part.underline)
+			text_add_image(image, font, color, tag, part.underline)
 		} else {
-			text_add(UI.text, part.text, font, color, tag, part.underline)
+			text_add(part.text, font, color, tag, part.underline)
 		}
 	}
-	box.text = text_end(UI.text)
+	box.text = text_end()
 }
 
-ui_init :: proc(sprites: ^Sprites, text: ^Text_Ctx) {
+ui_init :: proc() {
 	UI = {}
-	UI.sprites = sprites
-	UI.text = text
 }
 
 ui_begin :: proc(viewport: [2]f32) {
@@ -568,7 +562,7 @@ ui_update_interaction :: proc(input: Input) {
 		}
 		if !hot_found && .Hover_Text in box.flags {
 			local := mouse_pos - ui_text_origin(box)
-			if tag := text_tag_at(UI.text, box.text, ui_text_room(box), local); tag != 0 {
+			if tag := text_tag_at(box.text, ui_text_room(box), local); tag != 0 {
 				UI.hot = Ui_Key(tag)
 				UI.hovered_any = true
 				hot_found = true
@@ -809,7 +803,7 @@ ui_layout :: proc() {
 		box := &UI.boxes[UI.box_order[i]]
 		if box.text == 0 || box.size.y.kind != .Text {continue}
 		room := [2]f32{ui_text_room(box).x, math.INF_F32}
-		box.size_computed.y = text_measure(UI.text, box.text, room).y + 2 * box.padding.y
+		box.size_computed.y = text_measure(box.text, room).y + 2 * box.padding.y
 	}
 
 	ui_compute_dependent_sizes(.Y)
@@ -879,7 +873,7 @@ ui_flow_skip :: proc(id: Ui_Id) -> Ui_Id {
 // How far the wheel moves a scrolling box's content, in pixels.
 @(private = "file")
 ui_scroll_from_wheel :: proc(box: ^Ui_Box, wheel: [2]f32) -> [2]f32 {
-	em := f32(UI.sprites.fonts[box.font].size)
+	em := font_size(box.font)
 	// Turning the wheel away from the user reveals what is above.
 	return [2]f32{wheel.x, -wheel.y} * UI_SCROLL_STEP * em
 }
@@ -900,7 +894,7 @@ ui_scroll_flag :: proc(axis: Axis) -> Ui_Box_Flag {
 // Where a box's text starts: left-aligned after the padding, centered vertically, never above the box.
 @(private = "file")
 ui_text_origin :: proc(box: ^Ui_Box) -> [2]f32 {
-	size := text_measure(UI.text, box.text, ui_text_room(box))
+	size := text_measure(box.text, ui_text_room(box))
 	pos := box.pos_computed
 	pos.x += box.padding.x
 	pos.y += max(0, box.size_computed.y - size.y) / 2
@@ -938,7 +932,7 @@ ui_compute_independent_sizes :: proc() {
 				value[axis] = size[axis].value
 			case .Text:
 				// On one line; a narrower final width wraps it and recomputes the height.
-				value[axis] = text_measure(UI.text, box.text, {math.INF_F32, math.INF_F32})[axis] + 2 * box.padding[axis]
+				value[axis] = text_measure(box.text, {math.INF_F32, math.INF_F32})[axis] + 2 * box.padding[axis]
 			}
 		}
 
@@ -1078,7 +1072,7 @@ ui_draw :: proc(ctx: ^Draw_Ctx) {
 			draw_rectangle(ctx, bounds, border, box.radius, box.thickness, SOFTNESS)
 		}
 		if box.text != 0 {
-			text_draw(UI.text, ctx, box.text, ui_text_origin(box), ui_text_room(box), {1, 1, 1, alpha})
+			text_draw(ctx, box.text, ui_text_origin(box), ui_text_room(box), {1, 1, 1, alpha})
 		}
 		if .Focusable in box.flags {
 			focus_t := box.focus_t
@@ -1123,7 +1117,7 @@ UI_SCROLL_PANE :: "scroll pane"
 @(private = "file")
 ui_style_base :: proc() -> Ui_Style {
 	font := Font_Id(0)
-	em := f32(UI.sprites.fonts[font].size)
+	em := font_size(font)
 	return {
 		width = ui_px(10 * em),
 		height = ui_px(1.5 * em),

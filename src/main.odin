@@ -7,10 +7,8 @@ import sdl "vendor:sdl3"
 
 GLOBAL: struct {
 	input:       Input,
-	render_data: Render_Data,
-	render_ctx:  Render_Ctx,
-	sprites:     Sprites,
-	text:        Text_Ctx,
+	render_list: Render_List,
+	renderer:    Renderer,
 }
 
 Font_Name :: enum {
@@ -59,18 +57,17 @@ main :: proc() {
 		return
 	}
 	gl.load_up_to(3, 3, sdl.gl_set_proc_address)
-	render_ctx := &GLOBAL.render_ctx
-	if !render_init(render_ctx) {
+	renderer := &GLOBAL.renderer
+	if !render_init(renderer) {
 		return
 	}
-	defer render_destroy(render_ctx)
+	defer render_destroy(renderer)
 
-	sprites_font_define(&GLOBAL.sprites, Font_Id(Font_Name.Default), "MeathFLF", 24)
-	sprites_font_define(&GLOBAL.sprites, Font_Id(Font_Name.Heading), "MeathFLF", 32)
-	sprites_image_define(&GLOBAL.sprites, Image_Id(Image_Name.Logo), "logo")
-	sprites_load(&GLOBAL.sprites, render_ctx)
-	text_init(&GLOBAL.text, &GLOBAL.sprites)
-	ui_init(&GLOBAL.sprites, &GLOBAL.text)
+	sprites_font_define(Font_Id(Font_Name.Default), "MeathFLF", 24)
+	sprites_font_define(Font_Id(Font_Name.Heading), "MeathFLF", 32)
+	sprites_image_define(Image_Id(Image_Name.Logo), "logo")
+	sprites_load(renderer)
+	ui_init()
 
 	if !sdl.GL_SetSwapInterval(1) {
 		fmt.eprintf("Enabling VSync failed: %s\n", sdl.GetError())
@@ -151,20 +148,19 @@ main :: proc() {
 			draw: Draw_Ctx
 			draw_begin(
 				&draw,
-				&GLOBAL.render_data,
-				&GLOBAL.sprites,
-				span_from_array(&GLOBAL.render_data.instances),
+				&GLOBAL.render_list,
+				span_from_array(&GLOBAL.render_list.instances),
 				{0, 0, f32(logical_width), f32(logical_height)},
 			)
 
-			text_begin(&GLOBAL.text)
+			text_begin()
 			ui_begin({f32(logical_width), f32(logical_height)})
 			demo_build(&demo)
 			ui_end(GLOBAL.input, &draw, dt)
 		}
 
-		render_ctx.view_size = {f32(logical_width), f32(logical_height)}
-		render(render_ctx, GLOBAL.render_data)
+		renderer.view_size = {f32(logical_width), f32(logical_height)}
+		render(renderer, GLOBAL.render_list)
 		sdl.GL_SwapWindow(window)
 	}
 }

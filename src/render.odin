@@ -44,12 +44,12 @@ Render_Instance :: struct {
 	thickness: f32, // Zero fills the shape; positive widths draw an inward border.
 }
 
-Render_Data :: struct {
+Render_List :: struct {
 	keys:      [RENDER_MAX_INSTANCES]Render_Key,
 	instances: [RENDER_MAX_INSTANCES]Render_Instance,
 }
 
-Render_Ctx :: struct {
+Renderer :: struct {
 	program, vao, vbo, white_texture:                              u32,
 	view_uniform: i32,
 	// Logical window dimensions, matching SDL mouse coordinates.
@@ -69,20 +69,20 @@ Render_Order :: struct {
 // src, dst and clip are [x, y, width, height], with a top-left origin.
 // src uses texture pixels; dst, clip, radii and softness use logical pixels.
 // Textures should have their top row at v=0. Colors use straight alpha.
-render :: proc(ctx: ^Render_Ctx, data: Render_Data) {
-	if ctx.view_size.x <= 0 || ctx.view_size.y <= 0 {
+render :: proc(renderer: ^Renderer, list: Render_List) {
+	if renderer.view_size.x <= 0 || renderer.view_size.y <= 0 {
 		return
 	}
-	for key, i in data.keys {
-		ctx.order[i] = {key, i}
+	for key, i in list.keys {
+		renderer.order[i] = {key, i}
 	}
-	slice.sort_by(ctx.order[:], proc(a, b: Render_Order) -> bool {
+	slice.sort_by(renderer.order[:], proc(a, b: Render_Order) -> bool {
 		if a.key.layer != b.key.layer do return a.key.layer < b.key.layer
 		if a.key.sequence != b.key.sequence do return a.key.sequence < b.key.sequence
 		return a.index < b.index
 	})
-	for entry, i in ctx.order {
-		ctx.sorted[i] = data.instances[entry.index]
+	for entry, i in renderer.order {
+		renderer.sorted[i] = list.instances[entry.index]
 	}
 
 	gl.Disable(gl.DEPTH_TEST)
@@ -91,19 +91,19 @@ render :: proc(ctx: ^Render_Ctx, data: Render_Data) {
 	gl.Enable(gl.BLEND)
 	gl.BlendEquation(gl.FUNC_ADD)
 	gl.BlendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
-	gl.UseProgram(ctx.program)
-	gl.Uniform2f(ctx.view_uniform, ctx.view_size.x, ctx.view_size.y)
+	gl.UseProgram(renderer.program)
+	gl.Uniform2f(renderer.view_uniform, renderer.view_size.x, renderer.view_size.y)
 	gl.ActiveTexture(gl.TEXTURE0)
-	gl.BindVertexArray(ctx.vao)
-	gl.BindBuffer(gl.ARRAY_BUFFER, ctx.vbo)
-	gl.BufferData(gl.ARRAY_BUFFER, size_of(ctx.sorted), raw_data(ctx.sorted[:]), gl.STREAM_DRAW)
+	gl.BindVertexArray(renderer.vao)
+	gl.BindBuffer(gl.ARRAY_BUFFER, renderer.vbo)
+	gl.BufferData(gl.ARRAY_BUFFER, size_of(renderer.sorted), raw_data(renderer.sorted[:]), gl.STREAM_DRAW)
 
 	for first := 0; first < RENDER_MAX_INSTANCES; {
 		// Untextured instances sample nothing, so they join a batch of any texture; the first textured one picks it.
 		batch_texture: Texture_Id
 		end := first
 		for end < RENDER_MAX_INSTANCES {
-			texture := ctx.order[end].key.texture
+			texture := renderer.order[end].key.texture
 			if texture != 0 {
 				if batch_texture == 0 {
 					batch_texture = texture
@@ -113,9 +113,9 @@ render :: proc(ctx: ^Render_Ctx, data: Render_Data) {
 			}
 			end += 1
 		}
-		texture := ctx.textures[batch_texture]
+		texture := renderer.textures[batch_texture]
 		assert(batch_texture == 0 || texture != 0, "Texture ID has no registered OpenGL texture")
-		if batch_texture == 0 do texture = ctx.white_texture
+		if batch_texture == 0 do texture = renderer.white_texture
 		gl.BindTexture(gl.TEXTURE_2D, texture)
 		render_bind_instances(first)
 		gl.DrawArraysInstanced(gl.TRIANGLES, 0, 6, i32(end - first))
@@ -157,11 +157,11 @@ render_bind_instances :: proc(first: int) {
 	}
 }
 
-render_destroy :: proc(ctx: ^Render_Ctx) {
-	gl.DeleteTextures(1, &ctx.white_texture)
-	gl.DeleteBuffers(1, &ctx.vbo)
-	gl.DeleteVertexArrays(1, &ctx.vao)
-	gl.DeleteProgram(ctx.program)
+render_destroy :: proc(renderer: ^Renderer) {
+	gl.DeleteTextures(1, &renderer.white_texture)
+	gl.DeleteBuffers(1, &renderer.vbo)
+	gl.DeleteVertexArrays(1, &renderer.vao)
+	gl.DeleteProgram(renderer.program)
 }
 
 render_max_texture_size :: proc() -> int {
@@ -170,11 +170,11 @@ render_max_texture_size :: proc() -> int {
 	return int(size)
 }
 
-render_create_atlas_texture :: proc(ctx: ^Render_Ctx, id: Texture_Id, bitmap: Bitmap) {
+render_create_atlas_texture :: proc(renderer: ^Renderer, id: Texture_Id, bitmap: Bitmap) {
 	assert(id != 0)
 	assert(bitmap.width > 0 && bitmap.height > 0)
 	assert(len(bitmap.pixels) == bitmap.width * bitmap.height)
-	assert(ctx.textures[id] == 0, "Texture ID is already registered")
+	assert(renderer.textures[id] == 0, "Texture ID is already registered")
 
 	texture: u32
 	gl.GenTextures(1, &texture)
@@ -197,7 +197,7 @@ render_create_atlas_texture :: proc(ctx: ^Render_Ctx, id: Texture_Id, bitmap: Bi
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
-	ctx.textures[id] = texture
+	renderer.textures[id] = texture
 }
 
 @(private = "file")
@@ -219,37 +219,37 @@ render_compile_shader :: proc(kind: u32, source: cstring) -> u32 {
 	return shader
 }
 
-render_init :: proc(ctx: ^Render_Ctx) -> bool {
+render_init :: proc(renderer: ^Renderer) -> bool {
 	vertex := render_compile_shader(gl.VERTEX_SHADER, RENDER_VERTEX_SOURCE)
 	if vertex == 0 do return false
 	defer gl.DeleteShader(vertex)
 	fragment := render_compile_shader(gl.FRAGMENT_SHADER, RENDER_FRAGMENT_SOURCE)
 	if fragment == 0 do return false
 	defer gl.DeleteShader(fragment)
-	ctx.program = gl.CreateProgram()
-	gl.AttachShader(ctx.program, vertex)
-	gl.AttachShader(ctx.program, fragment)
-	gl.LinkProgram(ctx.program)
+	renderer.program = gl.CreateProgram()
+	gl.AttachShader(renderer.program, vertex)
+	gl.AttachShader(renderer.program, fragment)
+	gl.LinkProgram(renderer.program)
 	ok: i32
-	gl.GetProgramiv(ctx.program, gl.LINK_STATUS, &ok)
+	gl.GetProgramiv(renderer.program, gl.LINK_STATUS, &ok)
 	if ok == 0 {
 		log: [4096]u8
 		length: i32
-		gl.GetProgramInfoLog(ctx.program, len(log), &length, &log[0])
+		gl.GetProgramInfoLog(renderer.program, len(log), &length, &log[0])
 		fmt.eprintf("Renderer program linking failed: %s\n", string(log[:length]))
-		gl.DeleteProgram(ctx.program)
-		ctx.program = 0
+		gl.DeleteProgram(renderer.program)
+		renderer.program = 0
 		return false
 	}
-	ctx.view_uniform = gl.GetUniformLocation(ctx.program, "view_size")
-	gl.UseProgram(ctx.program)
-	gl.Uniform1i(gl.GetUniformLocation(ctx.program, "image"), 0)
+	renderer.view_uniform = gl.GetUniformLocation(renderer.program, "view_size")
+	gl.UseProgram(renderer.program)
+	gl.Uniform1i(gl.GetUniformLocation(renderer.program, "image"), 0)
 	gl.UseProgram(0)
-	gl.GenVertexArrays(1, &ctx.vao)
-	gl.GenBuffers(1, &ctx.vbo)
+	gl.GenVertexArrays(1, &renderer.vao)
+	gl.GenBuffers(1, &renderer.vbo)
 	// Keep the sampler complete even when the shader takes the untextured path.
-	gl.GenTextures(1, &ctx.white_texture)
-	gl.BindTexture(gl.TEXTURE_2D, ctx.white_texture)
+	gl.GenTextures(1, &renderer.white_texture)
+	gl.BindTexture(gl.TEXTURE_2D, renderer.white_texture)
 	white := [4]u8{255, 255, 255, 255}
 	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, &white)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)

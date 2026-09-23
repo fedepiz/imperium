@@ -61,8 +61,9 @@ Text :: struct {
 	truncated: bool,
 }
 
-Text_Ctx :: struct {
-	sprites:     ^Sprites,
+// The texts of this frame
+@(private = "file")
+TEXTS: struct {
 	texts:       [TEXT_MAX]Text,
 	text_count:  int,
 	runs:        [TEXT_RUNS_MAX]Text_Run,
@@ -77,97 +78,82 @@ Text_Ctx :: struct {
 	open_begin:  int,
 }
 
-text_init :: proc(ctx: ^Text_Ctx, sprites: ^Sprites) {
-	ctx^ = {}
-	ctx.sprites = sprites
-	ctx.text_count = 1
-}
-
 // Forgets every text of the last frame.
-text_begin :: proc(ctx: ^Text_Ctx) {
-	assert(!ctx.open)
-	ctx.text_count = 1
-	ctx.run_count = 0
-	ctx.piece_count = 0
-	ctx.blob_len = 0
+text_begin :: proc() {
+	assert(!TEXTS.open)
+	TEXTS.text_count = 1
+	TEXTS.run_count = 0
+	TEXTS.piece_count = 0
+	TEXTS.blob_len = 0
 }
 
 // Opens a new text; runs added until text_end belong to it.
-text_new :: proc(ctx: ^Text_Ctx) {
-	assert(!ctx.open, "texts cannot be built inside each other")
-	ctx.open = true
-	ctx.open_begin = ctx.run_count
+text_new :: proc() {
+	assert(!TEXTS.open, "texts cannot be built inside each other")
+	TEXTS.open = true
+	TEXTS.open_begin = TEXTS.run_count
 }
 
 // Adds text in a font and color to the open text, tagged for text_tag_at. A full blob keeps what fits.
-text_add :: proc(
-	ctx: ^Text_Ctx,
-	text: string,
-	font: Font_Id,
-	color: [4]f32,
-	tag: u64 = 0,
-	underline := false,
-) {
-	n := copy(ctx.blob[ctx.blob_len:], text)
-	copied := string(ctx.blob[ctx.blob_len:][:n])
-	ctx.blob_len += n
-	text_add_run(ctx, {text = copied, font = font, color = color, tag = tag, underline = underline})
+text_add :: proc(text: string, font: Font_Id, color: [4]f32, tag: u64 = 0, underline := false) {
+	n := copy(TEXTS.blob[TEXTS.blob_len:], text)
+	copied := string(TEXTS.blob[TEXTS.blob_len:][:n])
+	TEXTS.blob_len += n
+	text_add_run({text = copied, font = font, color = color, tag = tag, underline = underline})
 }
 
 // Adds an image to the open text, one line of font tall, tinted by color and tagged for text_tag_at.
 text_add_image :: proc(
-	ctx: ^Text_Ctx,
 	image: Image_Id,
 	font: Font_Id,
 	color: [4]f32,
 	tag: u64 = 0,
 	underline := false,
 ) {
-	text_add_run(ctx, {font = font, color = color, image = image, tag = tag, underline = underline})
+	text_add_run({font = font, color = color, image = image, tag = tag, underline = underline})
 }
 
 // Closes the open text and returns its id.
-text_end :: proc(ctx: ^Text_Ctx) -> Text_Id {
-	assert(ctx.open)
-	assert(ctx.text_count < TEXT_MAX)
-	ctx.open = false
-	id := Text_Id(ctx.text_count)
-	ctx.text_count += 1
-	ctx.texts[id] = {
-		runs = span_from_range(ctx.open_begin, ctx.run_count),
+text_end :: proc() -> Text_Id {
+	assert(TEXTS.open)
+	assert(TEXTS.text_count < TEXT_MAX)
+	TEXTS.open = false
+	id := Text_Id(TEXTS.text_count)
+	TEXTS.text_count += 1
+	TEXTS.texts[id] = {
+		runs = span_from_range(TEXTS.open_begin, TEXTS.run_count),
 	}
 	return id
 }
 
 // A text of one string in one font and color.
-text_from_string :: proc(ctx: ^Text_Ctx, text: string, font: Font_Id, color: [4]f32) -> Text_Id {
-	text_new(ctx)
-	text_add(ctx, text, font, color)
-	return text_end(ctx)
+text_from_string :: proc(text: string, font: Font_Id, color: [4]f32) -> Text_Id {
+	text_new()
+	text_add(text, font, color)
+	return text_end()
 }
 
 // The size of the text laid out in room: lines no wider than room.x, cut short with an ellipsis below room.y.
 // An infinite room leaves that axis unbounded.
-text_measure :: proc(ctx: ^Text_Ctx, id: Text_Id, room: [2]f32) -> [2]f32 {
-	return text_laid_out(ctx, id, room).size
+text_measure :: proc(id: Text_Id, room: [2]f32) -> [2]f32 {
+	return text_laid_out(id, room).size
 }
 
 // Whether laying the text out in room left some of it out.
-text_truncated :: proc(ctx: ^Text_Ctx, id: Text_Id, room: [2]f32) -> bool {
-	return text_laid_out(ctx, id, room).truncated
+text_truncated :: proc(id: Text_Id, room: [2]f32) -> bool {
+	return text_laid_out(id, room).truncated
 }
 
 // Draws the text laid out in room, its top-left at position, colors multiplied by tint.
 text_draw :: proc(
-	ctx: ^Text_Ctx,
 	draw: ^Draw_Ctx,
 	id: Text_Id,
 	position: [2]f32,
 	room: [2]f32,
 	tint := [4]f32{1, 1, 1, 1},
 ) {
-	text := text_laid_out(ctx, id, room)
-	for piece in ctx.pieces[text.pieces.begin:][:text.pieces.len] {
+	text := text_laid_out(id, room)
+	for piece in TEXTS.pieces[text.pieces.begin:][:text.pieces.len] {
 		if piece.underline.z > 0 {
 			underline := piece.underline
 			underline.xy += position
@@ -182,9 +168,9 @@ text_draw :: proc(
 }
 
 // The tag of the run under point, relative to the text's top-left, laid out in room; 0 over untagged text or nothing.
-text_tag_at :: proc(ctx: ^Text_Ctx, id: Text_Id, room: [2]f32, point: [2]f32) -> u64 {
-	text := text_laid_out(ctx, id, room)
-	for piece in ctx.pieces[text.pieces.begin:][:text.pieces.len] {
+text_tag_at :: proc(id: Text_Id, room: [2]f32, point: [2]f32) -> u64 {
+	text := text_laid_out(id, room)
+	for piece in TEXTS.pieces[text.pieces.begin:][:text.pieces.len] {
 		if piece.tag != 0 && rect_contains(piece.cell, point) {
 			return piece.tag
 		}
@@ -193,22 +179,26 @@ text_tag_at :: proc(ctx: ^Text_Ctx, id: Text_Id, room: [2]f32, point: [2]f32) ->
 }
 
 @(private = "file")
-text_add_run :: proc(ctx: ^Text_Ctx, run: Text_Run) {
-	assert(ctx.open, "runs are added between text_new and text_end")
-	assert(ctx.run_count < TEXT_RUNS_MAX)
-	ctx.runs[ctx.run_count] = run
-	ctx.run_count += 1
+text_add_run :: proc(run: Text_Run) {
+	assert(TEXTS.open, "runs are added between text_new and text_end")
+	assert(TEXTS.run_count < TEXT_RUNS_MAX)
+	TEXTS.runs[TEXTS.run_count] = run
+	TEXTS.run_count += 1
 }
 
 // The text, laid out in room unless it already was. A layout that left nothing out serves any room as wide and at least as tall.
 @(private = "file")
-text_laid_out :: proc(ctx: ^Text_Ctx, id: Text_Id, room: [2]f32) -> ^Text {
-	text := &ctx.texts[id]
-	fits := text.laid_out && text.room.x == room.x && !text.truncated && text.size.y <= room.y + TEXT_FIT_SLACK
+text_laid_out :: proc(id: Text_Id, room: [2]f32) -> ^Text {
+	text := &TEXTS.texts[id]
+	fits :=
+		text.laid_out &&
+		text.room.x == room.x &&
+		!text.truncated &&
+		text.size.y <= room.y + TEXT_FIT_SLACK
 	if !fits && (!text.laid_out || text.room != room) {
 		text.laid_out = true
 		text.room = room
-		text_layout(ctx, text)
+		text_layout(text)
 	}
 	return text
 }
@@ -216,7 +206,6 @@ text_laid_out :: proc(ctx: ^Text_Ctx, id: Text_Id, room: [2]f32) -> ^Text {
 // Where the layout of one text stands: the pen, the line being filled, and the last line closed.
 @(private = "file")
 Text_Pen :: struct {
-	ctx:            ^Text_Ctx,
 	text:           ^Text,
 	room:           [2]f32,
 	// Pen position on the line, from the line's left edge
@@ -253,28 +242,26 @@ Text_Pen :: struct {
 // Each line sits on one baseline under its tallest run. LF starts a line; CR is ignored.
 // The first line past the room's height is left out with everything after it, and the line before it ends in an ellipsis.
 @(private = "file")
-text_layout :: proc(ctx: ^Text_Ctx, text: ^Text) {
+text_layout :: proc(text: ^Text) {
 	pen := Text_Pen {
-		ctx            = ctx,
 		text           = text,
 		room           = text.room,
-		line_begin     = ctx.piece_count,
+		line_begin     = TEXTS.piece_count,
 		word_start     = true,
 		separators_run = -1,
 	}
 	text.size = {}
 	text.truncated = false
-	text.pieces = {ctx.piece_count, 0}
+	text.pieces = {TEXTS.piece_count, 0}
 	width := text.room.x
-	runs := ctx.runs[text.runs.begin:][:text.runs.len]
-	sprites := ctx.sprites
+	runs := TEXTS.runs[text.runs.begin:][:text.runs.len]
 
 	runs_loop: for run, run_index in runs {
 		if image, is_image := run.image.?; is_image {
 			// An image is a word of its own, one line of its font tall.
-			info := sprites.fonts[run.font].info
+			info := font_info(run.font)
 			sprite := sprite_of_image(image)
-			source := sprites.regions[sprite].source
+			source := sprite_region(sprite).source
 			height := info.ascent - info.descent
 			image_width := source.z * height / source.w if source.w > 0 else 0
 			gap := text_pen_word(&pen, image_width, run_index, run.tag)
@@ -299,19 +286,19 @@ text_layout :: proc(ctx: ^Text_Ctx, text: ^Text) {
 				pen.word_start = true
 			case ' ', '\t':
 				text_pen_touch(&pen, run.font)
-				if sprite, found := sprite_of_glyph(sprites, run.font, ch); found {
-					pen.separators += sprites.glyphs[sprite].advance
+				if sprite, found := sprite_of_glyph(run.font, ch); found {
+					pen.separators += sprite_glyph(sprite).advance
 				}
 				pen.separators_run = run_index
 				pen.separators_tag = run.tag
 				pen.word_start = true
 			case:
-				sprite, found := sprite_of_glyph(sprites, run.font, ch)
+				sprite, found := sprite_of_glyph(run.font, ch)
 				glyph: Sprite_Glyph
-				if found {glyph = sprites.glyphs[sprite]}
+				if found {glyph = sprite_glyph(sprite)}
 				gap: f32
 				if pen.word_start {
-					word_width := text_word_width(ctx, runs, run_index, offset)
+					word_width := text_word_width(runs, run_index, offset)
 					gap = text_pen_word(&pen, word_width, run_index, run.tag)
 					pen.word_start = false
 				} else if pen.x > 0 && pen.x + glyph.advance > width + TEXT_FIT_SLACK {
@@ -338,12 +325,12 @@ text_layout :: proc(ctx: ^Text_Ctx, text: ^Text) {
 	if pen.any && !pen.stopped {
 		text_pen_close(&pen)
 	}
-	text.pieces.len = ctx.piece_count - text.pieces.begin
+	text.pieces.len = TEXTS.piece_count - text.pieces.begin
 }
 
 // The width of the word starting at offset in runs[run_index], which may carry on into later runs.
 @(private = "file")
-text_word_width :: proc(ctx: ^Text_Ctx, runs: []Text_Run, run_index, offset: int) -> f32 {
+text_word_width :: proc(runs: []Text_Run, run_index, offset: int) -> f32 {
 	width: f32
 	start := offset
 	for run in runs[run_index:] {
@@ -354,8 +341,8 @@ text_word_width :: proc(ctx: ^Text_Ctx, runs: []Text_Run, run_index, offset: int
 				return width
 			case '\r':
 			case:
-				if sprite, found := sprite_of_glyph(ctx.sprites, run.font, ch); found {
-					width += ctx.sprites.glyphs[sprite].advance
+				if sprite, found := sprite_of_glyph(run.font, ch); found {
+					width += sprite_glyph(sprite).advance
 				}
 			}
 		}
@@ -367,7 +354,7 @@ text_word_width :: proc(ctx: ^Text_Ctx, runs: []Text_Run, run_index, offset: int
 // Makes the line at least as tall as font.
 @(private = "file")
 text_pen_touch :: proc(pen: ^Text_Pen, font: Font_Id) {
-	info := pen.ctx.sprites.fonts[font].info
+	info := font_info(font)
 	pen.ascent = max(pen.ascent, info.ascent)
 	pen.descent = min(pen.descent, info.descent)
 	pen.line_gap = max(pen.line_gap, info.line_gap)
@@ -400,7 +387,7 @@ text_pen_line :: proc(pen: ^Text_Pen, wrapped: bool) {
 	pen.line_top += pen.ascent - pen.descent + pen.line_gap
 	pen.x, pen.separators = 0, 0
 	pen.ascent, pen.descent, pen.line_gap = 0, 0, 0
-	pen.line_begin = pen.ctx.piece_count
+	pen.line_begin = TEXTS.piece_count
 	pen.line_wrapped = wrapped
 }
 
@@ -414,7 +401,7 @@ text_pen_close :: proc(pen: ^Text_Pen) {
 		return
 	}
 	baseline := pen.line_top + pen.ascent
-	for &piece in pen.ctx.pieces[pen.line_begin:pen.ctx.piece_count] {
+	for &piece in TEXTS.pieces[pen.line_begin:TEXTS.piece_count] {
 		piece.rect.y += baseline
 		piece.cell.y = pen.line_top
 		piece.cell.w = pen.ascent - pen.descent
@@ -424,7 +411,7 @@ text_pen_close :: proc(pen: ^Text_Pen) {
 	pen.text.size.y = bottom
 	pen.lines += 1
 	pen.last_begin = pen.line_begin
-	pen.last_end = pen.ctx.piece_count
+	pen.last_end = TEXTS.piece_count
 	pen.last_top = pen.line_top
 	pen.last_ascent = pen.ascent
 	pen.last_descent = pen.descent
@@ -434,36 +421,39 @@ text_pen_close :: proc(pen: ^Text_Pen) {
 // The ellipsis takes the font, color, tag and underline of the piece it follows.
 @(private = "file")
 text_pen_truncate :: proc(pen: ^Text_Pen) {
-	ctx := pen.ctx
 	pen.stopped = true
 	pen.text.truncated = true
-	ctx.piece_count = pen.last_end
+	TEXTS.piece_count = pen.last_end
 
 	// Pieces dropped for a full table leave nothing to follow; the first run then gives the look.
 	like: Text_Piece
 	if pen.last_end > pen.last_begin {
-		like = ctx.pieces[pen.last_end - 1]
+		like = TEXTS.pieces[pen.last_end - 1]
 	} else if pen.text.runs.len > 0 {
-		run := ctx.runs[pen.text.runs.begin]
-		like = {font = run.font, color = run.color, tag = run.tag}
+		run := TEXTS.runs[pen.text.runs.begin]
+		like = {
+			font  = run.font,
+			color = run.color,
+			tag   = run.tag,
+		}
 	}
-	dot, found := sprite_of_glyph(ctx.sprites, like.font, '.')
+	dot, found := sprite_of_glyph(like.font, '.')
 	glyph: Sprite_Glyph
-	if found {glyph = ctx.sprites.glyphs[dot]}
+	if found {glyph = sprite_glyph(dot)}
 	ellipsis_width := glyph.advance * f32(len(TEXT_ELLIPSIS))
 
 	x: f32
-	for ctx.piece_count > pen.last_begin {
-		last := ctx.pieces[ctx.piece_count - 1]
+	for TEXTS.piece_count > pen.last_begin {
+		last := TEXTS.pieces[TEXTS.piece_count - 1]
 		x = last.cell.x + last.cell.z
 		if x + ellipsis_width <= pen.room.x + TEXT_FIT_SLACK {break}
-		ctx.piece_count -= 1
+		TEXTS.piece_count -= 1
 		x = 0
 	}
 
 	baseline := pen.last_top + pen.last_ascent
 	for _ in TEXT_ELLIPSIS {
-		if ctx.piece_count >= TEXT_PIECES_MAX {break}
+		if TEXTS.piece_count >= TEXT_PIECES_MAX {break}
 		piece := Text_Piece {
 			sprite = dot,
 			rect   = {x + glyph.offset.x, baseline + glyph.offset.y, glyph.size.x, glyph.size.y},
@@ -476,8 +466,8 @@ text_pen_truncate :: proc(pen: ^Text_Pen) {
 		if like.underline.z > 0 {
 			piece.underline = {x, like.underline.y, glyph.advance, like.underline.w}
 		}
-		ctx.pieces[ctx.piece_count] = piece
-		ctx.piece_count += 1
+		TEXTS.pieces[TEXTS.piece_count] = piece
+		TEXTS.piece_count += 1
 		x += glyph.advance
 	}
 	pen.text.size.x = max(pen.text.size.x, x)
@@ -493,8 +483,7 @@ text_pen_piece :: proc(
 	rect: [4]f32,
 	cell_x, cell_width: f32,
 ) {
-	ctx := pen.ctx
-	if ctx.piece_count >= TEXT_PIECES_MAX {return}
+	if TEXTS.piece_count >= TEXT_PIECES_MAX {return}
 	piece := Text_Piece {
 		sprite = sprite,
 		rect   = rect,
@@ -505,10 +494,11 @@ text_pen_piece :: proc(
 	}
 	if run.underline {
 		// Thickness and distance below the baseline follow the font's size, in whole pixels.
-		em := f32(ctx.sprites.fonts[run.font].size)
+		em := font_size(run.font)
 		thickness := max(1, math.round(em / 16))
 		piece.underline = {cell_x, math.round(em / 12), cell_width, thickness}
 	}
-	ctx.pieces[ctx.piece_count] = piece
-	ctx.piece_count += 1
+	TEXTS.pieces[TEXTS.piece_count] = piece
+	TEXTS.piece_count += 1
 }
+
