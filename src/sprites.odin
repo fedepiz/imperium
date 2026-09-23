@@ -107,7 +107,7 @@ sprites_font_define :: proc(sprites: ^Sprites, id: Font_Id, name: string, size: 
 
 sprites_image_define :: proc(sprites: ^Sprites, id: Image_Id, name: string) {
 	sprites.images[id] = {
-		name = "logo",
+		name = name,
 	}
 }
 
@@ -407,3 +407,4 @@ sprite_of_glyph :: proc(
 	sprite_index := IMAGES_MAX + int(font) * FONT_GLYPHS_MAX + index
 	return Sprite_Id(sprite_index), true
 }
+

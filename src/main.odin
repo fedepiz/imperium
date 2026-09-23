@@ -227,6 +227,8 @@ MIDNIGHT_PRIMARY :: [4]f32{0.23, 0.39, 0.61, 1}
 MIDNIGHT_DANGER :: [4]f32{0.48, 0.15, 0.19, 1}
 // Text drawn on the saturated primary and danger fills
 MIDNIGHT_TEXT_ON_FILL :: [4]f32{1, 1, 1, 1}
+// Text while hovered
+MIDNIGHT_HOT_TEXT :: [4]f32{1, 1, 1, 1}
 
 // Pushed over the whole demo: every box inherits these colors.
 MIDNIGHT :: Ui_Style {
@@ -236,6 +238,7 @@ MIDNIGHT :: Ui_Style {
 	border            = MIDNIGHT_BORDER,
 	focus_border      = MIDNIGHT_GOLD,
 	text_color        = MIDNIGHT_TEXT,
+	hot_text_color    = MIDNIGHT_HOT_TEXT,
 	radius            = 5,
 	thickness         = 1,
 }
@@ -293,7 +296,11 @@ demo_build :: proc(demo: ^Demo) {
 							demo_label("Lorem ipsum dolor sit amet.")
 							demo_label(
 								"Consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
-								{width = ui_em(14), height = ui_text_dim(), text_color = MIDNIGHT_MUTED},
+								{
+									width = ui_em(14),
+									height = ui_text_dim(),
+									text_color = MIDNIGHT_MUTED,
+								},
 							)
 						}
 					}
@@ -305,12 +312,33 @@ demo_build :: proc(demo: ^Demo) {
 					demo_checkbox("Locked", &demo.locked)
 					demo_button("Guarded", {disabled = demo.locked})
 				}
-				demo_label("Sed do eiusmod tempor incididunt.", MIDNIGHT_MUTED_TEXT)
+				ui_label_text(
+					{
+						{text = "Sed do eiusmod "},
+						{text = "tempor", color = MIDNIGHT_GOLD, key = "tempor", underline = true},
+						{text = " incididunt."},
+					},
+					{width = ui_text_dim(), text_color = MIDNIGHT_MUTED},
+				)
+				if ui_signal("tempor").hovered {
+					if ui_tooltip(MIDNIGHT_PANEL_STYLE) {
+						demo_label("Lorem ipsum dolor sit amet.")
+					}
+				}
 			}
 
 			if ui_panel("styles", MIDNIGHT_PANEL_STYLE) {
 				demo_label("Styles", MIDNIGHT_HEADING)
-				demo_label("Ut enim ad minim veniam.")
+				ui_label_text(
+					{
+						{text = "Ut enim "},
+						{image = Image_Id(Image_Name.Logo)},
+						{text = " ad minim "},
+						{text = "veniam", color = MIDNIGHT_GOLD},
+						{text = "."},
+					},
+					{width = ui_text_dim()},
+				)
 				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
 					demo_button("Ordinary")
 					demo_button("Primary", MIDNIGHT_PRIMARY_BUTTON)
@@ -359,3 +387,4 @@ demo_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Si
 	ui_style_next({width = ui_fit(), padding = [2]f32{10, 0}})
 	return ui_checkbox(label, value, style)
 }
+

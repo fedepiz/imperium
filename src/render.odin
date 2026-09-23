@@ -51,7 +51,7 @@ Render_Data :: struct {
 
 Render_Ctx :: struct {
 	program, vao, vbo, white_texture:                              u32,
-	view_uniform, textured_uniform: i32,
+	view_uniform: i32,
 	// Logical window dimensions, matching SDL mouse coordinates.
 	view_size:                                                     [2]f32,
 	// Borrowed OpenGL texture handles. Slot zero always means untextured.
@@ -99,17 +99,24 @@ render :: proc(ctx: ^Render_Ctx, data: Render_Data) {
 	gl.BufferData(gl.ARRAY_BUFFER, size_of(ctx.sorted), raw_data(ctx.sorted[:]), gl.STREAM_DRAW)
 
 	for first := 0; first < RENDER_MAX_INSTANCES; {
-		key := ctx.order[first].key
-		end := first + 1
-		for end < RENDER_MAX_INSTANCES &&
-		    ctx.order[end].key.texture == key.texture {
+		// Untextured instances sample nothing, so they join a batch of any texture; the first textured one picks it.
+		batch_texture: Texture_Id
+		end := first
+		for end < RENDER_MAX_INSTANCES {
+			texture := ctx.order[end].key.texture
+			if texture != 0 {
+				if batch_texture == 0 {
+					batch_texture = texture
+				} else if texture != batch_texture {
+					break
+				}
+			}
 			end += 1
 		}
-		texture := ctx.textures[key.texture]
-		assert(key.texture == 0 || texture != 0, "Texture ID has no registered OpenGL texture")
-		if key.texture == 0 do texture = ctx.white_texture
+		texture := ctx.textures[batch_texture]
+		assert(batch_texture == 0 || texture != 0, "Texture ID has no registered OpenGL texture")
+		if batch_texture == 0 do texture = ctx.white_texture
 		gl.BindTexture(gl.TEXTURE_2D, texture)
-		gl.Uniform1i(ctx.textured_uniform, i32(key.texture != 0))
 		render_bind_instances(first)
 		gl.DrawArraysInstanced(gl.TRIANGLES, 0, 6, i32(end - first))
 		first = end
@@ -235,7 +242,6 @@ render_init :: proc(ctx: ^Render_Ctx) -> bool {
 		return false
 	}
 	ctx.view_uniform = gl.GetUniformLocation(ctx.program, "view_size")
-	ctx.textured_uniform = gl.GetUniformLocation(ctx.program, "textured")
 	gl.UseProgram(ctx.program)
 	gl.Uniform1i(gl.GetUniformLocation(ctx.program, "image"), 0)
 	gl.UseProgram(0)
@@ -296,7 +302,6 @@ void main() {
 @(private = "file")
 RENDER_FRAGMENT_SOURCE: cstring = `#version 330 core
 uniform sampler2D image;
-uniform bool textured;
 in vec2 local_position;
 flat in vec4 rect_src;
 flat in vec2 rect_size;
@@ -312,7 +317,8 @@ void main() {
     vec2 t = local_position / rect_size;
     vec4 color = mix(mix(colors[0], colors[1], t.x),
                      mix(colors[3], colors[2], t.x), t.y);
-    if (textured) {
+    // Only instances with a source rect sample; the rest ignore whatever texture their batch binds.
+    if (rect_src.z > 0.0) {
         vec2 uv = (rect_src.xy + t * rect_src.zw) / vec2(textureSize(image, 0));
         color *= texture(image, uv);
     }

@@ -42,12 +42,7 @@ draw_clip_push :: proc(ctx: ^Draw_Ctx, rect: [4]f32) {
 	parent := draw_clip_current(ctx)
 	ctx.clip_depth += 1
 	if ctx.clip_depth < DRAW_CLIP_DEPTH_MAX {
-		lo := [2]f32{max(rect.x, parent.x), max(rect.y, parent.y)}
-		hi := [2]f32 {
-			min(rect.x + rect.z, parent.x + parent.z),
-			min(rect.y + rect.w, parent.y + parent.w),
-		}
-		ctx.clip_stack[ctx.clip_depth] = {lo.x, lo.y, max(hi.x - lo.x, 0), max(hi.y - lo.y, 0)}
+		ctx.clip_stack[ctx.clip_depth] = rect_intersect(rect, parent)
 	}
 }
 

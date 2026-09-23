@@ -8,6 +8,8 @@ import "vendor:sdl3"
 // Maximum number of ui boxes supported by the system
 UI_BOX_MAX :: 2048
 UI_DEPTH_MAX :: 32
+// Maximum number of keyed runs of text in one frame
+UI_TEXT_KEYS_MAX :: 1024
 // Maximum number of animated values alive at once
 UI_ANIM_MAX :: 1024
 
@@ -41,17 +43,20 @@ UI: struct {
 	sprites:         ^Sprites,
 	// Where box texts are built, measured and drawn
 	text:            ^Text_Ctx,
-	// Global interaction state
-	hot_box:         Ui_Key,
+	// Global interaction state, by key: a box, or a keyed run of text
+	hot:             Ui_Key,
 	// Owns the mouse from the press until the release, wherever the mouse goes
-	active_box:      Ui_Key,
+	active:          Ui_Key,
 	// Only set for the frame the press happened or the release completed a click
 	pressed:         Ui_Key,
 	// Takes a press on a focusable box and keeps it until a press lands anywhere else
-	focus_box:       Ui_Key,
+	focus:           Ui_Key,
 	// The mouse as of the last ui_end, and where the press that made the active box happened
 	mouse:           [2]f32,
 	drag_start:      [2]f32,
+	// Keys of the runs of text built this frame, which take the mouse like boxes do
+	text_keys:       [UI_TEXT_KEYS_MAX]Ui_Key,
+	text_key_count:  int,
 	// Wheel movement in the last ui_end, in notches
 	wheel:           [2]f32,
 	// The last ui_end saw a left press, wherever it landed
@@ -99,7 +104,7 @@ Ui_Box_Flag :: enum {
 	Border,
 	// Takes part in mouse hit testing; the box needs a key
 	Clickable,
-	// Fades the background toward hot_background and active_background while hovered and held
+	// Fades the background toward hot_background and active_background while hovered and held, and the text toward hot_text_color
 	Hot_Effects,
 	// A press on the box gives it focus, drawn as a ring
 	Focusable,
@@ -110,6 +115,8 @@ Ui_Box_Flag :: enum {
 	Scroll_Y,
 	// Out of the flow: the parent neither sizes around the box nor places it; it sits at position from the parent's corner
 	Floating,
+	// Its text has keyed runs, which take the mouse like boxes; set by the box's text
+	Hover_Text,
 }
 
 // Distance moved per wheel notch, in multiples of the scrolled box's font size
@@ -132,6 +139,8 @@ Ui_Style :: struct {
 	radius:            Maybe(f32),
 	font:              Maybe(Font_Id),
 	text_color:        Maybe([4]f32),
+	// Text faded toward while hovered: a Hot_Effects box's own, and keyed runs of text
+	hot_text_color:    Maybe([4]f32),
 	// Sets or clears Ui_Box_Flag.Disabled; a disabled parent still disables its children
 	disabled:          Maybe(bool),
 	// Where a floating box's top-left corner sits, from its parent's
@@ -168,6 +177,7 @@ Ui_Box :: struct {
 	text:              Text_Id,
 	font:              Font_Id,
 	text_color:        [4]f32,
+	hot_text_color:    [4]f32,
 	// Layout results: until this frame's layout runs, they are last frame's
 	pos_computed:      [2]f32,
 	size_computed:     [2]f32,
@@ -337,6 +347,11 @@ Ui_Anim_Hashtable :: Ui_Hashtable(Ui_Anim_Id, ANIM_HASH_CAPACITY)
 ui_anim :: proc(label: string, target: f32, initial: f32 = 0) -> f32 {
 	key := ui_key_from_string(label)
 	assert(key != UI_KEY_NIL, "animated values need a non-empty label")
+	return ui_anim_from_key(key, target, initial)
+}
+
+@(private = "file")
+ui_anim_from_key :: proc(key: Ui_Key, target: f32, initial: f32 = 0) -> f32 {
 	id := ui_hashtable_find(&UI.anim_hash_table, key)
 	if id == 0 {
 		assert(UI.anim_free_count > 0)
@@ -378,9 +393,41 @@ ui_box_alloc :: proc(key: Ui_Key) -> Ui_Id {
 
 // Gives the box a text in its font and color, showing the label up to any "##".
 @(private = "file")
-ui_box_text :: proc(box: ^Ui_Box, label: string) {
+ui_box_set_label :: proc(box: ^Ui_Box, label: string) {
 	head, _, _ := strings.partition(label, "##")
-	box.text = text_from_string(UI.text, head, box.font, box.text_color)
+	ui_box_set_text(box, {Ui_Text{text = head}})
+}
+
+// Gives the box a text made of parts, in the box's font and color where a part sets none.
+@(private = "file")
+ui_box_set_text :: proc(box: ^Ui_Box, parts: []Ui_Text) {
+	text_new(UI.text)
+	// A Hot_Effects box's text fades with the box; a keyed run fades with its own hover, eased under its key.
+	box_hot_t := box.hot_t if .Hot_Effects in box.flags else 0
+	for part in parts {
+		font := part.font.? or_else box.font
+		color := part.color.? or_else box.text_color
+		hot_color := part.hot_color.? or_else box.hot_text_color
+		hot_t := box_hot_t
+		// A keyed run's key is its tag; runs of disabled boxes take no mouse.
+		tag: u64
+		if len(part.key) > 0 && .Disabled not_in box.flags {
+			key := ui_key_from_string(part.key)
+			assert(UI.text_key_count < UI_TEXT_KEYS_MAX)
+			UI.text_keys[UI.text_key_count] = key
+			UI.text_key_count += 1
+			box.flags += {.Hover_Text}
+			tag = u64(key)
+			hot_t = ui_anim_from_key(key, 1 if UI.hot == key else 0)
+		}
+		color += (hot_color - color) * hot_t
+		if image, is_image := part.image.?; is_image {
+			text_add_image(UI.text, image, font, color, tag, part.underline)
+		} else {
+			text_add(UI.text, part.text, font, color, tag, part.underline)
+		}
+	}
+	box.text = text_end(UI.text)
 }
 
 ui_init :: proc(sprites: ^Sprites, text: ^Text_Ctx) {
@@ -399,6 +446,8 @@ ui_begin :: proc(viewport: [2]f32) {
 
 	UI.style_depth = 0
 	UI.style_next = {}
+
+	UI.text_key_count = 0
 
 	// Keyed boxes built last frame keep their slot and are ready to be built again; the rest are freed.
 	UI.boxes[0] = {}
@@ -470,9 +519,9 @@ ui_end :: proc(input: Input, draw_ctx: ^Draw_Ctx, dt: f32) {
 		key := box.key
 		if key == {} {continue}
 		rate := 1 - math.exp(-16 * dt)
-		box.hot_t += ((key == UI.hot_box ? 1 : 0) - box.hot_t) * rate
-		box.active_t += ((key == UI.active_box ? 1 : 0) - box.active_t) * rate
-		box.focus_t += ((key == UI.focus_box ? 1 : 0) - box.focus_t) * rate
+		box.hot_t += ((key == UI.hot ? 1 : 0) - box.hot_t) * rate
+		box.active_t += ((key == UI.active ? 1 : 0) - box.active_t) * rate
+		box.focus_t += ((key == UI.focus ? 1 : 0) - box.focus_t) * rate
 		disabled := .Disabled in box.flags
 		box.disabled_t += ((disabled ? 1 : 0) - box.disabled_t) * rate
 
@@ -504,32 +553,45 @@ ui_update_interaction :: proc(input: Input) {
 	for i := 0; i < UI.box_order_count; i += 1 {
 		box := &UI.boxes[UI.box_order[i]]
 		if box.key == UI_KEY_NIL || .Disabled in box.flags {continue}
-		active_seen |= box.key == UI.active_box
-		focus_seen |= box.key == UI.focus_box
+		active_seen |= box.key == UI.active
+		focus_seen |= box.key == UI.focus
+	}
+	for key in UI.text_keys[:UI.text_key_count] {
+		active_seen |= key == UI.active
+		focus_seen |= key == UI.focus
 	}
 	if !active_seen {
-		UI.active_box = {}
+		UI.active = {}
 	}
 	if !focus_seen {
-		UI.focus_box = {}
+		UI.focus = {}
 	}
 
 	mouse_pos := input.pos
 	UI.mouse = mouse_pos
 	UI.wheel = input.wheel
-	UI.hot_box = {}
+	UI.hot = {}
 	UI.hovered_any = false
 	hot_focusable := false
 	// With the mouse outside the window, nothing is under it.
 	for i := UI.box_order_count; i > 0 && input.pos_is_valid; i -= 1 {
 		box := &UI.boxes[UI.box_order[i - 1]]
+		// Hovering over interactive text
+		if .Hover_Text in box.flags && rect_contains(box.clip, mouse_pos) {
+			local := mouse_pos - ui_text_origin(box)
+			if tag := text_tag_at(UI.text, box.text, ui_text_room(box), local); tag != 0 {
+				UI.hot = Ui_Key(tag)
+				UI.hovered_any = true
+				break
+			}
+		}
 		if .Clickable not_in box.flags {continue}
 		assert(box.key != UI_KEY_NIL, "clickable boxes need a key to receive signals")
 		if rect_contains(box.clip, mouse_pos) {
 			UI.hovered_any = true
 			// A disabled box stops the search without becoming hot, so the mouse reaches nothing.
 			if .Disabled not_in box.flags {
-				UI.hot_box = box.key
+				UI.hot = box.key
 				hot_focusable = .Focusable in box.flags
 			}
 			break
@@ -567,23 +629,23 @@ ui_update_interaction :: proc(input: Input) {
 	UI.pressed_any = bool(left_pressed)
 
 	UI.pressed = {}
-	if UI.active_box != UI_KEY_NIL {
+	if UI.active != UI_KEY_NIL {
 		// While something is held, nothing else reacts to the mouse.
-		if UI.hot_box != UI.active_box {
-			UI.hot_box = {}
+		if UI.hot != UI.active {
+			UI.hot = {}
 		}
 		if left_released {
-			UI.active_box = {}
+			UI.active = {}
 		}
-	} else if left_pressed && UI.hot_box != UI_KEY_NIL {
-		UI.active_box = UI.hot_box
-		UI.pressed = UI.hot_box
+	} else if left_pressed && UI.hot != UI_KEY_NIL {
+		UI.active = UI.hot
+		UI.pressed = UI.hot
 		UI.drag_start = mouse_pos
 	}
 
 	// Any press moves focus: to the pressed box if it takes focus, otherwise away.
 	if left_pressed {
-		UI.focus_box = UI.hot_box if hot_focusable else {}
+		UI.focus = UI.hot if hot_focusable else {}
 	}
 
 }
@@ -630,13 +692,23 @@ ui_box_make :: proc(key: Ui_Key, forced: Ui_Style) -> (Ui_Id, Ui_Signal) {
 		p_box.child_last = id
 	}
 
-	// Unkeyed boxes cannot be told apart between frames, so they never get a signal.
+	return id, ui_signal_from_key(key)
+}
+
+// The signal of whatever carries the label's key in the current scope: a box, or a keyed run of text.
+ui_signal :: proc(label: string) -> Ui_Signal {
+	return ui_signal_from_key(ui_key_from_string(label))
+}
+
+// Unkeyed things cannot be told apart between frames, so they never get a signal.
+@(private = "file")
+ui_signal_from_key :: proc(key: Ui_Key) -> Ui_Signal {
 	signal: Ui_Signal
 	if key != UI_KEY_NIL {
-		signal.hovered = UI.hot_box == key
+		signal.hovered = UI.hot == key
 		signal.pressed = UI.pressed == key
-		signal.held = UI.active_box == key
-		signal.focused = UI.focus_box == key
+		signal.held = UI.active == key
+		signal.focused = UI.focus == key
 		if signal.held {
 			signal.drag = UI.mouse - UI.drag_start
 		}
@@ -644,7 +716,7 @@ ui_box_make :: proc(key: Ui_Key, forced: Ui_Style) -> (Ui_Id, Ui_Signal) {
 			signal.wheel = UI.wheel
 		}
 	}
-	return id, signal
+	return signal
 }
 
 @(private = "file")
@@ -713,6 +785,7 @@ ui_style_merge :: proc(dst: ^Ui_Style, src: Ui_Style) {
 	if src.radius != nil {dst.radius = src.radius}
 	if src.font != nil {dst.font = src.font}
 	if src.text_color != nil {dst.text_color = src.text_color}
+	if src.hot_text_color != nil {dst.hot_text_color = src.hot_text_color}
 	if src.disabled != nil {dst.disabled = src.disabled}
 	if src.position != nil {dst.position = src.position}
 }
@@ -732,6 +805,7 @@ ui_style_apply :: proc(dst: ^Ui_Box, src: Ui_Style) {
 	if v, ok := src.radius.?; ok {dst.radius = v}
 	if v, ok := src.font.?; ok {dst.font = v}
 	if v, ok := src.text_color.?; ok {dst.text_color = v}
+	if v, ok := src.hot_text_color.?; ok {dst.hot_text_color = v}
 	if v, ok := src.disabled.?; ok {
 		if v {dst.flags += {.Disabled}} else {dst.flags -= {.Disabled}}
 	}
@@ -744,12 +818,12 @@ ui_layout :: proc() {
 
 	ui_compute_dependent_sizes(.X)
 
-	// Text breaks into lines at its box's final width, and boxes sized by their text take its height.
+	// Text breaks into lines at its box's final width, and boxes sized by their text take all of its height.
 	for i := 0; i < UI.box_order_count; i += 1 {
 		box := &UI.boxes[UI.box_order[i]]
 		if box.text == 0 || box.size.y.kind != .Text {continue}
-		box.size_computed.y =
-			text_measure(UI.text, box.text, ui_text_row_width(box)).y + 2 * box.padding.y
+		room := [2]f32{ui_text_row_width(box), math.INF_F32}
+		box.size_computed.y = text_measure(UI.text, box.text, room).y + 2 * box.padding.y
 	}
 
 	ui_compute_dependent_sizes(.Y)
@@ -796,22 +870,6 @@ ui_layout :: proc() {
 	}
 }
 
-@(private = "file")
-rect_intersect :: proc(r1: [4]f32, r2: [4]f32) -> [4]f32 {
-	lo := [2]f32{max(r1.x, r2.x), max(r1.y, r2.y)}
-	hi := [2]f32{min(r1.x + r1.z, r2.x + r2.z), min(r1.y + r1.w, r2.y + r2.w)}
-	return {lo.x, lo.y, max(hi.x - lo.x, 0), max(hi.y - lo.y, 0)}
-}
-
-@(private = "file")
-rect_contains :: proc(rect: [4]f32, pt: [2]f32) -> bool {
-	return pt.x >= rect.x && pt.y >= rect.y && pt.x < rect.x + rect.z && pt.y < rect.y + rect.w
-}
-
-rect_from_pos_size :: proc(pos: [2]f32, size: [2]f32) -> [4]f32 {
-	return {pos.x, pos.y, size.x, size.y}
-}
-
 // How far the wheel moves a scrolling box's content, in pixels.
 @(private = "file")
 ui_scroll_from_wheel :: proc(box: ^Ui_Box, wheel: [2]f32) -> [2]f32 {
@@ -833,10 +891,26 @@ ui_scroll_flag :: proc(axis: Axis) -> Ui_Box_Flag {
 	return out
 }
 
+// Where a box's text starts: left-aligned after the padding, centered vertically, never above the box.
+@(private = "file")
+ui_text_origin :: proc(box: ^Ui_Box) -> [2]f32 {
+	size := text_measure(UI.text, box.text, ui_text_room(box))
+	pos := box.pos_computed
+	pos.x += box.padding.x
+	pos.y += max(0, box.size_computed.y - size.y) / 2
+	return pos
+}
+
 // The width a box's text breaks its lines at: the box's, inside the padding.
 @(private = "file")
 ui_text_row_width :: proc(box: ^Ui_Box) -> f32 {
 	return max(0, box.size_computed.x - 2 * box.padding.x)
+}
+
+// The room a box's text is laid out in: the box inside its padding. Text that does not fit ends in an ellipsis.
+@(private = "file")
+ui_text_room :: proc(box: ^Ui_Box) -> [2]f32 {
+	return {ui_text_row_width(box), max(0, box.size_computed.y - 2 * box.padding.y)}
 }
 
 @(private = "file")
@@ -863,7 +937,7 @@ ui_compute_independent_sizes :: proc() {
 				value[axis] = size[axis].value
 			case .Text:
 				// On one line; a narrower final width wraps it and recomputes the height.
-				value[axis] = text_measure(UI.text, box.text, 0)[axis] + 2 * box.padding[axis]
+				value[axis] = text_measure(UI.text, box.text, {math.INF_F32, math.INF_F32})[axis] + 2 * box.padding[axis]
 			}
 		}
 
@@ -1009,13 +1083,7 @@ ui_draw :: proc(ctx: ^Draw_Ctx) {
 			draw_rectangle(ctx, bounds, border, box.radius, box.thickness, SOFTNESS)
 		}
 		if box.text != 0 {
-			width := ui_text_row_width(box)
-			size := text_measure(UI.text, box.text, width)
-			// Left-aligned after the padding, centered vertically; never starts before the box.
-			pos := box.pos_computed
-			pos.x += box.padding.x
-			pos.y += max(0, box.size_computed.y - size.y) / 2
-			text_draw(UI.text, ctx, box.text, pos, width, {1, 1, 1, alpha})
+			text_draw(UI.text, ctx, box.text, ui_text_origin(box), ui_text_room(box), {1, 1, 1, alpha})
 		}
 		if .Focusable in box.flags {
 			focus_t := box.focus_t
@@ -1041,6 +1109,7 @@ ui_grow :: proc(weight: f32 = 1, strictness: f32 = 0) -> Ui_Size {
 UI_PANEL_BACKGROUND :: [4]f32{0.93, 0.89, 0.80, 1}
 UI_PANEL_BORDER :: [4]f32{0.36, 0.24, 0.16, 1}
 UI_LABEL_COLOR :: [4]f32{0.20, 0.13, 0.09, 1}
+UI_HOT_LABEL_COLOR :: [4]f32{0.55, 0.30, 0.10, 1}
 UI_HOT_BACKGROUND :: [4]f32{0.87, 0.81, 0.69, 1}
 UI_ACTIVE_BACKGROUND :: [4]f32{0.80, 0.72, 0.58, 1}
 UI_FOCUS_BORDER :: [4]f32{0.72, 0.50, 0.20, 1}
@@ -1074,6 +1143,7 @@ ui_style_base :: proc() -> Ui_Style {
 		radius = 4,
 		font = font,
 		text_color = UI_LABEL_COLOR,
+		hot_text_color = UI_HOT_LABEL_COLOR,
 		position = [2]f32{0, 0},
 	}
 }
@@ -1268,12 +1338,33 @@ ui_spacer :: proc(size: Ui_Size) {
 	ui_box_make({}, forced)
 }
 
+// Part of a rich label: text, or an image one line tall when there is one. Font and color default to the label's.
+Ui_Text :: struct {
+	text:      string,
+	image:     Maybe(Image_Id),
+	font:      Maybe(Font_Id),
+	color:     Maybe([4]f32),
+	// Faded toward while the run, or a Hot_Effects box it is in, is hovered
+	hot_color: Maybe([4]f32),
+	// Makes the run take the mouse; ui_signal(key) in the same scope reads it
+	key:       string,
+	underline: bool,
+}
+
+// A label made of parts, which may mix fonts, colors and images.
+ui_label_text :: proc(parts: []Ui_Text, style := Ui_Style{}) -> Ui_Signal {
+	ui_style_next(style)
+	id, signal := ui_box_make({}, {})
+	ui_box_set_text(&UI.boxes[id], parts)
+	return signal
+}
+
 // A line of text. Anything from "##" on is not shown.
 ui_label :: proc(text: string, style := Ui_Style{}) -> Ui_Signal {
 	ui_style_next(style)
 	id, signal := ui_box_make({}, {})
 	box := &UI.boxes[id]
-	ui_box_text(box, text)
+	ui_box_set_label(box, text)
 	return signal
 }
 
@@ -1283,7 +1374,7 @@ ui_button :: proc(label: string, style := Ui_Style{}) -> Ui_Signal {
 	id, signal := ui_box_make(ui_key_from_string(label), {})
 	box := &UI.boxes[id]
 	box.flags += {.Background, .Border, .Clickable, .Hot_Effects, .Focusable}
-	ui_box_text(box, label)
+	ui_box_set_label(box, label)
 	return signal
 }
 
@@ -1302,7 +1393,7 @@ ui_combo :: proc(
 	button := &UI.boxes[id]
 	button.flags += {.Background, .Border, .Clickable, .Hot_Effects, .Focusable}
 	if selection^ >= 0 && selection^ < len(choices) {
-		ui_box_text(button, choices[selection^])
+		ui_box_set_label(button, choices[selection^])
 	}
 	if signal.pressed {
 		open^ = !open^
@@ -1404,7 +1495,7 @@ ui_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Sign
 			text_color = ink,
 		},
 	)
-	ui_box_text(&UI.boxes[text], label)
+	ui_box_set_label(&UI.boxes[text], label)
 	return signal
 }
 
