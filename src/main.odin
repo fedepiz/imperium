@@ -87,6 +87,7 @@ main :: proc() {
 		GLOBAL.input.btns[.Old] = GLOBAL.input.btns[.New]
 		GLOBAL.input.keys[.New][.Pressed] = {}
 		GLOBAL.input.btns[.New][.Pressed] = {}
+		GLOBAL.input.wheel = {}
 
 		for sdl.PollEvent(&event) {
 			#partial switch event.type {
@@ -111,6 +112,10 @@ main :: proc() {
 				GLOBAL.input.pos = {event.button.x, event.button.y}
 			case .MOUSE_MOTION:
 				GLOBAL.input.pos = {event.motion.x, event.motion.y}
+				GLOBAL.input.pos_is_valid = true
+			case .MOUSE_WHEEL:
+				GLOBAL.input.wheel += {event.wheel.x, event.wheel.y}
+				GLOBAL.input.pos = {event.wheel.mouse_x, event.wheel.mouse_y}
 				GLOBAL.input.pos_is_valid = true
 			case .WINDOW_MOUSE_LEAVE:
 				GLOBAL.input.pos_is_valid = false
@@ -176,6 +181,8 @@ Input :: struct {
 	btns:         [Old_New][Button_State][max(u8)]b8,
 	pos:          [2]f32,
 	pos_is_valid: b32,
+	// Wheel movement this frame, in notches (fractional on touchpads); positive y is away from the user, positive x to the right
+	wheel:        [2]f32,
 }
 
 key_is_down :: proc(input: Input, key: sdl.Scancode) -> bool {
@@ -296,6 +303,14 @@ demo_build :: proc(demo: ^Demo) {
 					demo_button("Unavailable", {disabled = true})
 				}
 				demo_label("Click a button to give it focus.", MIDNIGHT_MUTED_TEXT)
+			}
+
+			ui_style_next(MIDNIGHT_PANEL_STYLE)
+			if ui_scroll_panel("scrolling", {height = ui_px(180)}) {
+				demo_label("Scrolling", MIDNIGHT_HEADING)
+				for i in 1 ..= 20 {
+					demo_button(fmt.tprintf("Entry %d###entry%d", i, i))
+				}
 			}
 		}
 	}

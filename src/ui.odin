@@ -22,8 +22,6 @@ UI: struct {
 	// Order of boxes, from bottom to top
 	box_order:       [UI_BOX_MAX]Ui_Id,
 	box_order_count: int,
-	// Persisted memorised box state
-	memos:           [UI_BOX_MAX]Ui_Memo,
 	// Key -> Id hashmap
 	key_hash_table:  Ui_Key_Hashtable,
 	// Parent stack
@@ -47,6 +45,13 @@ UI: struct {
 	pressed:         Ui_Key,
 	// Takes a press on a focusable box and keeps it until a press lands anywhere else
 	focus_box:       Ui_Key,
+	// The mouse as of the last ui_end, and where the press that made the active box happened
+	mouse:           [2]f32,
+	drag_start:      [2]f32,
+	// Wheel movement in the last ui_end, in notches
+	wheel:           [2]f32,
+	// Saved by the widget being dragged, usually its value when the drag began
+	drag_value:      [2]f32,
 	// Animated values, kept alive by being asked for every frame
 	anims:           [UI_ANIM_MAX]Ui_Anim,
 	// Free stack of anims
@@ -93,9 +98,13 @@ Ui_Box_Flag :: enum {
 	Focusable,
 	// Gets no hover, press or focus, still blocks the mouse, and is drawn faded; inherited by children
 	Disabled,
-	// Clips the content
-	Clip,
+	// Children may overflow along the axis, and the wheel moves them through the box; the box needs a key
+	Scroll_X,
+	Scroll_Y,
 }
+
+// Distance moved per wheel notch, in multiples of the scrolled box's font size
+UI_SCROLL_STEP :: 3
 
 // A partial set of box fields. Nil fields leave whatever was set before them alone.
 Ui_Style :: struct {
@@ -118,13 +127,12 @@ Ui_Style :: struct {
 	disabled:          Maybe(bool),
 }
 
-// Live ui box state for 'current' frame
+// A ui box. Keyed boxes keep their slot, and so their persistent fields, for as long as they are built every frame.
 Ui_Box :: struct {
+	// Per-build: reset in ui_begin when a box is kept, or overwritten by the style when it is built
 	flags:             bit_set[Ui_Box_Flag],
 	key:               Ui_Key,
 	size:              [2]Ui_Size,
-	pos_computed:      [2]f32,
-	size_computed:     [2]f32,
 	child_axis:        Axis,
 	// Space between the box edge and its children, applied on both sides of each axis
 	padding:           [2]f32,
@@ -147,6 +155,21 @@ Ui_Box :: struct {
 	text:              Span, //span into the blob
 	font:              Font_Id,
 	text_color:        [4]f32,
+	// Layout results: until this frame's layout runs, they are last frame's
+	pos_computed:      [2]f32,
+	size_computed:     [2]f32,
+	// Clipping bounds
+	clip:              [4]f32,
+	// Extent of the children, gaps and padding, as placed
+	content_size:      [2]f32,
+	// Persistent: eased a little every frame
+	hot_t:             f32,
+	active_t:          f32,
+	focus_t:           f32,
+	disabled_t:        f32,
+	// How far the children are moved through the box, easing toward scroll_target
+	scroll:            [2]f32,
+	scroll_target:     [2]f32,
 }
 
 Ui_Signal :: struct {
@@ -156,6 +179,20 @@ Ui_Signal :: struct {
 	// The box is active: pressed and not yet released
 	held:    bool,
 	focused: bool,
+	// How far the mouse moved since the press, while held
+	drag:    [2]f32,
+	// Wheel movement in notches, while hovered
+	wheel:   [2]f32,
+}
+
+// Saves a value for the box being dragged, usually its value when the press happened.
+ui_drag_store :: proc(value: [2]f32) {
+	UI.drag_value = value
+}
+
+// The value saved with ui_drag_store.
+ui_drag_stored :: proc() -> [2]f32 {
+	return UI.drag_value
 }
 
 Axis :: enum {
@@ -178,15 +215,6 @@ ui_text_dim :: proc(strictness: f32 = 1) -> Ui_Size {
 	return {.Text, 0, strictness}
 }
 
-// Memorised ui box state from previous frame
-@(private = "file")
-Ui_Memo :: struct {
-	hot_t:      f32,
-	active_t:   f32,
-	focus_t:    f32,
-	disabled_t: f32,
-}
-
 @(private = "file")
 ui_seed :: proc() -> u64 {
 	for i := UI.parent_depth - 1; i >= 0; i = i - 1 {
@@ -199,13 +227,18 @@ ui_seed :: proc() -> u64 {
 
 @(private = "file")
 ui_key_from_string :: proc(str: string) -> Ui_Key {
+	return ui_key_from_string_seeded(str, ui_seed())
+}
+
+// A key scoped under seed rather than under the nearest keyed parent
+@(private = "file")
+ui_key_from_string_seeded :: proc(str: string, seed: u64) -> Ui_Key {
 	head, match, tail := strings.partition(str, "###")
 	to_hash := tail
 	if len(match) == 0 {
 		to_hash = head
 	}
 	out: Ui_Key
-	seed := ui_seed()
 	if len(to_hash) > 0 {
 		h := hash.fnv64(transmute([]byte)to_hash, seed)
 		if h == 0 {h = 1}
@@ -357,17 +390,23 @@ ui_begin :: proc(viewport: [2]f32) {
 	UI.style_depth = 0
 	UI.style_next = {}
 
+	// Keyed boxes built last frame keep their slot and are ready to be built again; the rest are freed.
+	UI.boxes[0] = {}
 	for i in 1 ..< UI_BOX_MAX {
-		key := UI.boxes[i].key
-		if key != UI_KEY_NIL {
-			ui_hashtable_save(&UI.key_hash_table, key, Ui_Id(i))
+		box := &UI.boxes[i]
+		if box.key != UI_KEY_NIL {
+			ui_hashtable_save(&UI.key_hash_table, box.key, Ui_Id(i))
+			box.key = {}
+			box.flags = {}
+			box.parent, box.child_first, box.child_last, box.sibling_next = 0, 0, 0, 0
+			box.child_axis = {}
+			box.text = {}
 		} else {
-			UI.memos[i] = {}
+			box^ = {}
 			UI.box_free[UI.box_free_count] = Ui_Id(i)
 			UI.box_free_count += 1
 		}
 	}
-	UI.boxes = {}
 
 	// Anims asked for last frame survive; the rest go back on the free stack.
 	UI.anim_hash_table = {}
@@ -405,17 +444,26 @@ ui_end :: proc(input: Input, draw_ctx: ^Draw_Ctx, dt: f32) {
 
 	ui_update_interaction(input)
 
-	// Interpolate memos for animation purposes
-	for i in 0 ..< len(UI.boxes) {
-		key := UI.boxes[i].key
+	// Ease the persistent state of every box built this frame
+	for &box in UI.boxes {
+		key := box.key
 		if key == {} {continue}
-		memo := &UI.memos[i]
 		rate := 1 - math.exp(-16 * dt)
-		memo.hot_t += ((key == UI.hot_box ? 1 : 0) - memo.hot_t) * rate
-		memo.active_t += ((key == UI.active_box ? 1 : 0) - memo.active_t) * rate
-		memo.focus_t += ((key == UI.focus_box ? 1 : 0) - memo.focus_t) * rate
-		disabled := .Disabled in UI.boxes[i].flags
-		memo.disabled_t += ((disabled ? 1 : 0) - memo.disabled_t) * rate
+		box.hot_t += ((key == UI.hot_box ? 1 : 0) - box.hot_t) * rate
+		box.active_t += ((key == UI.active_box ? 1 : 0) - box.active_t) * rate
+		box.focus_t += ((key == UI.focus_box ? 1 : 0) - box.focus_t) * rate
+		disabled := .Disabled in box.flags
+		box.disabled_t += ((disabled ? 1 : 0) - box.disabled_t) * rate
+
+		// Scrolling stops at the ends of the content, and axes that do not scroll return to the start.
+		for axis in Axis {
+			limit: f32
+			if ui_scroll_flag(axis) in box.flags {
+				limit = max(0, box.content_size[axis] - box.size_computed[axis])
+			}
+			box.scroll_target[axis] = clamp(box.scroll_target[axis], 0, limit)
+		}
+		box.scroll += (box.scroll_target - box.scroll) * rate
 	}
 
 	// Ease every live anim toward its target
@@ -446,24 +494,44 @@ ui_update_interaction :: proc(input: Input) {
 	}
 
 	mouse_pos := input.pos
+	UI.mouse = mouse_pos
+	UI.wheel = input.wheel
 	UI.hot_box = {}
 	hot_focusable := false
-	for i := UI.box_order_count; i > 0; i -= 1 {
+	// With the mouse outside the window, nothing is under it.
+	for i := UI.box_order_count; i > 0 && input.pos_is_valid; i -= 1 {
 		box := &UI.boxes[UI.box_order[i - 1]]
 		if .Clickable not_in box.flags {continue}
 		assert(box.key != UI_KEY_NIL, "clickable boxes need a key to receive signals")
-		top := box.pos_computed
-		bot := box.pos_computed + box.size_computed
-		if mouse_pos.x >= top.x &&
-		   mouse_pos.y >= top.y &&
-		   mouse_pos.x < bot.x &&
-		   mouse_pos.y < bot.y {
+		if rect_contains(box.clip, mouse_pos) {
 			// A disabled box stops the search without becoming hot, so the mouse reaches nothing.
 			if .Disabled not_in box.flags {
 				UI.hot_box = box.key
 				hot_focusable = .Focusable in box.flags
 			}
 			break
+		}
+	}
+
+	// The wheel moves the nearest box under the mouse that scrolls along each axis.
+	if input.wheel != {} {
+		under: Ui_Id
+		for i := UI.box_order_count; i > 0; i -= 1 {
+			id := UI.box_order[i - 1]
+			if rect_contains(UI.boxes[id].clip, mouse_pos) {
+				under = id
+				break
+			}
+		}
+		for axis in Axis {
+			if input.wheel[axis] == 0 {continue}
+			for id := under; id != 0; id = UI.boxes[id].parent {
+				box := &UI.boxes[id]
+				if ui_scroll_flag(axis) in box.flags {
+					box.scroll_target[axis] += ui_scroll_from_wheel(box, input.wheel)[axis]
+					break
+				}
+			}
 		}
 	}
 
@@ -483,6 +551,7 @@ ui_update_interaction :: proc(input: Input) {
 	} else if left_pressed && UI.hot_box != UI_KEY_NIL {
 		UI.active_box = UI.hot_box
 		UI.pressed = UI.hot_box
+		UI.drag_start = mouse_pos
 	}
 
 	// Any press moves focus: to the pressed box if it takes focus, otherwise away.
@@ -527,6 +596,12 @@ ui_box_make :: proc(key: Ui_Key, forced: Ui_Style) -> (Ui_Id, Ui_Signal) {
 		signal.pressed = UI.pressed == key
 		signal.held = UI.active_box == key
 		signal.focused = UI.focus_box == key
+		if signal.held {
+			signal.drag = UI.mouse - UI.drag_start
+		}
+		if signal.hovered {
+			signal.wheel = UI.wheel
+		}
 	}
 	return id, signal
 }
@@ -630,21 +705,78 @@ ui_layout :: proc(sprites: ^Sprites) {
 
 	ui_compute_dependent_sizes(.Y)
 
-	// Placement
+	// Placement. The root has no parent to clip it, so it sees all of itself.
+	root := &UI.boxes[UI.box_order[0]]
+	root.clip = rect_from_pos_size(root.pos_computed, root.size_computed)
 	for i := 0; i < UI.box_order_count; i += 1 {
 		parent := &UI.boxes[UI.box_order[i]]
 		axis := parent.child_axis
-		offset: f32
+		cross := ui_axis_flip(axis)
+		assert(
+			parent.key != UI_KEY_NIL || parent.flags & {.Scroll_X, .Scroll_Y} == {},
+			"scrolling boxes need a key to keep their offset",
+		)
+		// Whole pixels, so scrolled text stays sharp
+		scroll := parent.scroll
+		scroll = {math.floor(scroll.x), math.floor(scroll.y)}
+		offset, extent: f32
 
 		for id := parent.child_first; id != 0; id = UI.boxes[id].sibling_next {
 			child := &UI.boxes[id]
 
-			child.pos_computed = parent.pos_computed + parent.padding
+			child.pos_computed = parent.pos_computed + parent.padding - scroll
 			child.pos_computed[axis] += offset
 
 			offset += child.size_computed[axis] + parent.gap
+			extent = max(extent, child.size_computed[cross])
+
+			child.clip = rect_intersect(
+				parent.clip,
+				rect_from_pos_size(child.pos_computed, child.size_computed),
+			)
 		}
+
+		if parent.child_first != 0 {offset -= parent.gap}
+		parent.content_size[axis] = offset + 2 * parent.padding[axis]
+		parent.content_size[cross] = extent + 2 * parent.padding[cross]
 	}
+}
+
+@(private = "file")
+rect_intersect :: proc(r1: [4]f32, r2: [4]f32) -> [4]f32 {
+	lo := [2]f32{max(r1.x, r2.x), max(r1.y, r2.y)}
+	hi := [2]f32{min(r1.x + r1.z, r2.x + r2.z), min(r1.y + r1.w, r2.y + r2.w)}
+	return {lo.x, lo.y, max(hi.x - lo.x, 0), max(hi.y - lo.y, 0)}
+}
+
+@(private = "file")
+rect_contains :: proc(rect: [4]f32, pt: [2]f32) -> bool {
+	return pt.x >= rect.x && pt.y >= rect.y && pt.x < rect.x + rect.z && pt.y < rect.y + rect.w
+}
+
+rect_from_pos_size :: proc(pos: [2]f32, size: [2]f32) -> [4]f32 {
+	return {pos.x, pos.y, size.x, size.y}
+}
+
+// How far the wheel moves a scrolling box's content, in pixels.
+@(private = "file")
+ui_scroll_from_wheel :: proc(box: ^Ui_Box, wheel: [2]f32) -> [2]f32 {
+	em := f32(UI.sprites.fonts[box.font].size)
+	// Turning the wheel away from the user reveals what is above.
+	return [2]f32{wheel.x, -wheel.y} * UI_SCROLL_STEP * em
+}
+
+// The flag that makes a box scroll along the axis
+@(private = "file")
+ui_scroll_flag :: proc(axis: Axis) -> Ui_Box_Flag {
+	out: Ui_Box_Flag
+	switch axis {
+	case .X:
+		out = .Scroll_X
+	case .Y:
+		out = .Scroll_Y
+	}
+	return out
 }
 
 @(private = "file")
@@ -723,6 +855,9 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 		parent := &UI.boxes[UI.box_order[i]]
 		available := max(0, parent.size_computed[axis] - 2 * parent.padding[axis])
 
+		// Children of a box scrolling along this axis may overflow it.
+		scrolls := ui_scroll_flag(axis) in parent.flags
+
 		if axis != parent.child_axis {
 			// Cross-axis children each have the parent's full extent available, and no more.
 			for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
@@ -730,7 +865,9 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 				if child.size[axis].kind == .Grow {
 					child.size_computed[axis] = available
 				}
-				child.size_computed[axis] = min(child.size_computed[axis], available)
+				if !scrolls {
+					child.size_computed[axis] = min(child.size_computed[axis], available)
+				}
 			}
 			continue
 		}
@@ -757,7 +894,7 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 					child.size_computed[axis] += remaining * (size.value / total_weight)
 				}
 			}
-		} else if remaining < 0 {
+		} else if remaining < 0 && !scrolls {
 			// Overflow is taken from each child in proportion to the size it is willing to give up.
 			budget: f32
 			for kid := parent.child_first; kid != 0; kid = UI.boxes[kid].sibling_next {
@@ -790,19 +927,21 @@ ui_draw :: proc(ctx: ^Draw_Ctx) {
 
 		SOFTNESS :: 0.8
 
-		// Unkeyed boxes have no memo to animate, so they fade fully at once.
-		disabled_t := UI.memos[id].disabled_t
+		// Unkeyed boxes are new every frame and cannot animate, so they fade fully at once.
+		disabled_t := box.disabled_t
 		if box.key == UI_KEY_NIL {
 			disabled_t = 1 if .Disabled in box.flags else 0
 		}
 		alpha := 1 - 0.5 * disabled_t
 
+		draw_clip_push(ctx, box.clip)
+		defer draw_clip_pop(ctx)
+
 		if Ui_Box_Flag.Background in box.flags {
 			background := box.background
 			if .Hot_Effects in box.flags {
-				memo := UI.memos[id]
-				background += (box.hot_background - background) * memo.hot_t
-				background += (box.active_background - background) * memo.active_t
+				background += (box.hot_background - background) * box.hot_t
+				background += (box.active_background - background) * box.active_t
 			}
 			background.a *= alpha
 			draw_rectangle(ctx, bounds, background, box.radius, 0, SOFTNESS)
@@ -824,7 +963,7 @@ ui_draw :: proc(ctx: ^Draw_Ctx) {
 			draw_text(ctx, box.font, text, pos, text_color)
 		}
 		if .Focusable in box.flags {
-			focus_t := UI.memos[id].focus_t
+			focus_t := box.focus_t
 			if focus_t > 0.001 {
 				color := box.focus_border
 				color.a *= focus_t * alpha
@@ -853,6 +992,11 @@ UI_FOCUS_BORDER :: [4]f32{0.72, 0.50, 0.20, 1}
 // The checkbox square and the space between it and its label
 UI_CHECK_SIZE :: 18
 UI_CHECK_GAP :: 8
+// The thickness of a scrollbar
+UI_SCROLLBAR_SIZE :: 8
+// The label of the box a scroll panel's children scroll in
+@(private = "file")
+UI_SCROLL_PANE :: "scroll pane"
 
 // The look of every box unless pushed or overridden: pushed at the bottom of the stack in ui_begin.
 @(private = "file")
@@ -921,6 +1065,101 @@ ui_panel :: proc(label: string, style := Ui_Style{}, child_axis := Axis.Y) -> bo
 	box, _ := ui_container_begin(label, child_axis, style)
 	box.flags += {.Background, .Border, .Clickable}
 	return true
+}
+
+// A panel whose children scroll along its child axis when they do not fit, with a scrollbar beside them.
+// The style goes to the panel; its children sit in a pane that fills it, next to the bar.
+@(deferred_out = ui_scroll_panel_end)
+ui_scroll_panel :: proc(label: string, style := Ui_Style{}, child_axis := Axis.Y) -> bool {
+	panel, _ := ui_container_begin(label, ui_axis_flip(child_axis), style)
+	panel.flags += {.Background, .Border, .Clickable}
+	pane, _ := ui_box_make(
+		ui_key_from_string(UI_SCROLL_PANE),
+		{width = ui_grow(), height = ui_grow(), padding = [2]f32{0, 0}, gap = panel.gap},
+	)
+	UI.boxes[pane].flags += {ui_scroll_flag(child_axis)}
+	UI.boxes[pane].child_axis = child_axis
+	ui_parent_push(pane)
+	return true
+}
+
+// Closes the pane, adds the bar after the caller's children, then closes the panel.
+@(private = "file")
+ui_scroll_panel_end :: proc(open: bool) {
+	if open {
+		axis := UI.boxes[ui_parent_top()].child_axis
+		ui_parent_pop()
+		ui_scrollbar(UI_SCROLL_PANE, axis)
+		ui_parent_pop()
+	}
+}
+
+// Shows which part of a pane's content is in view along axis, from the pane's layout last frame; dragging the thumb scrolls it.
+// The pane is found by its label, so it must have been made under the same parent.
+ui_scrollbar :: proc(pane_label: string, axis: Axis, style := Ui_Style{}) {
+	pane_key := ui_key_from_string(pane_label)
+	pane_id := ui_hashtable_find(&UI.key_hash_table, pane_key)
+	pane := &UI.boxes[pane_id]
+	view := pane.size_computed[axis]
+	content := max(pane.content_size[axis], view)
+	offset := pane.scroll[axis]
+
+	// Grow weights split the track in proportion: the space before, the thumb, the space after.
+	track_style, thumb_style: Ui_Style
+	switch axis {
+	case .X:
+		track_style = {
+			width  = ui_grow(),
+			height = ui_px(UI_SCROLLBAR_SIZE),
+		}
+		thumb_style = {
+			width  = ui_grow(view),
+			height = ui_grow(),
+		}
+	case .Y:
+		track_style = {
+			width  = ui_px(UI_SCROLLBAR_SIZE),
+			height = ui_grow(),
+		}
+		thumb_style = {
+			width  = ui_grow(),
+			height = ui_grow(view),
+		}
+	}
+	// Keyed under the pane, so every pane's bar has its own.
+	ui_style_next(style)
+	track, track_signal := ui_box_make(
+		ui_key_from_string_seeded("scrollbar", u64(pane_key)),
+		track_style,
+	)
+	UI.boxes[track].flags += {.Background, .Clickable}
+	UI.boxes[track].child_axis = axis
+	thumb_color := UI.boxes[track].border
+	// Pixels of content per pixel of track, as laid out last frame
+	ratio := content / max(1, UI.boxes[track].size_computed[axis])
+
+	ui_parent_push(track)
+	defer ui_parent_pop()
+	ui_spacer(ui_grow(offset))
+	thumb_style.background = thumb_color
+	thumb, thumb_signal := ui_box_make(ui_key_from_string("thumb"), thumb_style)
+	UI.boxes[thumb].flags += {.Background, .Clickable, .Hot_Effects}
+	ui_spacer(ui_grow(max(0, content - view - offset)))
+
+	// The thumb stays under the mouse: the offset it had at the press, plus the drag scaled to the content.
+	if thumb_signal.pressed {
+		ui_drag_store({offset, 0})
+	}
+	if thumb_signal.held && pane_id != 0 {
+		target := clamp(ui_drag_stored().x + thumb_signal.drag[axis] * ratio, 0, content - view)
+		pane.scroll_target[axis] = target
+		pane.scroll[axis] = target
+	}
+	// The wheel over the bar scrolls its pane, as it would over the pane itself.
+	wheel := track_signal.wheel + thumb_signal.wheel
+	if pane_id != 0 {
+		pane.scroll_target[axis] += ui_scroll_from_wheel(pane, wheel)[axis]
+	}
 }
 
 // Empty space along the parent's child axis, and none across it.
