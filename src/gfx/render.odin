@@ -398,10 +398,7 @@ render_create_atlas_texture :: proc(renderer: ^Renderer, id: Texture_Id, bitmap:
 		gl.UNSIGNED_BYTE,
 		raw_data(bitmap.pixels),
 	)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	render_texture_filter(gl.LINEAR)
 	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 	renderer.textures[id] = texture
@@ -424,11 +421,11 @@ render_layer_init :: proc(textures: ^Render_Layer_Textures) {
 		gl.UNSIGNED_BYTE,
 		nil,
 	)
-	render_texture_nearest()
+	render_texture_filter(gl.NEAREST)
 	gl.GenTextures(1, &textures.palette)
 	gl.BindTexture(gl.TEXTURE_2D, textures.palette)
 	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, RENDER_LAYER_CATEGORIES, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, nil)
-	render_texture_nearest()
+	render_texture_filter(gl.NEAREST)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 }
 
@@ -472,11 +469,11 @@ render_layer_destroy :: proc(textures: ^Render_Layer_Textures) {
 	gl.DeleteTextures(1, &textures.palette)
 }
 
-// Texel by texel, clamped to the edge, for the bound 2D texture
+// Filtering, gl.NEAREST or gl.LINEAR, for the bound 2D texture, which is clamped to its edges
 @(private = "file")
-render_texture_nearest :: proc() {
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+render_texture_filter :: proc(filter: i32) {
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 }
@@ -533,8 +530,7 @@ render_init :: proc(renderer: ^Renderer) -> bool {
 	gl.BindTexture(gl.TEXTURE_2D, renderer.white_texture)
 	white := [4]u8{255, 255, 255, 255}
 	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, &white)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+	render_texture_filter(gl.NEAREST)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 	return render_terrain_init(renderer)
 }
@@ -607,10 +603,7 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 		gl.UNSIGNED_BYTE,
 		nil,
 	)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	render_texture_filter(gl.LINEAR)
 	gl.GenTextures(1, &renderer.terrain_coast)
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_coast)
 	gl.TexImage2D(
@@ -624,10 +617,7 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 		gl.FLOAT,
 		nil,
 	)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	render_texture_filter(gl.LINEAR)
 	gl.GenTextures(1, &renderer.terrain_river)
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_river)
 	gl.TexImage2D(
@@ -641,10 +631,7 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 		gl.FLOAT,
 		nil,
 	)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	render_texture_filter(gl.NEAREST)
 	render_layer_init(&renderer.terrain_cover)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 	return true
