@@ -3,6 +3,7 @@ package main
 import "core:hash"
 import "core:math"
 import "core:strings"
+import "core:unicode/utf8"
 import "gfx"
 import "vendor:sdl3"
 
@@ -14,56 +15,65 @@ UI_ANIM_MAX :: 1024
 
 @(private = "file")
 UI: struct {
-	boxes:           [UI_BOX_MAX]Ui_Box,
+	boxes:             [UI_BOX_MAX]Ui_Box,
 	// Free stack of boxes
-	box_free:        [UI_BOX_MAX]Ui_Id,
-	box_free_count:  int,
+	box_free:          [UI_BOX_MAX]Ui_Id,
+	box_free_count:    int,
 	// Order of boxes, from bottom to top: the tree walked parents first, computed in ui_end
-	box_order:       [UI_BOX_MAX]Ui_Id,
-	box_order_count: int,
+	box_order:         [UI_BOX_MAX]Ui_Id,
+	box_order_count:   int,
 	// The box everything else is built under, and its two children: what the app builds, then what floats over it
-	root:            Ui_Id,
+	root:              Ui_Id,
 	// This box contains all "ground layer" ui elements
-	content:         Ui_Id,
+	content:           Ui_Id,
 	// This box contains all the overlay stuff, such as the tooltip
-	overlay:         Ui_Id,
-	viewport:        [2]f32,
+	overlay:           Ui_Id,
+	viewport:          [2]f32,
 	// Key -> Id hashmap
-	key_hash_table:  Ui_Key_Hashtable,
+	key_hash_table:    Ui_Key_Hashtable,
 	// Parent stack
-	parent_stack:    [UI_DEPTH_MAX]Ui_Id,
-	parent_depth:    int,
+	parent_stack:      [UI_DEPTH_MAX]Ui_Id,
+	parent_depth:      int,
 	// Style stack: the base style sits at the bottom, and each entry already includes the ones below it
-	style_stack:     [UI_DEPTH_MAX]Ui_Style,
-	style_depth:     int,
+	style_stack:       [UI_DEPTH_MAX]Ui_Style,
+	style_depth:       int,
 	// Overrides for the next box only
-	style_next:      Ui_Style,
+	style_next:        Ui_Style,
 	// Global interaction state, by key: a box, or a keyed run of text
-	hot:             Ui_Key,
+	hot:               Ui_Key,
 	// Owns the mouse from the press until the release, wherever the mouse goes
-	active:          Ui_Key,
+	active:            Ui_Key,
 	// Only set for the frame the press happened or the release completed a click
-	pressed:         Ui_Key,
-	// Takes a press on a focusable box and keeps it until a press lands anywhere else
-	focus:           Ui_Key,
+	pressed:           Ui_Key,
+	// Takes a press on a focusable box and keeps it until a press lands anywhere else, or Escape
+	focus:             Ui_Key,
+	// Given focus by ui_focus, from the next ui_end
+	focus_next:        Ui_Key,
+	// The focus as of the last ui_end takes the keyboard, so the game gets no keys
+	keyboard_captured: bool,
+	// The keys and characters the last ui_end gave to the box of events_key, the focused box then
+	events:            [dynamic; INPUT_EVENTS_MAX]Input_Event,
+	events_key:        Ui_Key,
+	// Where the text cursor sits in the focused box's text, in bytes; a new focus puts it past the end
+	cursor:            int,
 	// The mouse as of the last ui_end, and where the press that made the active box happened
-	mouse:           [2]f32,
-	drag_start:      [2]f32,
+	mouse:             [2]f32,
+	drag_start:        [2]f32,
 	// Wheel movement in the last ui_end, in notches
-	wheel:           [2]f32,
+	wheel:             [2]f32,
 	// The last ui_end saw a left press, wherever it landed
-	pressed_any:     bool,
+	pressed_any:       bool,
 	// The mouse was over a box that takes it in the last ui_end, disabled ones included
-	hovered_any:     bool,
+	hovered_any:       bool,
 	// Saved by the widget being dragged, usually its value when the drag began
-	drag_value:      [2]f32,
+	drag_value:        [2]f32,
 	// Animated values, kept alive by being asked for every frame
-	anims:           [UI_ANIM_MAX]Ui_Anim,
+	anims:             [UI_ANIM_MAX]Ui_Anim,
 	// Free stack of anims
-	anim_free:       [UI_ANIM_MAX]Ui_Anim_Id,
-	anim_free_count: int,
+	anim_free:         [UI_ANIM_MAX]Ui_Anim_Id,
+	anim_free_count:   int,
 	// Key -> Anim id hashmap
-	anim_hash_table: Ui_Anim_Hashtable,
+	anim_hash_table:   Ui_Anim_Hashtable,
 }
 
 // The short live id for the ui boxes. Doubles up as the index in the table
@@ -100,6 +110,8 @@ Ui_Box_Flag :: enum {
 	Hot_Effects,
 	// A press on the box gives it focus, drawn as a ring
 	Focusable,
+	// While focused, takes every key and typed character, and the game gets none
+	Keyboard,
 	// Gets no hover, press or focus, still blocks the mouse, and is drawn faded; inherited by children
 	Disabled,
 	// Children may overflow along the axis, and the wheel moves them through the box; the box needs a key
@@ -203,6 +215,29 @@ Ui_Signal :: struct {
 // The mouse is over the ui, as of the last ui_end: whatever is drawn under it should ignore the mouse.
 ui_hovered_any :: proc() -> bool {
 	return UI.hovered_any
+}
+
+// Something in the ui is focused, as of the last ui_end.
+ui_focused_any :: proc() -> bool {
+	return UI.focus != UI_KEY_NIL
+}
+
+// The focused box takes the keyboard, as of the last ui_end: the game should ignore the keys.
+ui_keyboard_captured :: proc() -> bool {
+	return UI.keyboard_captured
+}
+
+// Gives focus to whatever carries the label's key in the current scope, from the next ui_end.
+ui_focus :: proc(label: string) {
+	UI.focus_next = ui_key_from_string(label)
+}
+
+// The key went down, or repeated, among the keys the last ui_end gave to the focused box.
+ui_key_pressed :: proc(key: sdl3.Scancode) -> bool {
+	for event in UI.events[:] {
+		if event.kind == .Key && event.key == key {return true}
+	}
+	return false
 }
 
 // Saves a value for the box being dragged, usually its value when the press happened.
@@ -540,6 +575,15 @@ ui_update_interaction :: proc(input: Input) {
 	if !ui_key_is_enabled_box(UI.focus) {
 		UI.focus = {}
 	}
+	focus_before := UI.focus
+
+	// This frame's keys go to the box focused before them, if it takes the keyboard.
+	clear(&UI.events)
+	UI.events_key = {}
+	if ui_key_takes_keyboard(UI.focus) {
+		UI.events = input.events
+		UI.events_key = UI.focus
+	}
 
 	mouse_pos := input.pos
 	UI.mouse = mouse_pos
@@ -619,7 +663,26 @@ ui_update_interaction :: proc(input: Input) {
 	if left_pressed {
 		UI.focus = UI.hot if hot_focusable else {}
 	}
+	if key_is_pressed(input, .ESCAPE) {
+		UI.focus = {}
+	}
+	if UI.focus_next != UI_KEY_NIL {
+		UI.focus = UI.focus_next
+		UI.focus_next = {}
+	}
+	if UI.focus != focus_before {
+		UI.cursor = max(int)
+	}
+	UI.keyboard_captured = ui_key_takes_keyboard(UI.focus)
+}
 
+// A box was built this frame with key, is not disabled, and takes the keyboard while focused.
+@(private = "file")
+ui_key_takes_keyboard :: proc(key: Ui_Key) -> bool {
+	return(
+		ui_key_is_enabled_box(key) &&
+		.Keyboard in UI.boxes[ui_hashtable_find(&UI.key_hash_table, key)].flags \
+	)
 }
 
 // Fills box_order by walking the tree from the root, parents before children.
@@ -1112,6 +1175,8 @@ UI_CHECK_GAP :: 8
 UI_TOOLTIP_OFFSET :: [2]f32{16, 16}
 // The thickness of a scrollbar
 UI_SCROLLBAR_SIZE :: 8
+// The width of the text cursor
+UI_CARET_WIDTH :: 2
 // The label of the box a scroll panel's children scroll in
 @(private = "file")
 UI_SCROLL_PANE :: "scroll pane"
@@ -1282,6 +1347,13 @@ ui_scrollbar :: proc(pane_label: string, axis: Axis, style := Ui_Style{}) {
 	}
 }
 
+// Builds over everything else, filling the viewport; its children lay out left to right.
+@(deferred_out = ui_container_end)
+ui_overlay :: proc() -> bool {
+	ui_parent_push(UI.overlay)
+	return true
+}
+
 // A column floating over everything near the mouse, kept inside the window. Build it while its anchor is hovered.
 @(deferred_out = ui_tooltip_end)
 ui_tooltip :: proc(style := Ui_Style{}) -> bool {
@@ -1442,9 +1514,101 @@ ui_slider :: proc(label: string, value: ^f32, lo, hi: f32, style := Ui_Style{}) 
 	fill_color := track.focus_border
 	ui_parent_push(id)
 	defer ui_parent_pop()
-	fill, _ := ui_box_make({}, {width = ui_grow(t), height = ui_grow(), background = fill_color, radius = track.radius})
+	fill, _ := ui_box_make(
+		{},
+		{width = ui_grow(t), height = ui_grow(), background = fill_color, radius = track.radius},
+	)
 	UI.boxes[fill].flags += {.Background}
 	ui_spacer(ui_grow(1 - t))
+	return signal
+}
+
+// A line of editable text held in buffer, length bytes of it in use. While focused it takes the keyboard: typing inserts
+// at the cursor, and Backspace, Delete, Left, Right, Home and End edit and move it. The label is only the key.
+ui_input :: proc(label: string, buffer: []u8, length: ^int, style := Ui_Style{}) -> Ui_Signal {
+	ui_style_next(style)
+	key := ui_key_from_string(label)
+	id, signal := ui_box_make(key, {})
+	box := &UI.boxes[id]
+	box.flags += {.Background, .Border, .Clickable, .Focusable, .Keyboard}
+
+	if signal.focused {
+		// On a rune's first byte, within the text
+		cursor := clamp(UI.cursor, 0, length^)
+		for cursor > 0 && cursor < length^ && !utf8.rune_start(buffer[cursor]) {
+			cursor -= 1
+		}
+		if UI.events_key == key {
+			for event in UI.events[:] {
+				switch event.kind {
+				case .Char:
+					if event.char < ' ' || event.char == 0x7f {continue}
+					bytes, n := utf8.encode_rune(event.char)
+					if length^ + n > len(buffer) {continue}
+					copy(buffer[cursor + n:length^ + n], buffer[cursor:length^])
+					copy(buffer[cursor:], bytes[:n])
+					length^ += n
+					cursor += n
+				case .Key:
+					#partial switch event.key {
+					case .BACKSPACE:
+						if cursor > 0 {
+							_, n := utf8.decode_last_rune(buffer[:cursor])
+							copy(buffer[cursor - n:], buffer[cursor:length^])
+							length^ -= n
+							cursor -= n
+						}
+					case .DELETE:
+						if cursor < length^ {
+							_, n := utf8.decode_rune(buffer[cursor:length^])
+							copy(buffer[cursor:], buffer[cursor + n:length^])
+							length^ -= n
+						}
+					case .LEFT:
+						if cursor > 0 {
+							_, n := utf8.decode_last_rune(buffer[:cursor])
+							cursor -= n
+						}
+					case .RIGHT:
+						if cursor < length^ {
+							_, n := utf8.decode_rune(buffer[cursor:length^])
+							cursor += n
+						}
+					case .HOME:
+						cursor = 0
+					case .END:
+						cursor = length^
+					}
+				}
+			}
+		}
+		UI.cursor = cursor
+	}
+
+	ui_box_set_text(box, {Ui_Text{text = string(buffer[:length^])}})
+
+	// A bar one line tall before the byte at the cursor, from the box's layout last frame
+	if signal.focused {
+		info := gfx.font_info(box.font)
+		line := info.ascent - info.descent
+		position := [2]f32 {
+			math.round(box.padding.x + gfx.text_advance(string(buffer[:UI.cursor]), box.font)),
+			math.round(max(0, box.size_computed.y - line) / 2),
+		}
+		ui_parent_push(id)
+		caret, _ := ui_box_make(
+			{},
+			{
+				position = position,
+				width = ui_px(UI_CARET_WIDTH),
+				height = ui_px(line),
+				background = box.text_color,
+				radius = 0,
+			},
+		)
+		UI.boxes[caret].flags += {.Floating, .Background}
+		ui_parent_pop()
+	}
 	return signal
 }
 
@@ -1516,3 +1680,4 @@ ui_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Sign
 	ui_box_set_label(&UI.boxes[text], label)
 	return signal
 }
+

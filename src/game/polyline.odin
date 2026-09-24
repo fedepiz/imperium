@@ -35,44 +35,47 @@ Polyline_Run :: struct {
 
 Polylines :: struct {
 	// The traced points, and the runs of them that make lines
-	points:        [POLYLINE_POINTS_MAX][2]f32,
-	point_count:   int,
-	runs:          [POLYLINE_RUNS_MAX]Polyline_Run,
-	run_count:     int,
+	points:        [dynamic; POLYLINE_POINTS_MAX][2]f32,
+	runs:          [dynamic; POLYLINE_RUNS_MAX]Polyline_Run,
 	// Written by polylines_smooth: each run, smoothed. A run that did not fit is left empty.
 	smoothed:      [POLYLINE_SMOOTHED_MAX][2]f32,
 	smoothed_runs: [POLYLINE_RUNS_MAX]span.Span,
 }
 
 polylines_clear :: proc(lines: ^Polylines) {
-	lines.point_count, lines.run_count = 0, 0
+	clear(&lines.points)
+	clear(&lines.runs)
 }
 
 // Adds a point to the run being traced. A full table takes no more.
 polylines_add :: proc(lines: ^Polylines, point: [2]f32) {
-	if lines.point_count < POLYLINE_POINTS_MAX {
-		lines.points[lines.point_count] = point
-		lines.point_count += 1
+	if len(lines.points) < POLYLINE_POINTS_MAX {
+		append(&lines.points, point)
 	}
 }
 
 // Ends the run being traced: the points added since the last run ended. Runs of fewer than two points are dropped.
 polylines_end :: proc(lines: ^Polylines, closed: bool, smoothing: Polyline_Smoothing) {
 	assert(smoothing.softness >= 0 && smoothing.softness <= 1, "softness runs from 0 to 1")
-	assert(smoothing.cut_iter >= 0 && smoothing.cut_iter <= POLYLINE_CORNER_ITER_MAX, "too many corner cuts")
-	assert(smoothing.cut_ratio > 0 && smoothing.cut_ratio <= 0.5, "cut_ratio runs above 0 up to 0.5")
+	assert(
+		smoothing.cut_iter >= 0 && smoothing.cut_iter <= POLYLINE_CORNER_ITER_MAX,
+		"too many corner cuts",
+	)
+	assert(
+		smoothing.cut_ratio > 0 && smoothing.cut_ratio <= 0.5,
+		"cut_ratio runs above 0 up to 0.5",
+	)
 	begin := 0
-	if lines.run_count > 0 {
-		last := lines.runs[lines.run_count - 1].points
+	if len(lines.runs) > 0 {
+		last := lines.runs[len(lines.runs) - 1].points
 		begin = last.begin + last.len
 	}
-	points := span.from_range(begin, lines.point_count)
-	if points.len < 2 || lines.run_count == POLYLINE_RUNS_MAX {
-		lines.point_count = begin
+	points := span.from_range(begin, len(lines.points))
+	if points.len < 2 || len(lines.runs) == POLYLINE_RUNS_MAX {
+		resize(&lines.points, begin)
 		return
 	}
-	lines.runs[lines.run_count] = {points, closed, smoothing}
-	lines.run_count += 1
+	append(&lines.runs, Polyline_Run{points, closed, smoothing})
 }
 
 // A run's smoothed points.
@@ -84,7 +87,7 @@ polylines_smoothed :: proc(lines: ^Polylines, run: int) -> [][2]f32 {
 // Smooths every run as it asks: see Polyline_Smoothing. Open runs keep their ends where they are.
 polylines_smooth :: proc(lines: ^Polylines) {
 	out := 0
-	for run, r in lines.runs[:lines.run_count] {
+	for run, r in lines.runs[:] {
 		n := run.points.len
 		closed, smoothing := run.closed, run.smoothing
 		lines.smoothed_runs[r] = {}
@@ -132,7 +135,13 @@ polyline_cut_corners :: proc(p: [][2]f32, n: int, closed: bool, ratio: f32) -> i
 // Records a line as the nearest one of every cell within reach cells of it, where it is nearer than what the cell
 // holds: nearest gets the offset from the cell's middle to the nearest point of the line, and side, if given, which
 // side of the line the middle lies on, 1 to the left of its direction and -1 to the right.
-polyline_stamp :: proc(points: [][2]f32, closed: bool, reach: f32, nearest: [][2]f32, side: []f32) {
+polyline_stamp :: proc(
+	points: [][2]f32,
+	closed: bool,
+	reach: f32,
+	nearest: [][2]f32,
+	side: []f32,
+) {
 	n := len(points)
 	segments := closed ? n : n - 1
 	for s in 0 ..< segments {
@@ -157,3 +166,4 @@ polyline_stamp :: proc(points: [][2]f32, closed: bool, reach: f32, nearest: [][2
 		}
 	}
 }
+

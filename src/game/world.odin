@@ -10,6 +10,7 @@ import stbi "vendor:stb/image"
 
 import "../gfx"
 import "../span"
+import "../tweak"
 
 WORLD: struct {
 	camera:           Camera,
@@ -349,7 +350,14 @@ CAMERA_ZOOM_MAX :: 24
 CAMERA_ZOOM_MIN :: 2
 
 // Called every frame
+// Named in the order of gfx.Render_Terrain_Debug
+TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture", "Cover"}
+
 world_tick :: proc(input: Input, dt: f32) {
+	view := &WORLD.render_terrain.debug_mode
+	view^ = gfx.Render_Terrain_Debug(
+		tweak.choice("Render/Terrain view", int(view^), TERRAIN_VIEW_NAMES),
+	)
 	world_pan_camera(input, dt)
 	world_update_render_terrain()
 	world_draw_marks(input.viewport)
@@ -419,7 +427,7 @@ world_update_render_terrain :: proc() {
 	lines := &POLYLINES
 	polylines_clear(lines)
 	world_trace_rivers(lines)
-	rivers := lines.run_count
+	rivers := len(lines.runs)
 	world_trace_coasts(lines)
 	polylines_smooth(lines)
 
@@ -427,7 +435,7 @@ world_update_render_terrain :: proc() {
 	to_coast := make([][2]f32, CELLS_MAX, context.temp_allocator)
 	coast_side := make([]f32, CELLS_MAX, context.temp_allocator)
 	for &offset in to_coast do offset = COAST_REACH
-	for r in 0 ..< lines.run_count {
+	for r in 0 ..< len(lines.runs) {
 		points, closed := polylines_smoothed(lines, r), lines.runs[r].closed
 		if r < rivers do polyline_stamp(points, closed, gfx.RENDER_RIVER_REACH, rt.river[:], nil)
 		else do polyline_stamp(points, closed, COAST_REACH, to_coast, coast_side)

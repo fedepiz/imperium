@@ -5,6 +5,7 @@ import "core:mem"
 import "game"
 import "gfx"
 import "span"
+import "tweak"
 import gl "vendor:OpenGL"
 import sdl "vendor:sdl3"
 
@@ -60,6 +61,9 @@ main :: proc() {
 		return
 	}
 	gl.load_up_to(3, 3, sdl.gl_set_proc_address)
+	if !sdl.StartTextInput(window) {
+		fmt.eprintf("Starting text input failed: %s\n", sdl.GetError())
+	}
 	renderer := &GLOBAL.renderer
 	if !gfx.render_init(renderer) {
 		return
@@ -86,8 +90,11 @@ main :: proc() {
 		fmt.eprintf("Enabling VSync failed: %s\n", sdl.GetError())
 	}
 
-	// demo: Demo
-	pane: Debug_Pane
+	demo: Demo_Ui
+	palette: Palette
+	// Frames and time counted toward the next frame rate shown, and the one shown
+	fps_frames: int
+	fps_time, fps: f32
 	frame_previous := sdl.GetTicksNS()
 	keep_going := true
 	for keep_going {
@@ -101,6 +108,7 @@ main :: proc() {
 		GLOBAL.input.keys[.New][.Pressed] = {}
 		GLOBAL.input.btns[.New][.Pressed] = {}
 		GLOBAL.input.wheel = {}
+		clear(&GLOBAL.input.events)
 
 		for sdl.PollEvent(&event) {
 			#partial switch event.type {
@@ -110,6 +118,11 @@ main :: proc() {
 				id := event.key.scancode
 				GLOBAL.input.keys[.New][.Down][id] = true
 				GLOBAL.input.keys[.New][.Pressed][id] = !GLOBAL.input.keys[.Old][.Down][id]
+				input_event_push(&GLOBAL.input, {kind = .Key, key = id})
+			case .TEXT_INPUT:
+				for ch in string(event.text.text) {
+					input_event_push(&GLOBAL.input, {kind = .Char, char = ch})
+				}
 			case .KEY_UP:
 				id := event.key.scancode
 				GLOBAL.input.keys[.New][.Down][id] = false
@@ -138,7 +151,8 @@ main :: proc() {
 			}
 		}
 
-		keep_going &= !key_is_pressed(GLOBAL.input, .ESCAPE)
+		// Escape leaves the game when nothing in the ui is focused; otherwise the ui takes it to drop the focus.
+		keep_going &= !(key_is_pressed(GLOBAL.input, .ESCAPE) && !ui_focused_any())
 		if !keep_going {
 			break
 		}
@@ -158,9 +172,25 @@ main :: proc() {
 			return
 		}
 
+		// Fps calcualtion
+		fps_frames += 1
+		fps_time += dt
+		if fps_time >= FPS_PERIOD {
+			fps = f32(fps_frames) / fps_time
+			fps_frames, fps_time = 0, 0
+		}
+
+		tweak.begin()
+		// The frame rate over each period
+		tweak.label("Info/fps", fmt.tprintf("%.0f (%.2f ms)", fps, 1000 / max(fps, 1e-6)))
+		tweak.button("Demo.Button", "Press")
+		tweak.slider("Value", 0.5, 0, 1)
+
+		demo.enabled = tweak.toggle("Demo.UI", "Shown", demo.enabled)
+
 		game.world_tick(game_input(GLOBAL.input, {f32(logical_width), f32(logical_height)}), dt)
 		// Tab steps through the map and the raw terrain properties.
-		if key_is_pressed(GLOBAL.input, .TAB) {
+		if key_is_pressed(GLOBAL.input, .TAB) && !ui_keyboard_captured() {
 			debug := &game.WORLD.render_terrain.debug_mode
 			debug^ = gfx.Render_Terrain_Debug((int(debug^) + 1) % len(gfx.Render_Terrain_Debug))
 		}
@@ -177,8 +207,8 @@ main :: proc() {
 
 			gfx.text_begin()
 			ui_begin({f32(logical_width), f32(logical_height)})
-			// demo_build(&demo)
-			debug_pane_build(&pane)
+			if demo.enabled do demo_build(&demo)
+			palette_build(&palette, GLOBAL.input)
 			ui_end(GLOBAL.input, &draw, dt)
 		}
 
@@ -190,44 +220,14 @@ main :: proc() {
 	}
 }
 
-// A pane in the top-left corner for looking at the terrain.
-Debug_Pane :: struct {
-	view_open: bool,
-}
-
-// Named in the order of gfx.Render_Terrain_Debug
-TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture", "Cover"}
-
-debug_pane_build :: proc(pane: ^Debug_Pane) {
-	#assert(len(gfx.Render_Terrain_Debug) == 6)
-	// The column only places the pane; it takes no mouse, so the map gets it everywhere else.
-	if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{16, 16}}) {
-		if ui_panel("debug pane", MIDNIGHT_PANEL_STYLE) {
-			demo_label("Terrain", MIDNIGHT_HEADING)
-			if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
-				demo_label("View")
-				// The ui reads and writes the world's render terrain directly.
-				view := &game.WORLD.render_terrain.debug_mode
-				selection := int(view^)
-				ui_combo(
-					"terrain view",
-					&selection,
-					&pane.view_open,
-					TERRAIN_VIEW_NAMES,
-					{width = ui_px(140), padding = [2]f32{10, 0}},
-				)
-				view^ = gfx.Render_Terrain_Debug(selection)
-			}
-		}
-	}
-}
-
 game_input :: proc(input: Input, viewport: [2]f32) -> game.Input {
 	pan: [2]f32
-	if key_is_down(input, .A) || key_is_down(input, .LEFT) do pan.x -= 1
-	if key_is_down(input, .D) || key_is_down(input, .RIGHT) do pan.x += 1
-	if key_is_down(input, .W) || key_is_down(input, .UP) do pan.y -= 1
-	if key_is_down(input, .S) || key_is_down(input, .DOWN) do pan.y += 1
+	if !ui_keyboard_captured() {
+		if key_is_down(input, .A) || key_is_down(input, .LEFT) do pan.x -= 1
+		if key_is_down(input, .D) || key_is_down(input, .RIGHT) do pan.x += 1
+		if key_is_down(input, .W) || key_is_down(input, .UP) do pan.y -= 1
+		if key_is_down(input, .S) || key_is_down(input, .DOWN) do pan.y += 1
+	}
 	return {
 		viewport = viewport,
 		cursor = input.pos,
@@ -237,6 +237,9 @@ game_input :: proc(input: Input, viewport: [2]f32) -> game.Input {
 		wheel = input.wheel.y,
 	}
 }
+
+// Seconds over which the frame rate is averaged
+FPS_PERIOD :: 0.5
 
 Old_New :: enum {
 	Old,
@@ -255,6 +258,28 @@ Input :: struct {
 	pos_is_valid: b32,
 	// Wheel movement this frame, in notches (fractional on touchpads); positive y is away from the user, positive x to the right
 	wheel:        [2]f32,
+	// Keys going down, repeats included, and typed characters, in the order they came this frame; the rest are dropped
+	events:       [dynamic; INPUT_EVENTS_MAX]Input_Event,
+}
+
+INPUT_EVENTS_MAX :: 64
+
+Input_Event_Kind :: enum {
+	Key,
+	Char,
+}
+
+// A key going down, or a character typed
+Input_Event :: struct {
+	kind: Input_Event_Kind,
+	key:  sdl.Scancode,
+	char: rune,
+}
+
+input_event_push :: proc(input: ^Input, event: Input_Event) {
+	if len(input.events) < INPUT_EVENTS_MAX {
+		append(&input.events, event)
+	}
 }
 
 key_is_down :: proc(input: Input, key: sdl.Scancode) -> bool {
@@ -274,11 +299,14 @@ button_is_pressed :: proc(input: Input, button: u8) -> bool {
 }
 
 // A small showcase of the widgets.
-Demo :: struct {
+Demo_Ui :: struct {
+	enabled:         bool,
 	presses:         int,
 	locked:          bool,
 	difficulty:      int,
 	difficulty_open: bool,
+	name:            [64]u8,
+	name_len:        int,
 }
 
 DEMO_DIFFICULTIES := []string{"Easy", "Normal", "Hard"}
@@ -321,7 +349,7 @@ MIDNIGHT_DANGER_BUTTON :: Ui_Style {
 	text_color = MIDNIGHT_TEXT_ON_FILL,
 }
 
-demo_build :: proc(demo: ^Demo) {
+demo_build :: proc(demo: ^Demo_Ui) {
 	if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{24, 20}, gap = 16}) {
 		if ui_column({width = ui_fit(), height = ui_fit(), gap = 2}) {
 			demo_label("Imperium", MIDNIGHT_HEADING)
@@ -403,6 +431,15 @@ demo_build :: proc(demo: ^Demo) {
 						{width = ui_px(120), padding = [2]f32{10, 0}},
 					)
 				}
+				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
+					demo_label("Name")
+					ui_input(
+						"name",
+						demo.name[:],
+						&demo.name_len,
+						{width = ui_px(160), padding = [2]f32{10, 0}},
+					)
+				}
 				demo_label("Quis nostrud exercitation.", MIDNIGHT_MUTED_TEXT)
 			}
 
@@ -433,3 +470,4 @@ demo_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Si
 	ui_style_next({width = ui_fit(), padding = [2]f32{10, 0}})
 	return ui_checkbox(label, value, style)
 }
+

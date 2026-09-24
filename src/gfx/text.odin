@@ -173,6 +173,17 @@ text_draw :: proc(
 	}
 }
 
+// The width of text in font on one line, from the advances of its glyphs, spaces and tabs included.
+text_advance :: proc(text: string, font: Font_Id) -> f32 {
+	width: f32
+	for ch in text {
+		if sprite, found := sprite_of_glyph(font, ch); found {
+			width += sprite_glyph(sprite).advance
+		}
+	}
+	return width
+}
+
 // The tag of the run under point, relative to the text's top-left, laid out in room; 0 over untagged text or nothing.
 text_tag_at :: proc(id: Text_Id, point: [2]f32, room := ROOM_INF) -> u64 {
 	text := text_laid_out(id, room)
