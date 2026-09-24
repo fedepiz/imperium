@@ -460,7 +460,7 @@ world_update_render_terrain :: proc() {
 // What the terrain does not hold but covers and marks need, worked out whenever it changes, in the temp allocator:
 // cells to the nearest river and to the sea, and how much the ground rises and falls within two cells.
 Land :: struct {
-	to_river, to_sea, unevenness: []f32,
+	to_river, to_sea: []f32,
 }
 
 @(private = "file")
@@ -476,20 +476,6 @@ world_land :: proc() -> (land: Land) {
 	land.to_sea = make([]f32, CELLS_MAX, context.temp_allocator)
 	world_distance_from(land.to_river, is_river)
 	world_distance_from(land.to_sea, is_sea)
-
-	land.unevenness = make([]f32, CELLS_MAX, context.temp_allocator)
-	for i in 0 ..< CELLS_MAX {
-		x, y := i % WORLD_WIDTH, i / WORLD_WIDTH
-		lowest, highest := terrain[i].elevation, terrain[i].elevation
-		for dy in -2 ..= 2 {
-			for dx in -2 ..= 2 {
-				nx, ny := clamp(x + dx, 0, WORLD_WIDTH - 1), clamp(y + dy, 0, WORLD_HEIGHT - 1)
-				e := terrain[ny * WORLD_WIDTH + nx].elevation
-				lowest, highest = min(lowest, e), max(highest, e)
-			}
-		}
-		land.unevenness[i] = f32(highest - lowest) / f32(max(u8))
-	}
 	return
 }
 
@@ -537,7 +523,7 @@ world_classify_cover :: proc(land: ^Land) {
 world_cover :: proc(land: ^Land, i: int) -> (best: Cover_Cell) {
 	if WORLD.atlas.terrain[i].surface in WATER do return
 	p := place_of(i)
-	low_and_level := ramp(0.22, 0.12, p.elevation) * ramp(0.08, 0.03, land.unevenness[i])
+	low := ramp(0.22, 0.12, p.elevation)
 	delta := ramp(6, 2, land.to_river[i]) * ramp(16, 6, land.to_sea[i])
 	suits := [Cover]f32 {
 		.Open    = 1.0 / 6,
@@ -545,7 +531,7 @@ world_cover :: proc(land: ^Land, i: int) -> (best: Cover_Cell) {
 		.Desert  = ramp(0.47, 0.35, p.moisture),
 		.Steppe  = ramp(0.40, 0.47, p.moisture) * ramp(0.58, 0.48, p.moisture),
 		.Fertile = 1.3 * ramp(0.62, 0.52, p.moisture) * ramp(5, 1.5, land.to_river[i]),
-		.Marsh   = 1.5 * low_and_level * max(delta, ramp(0.80, 0.88, p.moisture)),
+		.Marsh   = 1.5 * low * max(delta, ramp(0.80, 0.88, p.moisture)),
 	}
 	most: f32
 	for s, cover in suits {
