@@ -60,16 +60,16 @@ Render_Terrain_Debug :: enum i32 {
 
 // How the map is drawn. Colors use straight RGBA; only RGB is used.
 Render_Terrain_Style :: struct {
-	paper:        [4]f32,
-	paper_stain:  [4]f32,
-	ink:          [4]f32,
-	sea_color:    [4]f32,
-	sea_tint:     f32,
+	paper:       [4]f32,
+	paper_stain: [4]f32,
+	ink:         [4]f32,
+	sea_color:   [4]f32,
+	sea_tint:    f32,
 	// Coast line width in logical pixels, and how far the coast wanders from the cells, in cells
-	coast_width:  f32,
-	wobble:       f32,
+	coast_width: f32,
+	wobble:      f32,
 	// River line width in logical pixels, where a river reaches the lowlands; it thins toward its sources.
-	river_width:  f32,
+	river_width: f32,
 }
 
 // How many categories a layer can have, category 0 included
@@ -84,7 +84,7 @@ Render_Pattern :: enum u8 {
 
 // How one category of a layer is drawn: the paper is multiplied toward color by wash, and the pattern is drawn in ink
 // as dark as pattern_ink, both scaled by each cell's strength. Only the color's RGB is used.
-Render_Category :: struct {
+Render_Layer_Palette :: struct {
 	color:       [4]f32,
 	wash:        f32,
 	pattern:     Render_Pattern,
@@ -100,7 +100,7 @@ Render_Layer :: struct {
 	revision: u32,
 	// Category, then strength from 0 to 255
 	cells:    [RENDER_TERRAIN_CELLS][2]u8,
-	palette:  [RENDER_LAYER_CATEGORIES]Render_Category,
+	palette:  [RENDER_LAYER_CATEGORIES]Render_Layer_Palette,
 	jitter:   f32,
 }
 
@@ -424,7 +424,17 @@ render_layer_init :: proc(textures: ^Render_Layer_Textures) {
 	render_texture_filter(gl.NEAREST)
 	gl.GenTextures(1, &textures.palette)
 	gl.BindTexture(gl.TEXTURE_2D, textures.palette)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, RENDER_LAYER_CATEGORIES, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, nil)
+	gl.TexImage2D(
+		gl.TEXTURE_2D,
+		0,
+		gl.RGBA8,
+		RENDER_LAYER_CATEGORIES,
+		2,
+		0,
+		gl.RGBA,
+		gl.UNSIGNED_BYTE,
+		nil,
+	)
 	render_texture_filter(gl.NEAREST)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 }
@@ -456,7 +466,17 @@ render_layer_upload :: proc(textures: ^Render_Layer_Textures, layer: ^Render_Lay
 		raw_data(layer.cells[:]),
 	)
 	gl.BindTexture(gl.TEXTURE_2D, textures.palette)
-	gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, RENDER_LAYER_CATEGORIES, 2, gl.RGBA, gl.UNSIGNED_BYTE, &palette)
+	gl.TexSubImage2D(
+		gl.TEXTURE_2D,
+		0,
+		0,
+		0,
+		RENDER_LAYER_CATEGORIES,
+		2,
+		gl.RGBA,
+		gl.UNSIGNED_BYTE,
+		&palette,
+	)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4)
 	textures.revision = layer.revision
@@ -942,3 +962,4 @@ void main() {
     out_color = vec4(col, 1.0);
 }
 `
+
