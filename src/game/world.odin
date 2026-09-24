@@ -414,17 +414,44 @@ world_update_render_terrain :: proc() {
 		}
 	}
 
-	// Signed distance to the coast, in cells: half a cell at the cells either side of it, positive on land.
+	// Rivers and coasts are traced into lines, smoothed, and stamped around themselves: each cell near a river learns
+	// the offset to its nearest point, and each cell near the coast which side of it it lies on.
+	lines := &POLYLINES
+	polylines_clear(lines)
+	world_trace_rivers(lines)
+	rivers := lines.run_count
+	world_trace_coasts(lines)
+	polylines_smooth(lines)
+
+	for &offset in rt.river do offset = gfx.RENDER_RIVER_FAR
+	to_coast := make([][2]f32, CELLS_MAX, context.temp_allocator)
+	coast_side := make([]f32, CELLS_MAX, context.temp_allocator)
+	for &offset in to_coast do offset = COAST_REACH
+	for r in 0 ..< lines.run_count {
+		points, closed := polylines_smoothed(lines, r), lines.runs[r].closed
+		if r < rivers do polyline_stamp(points, closed, gfx.RENDER_RIVER_REACH, rt.river[:], nil)
+		else do polyline_stamp(points, closed, COAST_REACH, to_coast, coast_side)
+	}
+
+	// Signed distance to the coast, in cells, positive on land: to the smoothed coast near it, and farther out from
+	// cell to cell, half a cell at the cells either side of the coast, the two blending over the last cell of reach.
 	to_water := make([]f32, CELLS_MAX, context.temp_allocator)
 	to_land := make([]f32, CELLS_MAX, context.temp_allocator)
 	world_distance_to(to_water, true)
 	world_distance_to(to_land, false)
 	for terrain, i in WORLD.atlas.terrain {
-		coast := terrain.surface in WATER ? -(to_land[i] - 0.5) : to_water[i] - 0.5
-		rt.coast[i] = coast
+		water := terrain.surface in WATER
+		far := water ? -(to_land[i] - 0.5) : to_water[i] - 0.5
+		near := linalg.length(to_coast[i])
+		// Away from the line, the cell itself says which side it is on.
+		if near > 1 do coast_side[i] = water ? -1 : 1
+		rt.coast[i] = math.lerp(
+			coast_side[i] * near,
+			far,
+			math.smoothstep(COAST_REACH - 1, COAST_REACH, near),
+		)
 	}
 
-	world_trace_rivers()
 	land := world_land()
 	world_classify_cover(&land)
 	world_scatter_marks(&land)
@@ -528,14 +555,30 @@ world_cover :: proc(land: ^Land, i: int) -> (best: Cover_Cell) {
 	return
 }
 
-// Traces the river cells into lines and smooths them, then gives every cell near a river the offset from its middle to
-// the nearest point of a line. Lines run between ends and forks, so rivers meet where they join.
+// How far around the coast its smoothed line decides the distance to it, in cells
+COAST_REACH :: f32(3)
+
+// Rivers are smoothed fully; coasts keep more of their shape, losing mostly the steps of the cells.
+RIVER_SMOOTHING :: Polyline_Smoothing {
+	softness  = 1,
+	cut_iter  = 2,
+	cut_ratio = 0.25,
+}
+COAST_SMOOTHING :: Polyline_Smoothing {
+	softness  = 0.3,
+	cut_iter  = 2,
+	cut_ratio = 0.2,
+}
+
+// The rivers and coasts, traced and smoothed whenever the terrain changes
 @(private = "file")
-world_trace_rivers :: proc() {
-	river := &WORLD.render_terrain.river
-	for &offset in river do offset = gfx.RENDER_RIVER_FAR
+POLYLINES: Polylines
+
+// Traces the river cells into lines through the middles of their cells. Lines run between ends and forks, so rivers
+// meet where they join; what is left over are closed loops.
+@(private = "file")
+world_trace_rivers :: proc(lines: ^Polylines) {
 	visited := make([]bool, CELLS_MAX, context.temp_allocator)
-	points := make([dynamic][2]f32, 0, 1024, context.temp_allocator)
 	for i in 0 ..< CELLS_MAX {
 		if WORLD.atlas.terrain[i].surface != .River do continue
 		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
@@ -547,21 +590,16 @@ world_trace_rivers :: proc() {
 			j := n.y * WORLD_WIDTH + n.x
 			if visited[j] do continue
 			if world_river_next(n, &{}) != 2 && j < i do continue
-			clear(&points)
-			world_river_follow(&points, visited, cell, n)
-			world_river_stamp(points[:])
+			world_river_follow(lines, visited, cell, n)
 		}
 	}
-	// What is left are closed loops.
 	for i in 0 ..< CELLS_MAX {
 		if WORLD.atlas.terrain[i].surface != .River || visited[i] do continue
 		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
 		next: [8][2]int
 		if world_river_next(cell, &next) != 2 do continue
 		visited[i] = true
-		clear(&points)
-		world_river_follow(&points, visited, cell, next[0])
-		world_river_stamp(points[:])
+		world_river_follow(lines, visited, cell, next[0])
 	}
 }
 
@@ -585,36 +623,37 @@ world_river_next :: proc(cell: [2]int, out: ^[8][2]int) -> (count: int) {
 	return
 }
 
-// Walks a river from cell through next until it reaches an end, a fork, or a cell already walked, putting the middle
-// of every cell on the way into points. A river that ends by the sea or a lake is carried on to the shore.
+// Walks a river from cell through next until it reaches an end, a fork, or a cell already walked, through the middle
+// of every cell on the way. A river that ends by the sea or a lake is carried on to the shore.
 @(private = "file")
-world_river_follow :: proc(points: ^[dynamic][2]f32, visited: []bool, cell, next: [2]int) {
+world_river_follow :: proc(lines: ^Polylines, visited: []bool, cell, next: [2]int) {
 	middle :: proc(cell: [2]int) -> [2]f32 {return {f32(cell.x), f32(cell.y)} + 0.5}
-	world_river_mouth(points, cell)
-	append(points, middle(cell))
+	world_river_mouth(lines, cell)
+	polylines_add(lines, middle(cell))
 	prev, cur := cell, next
 	for {
-		append(points, middle(cur))
+		polylines_add(lines, middle(cur))
 		i := cur.y * WORLD_WIDTH + cur.x
 		ahead: [8][2]int
 		if world_river_next(cur, &ahead) != 2 || visited[i] do break
 		visited[i] = true
 		prev, cur = cur, ahead[0] == prev ? ahead[1] : ahead[0]
 	}
-	world_river_mouth(points, cur)
+	world_river_mouth(lines, cur)
+	polylines_end(lines, false, RIVER_SMOOTHING)
 }
 
 // If the river ends at cell and cell touches water, a point most of the way into the water.
 @(private = "file")
-world_river_mouth :: proc(points: ^[dynamic][2]f32, cell: [2]int) {
+world_river_mouth :: proc(lines: ^Polylines, cell: [2]int) {
 	if world_river_next(cell, &{}) != 1 do return
 	for dy in -1 ..= 1 {
 		for dx in -1 ..= 1 {
 			x, y := cell.x + dx, cell.y + dy
 			if x < 0 || y < 0 || x >= WORLD_WIDTH || y >= WORLD_HEIGHT do continue
 			if WORLD.atlas.terrain[y * WORLD_WIDTH + x].surface in WATER {
-				append(
-					points,
+				polylines_add(
+					lines,
 					[2]f32{f32(cell.x), f32(cell.y)} + 0.5 + [2]f32{f32(dx), f32(dy)} * 0.75,
 				)
 				return
@@ -623,52 +662,77 @@ world_river_mouth :: proc(points: ^[dynamic][2]f32, cell: [2]int) {
 	}
 }
 
-// Smooths a traced line, keeping its ends, and records it as the nearest river of the cells around it.
+// Traces the coasts: the edges between land and water cells, joined corner to corner into lines with the land on
+// their left. A coast that runs off the map ends there; the rest close.
 @(private = "file")
-world_river_stamp :: proc(traced: [][2]f32) {
-	if len(traced) < 2 do return
-	// Cell to cell steps are softened first, then the corners are cut twice, Chaikin's way.
-	line := slice.clone(traced, context.temp_allocator)
-	for _ in 0 ..< 2 {
-		prev := line[0]
-		for i in 1 ..< len(line) - 1 {
-			here := line[i]
-			line[i] = (prev + 2 * here + line[i + 1]) / 4
-			prev = here
-		}
+world_trace_coasts :: proc(lines: ^Polylines) {
+	// Corners are numbered y * (WORLD_WIDTH + 1) + x. From each leave up to two edges, one step east, south, west or
+	// north (see COAST_STEPS); two only where land and water meet across a corner.
+	CORNERS :: (WORLD_WIDTH + 1) * (WORLD_HEIGHT + 1)
+	corner :: proc(x, y: int) -> int {return y * (WORLD_WIDTH + 1) + x}
+	leaving := make([][2]u8, CORNERS, context.temp_allocator)
+	count := make([]u8, CORNERS, context.temp_allocator)
+	arriving := make([]u8, CORNERS, context.temp_allocator)
+	edge :: proc(leaving: [][2]u8, count, arriving: []u8, x, y: int, direction: u8) {
+		from := corner(x, y)
+		leaving[from][count[from]] = direction
+		count[from] += 1
+		step := COAST_STEPS[direction]
+		arriving[corner(x + step.x, y + step.y)] += 1
 	}
-	for _ in 0 ..< 2 {
-		cut := make([dynamic][2]f32, 0, 2 * len(line), context.temp_allocator)
-		append(&cut, line[0])
-		for i in 0 ..< len(line) - 1 {
-			a, b := line[i], line[i + 1]
-			append(&cut, a * 0.75 + b * 0.25, a * 0.25 + b * 0.75)
+	is_water :: proc(x, y: int) -> bool {return(
+			WORLD.atlas.terrain[y * WORLD_WIDTH + x].surface in
+			WATER \
+		)}
+	for y in 0 ..< WORLD_HEIGHT {
+		for x in 0 ..< WORLD_WIDTH {
+			if is_water(x, y) do continue
+			if y > 0 && is_water(x, y - 1) do edge(leaving, count, arriving, x + 1, y, 2)
+			if y < WORLD_HEIGHT - 1 && is_water(x, y + 1) do edge(leaving, count, arriving, x, y + 1, 0)
+			if x > 0 && is_water(x - 1, y) do edge(leaving, count, arriving, x, y, 1)
+			if x < WORLD_WIDTH - 1 && is_water(x + 1, y) do edge(leaving, count, arriving, x + 1, y + 1, 3)
 		}
-		append(&cut, line[len(line) - 1])
-		line = cut[:]
 	}
 
-	river := &WORLD.render_terrain.river
-	reach := f32(gfx.RENDER_RIVER_REACH)
-	for i in 0 ..< len(line) - 1 {
-		a, b := line[i], line[i + 1]
-		ab := b - a
-		length2 := max(linalg.dot(ab, ab), 1e-6)
-		x0 := max(int(min(a.x, b.x) - reach), 0)
-		y0 := max(int(min(a.y, b.y) - reach), 0)
-		x1 := min(int(max(a.x, b.x) + reach), WORLD_WIDTH - 1)
-		y1 := min(int(max(a.y, b.y) + reach), WORLD_HEIGHT - 1)
-		for y in y0 ..= y1 {
-			for x in x0 ..= x1 {
-				middle := [2]f32{f32(x), f32(y)} + 0.5
-				t := clamp(linalg.dot(middle - a, ab) / length2, 0, 1)
-				offset := a + ab * t - middle
-				cell := &river[y * WORLD_WIDTH + x]
-				if linalg.dot(offset, offset) < linalg.dot(cell^, cell^) do cell^ = offset
+	// Walks from a corner along edges not yet walked, until it comes back round or runs out of edges at the edge of the
+	// map; where two edges leave a corner, it turns left.
+	walk :: proc(lines: ^Polylines, leaving: [][2]u8, count: []u8, x, y: int) {
+		start := corner(x, y)
+		x, y := x, y
+		heading := -1
+		for {
+			c := corner(x, y)
+			if heading >= 0 && c == start {
+				polylines_end(lines, true, COAST_SMOOTHING)
+				return
 			}
+			if count[c] == 0 {
+				polylines_add(lines, [2]f32{f32(x), f32(y)})
+				polylines_end(lines, false, COAST_SMOOTHING)
+				return
+			}
+			pick := 0
+			if count[c] == 2 && heading >= 0 && int(leaving[c][1]) == (heading + 3) % 4 do pick = 1
+			direction := leaving[c][pick]
+			leaving[c][pick] = leaving[c][count[c] - 1]
+			count[c] -= 1
+			polylines_add(lines, [2]f32{f32(x), f32(y)})
+			step := COAST_STEPS[direction]
+			x, y, heading = x + step.x, y + step.y, int(direction)
 		}
 	}
+	// Coasts that start at the edge of the map first, then the closed ones
+	for c in 0 ..< CORNERS {
+		for count[c] > arriving[c] do walk(lines, leaving, count, c % (WORLD_WIDTH + 1), c / (WORLD_WIDTH + 1))
+	}
+	for c in 0 ..< CORNERS {
+		for count[c] > 0 do walk(lines, leaving, count, c % (WORLD_WIDTH + 1), c / (WORLD_WIDTH + 1))
+	}
 }
+
+// The steps along a coast edge: east, south, west and north, turning clockwise with y down the map
+@(private = "file", rodata)
+COAST_STEPS := [4][2]int{{1, 0}, {0, 1}, {-1, 0}, {0, -1}}
 
 // A repeatable pseudo-random number in [0, 1) for a position and a stream.
 @(private = "file")
