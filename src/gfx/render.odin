@@ -77,8 +77,11 @@ Render_Terrain_Style :: struct {
 	// Slopes facing away from the light darken toward shade_color, and slopes facing it brighten, the more the further
 	// they turn, scaled by relief_shade and relief_light. Level ground keeps its color.
 	// The shading is its own pass, render_terrain_shading, so the marks drawn on the map are shaded with the ground.
-	light:         [3]f32,
-	relief_height: f32,
+	// Shade falls with the light toward relief_ambient: ground the light cannot reach, behind higher ground, keeps that
+	// much.
+	light:          [3]f32,
+	relief_height:  f32,
+	relief_ambient: f32,
 	shade_color:   [4]f32,
 	relief_shade:  f32,
 	relief_light:  f32,
@@ -118,6 +121,7 @@ Render_Terrain_Uniforms :: struct {
 	paper, paper_stain, ink, sea_color, forest_color:              i32,
 	sea_tint, forest_tint, coast_width, wobble, river_width:       i32,
 	light, relief_height, shade_color, relief_shade, relief_light: i32,
+	relief_ambient:                                                i32,
 	shading_pass:                                                  i32,
 }
 
@@ -270,6 +274,7 @@ render_terrain_draw :: proc(renderer: ^Renderer, terrain: ^Render_Terrain, shadi
 	gl.Uniform3f(u.shade_color, style.shade_color.r, style.shade_color.g, style.shade_color.b)
 	gl.Uniform1f(u.relief_shade, style.relief_shade)
 	gl.Uniform1f(u.relief_light, style.relief_light)
+	gl.Uniform1f(u.relief_ambient, style.relief_ambient)
 	gl.Uniform1i(u.shading_pass, i32(shading_pass))
 
 	gl.DrawArrays(gl.TRIANGLES, 0, 3)
@@ -525,6 +530,7 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 	u.shade_color = gl.GetUniformLocation(program, "shade_color")
 	u.relief_shade = gl.GetUniformLocation(program, "relief_shade")
 	u.relief_light = gl.GetUniformLocation(program, "relief_light")
+	u.relief_ambient = gl.GetUniformLocation(program, "relief_ambient")
 	u.shading_pass = gl.GetUniformLocation(program, "shading_pass")
 	gl.UseProgram(program)
 	gl.Uniform1i(gl.GetUniformLocation(program, "cells"), 0)
@@ -748,6 +754,8 @@ uniform float relief_height;
 uniform vec3 shade_color;
 uniform float relief_shade;
 uniform float relief_light;
+// What shade keeps of the light
+uniform float relief_ambient;
 // Nonzero draws only the hill shading, as a factor for the blend to multiply into what is already drawn: shade as rgb
 // with full alpha, or brightening above one as rgb with no alpha.
 uniform int shading_pass;
@@ -799,14 +807,39 @@ float river_distance(vec2 p) {
     return min(min(distance(p, n[0]), distance(p, n[1])), min(distance(p, n[2]), distance(p, n[3])));
 }
 
-// How much the ground at p turns toward the light, next to level ground: negative on slopes facing away. The slope is
-// taken across two cells of the blended relief, so it changes smoothly rather than cell by cell.
-float relief_at(vec2 p) {
+// The light at p next to open level ground: below zero in shade, above on slopes turned to the light.
+// Slopes are lit by how they face it; ground behind higher ground, toward the light, is in its shadow; hollows lower
+// than the ground around them see less of the sky.
+float light_at(vec2 p) {
+    vec3 l = normalize(light);
+    // The slope is taken across two cells of the blended relief, so it changes smoothly rather than cell by cell.
     float dx = texture(relief, (p + vec2(1.0, 0.0)) / grid).r - texture(relief, (p - vec2(1.0, 0.0)) / grid).r;
     float dy = texture(relief, (p + vec2(0.0, 1.0)) / grid).r - texture(relief, (p - vec2(0.0, 1.0)) / grid).r;
     vec3 n = normalize(vec3(-0.5 * relief_height * vec2(dx, dy), 1.0));
-    vec3 l = normalize(light);
-    return dot(n, l) - l.z;
+
+    // March toward the light over the relief. The closer the ground comes to the ray, the deeper the shadow, and the
+    // farther away it does, the softer the shadow's edge.
+    float across = length(l.xy);
+    float sun = 1.0;
+    if (across > 1e-3) {
+        vec2 dir = l.xy / across;
+        float rise = l.z / across;
+        float h = texture(relief, p / grid).r * relief_height;
+        for (int i = 1; i <= 24; i++) {
+            float t = float(i) * 1.5;
+            float above = h + t * rise - texture(relief, (p + dir * t) / grid).r * relief_height;
+            sun = min(sun, clamp(0.5 + 2.0 * above / t, 0.0, 1.0));
+        }
+    }
+
+    // Hollows: the ground four cells around, against the ground here
+    float r = texture(relief, p / grid).r;
+    float around = texture(relief, (p + vec2(4.0, 0.0)) / grid).r + texture(relief, (p - vec2(4.0, 0.0)) / grid).r +
+                   texture(relief, (p + vec2(0.0, 4.0)) / grid).r + texture(relief, (p - vec2(0.0, 4.0)) / grid).r;
+    float hollow = clamp((around * 0.25 - r) * relief_height * 0.15, 0.0, 1.0);
+
+    float direct = max(dot(n, l), 0.0) * sun / l.z;
+    return relief_ambient * (1.0 - 0.5 * hollow) + (1.0 - relief_ambient) * direct - 1.0;
 }
 
 // Signed distance to the coast in cells, positive on land. It wanders a little from the cells, as if drawn by hand.
@@ -827,7 +860,7 @@ vec3 debug_color(vec4 cell, vec2 p) {
     if (water) return vec3(0.12, 0.2, 0.3);
     if (debug_mode == 2) return vec3(cell.g);
     if (debug_mode == 3) return mix(vec3(0.85, 0.8, 0.65), vec3(0.15, 0.4, 0.15), cell.b);
-    if (debug_mode == 5) return vec3(clamp(0.6 + relief_at(p), 0.0, 1.0));
+    if (debug_mode == 5) return vec3(clamp(0.6 + 0.6 * light_at(p), 0.0, 1.0));
     return mix(vec3(0.8, 0.65, 0.4), vec3(0.3, 0.5, 0.75), cell.a);
 }
 
@@ -844,7 +877,7 @@ void main() {
         out_color = vec4(1.0);
         if (outside) return;
         float land = smoothstep(-0.5 / px, 0.5 / px, coast_at(p));
-        float lit = relief_at(p);
+        float lit = light_at(p);
         if (lit < 0.0) out_color = vec4(mix(vec3(1.0), shade_color, clamp(-lit * relief_shade, 0.0, 1.0) * land), 1.0);
         else out_color = vec4(vec3(clamp(lit * relief_light, 0.0, 1.0) * land), 0.0);
         return;

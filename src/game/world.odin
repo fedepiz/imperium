@@ -128,9 +128,10 @@ Atlas :: struct {
 
 Terrain :: struct {
 	surface:   Surface,
-	elevation: u8,
 	trees:     u8,
 	moisture:  u8,
+	// From 0 to 1, as finely as the scenario gives it
+	elevation: f32,
 }
 
 // What covers a cell. A river is land it runs across: the rules treat it as land, the map draws it as a line.
@@ -182,17 +183,19 @@ world_init :: proc(img_base_index: gfx.Image_Id) {
 		wobble       = 0.3,
 		river_width  = 10.,
 		// From the north-west and halfway up the sky, as the marks are drawn: their shaded flanks face south-east.
-		light         = {-1, -1, 1.41},
-		relief_height = 30,
-		shade_color   = {0.639, 0.541, 0.431, 1},
-		relief_shade  = 1,
-		relief_light  = 0.12,
+		light          = {-1, -1, 1.41},
+		relief_height  = 55,
+		relief_ambient = 0.4,
+		shade_color    = {0.639, 0.541, 0.431, 1},
+		relief_shade   = 1,
+		relief_light   = 0.35,
 	}
 }
 
 // Loads a scenario's terrain from its folder: one greyscale PNG per property, WORLD_WIDTH by WORLD_HEIGHT.
 // surface.png is black for land, then darker to lighter grey for river, lake and sea; elevation.png, trees.png and
-// moisture.png run from 0 to 255 on land.
+// moisture.png run from black to white on land. Layers may be 8 or 16 bits deep: elevation keeps all of a 16-bit layer,
+// so its slopes shade smoothly.
 // If a layer is missing or the wrong size, the world is left all water, so the failure shows, and false is returned.
 world_load :: proc(scenario: string) -> bool {
 	terrain := &WORLD.atlas.terrain
@@ -219,15 +222,16 @@ world_load :: proc(scenario: string) -> bool {
 			return false
 		}
 		for value, i in pixels {
+			byte := u8(value * f32(max(u8)) + 0.5)
 			switch layer {
 			case .Surface:
-				terrain[i].surface = Surface(min((int(value) + 42) / 85, int(max(Surface))))
+				terrain[i].surface = Surface(min((int(byte) + 42) / 85, int(max(Surface))))
 			case .Elevation:
 				terrain[i].elevation = value
 			case .Trees:
-				terrain[i].trees = value
+				terrain[i].trees = byte
 			case .Moisture:
-				terrain[i].moisture = value
+				terrain[i].moisture = byte
 			}
 		}
 	}
@@ -238,16 +242,17 @@ world_load :: proc(scenario: string) -> bool {
 	return true
 }
 
-// One greyscale layer, WORLD_WIDTH by WORLD_HEIGHT; the pixels live in the temp allocator.
+// One greyscale layer, WORLD_WIDTH by WORLD_HEIGHT, from 0 to 1; the pixels live in the temp allocator. 8-bit layers
+// are widened, so both depths load alike.
 @(private = "file")
-world_load_layer :: proc(path: string) -> (pixels: []u8, ok: bool) {
+world_load_layer :: proc(path: string) -> (pixels: []f32, ok: bool) {
 	data, err := os.read_entire_file(path, context.temp_allocator)
 	if err != nil {
 		fmt.eprintfln("Could not read terrain layer %q: %v", path, err)
 		return
 	}
 	width, height, channels: c.int
-	loaded := stbi.load_from_memory(
+	loaded := stbi.load_16_from_memory(
 		raw_data(data),
 		c.int(len(data)),
 		&width,
@@ -271,8 +276,8 @@ world_load_layer :: proc(path: string) -> (pixels: []u8, ok: bool) {
 		)
 		return
 	}
-	pixels = make([]u8, CELLS_MAX, context.temp_allocator)
-	copy(pixels, loaded[:CELLS_MAX])
+	pixels = make([]f32, CELLS_MAX, context.temp_allocator)
+	for value, i in loaded[:CELLS_MAX] do pixels[i] = f32(value) / f32(max(u16))
 	return pixels, true
 }
 
@@ -360,7 +365,7 @@ world_update_render_terrain :: proc() {
 	for terrain, i in WORLD.atlas.terrain {
 		rt.cells[i] = {
 			u8(terrain.surface) * 85,
-			terrain.elevation,
+			u8(terrain.elevation * f32(max(u8)) + 0.5),
 			terrain.trees,
 			terrain.moisture,
 		}
@@ -386,14 +391,15 @@ world_update_render_terrain :: proc() {
 // to the sea, and water near land holds the elevation of that land.
 @(private = "file")
 world_smooth_relief :: proc() {
-	// Three box blurs make a bell about 2.5 cells wide.
-	RADIUS :: 2
+	// Three box blurs make a bell about 4.5 cells wide: wide enough to smooth away the small bumps in the heightmap,
+	// which relief_height would otherwise raise into pebbles.
+	RADIUS :: 4
 	PASSES :: 3
 	height := make([]f32, CELLS_MAX, context.temp_allocator)
 	weight := make([]f32, CELLS_MAX, context.temp_allocator)
 	for terrain, i in WORLD.atlas.terrain {
 		if terrain.surface in WATER do continue
-		height[i] = f32(terrain.elevation) / f32(max(u8))
+		height[i] = terrain.elevation
 		weight[i] = 1
 	}
 	scratch := make([]f32, max(WORLD_WIDTH, WORLD_HEIGHT), context.temp_allocator)
@@ -625,7 +631,7 @@ world_scatter_marks :: proc() {
 					WORLD.render_terrain.river[i] -
 					([2]f32{x, y} - [2]f32{f32(cx), f32(cy)} - 0.5),
 				)
-				elevation := f32(terrain.elevation) / f32(max(u8))
+				elevation := terrain.elevation
 				trees := f32(terrain.trees) / f32(max(u8))
 
 				mark := Mark {
