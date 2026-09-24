@@ -54,7 +54,7 @@ Render_Terrain_Debug :: enum i32 {
 	Elevation,
 	Trees,
 	Moisture,
-	// What covers the land: desert, steppe, fertile ground and marsh
+	// The cover layer's categories, cell by cell
 	Cover,
 }
 
@@ -64,21 +64,44 @@ Render_Terrain_Style :: struct {
 	paper_stain:  [4]f32,
 	ink:          [4]f32,
 	sea_color:    [4]f32,
-	forest_color: [4]f32,
 	sea_tint:     f32,
-	forest_tint:  f32,
 	// Coast line width in logical pixels, and how far the coast wanders from the cells, in cells
 	coast_width:  f32,
 	wobble:       f32,
 	// River line width in logical pixels, where a river reaches the lowlands; it thins toward its sources.
 	river_width:  f32,
-	// Deserts are washed toward sand_color and stippled with ink, steppe washed more faintly; fertile ground is washed
-	// toward forest_color, and marsh toward sea_color. stipple is how dark the desert's dots are.
-	sand_color:   [4]f32,
-	sand_tint:    f32,
-	stipple:      f32,
-	fertile_tint: f32,
-	marsh_tint:   f32,
+}
+
+// How many categories a layer can have, category 0 included
+RENDER_LAYER_CATEGORIES :: 256
+
+// Ink patterns a category can draw over its wash
+Render_Pattern :: enum u8 {
+	None,
+	// Fine dots, always about the same distance apart on screen
+	Stipple,
+}
+
+// How one category of a layer is drawn: the paper is multiplied toward color by wash, and the pattern is drawn in ink
+// as dark as pattern_ink, both scaled by each cell's strength. Only the color's RGB is used.
+Render_Category :: struct {
+	color:       [4]f32,
+	wash:        f32,
+	pattern:     Render_Pattern,
+	pattern_ink: f32,
+}
+
+// A map layer: one category per cell, with how strongly the cell is of it, and a palette saying how each category is
+// drawn. Drawing blends the categories of neighbouring cells, along borders that wander up to jitter cells from the
+// grid, so the map shows no cell edges. What the categories mean is the owner's business: the renderer only draws them.
+// Cells are indexed y * RENDER_TERRAIN_WIDTH + x.
+Render_Layer :: struct {
+	// Bumped whenever cells or palette change; the renderer uploads them again only then.
+	revision: u32,
+	// Category, then strength from 0 to 255
+	cells:    [RENDER_TERRAIN_CELLS][2]u8,
+	palette:  [RENDER_LAYER_CATEGORIES]Render_Category,
+	jitter:   f32,
 }
 
 // How far around a river its offsets reach, in cells. Cells farther away hold RENDER_RIVER_FAR.
@@ -96,8 +119,8 @@ Render_Terrain :: struct {
 	coast:      [RENDER_TERRAIN_CELLS]f32,
 	// Derived from the cells: from the middle of each cell to the nearest point of a river line, in cells.
 	river:      [RENDER_TERRAIN_CELLS][2]f32,
-	// What covers the land, from 0 to 255 in each: desert, steppe, fertile ground, marsh. Zero on water.
-	cover:      [RENDER_TERRAIN_CELLS][4]u8,
+	// What covers the land, drawn onto it: forest, desert and so on. Water is drawn over it.
+	cover:      Render_Layer,
 	// The cell at the middle of the view, and logical pixels per cell
 	center:     [2]f32,
 	zoom:       f32,
@@ -109,9 +132,18 @@ Render_Terrain :: struct {
 @(private = "file")
 Render_Terrain_Uniforms :: struct {
 	grid, center, zoom, view_size, pixel_density, debug_mode: i32,
-	paper, paper_stain, ink, sea_color, forest_color:         i32,
-	sea_tint, forest_tint, coast_width, wobble, river_width:  i32,
-	sand_color, sand_tint, stipple, fertile_tint, marsh_tint: i32,
+	paper, paper_stain, ink, sea_color:                       i32,
+	sea_tint, coast_width, wobble, river_width, cover_jitter: i32,
+}
+
+// A layer's textures: its cells, one texel each (category, strength), and its palette, a column per category (row 0:
+// color and wash; row 1: pattern and its ink).
+@(private = "file")
+Render_Layer_Textures :: struct {
+	cells, palette: u32,
+	// The layer revision the textures hold, once anything has been uploaded
+	revision:       u32,
+	uploaded:       bool,
 }
 
 Renderer :: struct {
@@ -129,7 +161,7 @@ Renderer :: struct {
 	terrain_cells:                    u32,
 	terrain_coast:                    u32,
 	terrain_river:                    u32,
-	terrain_cover:                    u32,
+	terrain_cover:                    Render_Layer_Textures,
 	terrain_uniforms:                 Render_Terrain_Uniforms,
 	// The terrain revision the textures hold, once anything has been uploaded
 	terrain_revision:                 u32,
@@ -180,23 +212,13 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 			gl.FLOAT,
 			raw_data(terrain.river[:]),
 		)
-		gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_cover)
-		gl.TexSubImage2D(
-			gl.TEXTURE_2D,
-			0,
-			0,
-			0,
-			RENDER_TERRAIN_WIDTH,
-			RENDER_TERRAIN_HEIGHT,
-			gl.RGBA,
-			gl.UNSIGNED_BYTE,
-			raw_data(terrain.cover[:]),
-		)
 		gl.BindTexture(gl.TEXTURE_2D, 0)
 		gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4)
 		renderer.terrain_revision = terrain.revision
 		renderer.terrain_uploaded = true
 	}
+
+	render_layer_upload(&renderer.terrain_cover, &terrain.cover)
 
 	// The map is opaque and covers everything drawn before it.
 	gl.Disable(gl.DEPTH_TEST)
@@ -212,7 +234,9 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	gl.ActiveTexture(gl.TEXTURE2)
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_river)
 	gl.ActiveTexture(gl.TEXTURE3)
-	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_cover)
+	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_cover.cells)
+	gl.ActiveTexture(gl.TEXTURE4)
+	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_cover.palette)
 
 	u := &renderer.terrain_uniforms
 	style := &terrain.style
@@ -227,20 +251,16 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	gl.Uniform3f(u.paper_stain, style.paper_stain.r, style.paper_stain.g, style.paper_stain.b)
 	gl.Uniform3f(u.ink, style.ink.r, style.ink.g, style.ink.b)
 	gl.Uniform3f(u.sea_color, style.sea_color.r, style.sea_color.g, style.sea_color.b)
-	gl.Uniform3f(u.forest_color, style.forest_color.r, style.forest_color.g, style.forest_color.b)
 	gl.Uniform1f(u.sea_tint, style.sea_tint)
-	gl.Uniform1f(u.forest_tint, style.forest_tint)
 	gl.Uniform1f(u.coast_width, style.coast_width)
 	gl.Uniform1f(u.wobble, style.wobble)
 	gl.Uniform1f(u.river_width, style.river_width)
-	gl.Uniform3f(u.sand_color, style.sand_color.r, style.sand_color.g, style.sand_color.b)
-	gl.Uniform1f(u.sand_tint, style.sand_tint)
-	gl.Uniform1f(u.stipple, style.stipple)
-	gl.Uniform1f(u.fertile_tint, style.fertile_tint)
-	gl.Uniform1f(u.marsh_tint, style.marsh_tint)
+	gl.Uniform1f(u.cover_jitter, terrain.cover.jitter)
 
 	gl.DrawArrays(gl.TRIANGLES, 0, 3)
 
+	gl.BindTexture(gl.TEXTURE_2D, 0)
+	gl.ActiveTexture(gl.TEXTURE3)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 	gl.ActiveTexture(gl.TEXTURE2)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
@@ -342,7 +362,7 @@ render_destroy :: proc(renderer: ^Renderer) {
 	gl.DeleteTextures(1, &renderer.terrain_cells)
 	gl.DeleteTextures(1, &renderer.terrain_coast)
 	gl.DeleteTextures(1, &renderer.terrain_river)
-	gl.DeleteTextures(1, &renderer.terrain_cover)
+	render_layer_destroy(&renderer.terrain_cover)
 	gl.DeleteVertexArrays(1, &renderer.terrain_vao)
 	gl.DeleteProgram(renderer.terrain_program)
 	gl.DeleteTextures(1, &renderer.white_texture)
@@ -385,6 +405,80 @@ render_create_atlas_texture :: proc(renderer: ^Renderer, id: Texture_Id, bitmap:
 	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 	renderer.textures[id] = texture
+}
+
+// Makes a layer's textures, with storage for the largest terrain and every category, and nothing in them yet. Both are
+// read cell by cell: the shader blends between cells itself, as categories cannot be blended as numbers.
+@(private = "file")
+render_layer_init :: proc(textures: ^Render_Layer_Textures) {
+	gl.GenTextures(1, &textures.cells)
+	gl.BindTexture(gl.TEXTURE_2D, textures.cells)
+	gl.TexImage2D(
+		gl.TEXTURE_2D,
+		0,
+		gl.RG8,
+		RENDER_TERRAIN_WIDTH,
+		RENDER_TERRAIN_HEIGHT,
+		0,
+		gl.RG,
+		gl.UNSIGNED_BYTE,
+		nil,
+	)
+	render_texture_nearest()
+	gl.GenTextures(1, &textures.palette)
+	gl.BindTexture(gl.TEXTURE_2D, textures.palette)
+	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, RENDER_LAYER_CATEGORIES, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, nil)
+	render_texture_nearest()
+	gl.BindTexture(gl.TEXTURE_2D, 0)
+}
+
+// Uploads a layer's cells and palette again if its revision has changed.
+@(private = "file")
+render_layer_upload :: proc(textures: ^Render_Layer_Textures, layer: ^Render_Layer) {
+	if textures.uploaded && textures.revision == layer.revision {
+		return
+	}
+	byte :: proc(v: f32) -> u8 {return u8(clamp(v, 0, 1) * 255 + 0.5)}
+	palette: [2][RENDER_LAYER_CATEGORIES][4]u8
+	for category, i in layer.palette {
+		c := category.color
+		palette[0][i] = {byte(c.r), byte(c.g), byte(c.b), byte(category.wash)}
+		palette[1][i] = {u8(category.pattern), byte(category.pattern_ink), 0, 0}
+	}
+	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
+	gl.BindTexture(gl.TEXTURE_2D, textures.cells)
+	gl.TexSubImage2D(
+		gl.TEXTURE_2D,
+		0,
+		0,
+		0,
+		RENDER_TERRAIN_WIDTH,
+		RENDER_TERRAIN_HEIGHT,
+		gl.RG,
+		gl.UNSIGNED_BYTE,
+		raw_data(layer.cells[:]),
+	)
+	gl.BindTexture(gl.TEXTURE_2D, textures.palette)
+	gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, RENDER_LAYER_CATEGORIES, 2, gl.RGBA, gl.UNSIGNED_BYTE, &palette)
+	gl.BindTexture(gl.TEXTURE_2D, 0)
+	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4)
+	textures.revision = layer.revision
+	textures.uploaded = true
+}
+
+@(private = "file")
+render_layer_destroy :: proc(textures: ^Render_Layer_Textures) {
+	gl.DeleteTextures(1, &textures.cells)
+	gl.DeleteTextures(1, &textures.palette)
+}
+
+// Texel by texel, clamped to the edge, for the bound 2D texture
+@(private = "file")
+render_texture_nearest :: proc() {
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 }
 
 @(private = "file")
@@ -481,22 +575,17 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 	u.paper_stain = gl.GetUniformLocation(program, "paper_stain")
 	u.ink = gl.GetUniformLocation(program, "ink")
 	u.sea_color = gl.GetUniformLocation(program, "sea_color")
-	u.forest_color = gl.GetUniformLocation(program, "forest_color")
 	u.sea_tint = gl.GetUniformLocation(program, "sea_tint")
-	u.forest_tint = gl.GetUniformLocation(program, "forest_tint")
 	u.coast_width = gl.GetUniformLocation(program, "coast_width")
 	u.wobble = gl.GetUniformLocation(program, "wobble")
 	u.river_width = gl.GetUniformLocation(program, "river_width")
-	u.sand_color = gl.GetUniformLocation(program, "sand_color")
-	u.sand_tint = gl.GetUniformLocation(program, "sand_tint")
-	u.stipple = gl.GetUniformLocation(program, "stipple")
-	u.fertile_tint = gl.GetUniformLocation(program, "fertile_tint")
-	u.marsh_tint = gl.GetUniformLocation(program, "marsh_tint")
+	u.cover_jitter = gl.GetUniformLocation(program, "cover_jitter")
 	gl.UseProgram(program)
 	gl.Uniform1i(gl.GetUniformLocation(program, "cells"), 0)
 	gl.Uniform1i(gl.GetUniformLocation(program, "coast"), 1)
 	gl.Uniform1i(gl.GetUniformLocation(program, "river"), 2)
-	gl.Uniform1i(gl.GetUniformLocation(program, "cover"), 3)
+	gl.Uniform1i(gl.GetUniformLocation(program, "cover_cells"), 3)
+	gl.Uniform1i(gl.GetUniformLocation(program, "cover_palette"), 4)
 	gl.UseProgram(0)
 
 	// The map's one triangle has no vertex data, but core profile still wants a vertex array bound.
@@ -556,24 +645,7 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-	// Cover is blended between cells, so the washes fade into each other.
-	gl.GenTextures(1, &renderer.terrain_cover)
-	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_cover)
-	gl.TexImage2D(
-		gl.TEXTURE_2D,
-		0,
-		gl.RGBA8,
-		RENDER_TERRAIN_WIDTH,
-		RENDER_TERRAIN_HEIGHT,
-		0,
-		gl.RGBA,
-		gl.UNSIGNED_BYTE,
-		nil,
-	)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	render_layer_init(&renderer.terrain_cover)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 	return true
 }
@@ -680,40 +752,34 @@ void main() {
 // a cell exactly; texture blends neighbouring cells.
 // coast holds the signed distance to the coast in cells, positive on land, blended between cells.
 // river holds, per cell, the offset from its middle to the nearest point of a river line.
-// cover holds what covers the land, blended between cells: desert, steppe, fertile ground, marsh.
+// cover_cells and cover_palette are the cover layer: see layer_at.
 @(private = "file")
 RENDER_MAP_FRAGMENT_SOURCE: cstring = `#version 330 core
 uniform sampler2D cells;
 uniform sampler2D coast;
 uniform sampler2D river;
-uniform sampler2D cover;
+uniform sampler2D cover_cells;
+uniform sampler2D cover_palette;
 uniform vec2 grid;
 // The cell at the middle of the view, and logical pixels per cell
 uniform vec2 center;
 uniform float zoom;
 uniform vec2 view_size;
 uniform float pixel_density;
-// 0 draws the map; 1 to 4 show surface, elevation, trees and moisture cell by cell; 5 shows what covers the land
+// 0 draws the map; 1 to 4 show surface, elevation, trees and moisture cell by cell; 5 shows the cover layer
 uniform int debug_mode;
 uniform vec3 paper;
 uniform vec3 paper_stain;
 uniform vec3 ink;
 uniform vec3 sea_color;
-uniform vec3 forest_color;
 uniform float sea_tint;
-uniform float forest_tint;
 // Coast line width in logical pixels, and how far the coast wanders from the cells, in cells
 uniform float coast_width;
 uniform float wobble;
 // River line width in logical pixels in the lowlands
 uniform float river_width;
-// Deserts wash toward sand_color and are stippled, steppe washes more faintly; fertile ground washes toward
-// forest_color, marsh toward sea_color. stipple is how dark the desert's dots are.
-uniform vec3 sand_color;
-uniform float sand_tint;
-uniform float stipple;
-uniform float fertile_tint;
-uniform float marsh_tint;
+// How far the cover layer's borders wander from the cells, in cells
+uniform float cover_jitter;
 out vec4 out_color;
 
 float hash(vec2 p) {
@@ -782,6 +848,39 @@ float stipple_at(vec2 p, float px, float density) {
     return mix(stipple_grid(p, exp2(l0), px, density, radius), stipple_grid(p, exp2(l0 + 1.0), px, density, radius), f);
 }
 
+// A layer as drawn at p: what its wash multiplies the paper by, and for each ink pattern (x: stipple) how dense it is
+// and how dark its ink.
+struct Layer_Look {
+    vec3 tint;
+    vec4 density;
+    vec4 ink;
+};
+
+// Reads a layer at p. cells holds a category and a strength per cell; palette holds, for each category, its color and
+// wash in row 0 and its pattern and ink in row 1. Categories cannot be blended as numbers, so the four cells around p
+// are read exactly and their looks blended instead. p first wanders up to jitter cells, so borders do not follow the
+// grid.
+Layer_Look layer_at(sampler2D cells, sampler2D palette, vec2 p, float jitter) {
+    vec2 q = p - 0.5 + jitter * (vec2(fbm(p * 0.3 + 1.3), fbm(p * 0.3 + 9.1)) - 0.5);
+    vec2 base = floor(q), f = q - base;
+    Layer_Look look = Layer_Look(vec3(0.0), vec4(0.0), vec4(0.0));
+    for (int k = 0; k < 4; k++) {
+        ivec2 corner = ivec2(k & 1, k >> 1);
+        vec2 cell = texelFetch(cells, clamp(ivec2(base) + corner, ivec2(0), ivec2(grid) - 1), 0).rg;
+        int category = int(cell.r * 255.0 + 0.5);
+        vec4 wash = texelFetch(palette, ivec2(category, 0), 0);
+        vec4 pattern = texelFetch(palette, ivec2(category, 1), 0);
+        float weight = mix(1.0 - f.x, f.x, float(corner.x)) * mix(1.0 - f.y, f.y, float(corner.y));
+        look.tint += weight * mix(vec3(1.0), wash.rgb, wash.a * cell.g);
+        int kind = int(pattern.r * 255.0 + 0.5);
+        if (kind > 0) {
+            look.density[kind - 1] += weight * cell.g;
+            look.ink[kind - 1] += weight * pattern.g;
+        }
+    }
+    return look;
+}
+
 vec3 debug_color(vec4 cell, vec2 p) {
     // Land, river, lake, sea
     int surface = int(cell.r * 3.0 + 0.5);
@@ -796,12 +895,12 @@ vec3 debug_color(vec4 cell, vec2 p) {
     if (debug_mode == 2) return vec3(cell.g);
     if (debug_mode == 3) return mix(vec3(0.85, 0.8, 0.65), vec3(0.15, 0.4, 0.15), cell.b);
     if (debug_mode == 5) {
-        vec4 c = texelFetch(cover, ivec2(floor(p)), 0);
-        vec3 col = vec3(0.85, 0.8, 0.65);
-        col = mix(col, vec3(0.9, 0.7, 0.35), c.r);
-        col = mix(col, vec3(0.75, 0.75, 0.4), c.g);
-        col = mix(col, vec3(0.3, 0.6, 0.25), c.b);
-        return mix(col, vec3(0.25, 0.45, 0.5), c.a);
+        // Each category's color, deepened, and fainter where the cell is weakly of it
+        vec2 c = texelFetch(cover_cells, ivec2(floor(p)), 0).rg;
+        int category = int(c.r * 255.0 + 0.5);
+        if (category == 0) return vec3(0.85, 0.8, 0.65);
+        vec3 color = texelFetch(cover_palette, ivec2(category, 0), 0).rgb;
+        return mix(vec3(0.85, 0.8, 0.65), color * color, 0.35 + 0.65 * c.g);
     }
     return mix(vec3(0.8, 0.65, 0.4), vec3(0.3, 0.5, 0.75), cell.a);
 }
@@ -833,16 +932,11 @@ void main() {
         col = paper_at(p);
         // The sea wash is strongest along the coast.
         vec3 sea = col * mix(vec3(1.0), sea_color, sea_tint * (0.65 + 0.35 * exp(min(d, 0.0) / 5.0)));
-        vec3 ground = col * mix(vec3(1.0), forest_color, cell.b * forest_tint);
+        // What covers the land: each category's wash and ink pattern
+        Layer_Look cover = layer_at(cover_cells, cover_palette, p, cover_jitter);
+        vec3 ground = col * cover.tint;
+        ground = mix(ground, ink, stipple_at(p, px, cover.density.x) * cover.ink.x);
         col = mix(sea, ground, land);
-
-        // What covers the land: deserts and steppe in sand, fertile ground in green, marsh in the sea's grey-green,
-        // and deserts stippled with ink.
-        vec4 c = texture(cover, p / grid) * land;
-        col *= mix(vec3(1.0), sand_color, (c.r + 0.4 * c.g) * sand_tint);
-        col *= mix(vec3(1.0), forest_color, c.b * fertile_tint);
-        col *= mix(vec3(1.0), sea_color, c.a * marsh_tint);
-        col = mix(col, ink, stipple_at(p, px, c.r) * stipple);
 
         // Rivers: a faint wash either side and a line that thins toward the hills, both stopping at the shore. The line
         // never grows past a third of a cell, so rivers fade out as the map zooms away.

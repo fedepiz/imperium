@@ -21,6 +21,8 @@ WORLD: struct {
 	// What the map pass draws, kept up to date by world_tick
 	render_terrain:   gfx.Render_Terrain,
 	render_list:      gfx.Render_List,
+	// What covers each cell, worked out from the terrain whenever it changes
+	cover:            [CELLS_MAX]Cover_Cell,
 	// The marks scattered over the terrain, top to bottom, so nearer marks overlap farther ones
 	marks:            [MARKS_MAX]Mark,
 	mark_count:       int,
@@ -39,81 +41,16 @@ Mark :: struct {
 	alpha:   u8,
 }
 
-// How marks are placed
-
-// The spacing of each kind's lattice, in cells: halving it gives four times as many marks. Broadleaf trees and cypresses
-// have no lattice of their own: they take the place of conifers where the climate suits them.
-@(private = "file", rodata)
-MARK_SPACING := [Terrain_Mark]f32 {
-	.Tree      = 2.1,
-	.Molehill  = 3.84,
-	.Mountain  = 8.04,
-	.Sea_Mark  = 12.0,
-	.Broadleaf = 0,
-	.Cypress   = 0,
-	.Palm      = 2.2,
-	.Tuft      = 3.8,
-	.Marsh     = 3.2,
-	.Dune      = 5.5,
-}
-
-// The typical width of each kind of mark, in cells; single marks vary a little around it. Width over spacing is how
-// much of the ground the marks cover.
-@(private = "file", rodata)
-MARK_WIDTH := [Terrain_Mark]f32 {
-	.Tree      = 1.58,
-	.Molehill  = 3.29,
-	.Mountain  = 5.5,
-	.Sea_Mark  = 3.0,
-	.Broadleaf = 1.6,
-	.Cypress   = 0.85,
-	.Palm      = 1.7,
-	.Tuft      = 1.3,
-	.Marsh     = 2.3,
-	.Dune      = 3.4,
-}
-
-// Each kind reads an intensity from the terrain: tree cover for trees, elevation for hills and mountains, cells out
-// from the coast for sea marks, and the land's cover for the rest: fertile ground for palms, steppe for tufts, marsh
-// for marsh, desert for dunes. A lattice point keeps its mark with a chance that rises from none at MARK_FROM to
-// certain at MARK_FULL. Hills give way as mountains take over.
-@(private = "file", rodata)
-MARK_FROM := [Terrain_Mark]f32 {
-	.Tree      = 0.07,
-	.Molehill  = 0.58,
-	.Mountain  = 0.55,
-	.Sea_Mark  = 3,
-	.Broadleaf = 0,
-	.Cypress   = 0,
-	.Palm      = 0.3,
-	.Tuft      = 0.2,
-	.Marsh     = 0.25,
-	.Dune      = 0.45,
-}
-
-@(private = "file", rodata)
-MARK_FULL := [Terrain_Mark]f32 {
-	.Tree      = 0.87,
-	.Molehill  = 0.77,
-	.Mountain  = 1.0,
-	.Sea_Mark  = 5,
-	.Broadleaf = 0,
-	.Cypress   = 0,
-	.Palm      = 0.9,
-	.Tuft      = 1.0,
-	.Marsh     = 0.8,
-	.Dune      = 1.0,
-}
-
+// The drawings a mark can be, each with up to TERRAIN_MARK_VARIANTS variants. Where each is placed is up to
+// MARK_FAMILIES.
 Terrain_Mark :: enum {
-	// A conifer; broadleaf trees and cypresses stand in for it in milder climates.
-	Tree,
-	Molehill,
-	Mountain,
-	Sea_Mark,
+	Conifer,
 	Broadleaf,
 	Cypress,
 	Palm,
+	Molehill,
+	Mountain,
+	Sea_Mark,
 	// Steppe grass
 	Tuft,
 	Marsh,
@@ -126,35 +63,30 @@ TERRAIN_MARK_VARIANTS :: 4
 // The drawings of each mark, under assets/gfx; an empty name is a variant the mark does not have.
 @(private = "file")
 TERRAIN_MARK_IMAGES := [Terrain_Mark][TERRAIN_MARK_VARIANTS]string {
-	.Tree     = {
-		"terrain/conifer_0",
-		"terrain/conifer_1",
-		"terrain/conifer_2",
-		"terrain/conifer_3",
-	},
-	.Molehill = {"terrain/hill_0", "terrain/hill_1", "terrain/hill_2", "terrain/hill_3"},
-	.Mountain = {
-		"terrain/mountain_0",
-		"terrain/mountain_1",
-		"terrain/mountain_2",
-		"terrain/mountain_3",
-	},
-	.Sea_Mark = {"terrain/sea_0", "terrain/sea_1", "", ""},
-	.Broadleaf = {
-		"terrain/broadleaf_0",
-		"terrain/broadleaf_1",
-		"terrain/broadleaf_2",
-		"terrain/broadleaf_3",
-	},
-	.Cypress = {"terrain/cypress_0", "terrain/cypress_1", "terrain/cypress_2", "terrain/cypress_3"},
-	.Palm = {"terrain/palm_0", "terrain/palm_1", "terrain/palm_2", "terrain/palm_3"},
-	.Tuft = {"terrain/tuft_0", "terrain/tuft_1", "terrain/tuft_2", "terrain/tuft_3"},
-	.Marsh = {"terrain/marsh_0", "terrain/marsh_1", "terrain/marsh_2", "terrain/marsh_3"},
-	.Dune = {"terrain/dune_0", "terrain/dune_1", "terrain/dune_2", "terrain/dune_3"},
+	.Conifer   = {"terrain/conifer_0", "terrain/conifer_1", "terrain/conifer_2", "terrain/conifer_3"},
+	.Broadleaf = {"terrain/broadleaf_0", "terrain/broadleaf_1", "terrain/broadleaf_2", "terrain/broadleaf_3"},
+	.Cypress   = {"terrain/cypress_0", "terrain/cypress_1", "terrain/cypress_2", "terrain/cypress_3"},
+	.Palm      = {"terrain/palm_0", "terrain/palm_1", "terrain/palm_2", "terrain/palm_3"},
+	.Molehill  = {"terrain/hill_0", "terrain/hill_1", "terrain/hill_2", "terrain/hill_3"},
+	.Mountain  = {"terrain/mountain_0", "terrain/mountain_1", "terrain/mountain_2", "terrain/mountain_3"},
+	.Sea_Mark  = {"terrain/sea_0", "terrain/sea_1", "", ""},
+	.Tuft      = {"terrain/tuft_0", "terrain/tuft_1", "terrain/tuft_2", "terrain/tuft_3"},
+	.Marsh     = {"terrain/marsh_0", "terrain/marsh_1", "terrain/marsh_2", "terrain/marsh_3"},
+	.Dune      = {"terrain/dune_0", "terrain/dune_1", "terrain/dune_2", "terrain/dune_3"},
 }
 
 // The world's images, numbered from its image base
 WORLD_IMAGES_MAX :: len(Terrain_Mark) * TERRAIN_MARK_VARIANTS
+
+// How many variants a mark has: its leading named drawings.
+world_mark_variants :: proc(mark: Terrain_Mark) -> int {
+	count := 0
+	for name in TERRAIN_MARK_IMAGES[mark] {
+		if name == "" do break
+		count += 1
+	}
+	return count
+}
 
 // The image of a mark's variant.
 world_mark_image :: proc(mark: Terrain_Mark, variant: int) -> gfx.Image_Id {
@@ -219,18 +151,12 @@ world_init :: proc(img_base_index: gfx.Image_Id) {
 		paper_stain  = {0.847, 0.761, 0.588, 1},
 		ink          = {0.231, 0.165, 0.110, 1},
 		sea_color    = {0.616, 0.714, 0.788, 1},
-		forest_color = {0.725, 0.784, 0.576, 1},
 		sea_tint     = 0.55,
-		forest_tint  = 0.45,
 		coast_width  = 1.6,
 		wobble       = 0.3,
 		river_width  = 10.,
-		sand_color   = {0.965, 0.878, 0.690, 1},
-		sand_tint    = 0.55,
-		stipple      = 0.45,
-		fertile_tint = 0.7,
-		marsh_tint   = 0.5,
 	}
+	WORLD.render_terrain.cover.jitter = 0.8
 }
 
 // Loads a scenario's terrain from its folder: one greyscale PNG per property, WORLD_WIDTH by WORLD_HEIGHT.
@@ -388,8 +314,8 @@ world_pan_camera :: proc(input: Input, dt: f32) {
 	camera.center = linalg.clamp(camera.center, 0, world_size)
 }
 
-// Keeps the map pass in step with the world: the camera every frame, the cells, coast and rivers when the terrain has
-// changed.
+// Keeps the map pass in step with the world: the camera every frame; the cells, coast, rivers, covers and marks when
+// the terrain has changed.
 @(private = "file")
 world_update_render_terrain :: proc() {
 	rt := &WORLD.render_terrain
@@ -420,59 +346,9 @@ world_update_render_terrain :: proc() {
 	}
 
 	world_trace_rivers()
-	world_classify_cover()
-	world_scatter_marks()
-}
-
-// What covers the land, from the moisture, the lie of the land and the rivers, into the render terrain's cover.
-// Desert and steppe follow the moisture. Dry land along a river is fertile instead. Marsh is low, level ground that is
-// very wet, or near both a river and the sea: the deltas.
-@(private = "file")
-world_classify_cover :: proc() {
-	terrain := &WORLD.atlas.terrain
-	is_river := make([]bool, CELLS_MAX, context.temp_allocator)
-	is_sea := make([]bool, CELLS_MAX, context.temp_allocator)
-	for cell, i in terrain {
-		is_river[i] = cell.surface == .River
-		is_sea[i] = cell.surface == .Sea
-	}
-	to_river := make([]f32, CELLS_MAX, context.temp_allocator)
-	to_sea := make([]f32, CELLS_MAX, context.temp_allocator)
-	world_distance_from(to_river, is_river)
-	world_distance_from(to_sea, is_sea)
-
-	ramp :: math.smoothstep
-	cover := &WORLD.render_terrain.cover
-	for cell, i in terrain {
-		cover[i] = {}
-		if cell.surface in WATER do continue
-		x, y := i % WORLD_WIDTH, i / WORLD_WIDTH
-		moisture := f32(cell.moisture) / f32(max(u8))
-		elevation := f32(cell.elevation) / f32(max(u8))
-		// How much the ground rises and falls within two cells
-		lowest, highest := cell.elevation, cell.elevation
-		for dy in -2 ..= 2 {
-			for dx in -2 ..= 2 {
-				nx, ny := clamp(x + dx, 0, WORLD_WIDTH - 1), clamp(y + dy, 0, WORLD_HEIGHT - 1)
-				e := terrain[ny * WORLD_WIDTH + nx].elevation
-				lowest, highest = min(lowest, e), max(highest, e)
-			}
-		}
-		unevenness := f32(highest - lowest) / f32(max(u8))
-
-		fertile := ramp(f32(0.56), 0.40, moisture) * ramp(f32(5), 1.5, to_river[i])
-		wet := max(ramp(f32(6), 2, to_river[i]) * ramp(f32(16), 6, to_sea[i]), ramp(f32(0.80), 0.88, moisture))
-		marsh := ramp(f32(0.22), 0.12, elevation) * ramp(f32(0.08), 0.03, unevenness) * wet
-		desert := ramp(f32(0.44), 0.32, moisture) * (1 - fertile) * (1 - marsh)
-		steppe := ramp(f32(0.36), 0.44, moisture) * ramp(f32(0.56), 0.46, moisture) * (1 - fertile) * (1 - marsh)
-		cover[i] = {world_byte(desert), world_byte(steppe), world_byte(fertile), world_byte(marsh)}
-	}
-}
-
-// A share from 0 to 1 as a byte.
-@(private = "file")
-world_byte :: proc(share: f32) -> u8 {
-	return u8(clamp(share, 0, 1) * f32(max(u8)) + 0.5)
+	land := land_make()
+	land_classify(&land)
+	land_scatter_marks(&land)
 }
 
 // Traces the river cells into lines and smooths them, then gives every cell near a river the offset from its middle to
@@ -618,143 +494,11 @@ world_river_stamp :: proc(traced: [][2]f32) {
 }
 
 // A repeatable pseudo-random number in [0, 1) for a position and a stream.
-@(private = "file")
 world_random :: proc(x, y: int, stream: u32) -> f32 {
 	h := u32(x) * 374761393 + u32(y) * 668265263 + stream * 2246822519
 	h = (h ~ (h >> 13)) * 1274126177
 	h ~= h >> 16
 	return f32(h >> 8) / f32(1 << 24)
-}
-
-// How far intensity is from a kind's MARK_FROM to its MARK_FULL, smoothed, from 0 to 1.
-@(private = "file")
-world_ramp :: proc(kind: Terrain_Mark, intensity: f32) -> f32 {
-	from, full := MARK_FROM[kind], MARK_FULL[kind]
-	if full <= from do return intensity >= from ? 1 : 0
-	return math.smoothstep(from, full, intensity)
-}
-
-// Scatters marks over the terrain: each kind on its own jittered lattice, keeping each point with the chance its
-// terrain gives it.
-@(private = "file")
-world_scatter_marks :: proc() {
-	WORLD.mark_count = 0
-	scatter: for kind in Terrain_Mark {
-		if MARK_SPACING[kind] <= 0 do continue
-		width := MARK_WIDTH[kind]
-		spacing := max(MARK_SPACING[kind], 0.3)
-		rows := int(f32(WORLD_HEIGHT) / (spacing * 0.8))
-		cols := int(f32(WORLD_WIDTH) / spacing)
-		for row in 0 ..< rows {
-			for col in 0 ..< cols {
-				stream := u32(kind) * 8
-				// Every other row is shifted half a step, and every point wanders within its step.
-				x :=
-					(f32(col) +
-						0.5 +
-						f32(row % 2) * 0.5 +
-						(world_random(col, row, stream) - 0.5) * 0.7) *
-					spacing
-				y :=
-					(f32(row) + 0.5 + (world_random(col, row, stream + 1) - 0.5) * 0.6) *
-					spacing *
-					0.8
-				cx, cy := int(x), int(y)
-				if cx < 0 || cy < 0 || cx >= WORLD_WIDTH || cy >= WORLD_HEIGHT do continue
-				i := cy * WORLD_WIDTH + cx
-				terrain := WORLD.atlas.terrain[i]
-				coast := WORLD.render_terrain.coast[i]
-				// From the mark to the river nearest its cell
-				river := linalg.length(
-					WORLD.render_terrain.river[i] -
-					([2]f32{x, y} - [2]f32{f32(cx), f32(cy)} - 0.5),
-				)
-				elevation := f32(terrain.elevation) / f32(max(u8))
-				trees := f32(terrain.trees) / f32(max(u8))
-				moisture := f32(terrain.moisture) / f32(max(u8))
-				cover := WORLD.render_terrain.cover[i]
-				desert, steppe := f32(cover[0]) / f32(max(u8)), f32(cover[1]) / f32(max(u8))
-				fertile, marsh := f32(cover[2]) / f32(max(u8)), f32(cover[3]) / f32(max(u8))
-
-				mark := Mark {
-					pos  = {x, y},
-					mark = kind,
-				}
-				// The chance this point keeps its mark, from the kind's intensity here
-				chance: f32
-				switch kind {
-				case .Mountain:
-					if coast < 1 do continue
-					chance = world_ramp(.Mountain, elevation)
-					mark.width = width * (0.85 + max(elevation - MARK_FROM[.Mountain], 0) * 0.8)
-				case .Molehill:
-					if coast < 1 do continue
-					chance =
-						world_ramp(.Molehill, elevation) * (1 - world_ramp(.Mountain, elevation))
-					mark.width = width
-				case .Tree:
-					if coast < 0.8 do continue
-					chance = world_ramp(.Tree, trees) * (1 - world_ramp(.Mountain, elevation))
-					// Conifers in the north and on high ground, cypresses around the warm, dry south, broadleaf trees
-					// between; the climates shade into each other.
-					north := 1 - y / f32(WORLD_HEIGHT)
-					conifer := max(math.smoothstep(f32(0.78), 0.86, north), math.smoothstep(f32(0.40), 0.55, elevation))
-					cypress := math.smoothstep(f32(0.67), 0.62, north) * math.smoothstep(f32(0.64), 0.54, moisture)
-					if world_random(col, row, stream + 6) >= conifer {
-						mark.mark = world_random(col, row, stream + 7) < cypress ? .Cypress : .Broadleaf
-					}
-					mark.width = MARK_WIDTH[mark.mark] * (0.85 + world_random(col, row, stream + 2) * 0.3)
-				case .Palm:
-					if coast < 0.8 do continue
-					// Palms want warmth as well as water.
-					north := 1 - y / f32(WORLD_HEIGHT)
-					chance =
-						world_ramp(.Palm, fertile) *
-						math.smoothstep(f32(0.56), 0.46, moisture) *
-						math.smoothstep(f32(0.62), 0.55, north)
-					mark.width = width * (0.85 + world_random(col, row, stream + 2) * 0.3)
-				case .Tuft:
-					if coast < 0.8 do continue
-					chance = world_ramp(.Tuft, steppe) * (1 - trees)
-					mark.width = width * (0.8 + world_random(col, row, stream + 2) * 0.4)
-				case .Marsh:
-					if coast < 0.8 do continue
-					chance = world_ramp(.Marsh, marsh)
-					mark.width = width * (0.85 + world_random(col, row, stream + 2) * 0.3)
-				case .Dune:
-					if coast < 2 do continue
-					chance = world_ramp(.Dune, desert) * (1 - world_ramp(.Molehill, elevation))
-					mark.width = width * (0.8 + world_random(col, row, stream + 2) * 0.4)
-				case .Broadleaf, .Cypress:
-					unreachable()
-				case .Sea_Mark:
-					// Out from the shore, then fading over the open sea
-					depth := -coast
-					chance = world_ramp(.Sea_Mark, depth)
-					fade := clamp(1 - (depth - MARK_FULL[.Sea_Mark]) / 14, 0, 1)
-					if fade < 0.08 do continue
-					mark.alpha = u8(fade * f32(max(u8)))
-					mark.width = width
-				}
-				if world_random(col, row, stream + 5) >= chance do continue
-				// Rivers stay in view: no mark sits on one, and lakes have no sea marks.
-				if kind == .Sea_Mark && terrain.surface != .Sea do continue
-				if kind != .Sea_Mark && river < mark.width * 0.6 do continue
-				if kind != .Sea_Mark do mark.alpha = max(u8)
-				variants := kind == .Sea_Mark ? 2 : TERRAIN_MARK_VARIANTS
-				mark.variant = u8(world_random(col, row, stream + 3) * f32(variants))
-
-				// A full table keeps what it has; the marks are still sorted below.
-				if WORLD.mark_count == MARKS_MAX do break scatter
-				WORLD.marks[WORLD.mark_count] = mark
-				WORLD.mark_count += 1
-			}
-		}
-	}
-	slice.sort_by(
-		WORLD.marks[:WORLD.mark_count],
-		proc(a, b: Mark) -> bool {return a.pos.y < b.pos.y},
-	)
 }
 
 // Fills the world's render list with the marks in view. Marks are fixed in the world and scale with the map; marks
@@ -794,7 +538,6 @@ world_distance_to :: proc(out: []f32, water: bool) {
 
 // Euclidean distance from every cell to the nearest source cell, by the exact transform of Felzenszwalb and
 // Huttenlocher: a pass down each column, then along each row.
-@(private = "file")
 world_distance_from :: proc(out: []f32, source: []bool) {
 	FAR :: 1e20
 	n := max(WORLD_WIDTH, WORLD_HEIGHT)
