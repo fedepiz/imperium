@@ -706,12 +706,14 @@ world_mark :: proc(family: Mark_Family, i: int, roll: f32) -> (mark: Mark, chanc
 	mark.width, mark.alpha = 1, max(u8)
 	switch family {
 	case .Tree:
-		// Trees thin out where mountains take over. Conifers grow in the north and on high ground, cypresses around the
-		// warm, dry south, palms along its rivers, broadleaf trees everywhere else, the climates shading into each other.
+		// Trees thin out where mountains take over. Conifers grow above a line that runs high in the south and falls to
+		// the ground in the far north, cypresses around the warm, dry south, palms along its rivers, broadleaf trees
+		// everywhere else, the climates shading into each other.
 		chance = density * ramp(0.7, 0.8, coast) * ramp(1.0, 0.55, p.elevation)
+		conifer_line := math.lerp(f32(0.95), 0, clamp((p.north - 0.45) / 0.45, 0, 1))
 		hot_and_dry := ramp(0.62, 0.55, p.north) * ramp(0.56, 0.46, p.moisture)
 		weights := [4]f32 {
-			6 * max(ramp(0.78, 0.86, p.north), ramp(0.40, 0.55, p.elevation)),
+			6 * ramp(conifer_line - 0.08, conifer_line + 0.08, p.elevation),
 			3 * ramp(0.67, 0.62, p.north) * ramp(0.64, 0.54, p.moisture),
 			cover.cover == .Fertile ? 20 * hot_and_dry : 0,
 			1,
