@@ -184,6 +184,9 @@ main :: proc() {
 
 		tweak.begin()
 		tweak.label("Info/fps", fmt.tprintf("%.0f (%.2f ms)", fps, 1000 / max(fps, 1e-6)))
+		if tweak.button("Sys/quit", "Quit") {
+			keep_going = false
+		}
 		demo.enabled = tweak.toggle("Demo.UI", "Shown", demo.enabled)
 
 		game.world_tick(game_input(GLOBAL.input, {f32(logical_width), f32(logical_height)}), dt)
