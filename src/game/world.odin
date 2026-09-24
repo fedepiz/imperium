@@ -1,9 +1,12 @@
 package game
 
+import "core:c"
+import "core:fmt"
 import "core:math"
 import "core:math/linalg"
-import "core:math/noise"
+import "core:os"
 import "core:slice"
+import stbi "vendor:stb/image"
 
 import "../gfx"
 import "../span"
@@ -44,7 +47,7 @@ MARK_SPACING := [Terrain_Mark]f32 {
 	.Tree     = 2.1,
 	.Molehill = 3.84,
 	.Mountain = 8.04,
-	.Sea_Mark = 7.0,
+	.Sea_Mark = 12.0,
 }
 
 // The typical width of each kind of mark, in cells; single marks vary a little around it. Width over spacing is how
@@ -53,8 +56,8 @@ MARK_SPACING := [Terrain_Mark]f32 {
 MARK_WIDTH := [Terrain_Mark]f32 {
 	.Tree     = 1.58,
 	.Molehill = 3.29,
-	.Mountain = 6.27,
-	.Sea_Mark = 3.67,
+	.Mountain = 5.5,
+	.Sea_Mark = 3.0,
 }
 
 // Each kind reads an intensity from the terrain: tree cover for trees, elevation for hills and mountains, and cells out
@@ -65,7 +68,7 @@ MARK_FROM := [Terrain_Mark]f32 {
 	.Tree     = 0.07,
 	.Molehill = 0.58,
 	.Mountain = 0.55,
-	.Sea_Mark = 2,
+	.Sea_Mark = 3,
 }
 
 @(private = "file", rodata)
@@ -124,11 +127,21 @@ Atlas :: struct {
 }
 
 Terrain :: struct {
-	is_water:  b8,
+	surface:   Surface,
 	elevation: u8,
 	trees:     u8,
 	moisture:  u8,
 }
+
+// What covers a cell. A river is land it runs across: the rules treat it as land, the map draws it as a line.
+Surface :: enum u8 {
+	Land,
+	River,
+	Lake,
+	Sea,
+}
+
+WATER :: bit_set[Surface]{.Lake, .Sea}
 
 Camera :: struct {
 	// The cell at the middle of the view, and pixels per cell
@@ -141,8 +154,8 @@ Camera :: struct {
 	grab_last: [2]f32,
 }
 
-// Stand-in terrain until scenarios load from files: noise shaped into one continent, with no attempt at real geography.
 // The world's images are defined from img_base_index up to WORLD_IMAGES_MAX more, so call this before sprites_load.
+// The terrain comes from a scenario, with world_load.
 world_init :: proc(img_base_index: gfx.Image_Id) {
 	// The camera starts over the middle of the world, at its farthest zoom.
 	WORLD.camera.center = {WORLD_WIDTH, WORLD_HEIGHT} / 2
@@ -156,41 +169,6 @@ world_init :: proc(img_base_index: gfx.Image_Id) {
 		}
 	}
 
-	SEED :: 435
-	SEA_LEVEL :: 0.3
-	// The height noise rarely reaches its extremes; this is the height treated as the highest ground.
-	PEAK :: 0.72
-
-	for y in 0 ..< WORLD_HEIGHT {
-		for x in 0 ..< WORLD_WIDTH {
-			p := [2]f64{f64(x), f64(y)} / WORLD_WIDTH
-
-			// Land rises toward the middle of the map, so the edges are sea.
-			edge := linalg.length(p - 0.5) * 2
-			height := world_fbm(SEED, p * 4, 5) * 0.5 + 0.5 - edge * edge * 0.3
-			wet := world_fbm(SEED + 1, p * 3, 3) * 0.5 + 0.5
-			growth := world_fbm(SEED + 2, p * 8, 3) * 0.5 + 0.5
-
-			terrain := &WORLD.atlas.terrain[y * WORLD_WIDTH + x]
-			if height < SEA_LEVEL {
-				terrain^ = {
-					is_water = true,
-				}
-				continue
-			}
-			above := clamp((height - SEA_LEVEL) / (PEAK - SEA_LEVEL), 0, 1)
-			// Low ground collects moisture; trees need some, and thin out on high ground.
-			moisture := clamp(wet * 0.8 + (1 - above) * 0.3, 0, 1)
-			trees :=
-				clamp(growth * 2 - 0.6, 0, 1) * clamp(moisture * 2 - 0.3, 0, 1) * (1 - above * 0.7)
-			terrain^ = {
-				elevation = u8(above * f64(max(u8))),
-				moisture  = u8(moisture * f64(max(u8))),
-				trees     = u8(trees * f64(max(u8))),
-			}
-		}
-	}
-
 	WORLD.render_terrain.style = {
 		paper        = {0.933, 0.878, 0.753, 1},
 		paper_stain  = {0.847, 0.761, 0.588, 1},
@@ -201,23 +179,94 @@ world_init :: proc(img_base_index: gfx.Image_Id) {
 		forest_tint  = 0.45,
 		coast_width  = 1.6,
 		wobble       = 0.3,
+		river_width  = 10.,
 	}
-	WORLD.terrain_revision += 1
 }
 
-// Sums octaves of noise at doubling frequency and halving weight; the result stays in [-1, 1].
-@(private = "file")
-world_fbm :: proc(seed: i64, p: [2]f64, octaves: int) -> f64 {
-	sum, total: f64
-	weight := 1.0
-	p := p
-	for i in 0 ..< octaves {
-		sum += f64(noise.noise_2d(seed + i64(i), p)) * weight
-		total += weight
-		p *= 2
-		weight *= 0.5
+// Loads a scenario's terrain from its folder: one greyscale PNG per property, WORLD_WIDTH by WORLD_HEIGHT.
+// surface.png is black for land, then darker to lighter grey for river, lake and sea; elevation.png, trees.png and
+// moisture.png run from 0 to 255 on land.
+// If a layer is missing or the wrong size, the world is left all water, so the failure shows, and false is returned.
+world_load :: proc(scenario: string) -> bool {
+	terrain := &WORLD.atlas.terrain
+	defer WORLD.terrain_revision += 1
+	Layer :: enum {
+		Surface,
+		Elevation,
+		Trees,
+		Moisture,
 	}
-	return sum / total
+	names := [Layer]string {
+		.Surface   = "surface",
+		.Elevation = "elevation",
+		.Trees     = "trees",
+		.Moisture  = "moisture",
+	}
+	for name, layer in names {
+		path := fmt.tprintf("%s/%s.png", scenario, name)
+		pixels, ok := world_load_layer(path)
+		if !ok {
+			for &cell in terrain do cell = {
+				surface = .Sea,
+			}
+			return false
+		}
+		for value, i in pixels {
+			switch layer {
+			case .Surface:
+				terrain[i].surface = Surface(min((int(value) + 42) / 85, int(max(Surface))))
+			case .Elevation:
+				terrain[i].elevation = value
+			case .Trees:
+				terrain[i].trees = value
+			case .Moisture:
+				terrain[i].moisture = value
+			}
+		}
+	}
+	// Water cells carry nothing else.
+	for &cell in terrain do if cell.surface in WATER do cell = {
+		surface = cell.surface,
+	}
+	return true
+}
+
+// One greyscale layer, WORLD_WIDTH by WORLD_HEIGHT; the pixels live in the temp allocator.
+@(private = "file")
+world_load_layer :: proc(path: string) -> (pixels: []u8, ok: bool) {
+	data, err := os.read_entire_file(path, context.temp_allocator)
+	if err != nil {
+		fmt.eprintfln("Could not read terrain layer %q: %v", path, err)
+		return
+	}
+	width, height, channels: c.int
+	loaded := stbi.load_from_memory(
+		raw_data(data),
+		c.int(len(data)),
+		&width,
+		&height,
+		&channels,
+		1,
+	)
+	if loaded == nil {
+		fmt.eprintfln("Could not decode terrain layer %q: %s", path, stbi.failure_reason())
+		return
+	}
+	defer stbi.image_free(loaded)
+	if width != WORLD_WIDTH || height != WORLD_HEIGHT {
+		fmt.eprintfln(
+			"Terrain layer %q is %dx%d; it should be %dx%d",
+			path,
+			width,
+			height,
+			WORLD_WIDTH,
+			WORLD_HEIGHT,
+		)
+		return
+	}
+	pixels = make([]u8, CELLS_MAX, context.temp_allocator)
+	copy(pixels, loaded[:CELLS_MAX])
+	return pixels, true
 }
 
 // Inputs used by the game module, in logical pixels unless stated
@@ -289,7 +338,8 @@ world_pan_camera :: proc(input: Input, dt: f32) {
 	camera.center = linalg.clamp(camera.center, 0, world_size)
 }
 
-// Keeps the map pass in step with the world: the camera every frame, the cells and coast when the terrain has changed.
+// Keeps the map pass in step with the world: the camera every frame, the cells, coast and rivers when the terrain has
+// changed.
 @(private = "file")
 world_update_render_terrain :: proc() {
 	rt := &WORLD.render_terrain
@@ -301,7 +351,12 @@ world_update_render_terrain :: proc() {
 	rt.revision = WORLD.terrain_revision
 
 	for terrain, i in WORLD.atlas.terrain {
-		rt.cells[i] = {u8(terrain.is_water), terrain.elevation, terrain.trees, terrain.moisture}
+		rt.cells[i] = {
+			u8(terrain.surface) * 85,
+			terrain.elevation,
+			terrain.trees,
+			terrain.moisture,
+		}
 	}
 
 	// Signed distance to the coast, in cells: half a cell at the cells either side of it, positive on land.
@@ -310,11 +365,154 @@ world_update_render_terrain :: proc() {
 	world_distance_to(to_water, true)
 	world_distance_to(to_land, false)
 	for terrain, i in WORLD.atlas.terrain {
-		coast := terrain.is_water ? -(to_land[i] - 0.5) : to_water[i] - 0.5
+		coast := terrain.surface in WATER ? -(to_land[i] - 0.5) : to_water[i] - 0.5
 		rt.coast[i] = coast
 	}
 
+	world_trace_rivers()
 	world_scatter_marks()
+}
+
+// Traces the river cells into lines and smooths them, then gives every cell near a river the offset from its middle to
+// the nearest point of a line. Lines run between ends and forks, so rivers meet where they join.
+@(private = "file")
+world_trace_rivers :: proc() {
+	river := &WORLD.render_terrain.river
+	for &offset in river do offset = gfx.RENDER_RIVER_FAR
+	visited := make([]bool, CELLS_MAX, context.temp_allocator)
+	points := make([dynamic][2]f32, 0, 1024, context.temp_allocator)
+	for i in 0 ..< CELLS_MAX {
+		if WORLD.atlas.terrain[i].surface != .River do continue
+		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
+		next: [8][2]int
+		count := world_river_next(cell, &next)
+		if count == 2 do continue
+		// Every line from this end or fork, unless it has been traced from its other end
+		for n in next[:count] {
+			j := n.y * WORLD_WIDTH + n.x
+			if visited[j] do continue
+			if world_river_next(n, &{}) != 2 && j < i do continue
+			clear(&points)
+			world_river_follow(&points, visited, cell, n)
+			world_river_stamp(points[:])
+		}
+	}
+	// What is left are closed loops.
+	for i in 0 ..< CELLS_MAX {
+		if WORLD.atlas.terrain[i].surface != .River || visited[i] do continue
+		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
+		next: [8][2]int
+		if world_river_next(cell, &next) != 2 do continue
+		visited[i] = true
+		clear(&points)
+		world_river_follow(&points, visited, cell, next[0])
+		world_river_stamp(points[:])
+	}
+}
+
+// The river cells a river cell leads to: those beside it, and those diagonal to it that are not already reached
+// through one beside it, so a river one cell wide has two.
+@(private = "file")
+world_river_next :: proc(cell: [2]int, out: ^[8][2]int) -> (count: int) {
+	is_river :: proc(x, y: int) -> bool {
+		if x < 0 || y < 0 || x >= WORLD_WIDTH || y >= WORLD_HEIGHT do return false
+		return WORLD.atlas.terrain[y * WORLD_WIDTH + x].surface == .River
+	}
+	for dy in -1 ..= 1 {
+		for dx in -1 ..= 1 {
+			if dx == 0 && dy == 0 do continue
+			if !is_river(cell.x + dx, cell.y + dy) do continue
+			if dx != 0 && dy != 0 && (is_river(cell.x + dx, cell.y) || is_river(cell.x, cell.y + dy)) do continue
+			out[count] = cell + {dx, dy}
+			count += 1
+		}
+	}
+	return
+}
+
+// Walks a river from cell through next until it reaches an end, a fork, or a cell already walked, putting the middle
+// of every cell on the way into points. A river that ends by the sea or a lake is carried on to the shore.
+@(private = "file")
+world_river_follow :: proc(points: ^[dynamic][2]f32, visited: []bool, cell, next: [2]int) {
+	middle :: proc(cell: [2]int) -> [2]f32 {return {f32(cell.x), f32(cell.y)} + 0.5}
+	world_river_mouth(points, cell)
+	append(points, middle(cell))
+	prev, cur := cell, next
+	for {
+		append(points, middle(cur))
+		i := cur.y * WORLD_WIDTH + cur.x
+		ahead: [8][2]int
+		if world_river_next(cur, &ahead) != 2 || visited[i] do break
+		visited[i] = true
+		prev, cur = cur, ahead[0] == prev ? ahead[1] : ahead[0]
+	}
+	world_river_mouth(points, cur)
+}
+
+// If the river ends at cell and cell touches water, a point most of the way into the water.
+@(private = "file")
+world_river_mouth :: proc(points: ^[dynamic][2]f32, cell: [2]int) {
+	if world_river_next(cell, &{}) != 1 do return
+	for dy in -1 ..= 1 {
+		for dx in -1 ..= 1 {
+			x, y := cell.x + dx, cell.y + dy
+			if x < 0 || y < 0 || x >= WORLD_WIDTH || y >= WORLD_HEIGHT do continue
+			if WORLD.atlas.terrain[y * WORLD_WIDTH + x].surface in WATER {
+				append(
+					points,
+					[2]f32{f32(cell.x), f32(cell.y)} + 0.5 + [2]f32{f32(dx), f32(dy)} * 0.75,
+				)
+				return
+			}
+		}
+	}
+}
+
+// Smooths a traced line, keeping its ends, and records it as the nearest river of the cells around it.
+@(private = "file")
+world_river_stamp :: proc(traced: [][2]f32) {
+	if len(traced) < 2 do return
+	// Cell to cell steps are softened first, then the corners are cut twice, Chaikin's way.
+	line := slice.clone(traced, context.temp_allocator)
+	for _ in 0 ..< 2 {
+		prev := line[0]
+		for i in 1 ..< len(line) - 1 {
+			here := line[i]
+			line[i] = (prev + 2 * here + line[i + 1]) / 4
+			prev = here
+		}
+	}
+	for _ in 0 ..< 2 {
+		cut := make([dynamic][2]f32, 0, 2 * len(line), context.temp_allocator)
+		append(&cut, line[0])
+		for i in 0 ..< len(line) - 1 {
+			a, b := line[i], line[i + 1]
+			append(&cut, a * 0.75 + b * 0.25, a * 0.25 + b * 0.75)
+		}
+		append(&cut, line[len(line) - 1])
+		line = cut[:]
+	}
+
+	river := &WORLD.render_terrain.river
+	reach := f32(gfx.RENDER_RIVER_REACH)
+	for i in 0 ..< len(line) - 1 {
+		a, b := line[i], line[i + 1]
+		ab := b - a
+		length2 := max(linalg.dot(ab, ab), 1e-6)
+		x0 := max(int(min(a.x, b.x) - reach), 0)
+		y0 := max(int(min(a.y, b.y) - reach), 0)
+		x1 := min(int(max(a.x, b.x) + reach), WORLD_WIDTH - 1)
+		y1 := min(int(max(a.y, b.y) + reach), WORLD_HEIGHT - 1)
+		for y in y0 ..= y1 {
+			for x in x0 ..= x1 {
+				middle := [2]f32{f32(x), f32(y)} + 0.5
+				t := clamp(linalg.dot(middle - a, ab) / length2, 0, 1)
+				offset := a + ab * t - middle
+				cell := &river[y * WORLD_WIDTH + x]
+				if linalg.dot(offset, offset) < linalg.dot(cell^, cell^) do cell^ = offset
+			}
+		}
+	}
 }
 
 // A repeatable pseudo-random number in [0, 1) for a position and a stream.
@@ -363,6 +561,11 @@ world_scatter_marks :: proc() {
 				i := cy * WORLD_WIDTH + cx
 				terrain := WORLD.atlas.terrain[i]
 				coast := WORLD.render_terrain.coast[i]
+				// From the mark to the river nearest its cell
+				river := linalg.length(
+					WORLD.render_terrain.river[i] -
+					([2]f32{x, y} - [2]f32{f32(cx), f32(cy)} - 0.5),
+				)
 				elevation := f32(terrain.elevation) / f32(max(u8))
 				trees := f32(terrain.trees) / f32(max(u8))
 
@@ -396,6 +599,9 @@ world_scatter_marks :: proc() {
 					mark.width = width
 				}
 				if world_random(col, row, stream + 5) >= chance do continue
+				// Rivers stay in view: no mark sits on one, and lakes have no sea marks.
+				if kind == .Sea_Mark && terrain.surface != .Sea do continue
+				if kind != .Sea_Mark && river < mark.width * 0.6 do continue
 				if kind != .Sea_Mark do mark.alpha = max(u8)
 				variants := kind == .Sea_Mark ? 2 : TERRAIN_MARK_VARIANTS
 				mark.variant = u8(world_random(col, row, stream + 3) * f32(variants))
@@ -452,7 +658,8 @@ world_distance_to :: proc(out: []f32, water: bool) {
 	bounds := make([]f32, n + 1, context.temp_allocator)
 	for x in 0 ..< WORLD_WIDTH {
 		for y in 0 ..< WORLD_HEIGHT {
-			line[y] = bool(WORLD.atlas.terrain[y * WORLD_WIDTH + x].is_water) == water ? 0 : FAR
+			line[y] =
+				(WORLD.atlas.terrain[y * WORLD_WIDTH + x].surface in WATER) == water ? 0 : FAR
 		}
 		world_distance_line(line[:WORLD_HEIGHT], result, parabolas, bounds)
 		for y in 0 ..< WORLD_HEIGHT {

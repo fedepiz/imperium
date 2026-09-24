@@ -75,6 +75,9 @@ main :: proc() {
 	gfx.sprites_image_define(gfx.Image_Id(Image_Name.Logo), "logo")
 	// The world's images follow main's own, and must be defined before the atlas loads.
 	game.world_init(gfx.Image_Id(len(Image_Name)))
+	if !game.world_load("assets/scenarios/roman") {
+		fmt.eprintln("The scenario did not load; the world is all water.")
+	}
 	gfx.sprites_load(renderer, pixel_density)
 	renderer.pixel_density = pixel_density
 	ui_init()
@@ -193,7 +196,7 @@ Debug_Pane :: struct {
 }
 
 // Named in the order of gfx.Render_Terrain_Debug
-TERRAIN_VIEW_NAMES := []string{"Map", "Water", "Elevation", "Trees", "Moisture"}
+TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture"}
 
 debug_pane_build :: proc(pane: ^Debug_Pane) {
 	#assert(len(gfx.Render_Terrain_Debug) == 5)

@@ -50,7 +50,7 @@ RENDER_TERRAIN_CELLS :: RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT
 // Which terrain property the map shows cell by cell instead of drawing the map. The values match the map shader's debug_mode.
 Render_Terrain_Debug :: enum i32 {
 	Map,
-	Water,
+	Surface,
 	Elevation,
 	Trees,
 	Moisture,
@@ -68,16 +68,25 @@ Render_Terrain_Style :: struct {
 	// Coast line width in logical pixels, and how far the coast wanders from the cells, in cells
 	coast_width:  f32,
 	wobble:       f32,
+	// River line width in logical pixels, where a river reaches the lowlands; it thins toward its sources.
+	river_width:  f32,
 }
+
+// How far around a river its offsets reach, in cells. Cells farther away hold RENDER_RIVER_FAR.
+RENDER_RIVER_REACH :: 4
+RENDER_RIVER_FAR :: [2]f32{RENDER_RIVER_REACH, RENDER_RIVER_REACH}
 
 // Everything the map pass draws from. Cells are indexed y * RENDER_TERRAIN_WIDTH + x, with cell (0, 0) at the top left.
 Render_Terrain :: struct {
 	// Bumped whenever cells or coast change; the renderer uploads them again only then.
 	revision:   u32,
-	// The terrain as the rules see it, one texel per cell: water, elevation, trees, moisture.
+	// The terrain as the rules see it, one texel per cell: surface (land, river, lake, sea as 0, 85, 170, 255),
+	// elevation, trees, moisture.
 	cells:      [RENDER_TERRAIN_CELLS][4]u8,
 	// Derived from the cells: signed distance to the coast, in cells, positive on land.
 	coast:      [RENDER_TERRAIN_CELLS]f32,
+	// Derived from the cells: from the middle of each cell to the nearest point of a river line, in cells.
+	river:      [RENDER_TERRAIN_CELLS][2]f32,
 	// The cell at the middle of the view, and logical pixels per cell
 	center:     [2]f32,
 	zoom:       f32,
@@ -90,7 +99,7 @@ Render_Terrain :: struct {
 Render_Terrain_Uniforms :: struct {
 	grid, center, zoom, view_size, pixel_density, debug_mode: i32,
 	paper, paper_stain, ink, sea_color, forest_color:         i32,
-	sea_tint, forest_tint, coast_width, wobble:               i32,
+	sea_tint, forest_tint, coast_width, wobble, river_width:  i32,
 }
 
 Renderer :: struct {
@@ -102,18 +111,19 @@ Renderer :: struct {
 	pixel_density:                    f32,
 	// Borrowed OpenGL texture handles. Slot zero always means untextured.
 	textures:                         [65536]u32,
-	// The map pass: its program, an empty vertex array for its one triangle, and its two textures
+	// The map pass: its program, an empty vertex array for its one triangle, and its textures
 	terrain_program:                  u32,
 	terrain_vao:                      u32,
 	terrain_cells:                    u32,
 	terrain_coast:                    u32,
+	terrain_river:                    u32,
 	terrain_uniforms:                 Render_Terrain_Uniforms,
 	// The terrain revision the textures hold, once anything has been uploaded
 	terrain_revision:                 u32,
 	terrain_uploaded:                 bool,
 }
 
-// Draws the map over the whole view. Cells and coast are uploaded again only when the revision has changed.
+// Draws the map over the whole view. Cells, coast and rivers are uploaded again only when the revision has changed.
 render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	if renderer.view_size.x <= 0 || renderer.view_size.y <= 0 || terrain.zoom <= 0 {
 		return
@@ -145,6 +155,18 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 			gl.FLOAT,
 			raw_data(terrain.coast[:]),
 		)
+		gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_river)
+		gl.TexSubImage2D(
+			gl.TEXTURE_2D,
+			0,
+			0,
+			0,
+			RENDER_TERRAIN_WIDTH,
+			RENDER_TERRAIN_HEIGHT,
+			gl.RG,
+			gl.FLOAT,
+			raw_data(terrain.river[:]),
+		)
 		gl.BindTexture(gl.TEXTURE_2D, 0)
 		gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4)
 		renderer.terrain_revision = terrain.revision
@@ -162,6 +184,8 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_cells)
 	gl.ActiveTexture(gl.TEXTURE1)
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_coast)
+	gl.ActiveTexture(gl.TEXTURE2)
+	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_river)
 
 	u := &renderer.terrain_uniforms
 	style := &terrain.style
@@ -181,9 +205,12 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	gl.Uniform1f(u.forest_tint, style.forest_tint)
 	gl.Uniform1f(u.coast_width, style.coast_width)
 	gl.Uniform1f(u.wobble, style.wobble)
+	gl.Uniform1f(u.river_width, style.river_width)
 
 	gl.DrawArrays(gl.TRIANGLES, 0, 3)
 
+	gl.BindTexture(gl.TEXTURE_2D, 0)
+	gl.ActiveTexture(gl.TEXTURE1)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 	gl.ActiveTexture(gl.TEXTURE0)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
@@ -280,6 +307,7 @@ render_bind_instances :: proc(first: int) {
 render_destroy :: proc(renderer: ^Renderer) {
 	gl.DeleteTextures(1, &renderer.terrain_cells)
 	gl.DeleteTextures(1, &renderer.terrain_coast)
+	gl.DeleteTextures(1, &renderer.terrain_river)
 	gl.DeleteVertexArrays(1, &renderer.terrain_vao)
 	gl.DeleteProgram(renderer.terrain_program)
 	gl.DeleteTextures(1, &renderer.white_texture)
@@ -423,16 +451,19 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 	u.forest_tint = gl.GetUniformLocation(program, "forest_tint")
 	u.coast_width = gl.GetUniformLocation(program, "coast_width")
 	u.wobble = gl.GetUniformLocation(program, "wobble")
+	u.river_width = gl.GetUniformLocation(program, "river_width")
 	gl.UseProgram(program)
 	gl.Uniform1i(gl.GetUniformLocation(program, "cells"), 0)
 	gl.Uniform1i(gl.GetUniformLocation(program, "coast"), 1)
+	gl.Uniform1i(gl.GetUniformLocation(program, "river"), 2)
 	gl.UseProgram(0)
 
 	// The map's one triangle has no vertex data, but core profile still wants a vertex array bound.
 	gl.GenVertexArrays(1, &renderer.terrain_vao)
 
-	// Both are filtered between cells: that makes the coast smooth and the washes soft. The debug views read cells
-	// with texelFetch, which ignores filtering, so they still show each cell exactly.
+	// Cells and coast are filtered between cells: that makes the coast smooth and the washes soft. The debug views read
+	// cells with texelFetch, which ignores filtering, so they still show each cell exactly. Rivers are read cell by
+	// cell and blended in the shader.
 	gl.GenTextures(1, &renderer.terrain_cells)
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_cells)
 	gl.TexImage2D(
@@ -465,6 +496,23 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 	)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	gl.GenTextures(1, &renderer.terrain_river)
+	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_river)
+	gl.TexImage2D(
+		gl.TEXTURE_2D,
+		0,
+		gl.RG16F,
+		RENDER_TERRAIN_WIDTH,
+		RENDER_TERRAIN_HEIGHT,
+		0,
+		gl.RG,
+		gl.FLOAT,
+		nil,
+	)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
@@ -569,20 +617,22 @@ void main() {
 `
 
 // Positions are in cells: the world is grid cells wide and tall, with cell (0, 0) at the top left.
-// cells holds the terrain as the rules see it, one texel per cell: water, elevation, trees, moisture. texelFetch reads a
-// cell exactly; texture blends neighbouring cells.
+// cells holds the terrain as the rules see it, one texel per cell: surface, elevation, trees, moisture. texelFetch reads
+// a cell exactly; texture blends neighbouring cells.
 // coast holds the signed distance to the coast in cells, positive on land, blended between cells.
+// river holds, per cell, the offset from its middle to the nearest point of a river line.
 @(private = "file")
 RENDER_MAP_FRAGMENT_SOURCE: cstring = `#version 330 core
 uniform sampler2D cells;
 uniform sampler2D coast;
+uniform sampler2D river;
 uniform vec2 grid;
 // The cell at the middle of the view, and logical pixels per cell
 uniform vec2 center;
 uniform float zoom;
 uniform vec2 view_size;
 uniform float pixel_density;
-// 0 draws the map; 1 to 4 show water, elevation, trees and moisture cell by cell
+// 0 draws the map; 1 to 4 show surface, elevation, trees and moisture cell by cell
 uniform int debug_mode;
 uniform vec3 paper;
 uniform vec3 paper_stain;
@@ -594,6 +644,8 @@ uniform float forest_tint;
 // Coast line width in logical pixels, and how far the coast wanders from the cells, in cells
 uniform float coast_width;
 uniform float wobble;
+// River line width in logical pixels in the lowlands
+uniform float river_width;
 out vec4 out_color;
 
 float hash(vec2 p) {
@@ -626,10 +678,32 @@ vec3 paper_at(vec2 p) {
     return c * (1.0 - (hash(floor(gl_FragCoord.xy)) - 0.5) * 0.035);
 }
 
+// Distance from p to the nearest river line, in cells. Each of the four cells around p knows its nearest river point;
+// blending them is exact along a straight river. Where they see different rivers, blending would draw a false river
+// between the two, so the nearest of their points is taken instead.
+float river_distance(vec2 p) {
+    vec2 q = p - 0.5;
+    vec2 base = floor(q), f = q - base;
+    vec2 n[4];
+    for (int k = 0; k < 4; k++) {
+        vec2 c = base + vec2(k & 1, k >> 1);
+        n[k] = c + 0.5 + texelFetch(river, clamp(ivec2(c), ivec2(0), ivec2(grid) - 1), 0).rg;
+    }
+    float spread = max(max(distance(n[0], n[1]), distance(n[2], n[3])), max(distance(n[0], n[2]), distance(n[1], n[3])));
+    if (spread < 2.0) return distance(p, mix(mix(n[0], n[1], f.x), mix(n[2], n[3], f.x), f.y));
+    return min(min(distance(p, n[0]), distance(p, n[1])), min(distance(p, n[2]), distance(p, n[3])));
+}
+
 vec3 debug_color(vec4 cell) {
-    // A true b8 is 1, which reads back as 1/255.
-    bool water = cell.r > 0.0;
-    if (debug_mode == 1) return water ? vec3(0.25, 0.45, 0.7) : vec3(0.85, 0.8, 0.65);
+    // Land, river, lake, sea
+    int surface = int(cell.r * 3.0 + 0.5);
+    bool water = surface >= 2;
+    if (debug_mode == 1) {
+        if (surface == 0) return vec3(0.85, 0.8, 0.65);
+        if (surface == 1) return vec3(0.2, 0.6, 0.55);
+        if (surface == 2) return vec3(0.35, 0.6, 0.85);
+        return vec3(0.25, 0.45, 0.7);
+    }
     if (water) return vec3(0.12, 0.2, 0.3);
     if (debug_mode == 2) return vec3(cell.g);
     if (debug_mode == 3) return mix(vec3(0.85, 0.8, 0.65), vec3(0.15, 0.4, 0.15), cell.b);
@@ -665,6 +739,14 @@ void main() {
         vec3 sea = col * mix(vec3(1.0), sea_color, sea_tint * (0.65 + 0.35 * exp(min(d, 0.0) / 5.0)));
         vec3 ground = col * mix(vec3(1.0), forest_color, cell.b * forest_tint);
         col = mix(sea, ground, land);
+
+        // Rivers: a faint wash either side and a line that thins toward the hills, both stopping at the shore. The line
+        // never grows past a third of a cell, so rivers fade out as the map zooms away.
+        float r = river_distance(p) + wobble * (fbm(p * 0.6 + 3.3) - 0.5) * 0.5;
+        col = mix(col, col * sea_color, sea_tint * 0.5 * (1.0 - smoothstep(0.0, 1.2, r)) * land);
+        float river_half = min(river_width * 0.5 * pixel_density * mix(1.0, 0.4, smoothstep(0.2, 0.8, cell.g)), px / 6.0);
+        col = mix(col, mix(ink, sea_color, 0.3), line_aa(r * px, river_half) * land);
+
         float width = coast_width * 0.5 * pixel_density * (0.8 + 0.4 * value_noise(p * 0.8));
         col = mix(col, ink, line_aa(abs(d) * px, width));
     }
