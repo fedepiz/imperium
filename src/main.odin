@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:mem"
+import "game"
 import gl "vendor:OpenGL"
 import sdl "vendor:sdl3"
 
@@ -66,8 +67,9 @@ main :: proc() {
 	pixel_density := sdl.GetWindowPixelDensity(window)
 	if pixel_density <= 0 do pixel_density = 1
 
-	sprites_font_define(Font_Id(Font_Name.Default), "MeathFLF", 24)
-	sprites_font_define(Font_Id(Font_Name.Heading), "MeathFLF", 32)
+	font_file := "aniron" //MeathFLF"
+	sprites_font_define(Font_Id(Font_Name.Default), font_file, 26)
+	sprites_font_define(Font_Id(Font_Name.Heading), font_file, 34)
 	sprites_image_define(Image_Id(Image_Name.Logo), "logo")
 	sprites_load(renderer, pixel_density)
 	ui_init()
