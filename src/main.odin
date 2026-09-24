@@ -3,13 +3,15 @@ package main
 import "core:fmt"
 import "core:mem"
 import "game"
+import "gfx"
+import "span"
 import gl "vendor:OpenGL"
 import sdl "vendor:sdl3"
 
 GLOBAL: struct {
 	input:       Input,
-	render_list: Render_List,
-	renderer:    Renderer,
+	render_list: gfx.Render_List,
+	renderer:    gfx.Renderer,
 }
 
 Font_Name :: enum {
@@ -59,26 +61,29 @@ main :: proc() {
 	}
 	gl.load_up_to(3, 3, sdl.gl_set_proc_address)
 	renderer := &GLOBAL.renderer
-	if !render_init(renderer) {
+	if !gfx.render_init(renderer) {
 		return
 	}
-	defer render_destroy(renderer)
+	defer gfx.render_destroy(renderer)
 
 	pixel_density := sdl.GetWindowPixelDensity(window)
 	if pixel_density <= 0 do pixel_density = 1
 
 	font_file := "aniron" //MeathFLF"
-	sprites_font_define(Font_Id(Font_Name.Default), font_file, 26)
-	sprites_font_define(Font_Id(Font_Name.Heading), font_file, 34)
-	sprites_image_define(Image_Id(Image_Name.Logo), "logo")
-	sprites_load(renderer, pixel_density)
+	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Default), font_file, 26)
+	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Heading), font_file, 34)
+	gfx.sprites_image_define(gfx.Image_Id(Image_Name.Logo), "logo")
+	gfx.sprites_load(renderer, pixel_density)
+	renderer.pixel_density = pixel_density
 	ui_init()
+	game.world_init()
 
 	if !sdl.GL_SetSwapInterval(1) {
 		fmt.eprintf("Enabling VSync failed: %s\n", sdl.GetError())
 	}
 
-	demo: Demo
+	// demo: Demo
+	pane: Debug_Pane
 	frame_previous := sdl.GetTicksNS()
 	keep_going := true
 	for keep_going {
@@ -149,25 +154,82 @@ main :: proc() {
 			return
 		}
 
+		game.world_tick(game_input(GLOBAL.input, {f32(logical_width), f32(logical_height)}), dt)
+		// Tab steps through the map and the raw terrain properties.
+		if key_is_pressed(GLOBAL.input, .TAB) {
+			debug := &game.WORLD.render_terrain.debug_mode
+			debug^ = gfx.Render_Terrain_Debug((int(debug^) + 1) % len(gfx.Render_Terrain_Debug))
+		}
+
 		{
-			draw: Draw_Ctx
-			draw_begin(
+			draw: gfx.Draw_Ctx
+			gfx.draw_begin(
 				&draw,
 				&GLOBAL.render_list,
-				span_from_array(&GLOBAL.render_list.instances),
+				span.from_array(&GLOBAL.render_list.instances),
 				{0, 0, f32(logical_width), f32(logical_height)},
 				pixel_density,
 			)
 
-			text_begin()
+			gfx.text_begin()
 			ui_begin({f32(logical_width), f32(logical_height)})
-			demo_build(&demo)
+			// demo_build(&demo)
+			debug_pane_build(&pane)
 			ui_end(GLOBAL.input, &draw, dt)
 		}
 
 		renderer.view_size = {f32(logical_width), f32(logical_height)}
-		render(renderer, &GLOBAL.render_list)
+		gfx.render_terrain(renderer, &game.WORLD.render_terrain)
+		gfx.render_list(renderer, &GLOBAL.render_list)
 		sdl.GL_SwapWindow(window)
+	}
+}
+
+// A pane in the top-left corner for looking at the terrain.
+Debug_Pane :: struct {
+	view_open: bool,
+}
+
+// Named in the order of gfx.Render_Terrain_Debug
+TERRAIN_VIEW_NAMES := []string{"Map", "Water", "Elevation", "Trees", "Moisture"}
+
+debug_pane_build :: proc(pane: ^Debug_Pane) {
+	#assert(len(gfx.Render_Terrain_Debug) == 5)
+	// The column only places the pane; it takes no mouse, so the map gets it everywhere else.
+	if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{16, 16}}) {
+		if ui_panel("debug pane", MIDNIGHT_PANEL_STYLE) {
+			demo_label("Terrain", MIDNIGHT_HEADING)
+			if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
+				demo_label("View")
+				// The ui reads and writes the world's render terrain directly.
+				view := &game.WORLD.render_terrain.debug_mode
+				selection := int(view^)
+				ui_combo(
+					"terrain view",
+					&selection,
+					&pane.view_open,
+					TERRAIN_VIEW_NAMES,
+					{width = ui_px(140), padding = [2]f32{10, 0}},
+				)
+				view^ = gfx.Render_Terrain_Debug(selection)
+			}
+		}
+	}
+}
+
+game_input :: proc(input: Input, viewport: [2]f32) -> game.Input {
+	pan: [2]f32
+	if key_is_down(input, .A) || key_is_down(input, .LEFT) do pan.x -= 1
+	if key_is_down(input, .D) || key_is_down(input, .RIGHT) do pan.x += 1
+	if key_is_down(input, .W) || key_is_down(input, .UP) do pan.y -= 1
+	if key_is_down(input, .S) || key_is_down(input, .DOWN) do pan.y += 1
+	return {
+		viewport = viewport,
+		cursor = input.pos,
+		on_map = bool(input.pos_is_valid) && !ui_hovered_any(),
+		grab = button_is_down(input, sdl.BUTTON_LEFT),
+		pan = pan,
+		wheel = input.wheel.y,
 	}
 }
 
@@ -235,7 +297,7 @@ MIDNIGHT_PANEL_STYLE := Ui_Style {
 }
 
 MIDNIGHT_HEADING := Ui_Style {
-	font       = Font_Id(Font_Name.Heading),
+	font       = gfx.Font_Id(Font_Name.Heading),
 	height     = Ui_Size{.Text, 0, 1},
 	text_color = MIDNIGHT_GOLD,
 }
@@ -311,7 +373,7 @@ demo_build :: proc(demo: ^Demo) {
 				ui_label_text(
 					{
 						{text = "Ut enim "},
-						{image = Image_Id(Image_Name.Logo)},
+						{image = gfx.Image_Id(Image_Name.Logo)},
 						{text = " ad minim "},
 						{text = "veniam", color = MIDNIGHT_GOLD},
 						{text = "."},

@@ -3,6 +3,7 @@ package main
 import "core:hash"
 import "core:math"
 import "core:strings"
+import "gfx"
 import "vendor:sdl3"
 
 // Maximum number of ui boxes supported by the system
@@ -128,7 +129,7 @@ Ui_Style :: struct {
 	focus_border:      Maybe([4]f32),
 	thickness:         Maybe(f32),
 	radius:            Maybe(f32),
-	font:              Maybe(Font_Id),
+	font:              Maybe(gfx.Font_Id),
 	text_color:        Maybe([4]f32),
 	// Text faded toward while hovered: a Hot_Effects box's own, and keyed runs of text
 	hot_text_color:    Maybe([4]f32),
@@ -165,8 +166,8 @@ Ui_Box :: struct {
 	thickness:         f32,
 	radius:            f32,
 	// Text
-	text:              Text_Id,
-	font:              Font_Id,
+	text:              gfx.Text_Id,
+	font:              gfx.Font_Id,
 	text_color:        [4]f32,
 	hot_text_color:    [4]f32,
 	// Layout results: until this frame's layout runs, they are last frame's
@@ -225,8 +226,8 @@ ui_px :: proc(value: f32, strictness: f32 = 1) -> Ui_Size {
 
 // Pixels in multiples of the current font's size, resolved when called.
 ui_em :: proc(value: f32, strictness: f32 = 1) -> Ui_Size {
-	font := ui_style_top().font.? or_else Font_Id(0)
-	return ui_px(value * font_size(font), strictness)
+	font := ui_style_top().font.? or_else gfx.Font_Id(0)
+	return ui_px(value * gfx.font_size(font), strictness)
 }
 
 // The size of the box's text, plus its padding.
@@ -392,7 +393,7 @@ ui_box_set_label :: proc(box: ^Ui_Box, label: string) {
 // Gives the box a text made of parts, in the box's font and color where a part sets none.
 @(private = "file")
 ui_box_set_text :: proc(box: ^Ui_Box, parts: []Ui_Text) {
-	text_new()
+	gfx.text_new()
 	// A Hot_Effects box's text fades with the box; a keyed run fades with its own hover, eased under its key.
 	box_hot_t := box.hot_t if .Hot_Effects in box.flags else 0
 	for part in parts {
@@ -410,12 +411,12 @@ ui_box_set_text :: proc(box: ^Ui_Box, parts: []Ui_Text) {
 		}
 		color += (hot_color - color) * hot_t
 		if image, is_image := part.image.?; is_image {
-			text_add_image(image, font, color, tag, part.underline)
+			gfx.text_add_image(image, font, color, tag, part.underline)
 		} else {
-			text_add(part.text, font, color, tag, part.underline)
+			gfx.text_add(part.text, font, color, tag, part.underline)
 		}
 	}
-	box.text = text_end()
+	box.text = gfx.text_end()
 }
 
 ui_init :: proc() {
@@ -484,7 +485,7 @@ ui_begin :: proc(viewport: [2]f32) {
 	ui_parent_push(UI.content)
 }
 
-ui_end :: proc(input: Input, draw_ctx: ^Draw_Ctx, dt: f32) {
+ui_end :: proc(input: Input, draw_ctx: ^gfx.Draw_Ctx, dt: f32) {
 	// Pop the content, the root and the base style
 	ui_parent_pop()
 	ui_parent_pop()
@@ -555,14 +556,14 @@ ui_update_interaction :: proc(input: Input) {
 	for i := UI.box_order_count; i > 0 && input.pos_is_valid; i -= 1 {
 		id := UI.box_order[i - 1]
 		box := &UI.boxes[id]
-		if !rect_contains(box.clip, mouse_pos) {continue}
+		if !gfx.rect_contains(box.clip, mouse_pos) {continue}
 		clickable := .Clickable in box.flags
 		if under == 0 && (clickable || box.flags & {.Scroll_X, .Scroll_Y} != {}) {
 			under = id
 		}
 		if !hot_found && .Hover_Text in box.flags {
 			local := mouse_pos - ui_text_origin(box)
-			if tag := text_tag_at(box.text, local, ui_text_room(box)); tag != 0 {
+			if tag := gfx.text_tag_at(box.text, local, ui_text_room(box)); tag != 0 {
 				UI.hot = Ui_Key(tag)
 				UI.hovered_any = true
 				hot_found = true
@@ -801,14 +802,14 @@ ui_layout :: proc() {
 		box := &UI.boxes[UI.box_order[i]]
 		if box.text == 0 || box.size.y.kind != .Text {continue}
 		room := [2]f32{ui_text_room(box).x, math.INF_F32}
-		box.size_computed.y = text_measure(box.text, room).y + 2 * box.padding.y
+		box.size_computed.y = gfx.text_measure(box.text, room).y + 2 * box.padding.y
 	}
 
 	ui_compute_dependent_sizes(.Y)
 
 	// Placement. The root has no parent to clip it, so it sees all of itself.
 	root := &UI.boxes[UI.box_order[0]]
-	root.clip = rect_from_pos_size(root.pos_computed, root.size_computed)
+	root.clip = gfx.rect_from_pos_size(root.pos_computed, root.size_computed)
 	for i := 0; i < UI.box_order_count; i += 1 {
 		parent := &UI.boxes[UI.box_order[i]]
 		axis := parent.child_axis
@@ -836,9 +837,9 @@ ui_layout :: proc() {
 				placed += 1
 			}
 
-			child.clip = rect_intersect(
+			child.clip = gfx.rect_intersect(
 				parent.clip,
-				rect_from_pos_size(child.pos_computed, child.size_computed),
+				gfx.rect_from_pos_size(child.pos_computed, child.size_computed),
 			)
 		}
 
@@ -871,7 +872,7 @@ ui_flow_skip :: proc(id: Ui_Id) -> Ui_Id {
 // How far the wheel moves a scrolling box's content, in pixels.
 @(private = "file")
 ui_scroll_from_wheel :: proc(box: ^Ui_Box, wheel: [2]f32) -> [2]f32 {
-	em := font_size(box.font)
+	em := gfx.font_size(box.font)
 	// Turning the wheel away from the user reveals what is above.
 	return [2]f32{wheel.x, -wheel.y} * UI_SCROLL_STEP * em
 }
@@ -892,7 +893,7 @@ ui_scroll_flag :: proc(axis: Axis) -> Ui_Box_Flag {
 // Where a box's text starts: left-aligned after the padding, centered vertically, never above the box.
 @(private = "file")
 ui_text_origin :: proc(box: ^Ui_Box) -> [2]f32 {
-	size := text_measure(box.text, ui_text_room(box))
+	size := gfx.text_measure(box.text, ui_text_room(box))
 	pos := box.pos_computed
 	pos.x += box.padding.x
 	pos.y += max(0, box.size_computed.y - size.y) / 2
@@ -933,7 +934,7 @@ ui_compute_independent_sizes :: proc() {
 				value[axis] = size[axis].value
 			case .Text:
 				// On one line; a narrower final width wraps it and recomputes the height.
-				value[axis] = text_measure(box.text)[axis] + 2 * box.padding[axis]
+				value[axis] = gfx.text_measure(box.text)[axis] + 2 * box.padding[axis]
 			}
 		}
 
@@ -1035,7 +1036,7 @@ ui_compute_dependent_sizes :: proc(axis: Axis) {
 }
 
 @(private = "file")
-ui_draw :: proc(ctx: ^Draw_Ctx) {
+ui_draw :: proc(ctx: ^gfx.Draw_Ctx) {
 	for i := 0; i < UI.box_order_count; i += 1 {
 		id := UI.box_order[i]
 		box := &UI.boxes[id]
@@ -1055,8 +1056,8 @@ ui_draw :: proc(ctx: ^Draw_Ctx) {
 		}
 		alpha := 1 - 0.5 * disabled_t
 
-		draw_clip_push(ctx, box.clip)
-		defer draw_clip_pop(ctx)
+		gfx.draw_clip_push(ctx, box.clip)
+		defer gfx.draw_clip_pop(ctx)
 
 		if Ui_Box_Flag.Background in box.flags {
 			background := box.background
@@ -1065,22 +1066,22 @@ ui_draw :: proc(ctx: ^Draw_Ctx) {
 				background += (box.active_background - background) * box.active_t
 			}
 			background.a *= alpha
-			draw_rectangle(ctx, bounds, background, box.radius, 0, SOFTNESS)
+			gfx.draw_rectangle(ctx, bounds, background, box.radius, 0, SOFTNESS)
 		}
 		if Ui_Box_Flag.Border in box.flags && box.thickness > 0 {
 			border := box.border
 			border.a *= alpha
-			draw_rectangle(ctx, bounds, border, box.radius, box.thickness, SOFTNESS)
+			gfx.draw_rectangle(ctx, bounds, border, box.radius, box.thickness, SOFTNESS)
 		}
 		if box.text != 0 {
-			text_draw(ctx, box.text, ui_text_origin(box), ui_text_room(box), {1, 1, 1, alpha})
+			gfx.text_draw(ctx, box.text, ui_text_origin(box), ui_text_room(box), {1, 1, 1, alpha})
 		}
 		if .Focusable in box.flags {
 			focus_t := box.focus_t
 			if focus_t > 0.001 {
 				color := box.focus_border
 				color.a *= focus_t * alpha
-				draw_rectangle(ctx, bounds, color, box.radius, 2, SOFTNESS)
+				gfx.draw_rectangle(ctx, bounds, color, box.radius, 2, SOFTNESS)
 			}
 		}
 	}
@@ -1118,8 +1119,8 @@ UI_SCROLL_PANE :: "scroll pane"
 // The look of every box unless pushed or overridden: pushed at the bottom of the stack in ui_begin.
 @(private = "file")
 ui_style_base :: proc() -> Ui_Style {
-	font := Font_Id(0)
-	em := font_size(font)
+	font := gfx.Font_Id(0)
+	em := gfx.font_size(font)
 	return {
 		width = ui_px(10 * em),
 		height = ui_px(1.5 * em),
@@ -1332,8 +1333,8 @@ ui_spacer :: proc(size: Ui_Size) {
 // Part of a rich label: text, or an image one line tall when there is one. Font and color default to the label's.
 Ui_Text :: struct {
 	text:      string,
-	image:     Maybe(Image_Id),
-	font:      Maybe(Font_Id),
+	image:     Maybe(gfx.Image_Id),
+	font:      Maybe(gfx.Font_Id),
 	color:     Maybe([4]f32),
 	// Faded toward while the run, or a Hot_Effects box it is in, is hovered
 	hot_color: Maybe([4]f32),

@@ -1,6 +1,8 @@
-package main
+package gfx
 
 import "core:math"
+
+import "../span"
 
 // Texts built in one frame, and the room for their runs and laid-out pieces
 @(private = "file")
@@ -52,10 +54,10 @@ Text_Piece :: struct {
 // A text's runs, and its layout for the last room asked for
 @(private = "file")
 Text :: struct {
-	runs:      Span,
+	runs:      span.Span,
 	laid_out:  bool,
 	room:      [2]f32,
-	pieces:    Span,
+	pieces:    span.Span,
 	size:      [2]f32,
 	// Lines past the room's height were left out, and the last one kept ends in an ellipsis
 	truncated: bool,
@@ -122,7 +124,7 @@ text_end :: proc() -> Text_Id {
 	assert(TEXTS.text_count < TEXT_MAX)
 	id := Text_Id(TEXTS.text_count)
 	TEXTS.texts[id] = {
-		runs = span_from_range(TEXTS.open_begin, TEXTS.run_count),
+		runs = span.from_range(TEXTS.open_begin, TEXTS.run_count),
 	}
 	return id
 }

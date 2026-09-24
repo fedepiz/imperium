@@ -1,4 +1,4 @@
-package main
+package gfx
 
 // Rects are [x, y, width, height], with a top-left origin.
 

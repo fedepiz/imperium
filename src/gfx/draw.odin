@@ -1,7 +1,9 @@
-package main
+package gfx
 
 import "core:math/linalg"
 import "core:mem"
+
+import "../span"
 
 DRAW_CLIP_DEPTH_MAX :: 32
 
@@ -15,7 +17,7 @@ Draw_Flags :: bit_set[Draw_Flag]
 Draw_Ctx :: struct {
 	list:          ^Render_List,
 	// Remaining writable range; consuming slots advances begin and reduces len.
-	instance_span: Span,
+	instance_span: span.Span,
 	// Clip rects stamped on every instance; the bottom entry is the clip given to draw_begin.
 	clip_stack:    [DRAW_CLIP_DEPTH_MAX][4]f32,
 	clip_depth:    int,
@@ -28,7 +30,7 @@ Draw_Ctx :: struct {
 draw_begin :: proc(
 	ctx: ^Draw_Ctx,
 	list: ^Render_List,
-	instance_span: Span,
+	instance_span: span.Span,
 	clip: [4]f32,
 	pixel_density: f32,
 ) {
@@ -107,7 +109,7 @@ draw_instance :: proc(ctx: ^Draw_Ctx, texture: Texture_Id, instance: Render_Inst
 		}
 		ctx.list.instances[index] = instance
 		ctx.list.instances[index].clip = draw_clip_current(ctx)
-		span_advance(&ctx.instance_span)
+		span.advance(&ctx.instance_span)
 	}
 }
 
