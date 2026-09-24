@@ -73,10 +73,11 @@ main :: proc() {
 	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Default), font_file, 26)
 	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Heading), font_file, 34)
 	gfx.sprites_image_define(gfx.Image_Id(Image_Name.Logo), "logo")
+	// The world's images follow main's own, and must be defined before the atlas loads.
+	game.world_init(gfx.Image_Id(len(Image_Name)))
 	gfx.sprites_load(renderer, pixel_density)
 	renderer.pixel_density = pixel_density
 	ui_init()
-	game.world_init()
 
 	if !sdl.GL_SetSwapInterval(1) {
 		fmt.eprintf("Enabling VSync failed: %s\n", sdl.GetError())
@@ -180,6 +181,7 @@ main :: proc() {
 
 		renderer.view_size = {f32(logical_width), f32(logical_height)}
 		gfx.render_terrain(renderer, &game.WORLD.render_terrain)
+		gfx.render_list(renderer, &game.WORLD.render_list)
 		gfx.render_list(renderer, &GLOBAL.render_list)
 		sdl.GL_SwapWindow(window)
 	}

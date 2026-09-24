@@ -1422,6 +1422,32 @@ ui_combo :: proc(
 	return signal
 }
 
+// A track that fills from the left up to value, between lo and hi. Pressing or dragging on it sets the value from where
+// the mouse is along the track, as laid out last frame. The label is only the key.
+ui_slider :: proc(label: string, value: ^f32, lo, hi: f32, style := Ui_Style{}) -> Ui_Signal {
+	ui_style_next(style)
+	id, signal := ui_box_make(ui_key_from_string(label), {})
+	track := &UI.boxes[id]
+	track.flags += {.Background, .Border, .Clickable, .Hot_Effects, .Focusable}
+	track.child_axis = .X
+	if signal.held {
+		inner := track.size_computed.x - 2 * track.padding.x
+		if inner > 0 {
+			t := clamp((UI.mouse.x - track.pos_computed.x - track.padding.x) / inner, 0, 1)
+			value^ = lo + (hi - lo) * t
+		}
+	}
+	// Grow weights split the track: the filled part, then the rest.
+	t := clamp((value^ - lo) / (hi - lo), 0, 1)
+	fill_color := track.focus_border
+	ui_parent_push(id)
+	defer ui_parent_pop()
+	fill, _ := ui_box_make({}, {width = ui_grow(t), height = ui_grow(), background = fill_color, radius = track.radius})
+	UI.boxes[fill].flags += {.Background}
+	ui_spacer(ui_grow(1 - t))
+	return signal
+}
+
 // A clickable row holding a check square and a label, all plain boxes. Flips value when pressed.
 ui_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Signal {
 	ui_style_next(style)

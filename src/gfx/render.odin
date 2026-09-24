@@ -3,7 +3,7 @@ package gfx
 import "core:fmt"
 import gl "vendor:OpenGL"
 
-RENDER_MAX_INSTANCES :: 16348
+RENDER_MAX_INSTANCES :: 8192 * 2
 
 Texture_Id :: distinct u16
 
