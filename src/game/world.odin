@@ -405,7 +405,7 @@ world_update_render_terrain :: proc() {
 	coast_side := make([]f32, CELLS_MAX, context.temp_allocator)
 	for &offset in to_coast do offset = COAST_REACH
 	for r in 0 ..< lines.run_count {
-		points, closed := polylines_smoothed(lines, r), lines.closed[r]
+		points, closed := polylines_smoothed(lines, r), lines.runs[r].closed
 		if r < rivers do polyline_stamp(points, closed, gfx.RENDER_RIVER_REACH, rt.river[:], nil)
 		else do polyline_stamp(points, closed, COAST_REACH, to_coast, coast_side)
 	}
@@ -529,6 +529,10 @@ world_cover :: proc(land: ^Land, i: int) -> (best: Cover_Cell) {
 // How far around the coast its smoothed line decides the distance to it, in cells
 COAST_REACH :: f32(3)
 
+// Rivers are smoothed fully; coasts keep more of their shape, losing mostly the steps of the cells.
+RIVER_SMOOTHING :: Polyline_Smoothing{softness = 1, cut_iter = 2, cut_ratio = 0.25}
+COAST_SMOOTHING :: Polyline_Smoothing{softness = 0.3, cut_iter = 2, cut_ratio = 0.2}
+
 // The rivers and coasts, traced and smoothed whenever the terrain changes
 @(private = "file")
 POLYLINES: Polylines
@@ -599,7 +603,7 @@ world_river_follow :: proc(lines: ^Polylines, visited: []bool, cell, next: [2]in
 		prev, cur = cur, ahead[0] == prev ? ahead[1] : ahead[0]
 	}
 	world_river_mouth(lines, cur)
-	polylines_end(lines, false)
+	polylines_end(lines, false, RIVER_SMOOTHING)
 }
 
 // If the river ends at cell and cell touches water, a point most of the way into the water.
@@ -656,12 +660,12 @@ world_trace_coasts :: proc(lines: ^Polylines) {
 		for {
 			c := corner(x, y)
 			if heading >= 0 && c == start {
-				polylines_end(lines, true)
+				polylines_end(lines, true, COAST_SMOOTHING)
 				return
 			}
 			if count[c] == 0 {
 				polylines_add(lines, [2]f32{f32(x), f32(y)})
-				polylines_end(lines, false)
+				polylines_end(lines, false, COAST_SMOOTHING)
 				return
 			}
 			pick := 0
