@@ -41,49 +41,83 @@ Mark :: struct {
 
 // How marks are placed
 
-// The spacing of each kind's lattice, in cells: halving it gives four times as many marks
+// The spacing of each kind's lattice, in cells: halving it gives four times as many marks. Broadleaf trees and cypresses
+// have no lattice of their own: they take the place of conifers where the climate suits them.
 @(private = "file", rodata)
 MARK_SPACING := [Terrain_Mark]f32 {
-	.Tree     = 2.1,
-	.Molehill = 3.84,
-	.Mountain = 8.04,
-	.Sea_Mark = 12.0,
+	.Tree      = 2.1,
+	.Molehill  = 3.84,
+	.Mountain  = 8.04,
+	.Sea_Mark  = 12.0,
+	.Broadleaf = 0,
+	.Cypress   = 0,
+	.Palm      = 2.2,
+	.Tuft      = 3.8,
+	.Marsh     = 3.2,
+	.Dune      = 5.5,
 }
 
 // The typical width of each kind of mark, in cells; single marks vary a little around it. Width over spacing is how
 // much of the ground the marks cover.
 @(private = "file", rodata)
 MARK_WIDTH := [Terrain_Mark]f32 {
-	.Tree     = 1.58,
-	.Molehill = 3.29,
-	.Mountain = 5.5,
-	.Sea_Mark = 3.0,
+	.Tree      = 1.58,
+	.Molehill  = 3.29,
+	.Mountain  = 5.5,
+	.Sea_Mark  = 3.0,
+	.Broadleaf = 1.6,
+	.Cypress   = 0.85,
+	.Palm      = 1.7,
+	.Tuft      = 1.3,
+	.Marsh     = 2.3,
+	.Dune      = 3.4,
 }
 
-// Each kind reads an intensity from the terrain: tree cover for trees, elevation for hills and mountains, and cells out
-// from the coast for sea marks. A lattice point keeps its mark with a chance that rises from none at MARK_FROM to
+// Each kind reads an intensity from the terrain: tree cover for trees, elevation for hills and mountains, cells out
+// from the coast for sea marks, and the land's cover for the rest: fertile ground for palms, steppe for tufts, marsh
+// for marsh, desert for dunes. A lattice point keeps its mark with a chance that rises from none at MARK_FROM to
 // certain at MARK_FULL. Hills give way as mountains take over.
 @(private = "file", rodata)
 MARK_FROM := [Terrain_Mark]f32 {
-	.Tree     = 0.07,
-	.Molehill = 0.58,
-	.Mountain = 0.55,
-	.Sea_Mark = 3,
+	.Tree      = 0.07,
+	.Molehill  = 0.58,
+	.Mountain  = 0.55,
+	.Sea_Mark  = 3,
+	.Broadleaf = 0,
+	.Cypress   = 0,
+	.Palm      = 0.3,
+	.Tuft      = 0.2,
+	.Marsh     = 0.25,
+	.Dune      = 0.45,
 }
 
 @(private = "file", rodata)
 MARK_FULL := [Terrain_Mark]f32 {
-	.Tree     = 0.87,
-	.Molehill = 0.77,
-	.Mountain = 1.0,
-	.Sea_Mark = 5,
+	.Tree      = 0.87,
+	.Molehill  = 0.77,
+	.Mountain  = 1.0,
+	.Sea_Mark  = 5,
+	.Broadleaf = 0,
+	.Cypress   = 0,
+	.Palm      = 0.9,
+	.Tuft      = 1.0,
+	.Marsh     = 0.8,
+	.Dune      = 1.0,
 }
 
 Terrain_Mark :: enum {
+	// A conifer; broadleaf trees and cypresses stand in for it in milder climates.
 	Tree,
 	Molehill,
 	Mountain,
 	Sea_Mark,
+	Broadleaf,
+	Cypress,
+	Palm,
+	// Steppe grass
+	Tuft,
+	Marsh,
+	Dune,
 }
 
 // Each mark has up to this many drawings, so the scatter does not look stamped
@@ -106,6 +140,17 @@ TERRAIN_MARK_IMAGES := [Terrain_Mark][TERRAIN_MARK_VARIANTS]string {
 		"terrain/mountain_3",
 	},
 	.Sea_Mark = {"terrain/sea_0", "terrain/sea_1", "", ""},
+	.Broadleaf = {
+		"terrain/broadleaf_0",
+		"terrain/broadleaf_1",
+		"terrain/broadleaf_2",
+		"terrain/broadleaf_3",
+	},
+	.Cypress = {"terrain/cypress_0", "terrain/cypress_1", "terrain/cypress_2", "terrain/cypress_3"},
+	.Palm = {"terrain/palm_0", "terrain/palm_1", "terrain/palm_2", "terrain/palm_3"},
+	.Tuft = {"terrain/tuft_0", "terrain/tuft_1", "terrain/tuft_2", "terrain/tuft_3"},
+	.Marsh = {"terrain/marsh_0", "terrain/marsh_1", "terrain/marsh_2", "terrain/marsh_3"},
+	.Dune = {"terrain/dune_0", "terrain/dune_1", "terrain/dune_2", "terrain/dune_3"},
 }
 
 // The world's images, numbered from its image base
@@ -180,6 +225,11 @@ world_init :: proc(img_base_index: gfx.Image_Id) {
 		coast_width  = 1.6,
 		wobble       = 0.3,
 		river_width  = 10.,
+		sand_color   = {0.965, 0.878, 0.690, 1},
+		sand_tint    = 0.55,
+		stipple      = 0.45,
+		fertile_tint = 0.7,
+		marsh_tint   = 0.5,
 	}
 }
 
@@ -370,7 +420,59 @@ world_update_render_terrain :: proc() {
 	}
 
 	world_trace_rivers()
+	world_classify_cover()
 	world_scatter_marks()
+}
+
+// What covers the land, from the moisture, the lie of the land and the rivers, into the render terrain's cover.
+// Desert and steppe follow the moisture. Dry land along a river is fertile instead. Marsh is low, level ground that is
+// very wet, or near both a river and the sea: the deltas.
+@(private = "file")
+world_classify_cover :: proc() {
+	terrain := &WORLD.atlas.terrain
+	is_river := make([]bool, CELLS_MAX, context.temp_allocator)
+	is_sea := make([]bool, CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain {
+		is_river[i] = cell.surface == .River
+		is_sea[i] = cell.surface == .Sea
+	}
+	to_river := make([]f32, CELLS_MAX, context.temp_allocator)
+	to_sea := make([]f32, CELLS_MAX, context.temp_allocator)
+	world_distance_from(to_river, is_river)
+	world_distance_from(to_sea, is_sea)
+
+	ramp :: math.smoothstep
+	cover := &WORLD.render_terrain.cover
+	for cell, i in terrain {
+		cover[i] = {}
+		if cell.surface in WATER do continue
+		x, y := i % WORLD_WIDTH, i / WORLD_WIDTH
+		moisture := f32(cell.moisture) / f32(max(u8))
+		elevation := f32(cell.elevation) / f32(max(u8))
+		// How much the ground rises and falls within two cells
+		lowest, highest := cell.elevation, cell.elevation
+		for dy in -2 ..= 2 {
+			for dx in -2 ..= 2 {
+				nx, ny := clamp(x + dx, 0, WORLD_WIDTH - 1), clamp(y + dy, 0, WORLD_HEIGHT - 1)
+				e := terrain[ny * WORLD_WIDTH + nx].elevation
+				lowest, highest = min(lowest, e), max(highest, e)
+			}
+		}
+		unevenness := f32(highest - lowest) / f32(max(u8))
+
+		fertile := ramp(f32(0.56), 0.40, moisture) * ramp(f32(5), 1.5, to_river[i])
+		wet := max(ramp(f32(6), 2, to_river[i]) * ramp(f32(16), 6, to_sea[i]), ramp(f32(0.80), 0.88, moisture))
+		marsh := ramp(f32(0.22), 0.12, elevation) * ramp(f32(0.08), 0.03, unevenness) * wet
+		desert := ramp(f32(0.44), 0.32, moisture) * (1 - fertile) * (1 - marsh)
+		steppe := ramp(f32(0.36), 0.44, moisture) * ramp(f32(0.56), 0.46, moisture) * (1 - fertile) * (1 - marsh)
+		cover[i] = {world_byte(desert), world_byte(steppe), world_byte(fertile), world_byte(marsh)}
+	}
+}
+
+// A share from 0 to 1 as a byte.
+@(private = "file")
+world_byte :: proc(share: f32) -> u8 {
+	return u8(clamp(share, 0, 1) * f32(max(u8)) + 0.5)
 }
 
 // Traces the river cells into lines and smooths them, then gives every cell near a river the offset from its middle to
@@ -538,6 +640,7 @@ world_ramp :: proc(kind: Terrain_Mark, intensity: f32) -> f32 {
 world_scatter_marks :: proc() {
 	WORLD.mark_count = 0
 	scatter: for kind in Terrain_Mark {
+		if MARK_SPACING[kind] <= 0 do continue
 		width := MARK_WIDTH[kind]
 		spacing := max(MARK_SPACING[kind], 0.3)
 		rows := int(f32(WORLD_HEIGHT) / (spacing * 0.8))
@@ -568,6 +671,10 @@ world_scatter_marks :: proc() {
 				)
 				elevation := f32(terrain.elevation) / f32(max(u8))
 				trees := f32(terrain.trees) / f32(max(u8))
+				moisture := f32(terrain.moisture) / f32(max(u8))
+				cover := WORLD.render_terrain.cover[i]
+				desert, steppe := f32(cover[0]) / f32(max(u8)), f32(cover[1]) / f32(max(u8))
+				fertile, marsh := f32(cover[2]) / f32(max(u8)), f32(cover[3]) / f32(max(u8))
 
 				mark := Mark {
 					pos  = {x, y},
@@ -588,7 +695,38 @@ world_scatter_marks :: proc() {
 				case .Tree:
 					if coast < 0.8 do continue
 					chance = world_ramp(.Tree, trees) * (1 - world_ramp(.Mountain, elevation))
+					// Conifers in the north and on high ground, cypresses around the warm, dry south, broadleaf trees
+					// between; the climates shade into each other.
+					north := 1 - y / f32(WORLD_HEIGHT)
+					conifer := max(math.smoothstep(f32(0.78), 0.86, north), math.smoothstep(f32(0.40), 0.55, elevation))
+					cypress := math.smoothstep(f32(0.67), 0.62, north) * math.smoothstep(f32(0.64), 0.54, moisture)
+					if world_random(col, row, stream + 6) >= conifer {
+						mark.mark = world_random(col, row, stream + 7) < cypress ? .Cypress : .Broadleaf
+					}
+					mark.width = MARK_WIDTH[mark.mark] * (0.85 + world_random(col, row, stream + 2) * 0.3)
+				case .Palm:
+					if coast < 0.8 do continue
+					// Palms want warmth as well as water.
+					north := 1 - y / f32(WORLD_HEIGHT)
+					chance =
+						world_ramp(.Palm, fertile) *
+						math.smoothstep(f32(0.56), 0.46, moisture) *
+						math.smoothstep(f32(0.62), 0.55, north)
 					mark.width = width * (0.85 + world_random(col, row, stream + 2) * 0.3)
+				case .Tuft:
+					if coast < 0.8 do continue
+					chance = world_ramp(.Tuft, steppe) * (1 - trees)
+					mark.width = width * (0.8 + world_random(col, row, stream + 2) * 0.4)
+				case .Marsh:
+					if coast < 0.8 do continue
+					chance = world_ramp(.Marsh, marsh)
+					mark.width = width * (0.85 + world_random(col, row, stream + 2) * 0.3)
+				case .Dune:
+					if coast < 2 do continue
+					chance = world_ramp(.Dune, desert) * (1 - world_ramp(.Molehill, elevation))
+					mark.width = width * (0.8 + world_random(col, row, stream + 2) * 0.4)
+				case .Broadleaf, .Cypress:
+					unreachable()
 				case .Sea_Mark:
 					// Out from the shore, then fading over the open sea
 					depth := -coast
@@ -646,10 +784,18 @@ world_draw_marks :: proc(viewport: [2]f32) {
 	}
 }
 
-// Euclidean distance from every cell to the nearest cell whose water matches, by the exact transform of
-// Felzenszwalb and Huttenlocher: a pass down each column, then along each row.
+// Euclidean distance from every cell to the nearest cell whose water matches.
 @(private = "file")
 world_distance_to :: proc(out: []f32, water: bool) {
+	source := make([]bool, CELLS_MAX, context.temp_allocator)
+	for cell, i in WORLD.atlas.terrain do source[i] = (cell.surface in WATER) == water
+	world_distance_from(out, source)
+}
+
+// Euclidean distance from every cell to the nearest source cell, by the exact transform of Felzenszwalb and
+// Huttenlocher: a pass down each column, then along each row.
+@(private = "file")
+world_distance_from :: proc(out: []f32, source: []bool) {
 	FAR :: 1e20
 	n := max(WORLD_WIDTH, WORLD_HEIGHT)
 	line := make([]f32, n, context.temp_allocator)
@@ -658,8 +804,7 @@ world_distance_to :: proc(out: []f32, water: bool) {
 	bounds := make([]f32, n + 1, context.temp_allocator)
 	for x in 0 ..< WORLD_WIDTH {
 		for y in 0 ..< WORLD_HEIGHT {
-			line[y] =
-				(WORLD.atlas.terrain[y * WORLD_WIDTH + x].surface in WATER) == water ? 0 : FAR
+			line[y] = source[y * WORLD_WIDTH + x] ? 0 : FAR
 		}
 		world_distance_line(line[:WORLD_HEIGHT], result, parabolas, bounds)
 		for y in 0 ..< WORLD_HEIGHT {
