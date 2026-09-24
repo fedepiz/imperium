@@ -189,6 +189,8 @@ main :: proc() {
 		renderer.view_size = {f32(logical_width), f32(logical_height)}
 		gfx.render_terrain(renderer, &game.WORLD.render_terrain)
 		gfx.render_list(renderer, &game.WORLD.render_list)
+		// The marks are on the map, so the hills shade them with it; the ui comes after, unshaded.
+		gfx.render_terrain_shading(renderer, &game.WORLD.render_terrain)
 		gfx.render_list(renderer, &GLOBAL.render_list)
 		sdl.GL_SwapWindow(window)
 	}

@@ -74,8 +74,9 @@ Render_Terrain_Style :: struct {
 	river_width:   f32,
 	// Hill shading. light points toward the light: x east, y south (down the map), z up; it need not be unit length.
 	// relief_height is how many cells tall the highest ground stands: more makes every slope steeper.
-	// Slopes facing away from the light darken toward shade_color, and slopes facing it lighten toward white, the more
-	// the further they turn, scaled by relief_shade and relief_light. Level ground keeps its color.
+	// Slopes facing away from the light darken toward shade_color, and slopes facing it brighten, the more the further
+	// they turn, scaled by relief_shade and relief_light. Level ground keeps its color.
+	// The shading is its own pass, render_terrain_shading, so the marks drawn on the map are shaded with the ground.
 	light:         [3]f32,
 	relief_height: f32,
 	shade_color:   [4]f32,
@@ -105,7 +106,7 @@ Render_Terrain :: struct {
 	center:     [2]f32,
 	zoom:       f32,
 	debug_mode: Render_Terrain_Debug,
-	// The map shades its hills from the relief; off, the land is flat paper.
+	// render_terrain_shading shades the map and its marks by the relief; off, it draws nothing.
 	shading:    bool,
 	style:      Render_Terrain_Style,
 }
@@ -117,7 +118,7 @@ Render_Terrain_Uniforms :: struct {
 	paper, paper_stain, ink, sea_color, forest_color:              i32,
 	sea_tint, forest_tint, coast_width, wobble, river_width:       i32,
 	light, relief_height, shade_color, relief_shade, relief_light: i32,
-	shading:                                                       i32,
+	shading_pass:                                                  i32,
 }
 
 Renderer :: struct {
@@ -206,10 +207,34 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	}
 
 	// The map is opaque and covers everything drawn before it.
+	gl.Disable(gl.BLEND)
+	render_terrain_draw(renderer, terrain, false)
+}
+
+// Shades what is already drawn, the map and the marks on it, by the hills under each pixel, so a mark takes the same
+// light as the ground it stands on. Draw it after the map's marks and before anything that is not on the map. Only the
+// map view is shaded, and only once render_terrain has uploaded the relief.
+render_terrain_shading :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
+	if renderer.view_size.x <= 0 || renderer.view_size.y <= 0 || terrain.zoom <= 0 {
+		return
+	}
+	if !terrain.shading || terrain.debug_mode != .Map || !renderer.terrain_uploaded {
+		return
+	}
+	// The pass writes a factor for each pixel, and the blend multiplies it in: rgb with full alpha darkens by rgb,
+	// rgb with no alpha brightens by 1 + rgb. Alpha already drawn is kept.
+	gl.Enable(gl.BLEND)
+	gl.BlendEquation(gl.FUNC_ADD)
+	gl.BlendFuncSeparate(gl.DST_COLOR, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE)
+	render_terrain_draw(renderer, terrain, true)
+}
+
+// One full-view triangle of the map program: the map itself, or with shading_pass only the factor that shades it.
+@(private = "file")
+render_terrain_draw :: proc(renderer: ^Renderer, terrain: ^Render_Terrain, shading_pass: bool) {
 	gl.Disable(gl.DEPTH_TEST)
 	gl.Disable(gl.CULL_FACE)
 	gl.Disable(gl.SCISSOR_TEST)
-	gl.Disable(gl.BLEND)
 	gl.UseProgram(renderer.terrain_program)
 	gl.BindVertexArray(renderer.terrain_vao)
 	gl.ActiveTexture(gl.TEXTURE0)
@@ -245,7 +270,7 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	gl.Uniform3f(u.shade_color, style.shade_color.r, style.shade_color.g, style.shade_color.b)
 	gl.Uniform1f(u.relief_shade, style.relief_shade)
 	gl.Uniform1f(u.relief_light, style.relief_light)
-	gl.Uniform1i(u.shading, i32(terrain.shading))
+	gl.Uniform1i(u.shading_pass, i32(shading_pass))
 
 	gl.DrawArrays(gl.TRIANGLES, 0, 3)
 
@@ -500,7 +525,7 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 	u.shade_color = gl.GetUniformLocation(program, "shade_color")
 	u.relief_shade = gl.GetUniformLocation(program, "relief_shade")
 	u.relief_light = gl.GetUniformLocation(program, "relief_light")
-	u.shading = gl.GetUniformLocation(program, "shading")
+	u.shading_pass = gl.GetUniformLocation(program, "shading_pass")
 	gl.UseProgram(program)
 	gl.Uniform1i(gl.GetUniformLocation(program, "cells"), 0)
 	gl.Uniform1i(gl.GetUniformLocation(program, "coast"), 1)
@@ -723,8 +748,9 @@ uniform float relief_height;
 uniform vec3 shade_color;
 uniform float relief_shade;
 uniform float relief_light;
-// Nonzero shades the hills on the map; the relief debug view shows the shading either way.
-uniform int shading;
+// Nonzero draws only the hill shading, as a factor for the blend to multiply into what is already drawn: shade as rgb
+// with full alpha, or brightening above one as rgb with no alpha.
+uniform int shading_pass;
 out vec4 out_color;
 
 float hash(vec2 p) {
@@ -783,6 +809,11 @@ float relief_at(vec2 p) {
     return dot(n, l) - l.z;
 }
 
+// Signed distance to the coast in cells, positive on land. It wanders a little from the cells, as if drawn by hand.
+float coast_at(vec2 p) {
+    return texture(coast, p / grid).r + wobble * (fbm(p * 0.45 + 7.7) - 0.5) * 1.6;
+}
+
 vec3 debug_color(vec4 cell, vec2 p) {
     // Land, river, lake, sea
     int surface = int(cell.r * 3.0 + 0.5);
@@ -807,7 +838,18 @@ void main() {
     // Device pixels per cell: line widths and anti-aliasing are measured in these.
     float px = zoom * pixel_density;
 
-    if (any(lessThan(p, vec2(0.0))) || any(greaterThanEqual(p, grid))) {
+    bool outside = any(lessThan(p, vec2(0.0))) || any(greaterThanEqual(p, grid));
+    if (shading_pass != 0) {
+        // Hill shading, lit from the same side as the drawn marks. Only the land is shaded.
+        out_color = vec4(1.0);
+        if (outside) return;
+        float land = smoothstep(-0.5 / px, 0.5 / px, coast_at(p));
+        float lit = relief_at(p);
+        if (lit < 0.0) out_color = vec4(mix(vec3(1.0), shade_color, clamp(-lit * relief_shade, 0.0, 1.0) * land), 1.0);
+        else out_color = vec4(vec3(clamp(lit * relief_light, 0.0, 1.0) * land), 0.0);
+        return;
+    }
+    if (outside) {
         out_color = vec4(paper * 0.72, 1.0);
         return;
     }
@@ -821,21 +863,13 @@ void main() {
         col = mix(col, vec3(0.0), (1.0 - smoothstep(0.0, 1.0, edge)) * 0.3 * smoothstep(4.0, 8.0, px));
     } else {
         vec4 cell = texture(cells, p / grid);
-        // The coast wanders a little from the cells, as if drawn by hand.
-        float d = texture(coast, p / grid).r + wobble * (fbm(p * 0.45 + 7.7) - 0.5) * 1.6;
+        float d = coast_at(p);
         float land = smoothstep(-0.5 / px, 0.5 / px, d);
         col = paper_at(p);
         // The sea wash is strongest along the coast.
         vec3 sea = col * mix(vec3(1.0), sea_color, sea_tint * (0.65 + 0.35 * exp(min(d, 0.0) / 5.0)));
         vec3 ground = col * mix(vec3(1.0), forest_color, cell.b * forest_tint);
         col = mix(sea, ground, land);
-
-        // Hill shading, lit from the same side as the drawn marks. Only the land is shaded.
-        if (shading != 0) {
-            float lit = relief_at(p);
-            col = mix(col, col * shade_color, clamp(-lit * relief_shade, 0.0, 1.0) * land);
-            col = mix(col, vec3(1.0), clamp(lit * relief_light, 0.0, 1.0) * land);
-        }
 
         // Rivers: a faint wash either side and a line that thins toward the hills, both stopping at the shore. The line
         // never grows past a third of a cell, so rivers fade out as the map zooms away.
