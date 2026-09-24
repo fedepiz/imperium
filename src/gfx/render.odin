@@ -105,6 +105,8 @@ Render_Terrain :: struct {
 	center:     [2]f32,
 	zoom:       f32,
 	debug_mode: Render_Terrain_Debug,
+	// The map shades its hills from the relief; off, the land is flat paper.
+	shading:    bool,
 	style:      Render_Terrain_Style,
 }
 
@@ -115,6 +117,7 @@ Render_Terrain_Uniforms :: struct {
 	paper, paper_stain, ink, sea_color, forest_color:              i32,
 	sea_tint, forest_tint, coast_width, wobble, river_width:       i32,
 	light, relief_height, shade_color, relief_shade, relief_light: i32,
+	shading:                                                       i32,
 }
 
 Renderer :: struct {
@@ -242,6 +245,7 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	gl.Uniform3f(u.shade_color, style.shade_color.r, style.shade_color.g, style.shade_color.b)
 	gl.Uniform1f(u.relief_shade, style.relief_shade)
 	gl.Uniform1f(u.relief_light, style.relief_light)
+	gl.Uniform1i(u.shading, i32(terrain.shading))
 
 	gl.DrawArrays(gl.TRIANGLES, 0, 3)
 
@@ -496,6 +500,7 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 	u.shade_color = gl.GetUniformLocation(program, "shade_color")
 	u.relief_shade = gl.GetUniformLocation(program, "relief_shade")
 	u.relief_light = gl.GetUniformLocation(program, "relief_light")
+	u.shading = gl.GetUniformLocation(program, "shading")
 	gl.UseProgram(program)
 	gl.Uniform1i(gl.GetUniformLocation(program, "cells"), 0)
 	gl.Uniform1i(gl.GetUniformLocation(program, "coast"), 1)
@@ -718,6 +723,8 @@ uniform float relief_height;
 uniform vec3 shade_color;
 uniform float relief_shade;
 uniform float relief_light;
+// Nonzero shades the hills on the map; the relief debug view shows the shading either way.
+uniform int shading;
 out vec4 out_color;
 
 float hash(vec2 p) {
@@ -824,9 +831,11 @@ void main() {
         col = mix(sea, ground, land);
 
         // Hill shading, lit from the same side as the drawn marks. Only the land is shaded.
-        float lit = relief_at(p);
-        col = mix(col, col * shade_color, clamp(-lit * relief_shade, 0.0, 1.0) * land);
-        col = mix(col, vec3(1.0), clamp(lit * relief_light, 0.0, 1.0) * land);
+        if (shading != 0) {
+            float lit = relief_at(p);
+            col = mix(col, col * shade_color, clamp(-lit * relief_shade, 0.0, 1.0) * land);
+            col = mix(col, vec3(1.0), clamp(lit * relief_light, 0.0, 1.0) * land);
+        }
 
         // Rivers: a faint wash either side and a line that thins toward the hills, both stopping at the shore. The line
         // never grows past a third of a cell, so rivers fade out as the map zooms away.

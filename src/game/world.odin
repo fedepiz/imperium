@@ -169,6 +169,7 @@ world_init :: proc(img_base_index: gfx.Image_Id) {
 		}
 	}
 
+	WORLD.render_terrain.shading = true
 	WORLD.render_terrain.style = {
 		paper        = {0.933, 0.878, 0.753, 1},
 		paper_stain  = {0.847, 0.761, 0.588, 1},

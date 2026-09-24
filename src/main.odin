@@ -164,6 +164,10 @@ main :: proc() {
 			debug := &game.WORLD.render_terrain.debug_mode
 			debug^ = gfx.Render_Terrain_Debug((int(debug^) + 1) % len(gfx.Render_Terrain_Debug))
 		}
+		// H turns the hill shading on and off.
+		if key_is_pressed(GLOBAL.input, .H) {
+			game.WORLD.render_terrain.shading = !game.WORLD.render_terrain.shading
+		}
 
 		{
 			draw: gfx.Draw_Ctx
@@ -218,6 +222,7 @@ debug_pane_build :: proc(pane: ^Debug_Pane) {
 				)
 				view^ = gfx.Render_Terrain_Debug(selection)
 			}
+			demo_checkbox("Hill shading", &game.WORLD.render_terrain.shading)
 		}
 	}
 }
