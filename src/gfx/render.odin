@@ -77,8 +77,7 @@ Render_Terrain_Style :: struct {
 	// Slopes facing away from the light darken toward shade_color, and slopes facing it brighten, the more the further
 	// they turn, scaled by relief_shade and relief_light. Level ground keeps its color.
 	// The shading is its own pass, render_terrain_shading, so the marks drawn on the map are shaded with the ground.
-	// Shade falls with the light toward relief_ambient: ground the light cannot reach, behind higher ground, keeps that
-	// much.
+	// Slopes turned fully away from the light keep relief_ambient of it.
 	light:          [3]f32,
 	relief_height:  f32,
 	relief_ambient: f32,
@@ -102,8 +101,7 @@ Render_Terrain :: struct {
 	coast:      [RENDER_TERRAIN_CELLS]f32,
 	// Derived from the cells: from the middle of each cell to the nearest point of a river line, in cells.
 	river:      [RENDER_TERRAIN_CELLS][2]f32,
-	// Derived from the cells: elevation from 0 to 1, smoothed so its slopes can be shaded. Water holds the elevation of
-	// the land around it, so the coast does not shade as a cliff.
+	// Derived from the cells: elevation from 0 to 1, for shading its slopes.
 	relief:     [RENDER_TERRAIN_CELLS]f32,
 	// The cell at the middle of the view, and logical pixels per cell
 	center:     [2]f32,
@@ -544,8 +542,7 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 
 	// Cells and coast are filtered between cells: that makes the coast smooth and the washes soft. The debug views read
 	// cells with texelFetch, which ignores filtering, so they still show each cell exactly. Rivers are read cell by
-	// cell and blended in the shader. Relief is filtered too, and kept at full precision: the shader takes its slope
-	// from small differences.
+	// cell and blended in the shader. Relief is filtered too.
 	gl.GenTextures(1, &renderer.terrain_cells)
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_cells)
 	gl.TexImage2D(
@@ -720,7 +717,7 @@ void main() {
 // a cell exactly; texture blends neighbouring cells.
 // coast holds the signed distance to the coast in cells, positive on land, blended between cells.
 // river holds, per cell, the offset from its middle to the nearest point of a river line.
-// relief holds the smoothed elevation, from 0 to 1, blended between cells.
+// relief holds the elevation, from 0 to 1, blended between cells.
 @(private = "file")
 RENDER_MAP_FRAGMENT_SOURCE: cstring = `#version 330 core
 uniform sampler2D cells;
@@ -807,39 +804,16 @@ float river_distance(vec2 p) {
     return min(min(distance(p, n[0]), distance(p, n[1])), min(distance(p, n[2]), distance(p, n[3])));
 }
 
-// The light at p next to open level ground: below zero in shade, above on slopes turned to the light.
-// Slopes are lit by how they face it; ground behind higher ground, toward the light, is in its shadow; hollows lower
-// than the ground around them see less of the sky.
+// The light at p next to open level ground: below zero on slopes turned away from the light, above on slopes turned
+// to it. Shade keeps relief_ambient of the light.
 float light_at(vec2 p) {
     vec3 l = normalize(light);
-    // The slope is taken across two cells of the blended relief, so it changes smoothly rather than cell by cell.
+    // The slope is taken across two cells of the blended relief.
     float dx = texture(relief, (p + vec2(1.0, 0.0)) / grid).r - texture(relief, (p - vec2(1.0, 0.0)) / grid).r;
     float dy = texture(relief, (p + vec2(0.0, 1.0)) / grid).r - texture(relief, (p - vec2(0.0, 1.0)) / grid).r;
     vec3 n = normalize(vec3(-0.5 * relief_height * vec2(dx, dy), 1.0));
-
-    // March toward the light over the relief. The closer the ground comes to the ray, the deeper the shadow, and the
-    // farther away it does, the softer the shadow's edge.
-    float across = length(l.xy);
-    float sun = 1.0;
-    if (across > 1e-3) {
-        vec2 dir = l.xy / across;
-        float rise = l.z / across;
-        float h = texture(relief, p / grid).r * relief_height;
-        for (int i = 1; i <= 24; i++) {
-            float t = float(i) * 1.5;
-            float above = h + t * rise - texture(relief, (p + dir * t) / grid).r * relief_height;
-            sun = min(sun, clamp(0.5 + 2.0 * above / t, 0.0, 1.0));
-        }
-    }
-
-    // Hollows: the ground four cells around, against the ground here
-    float r = texture(relief, p / grid).r;
-    float around = texture(relief, (p + vec2(4.0, 0.0)) / grid).r + texture(relief, (p - vec2(4.0, 0.0)) / grid).r +
-                   texture(relief, (p + vec2(0.0, 4.0)) / grid).r + texture(relief, (p - vec2(0.0, 4.0)) / grid).r;
-    float hollow = clamp((around * 0.25 - r) * relief_height * 0.15, 0.0, 1.0);
-
-    float direct = max(dot(n, l), 0.0) * sun / l.z;
-    return relief_ambient * (1.0 - 0.5 * hollow) + (1.0 - relief_ambient) * direct - 1.0;
+    float direct = max(dot(n, l), 0.0) / l.z;
+    return relief_ambient + (1.0 - relief_ambient) * direct - 1.0;
 }
 
 // Signed distance to the coast in cells, positive on land. It wanders a little from the cells, as if drawn by hand.
