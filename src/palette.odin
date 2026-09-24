@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:slice"
 import "core:unicode"
 import "core:unicode/utf8"
+import "gfx"
 import "tweak"
 
 // A list of this frame's tweaks floating over everything while tweak is open, filtered by what is typed on top.
@@ -79,6 +80,11 @@ palette_build :: proc(p: ^Palette, input: Input) {
 		}
 	}
 
+	// Everything in the palette is in the small font, one and a half lines of it tall.
+	small := gfx.Font_Id(Font_Name.Small)
+	ui_style_push({font = small, height = ui_px(1.5 * gfx.font_size(small))})
+	defer ui_style_pop()
+
 	if ui_overlay() {
 		if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{0, PALETTE_TOP}}) {
 			if ui_row({width = ui_grow(), height = ui_fit()}) {
@@ -147,7 +153,13 @@ palette_row :: proc(p: ^Palette, s: tweak.Shown) {
 		},
 	)
 	if ui_panel(label, {}, .X) {
-		ui_label(name, {width = ui_grow()})
+		// The name may be cut short, so hovering it shows all of it.
+		ui_label_text({{text = name, key = "name"}}, {width = ui_grow()})
+		if ui_signal("name").hovered {
+			if ui_tooltip(MIDNIGHT_PANEL_STYLE) {
+				ui_label(name, {width = ui_text_dim()})
+			}
+		}
 		if ui_row({width = ui_px(PALETTE_WIDGET_WIDTH), height = ui_fit(), gap = 8}) {
 			palette_widget(p, s, text)
 		}

@@ -111,8 +111,22 @@ button :: proc(label, text: string) -> bool {
 	return id == TWEAKS.fired
 }
 
+// Each declaration takes the value, or a pointer to it, which it writes back to at once.
+toggle :: proc {
+	toggle_value,
+	toggle_in_place,
+}
+slider :: proc {
+	slider_value,
+	slider_in_place,
+}
+choice :: proc {
+	choice_value,
+	choice_in_place,
+}
+
 // On or off.
-toggle :: proc(label, text: string, flag: bool) -> bool {
+toggle_value :: proc(label, text: string, flag: bool) -> bool {
 	id, t := declare(label, .Toggle)
 	if !t.edited {
 		t.flag = flag
@@ -122,8 +136,12 @@ toggle :: proc(label, text: string, flag: bool) -> bool {
 	return t.flag
 }
 
+toggle_in_place :: proc(label, text: string, flag: ^bool) {
+	flag^ = toggle_value(label, text, flag^)
+}
+
 // A number between lo and hi.
-slider :: proc(label: string, value, lo, hi: f32) -> f32 {
+slider_value :: proc(label: string, value, lo, hi: f32) -> f32 {
 	id, t := declare(label, .Slider)
 	if !t.edited {
 		t.value = value
@@ -134,8 +152,12 @@ slider :: proc(label: string, value, lo, hi: f32) -> f32 {
 	return t.value
 }
 
+slider_in_place :: proc(label: string, value: ^f32, lo, hi: f32) {
+	value^ = slider_value(label, value^, lo, hi)
+}
+
 // One of choices, by index.
-choice :: proc(label: string, selection: int, choices: []string) -> int {
+choice_value :: proc(label: string, selection: int, choices: []string) -> int {
 	assert(len(choices) > 0, "a choice needs something to choose")
 	id, t := declare(label, .Choice)
 	if !t.edited {
@@ -151,6 +173,10 @@ choice :: proc(label: string, selection: int, choices: []string) -> int {
 	names := span.from_range(names_begin, len(TWEAKS.names))
 	show({kind = .Choice, id = id, label = store(label), choices = names})
 	return t.selection
+}
+
+choice_in_place :: proc(label: string, selection: ^int, choices: []string) {
+	selection^ = choice_value(label, selection^, choices)
 }
 
 // This frame's declarations, in the order they came.

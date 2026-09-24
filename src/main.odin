@@ -18,6 +18,7 @@ GLOBAL: struct {
 Font_Name :: enum {
 	Default,
 	Heading,
+	Small,
 }
 
 Image_Name :: enum {
@@ -76,6 +77,7 @@ main :: proc() {
 	font_file := "aniron" //MeathFLF"
 	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Default), font_file, 26)
 	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Heading), font_file, 34)
+	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Small), font_file, 18)
 	gfx.sprites_image_define(gfx.Image_Id(Image_Name.Logo), "logo")
 	// The world's images follow main's own, and must be defined before the atlas loads.
 	game.world_init(gfx.Image_Id(len(Image_Name)))
@@ -181,11 +183,7 @@ main :: proc() {
 		}
 
 		tweak.begin()
-		// The frame rate over each period
 		tweak.label("Info/fps", fmt.tprintf("%.0f (%.2f ms)", fps, 1000 / max(fps, 1e-6)))
-		tweak.button("Demo.Button", "Press")
-		tweak.slider("Value", 0.5, 0, 1)
-
 		demo.enabled = tweak.toggle("Demo.UI", "Shown", demo.enabled)
 
 		game.world_tick(game_input(GLOBAL.input, {f32(logical_width), f32(logical_height)}), dt)
