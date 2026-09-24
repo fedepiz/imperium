@@ -180,6 +180,12 @@ world_init :: proc(img_base_index: gfx.Image_Id) {
 		coast_width  = 1.6,
 		wobble       = 0.3,
 		river_width  = 10.,
+		// From the north-west and halfway up the sky, as the marks are drawn: their shaded flanks face south-east.
+		light         = {-1, -1, 1.41},
+		relief_height = 30,
+		shade_color   = {0.639, 0.541, 0.431, 1},
+		relief_shade  = 1,
+		relief_light  = 0.12,
 	}
 }
 
@@ -338,8 +344,8 @@ world_pan_camera :: proc(input: Input, dt: f32) {
 	camera.center = linalg.clamp(camera.center, 0, world_size)
 }
 
-// Keeps the map pass in step with the world: the camera every frame, the cells, coast and rivers when the terrain has
-// changed.
+// Keeps the map pass in step with the world: the camera every frame, the cells, coast, rivers and relief when the
+// terrain has changed.
 @(private = "file")
 world_update_render_terrain :: proc() {
 	rt := &WORLD.render_terrain
@@ -370,7 +376,59 @@ world_update_render_terrain :: proc() {
 	}
 
 	world_trace_rivers()
+	world_smooth_relief()
 	world_scatter_marks()
+}
+
+// The elevation blurred into the render terrain's relief, so its slopes shade smoothly rather than in the steps of its
+// 256 levels. Only land is blurred, and every cell takes the average of the land near it: the coast is not a cliff down
+// to the sea, and water near land holds the elevation of that land.
+@(private = "file")
+world_smooth_relief :: proc() {
+	// Three box blurs make a bell about 2.5 cells wide.
+	RADIUS :: 2
+	PASSES :: 3
+	height := make([]f32, CELLS_MAX, context.temp_allocator)
+	weight := make([]f32, CELLS_MAX, context.temp_allocator)
+	for terrain, i in WORLD.atlas.terrain {
+		if terrain.surface in WATER do continue
+		height[i] = f32(terrain.elevation) / f32(max(u8))
+		weight[i] = 1
+	}
+	scratch := make([]f32, max(WORLD_WIDTH, WORLD_HEIGHT), context.temp_allocator)
+	for _ in 0 ..< PASSES {
+		world_box_blur(height, scratch, RADIUS)
+		world_box_blur(weight, scratch, RADIUS)
+	}
+	relief := &WORLD.render_terrain.relief
+	for i in 0 ..< CELLS_MAX {
+		relief[i] = weight[i] > 1e-4 ? height[i] / weight[i] : 0
+	}
+}
+
+// Blurs the cells in place, along each row and then each column, averaging radius cells either side. Cells past the
+// edge count as zero. scratch is at least as long as a row or a column.
+@(private = "file")
+world_box_blur :: proc(values, scratch: []f32, radius: int) {
+	for y in 0 ..< WORLD_HEIGHT {
+		world_box_line(values, y * WORLD_WIDTH, 1, WORLD_WIDTH, scratch, radius)
+	}
+	for x in 0 ..< WORLD_WIDTH {
+		world_box_line(values, x, WORLD_WIDTH, WORLD_HEIGHT, scratch, radius)
+	}
+}
+
+// One line of world_box_blur: count cells from first, stride apart, with a running sum over the window.
+@(private = "file")
+world_box_line :: proc(values: []f32, first, stride, count: int, scratch: []f32, radius: int) {
+	sum: f32
+	for k in 0 ..< min(radius, count) do sum += values[first + k * stride]
+	for k in 0 ..< count {
+		if k + radius < count do sum += values[first + (k + radius) * stride]
+		if k - radius - 1 >= 0 do sum -= values[first + (k - radius - 1) * stride]
+		scratch[k] = sum / f32(2 * radius + 1)
+	}
+	for k in 0 ..< count do values[first + k * stride] = scratch[k]
 }
 
 // Traces the river cells into lines and smooths them, then gives every cell near a river the offset from its middle to

@@ -54,22 +54,33 @@ Render_Terrain_Debug :: enum i32 {
 	Elevation,
 	Trees,
 	Moisture,
+	// The hill shading alone, over land
+	Relief,
 }
 
 // How the map is drawn. Colors use straight RGBA; only RGB is used.
 Render_Terrain_Style :: struct {
-	paper:        [4]f32,
-	paper_stain:  [4]f32,
-	ink:          [4]f32,
-	sea_color:    [4]f32,
-	forest_color: [4]f32,
-	sea_tint:     f32,
-	forest_tint:  f32,
+	paper:         [4]f32,
+	paper_stain:   [4]f32,
+	ink:           [4]f32,
+	sea_color:     [4]f32,
+	forest_color:  [4]f32,
+	sea_tint:      f32,
+	forest_tint:   f32,
 	// Coast line width in logical pixels, and how far the coast wanders from the cells, in cells
-	coast_width:  f32,
-	wobble:       f32,
+	coast_width:   f32,
+	wobble:        f32,
 	// River line width in logical pixels, where a river reaches the lowlands; it thins toward its sources.
-	river_width:  f32,
+	river_width:   f32,
+	// Hill shading. light points toward the light: x east, y south (down the map), z up; it need not be unit length.
+	// relief_height is how many cells tall the highest ground stands: more makes every slope steeper.
+	// Slopes facing away from the light darken toward shade_color, and slopes facing it lighten toward white, the more
+	// the further they turn, scaled by relief_shade and relief_light. Level ground keeps its color.
+	light:         [3]f32,
+	relief_height: f32,
+	shade_color:   [4]f32,
+	relief_shade:  f32,
+	relief_light:  f32,
 }
 
 // How far around a river its offsets reach, in cells. Cells farther away hold RENDER_RIVER_FAR.
@@ -87,6 +98,9 @@ Render_Terrain :: struct {
 	coast:      [RENDER_TERRAIN_CELLS]f32,
 	// Derived from the cells: from the middle of each cell to the nearest point of a river line, in cells.
 	river:      [RENDER_TERRAIN_CELLS][2]f32,
+	// Derived from the cells: elevation from 0 to 1, smoothed so its slopes can be shaded. Water holds the elevation of
+	// the land around it, so the coast does not shade as a cliff.
+	relief:     [RENDER_TERRAIN_CELLS]f32,
 	// The cell at the middle of the view, and logical pixels per cell
 	center:     [2]f32,
 	zoom:       f32,
@@ -97,9 +111,10 @@ Render_Terrain :: struct {
 // Where the map shader's uniforms live, looked up once when its program links.
 @(private = "file")
 Render_Terrain_Uniforms :: struct {
-	grid, center, zoom, view_size, pixel_density, debug_mode: i32,
-	paper, paper_stain, ink, sea_color, forest_color:         i32,
-	sea_tint, forest_tint, coast_width, wobble, river_width:  i32,
+	grid, center, zoom, view_size, pixel_density, debug_mode:      i32,
+	paper, paper_stain, ink, sea_color, forest_color:              i32,
+	sea_tint, forest_tint, coast_width, wobble, river_width:       i32,
+	light, relief_height, shade_color, relief_shade, relief_light: i32,
 }
 
 Renderer :: struct {
@@ -117,13 +132,15 @@ Renderer :: struct {
 	terrain_cells:                    u32,
 	terrain_coast:                    u32,
 	terrain_river:                    u32,
+	terrain_relief:                   u32,
 	terrain_uniforms:                 Render_Terrain_Uniforms,
 	// The terrain revision the textures hold, once anything has been uploaded
 	terrain_revision:                 u32,
 	terrain_uploaded:                 bool,
 }
 
-// Draws the map over the whole view. Cells, coast and rivers are uploaded again only when the revision has changed.
+// Draws the map over the whole view. Cells, coast, rivers and relief are uploaded again only when the revision has
+// changed.
 render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	if renderer.view_size.x <= 0 || renderer.view_size.y <= 0 || terrain.zoom <= 0 {
 		return
@@ -167,6 +184,18 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 			gl.FLOAT,
 			raw_data(terrain.river[:]),
 		)
+		gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_relief)
+		gl.TexSubImage2D(
+			gl.TEXTURE_2D,
+			0,
+			0,
+			0,
+			RENDER_TERRAIN_WIDTH,
+			RENDER_TERRAIN_HEIGHT,
+			gl.RED,
+			gl.FLOAT,
+			raw_data(terrain.relief[:]),
+		)
 		gl.BindTexture(gl.TEXTURE_2D, 0)
 		gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4)
 		renderer.terrain_revision = terrain.revision
@@ -186,6 +215,8 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_coast)
 	gl.ActiveTexture(gl.TEXTURE2)
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_river)
+	gl.ActiveTexture(gl.TEXTURE3)
+	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_relief)
 
 	u := &renderer.terrain_uniforms
 	style := &terrain.style
@@ -206,9 +237,16 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	gl.Uniform1f(u.coast_width, style.coast_width)
 	gl.Uniform1f(u.wobble, style.wobble)
 	gl.Uniform1f(u.river_width, style.river_width)
+	gl.Uniform3f(u.light, style.light.x, style.light.y, style.light.z)
+	gl.Uniform1f(u.relief_height, style.relief_height)
+	gl.Uniform3f(u.shade_color, style.shade_color.r, style.shade_color.g, style.shade_color.b)
+	gl.Uniform1f(u.relief_shade, style.relief_shade)
+	gl.Uniform1f(u.relief_light, style.relief_light)
 
 	gl.DrawArrays(gl.TRIANGLES, 0, 3)
 
+	gl.BindTexture(gl.TEXTURE_2D, 0)
+	gl.ActiveTexture(gl.TEXTURE2)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 	gl.ActiveTexture(gl.TEXTURE1)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
@@ -308,6 +346,7 @@ render_destroy :: proc(renderer: ^Renderer) {
 	gl.DeleteTextures(1, &renderer.terrain_cells)
 	gl.DeleteTextures(1, &renderer.terrain_coast)
 	gl.DeleteTextures(1, &renderer.terrain_river)
+	gl.DeleteTextures(1, &renderer.terrain_relief)
 	gl.DeleteVertexArrays(1, &renderer.terrain_vao)
 	gl.DeleteProgram(renderer.terrain_program)
 	gl.DeleteTextures(1, &renderer.white_texture)
@@ -452,10 +491,16 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 	u.coast_width = gl.GetUniformLocation(program, "coast_width")
 	u.wobble = gl.GetUniformLocation(program, "wobble")
 	u.river_width = gl.GetUniformLocation(program, "river_width")
+	u.light = gl.GetUniformLocation(program, "light")
+	u.relief_height = gl.GetUniformLocation(program, "relief_height")
+	u.shade_color = gl.GetUniformLocation(program, "shade_color")
+	u.relief_shade = gl.GetUniformLocation(program, "relief_shade")
+	u.relief_light = gl.GetUniformLocation(program, "relief_light")
 	gl.UseProgram(program)
 	gl.Uniform1i(gl.GetUniformLocation(program, "cells"), 0)
 	gl.Uniform1i(gl.GetUniformLocation(program, "coast"), 1)
 	gl.Uniform1i(gl.GetUniformLocation(program, "river"), 2)
+	gl.Uniform1i(gl.GetUniformLocation(program, "relief"), 3)
 	gl.UseProgram(0)
 
 	// The map's one triangle has no vertex data, but core profile still wants a vertex array bound.
@@ -463,7 +508,8 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 
 	// Cells and coast are filtered between cells: that makes the coast smooth and the washes soft. The debug views read
 	// cells with texelFetch, which ignores filtering, so they still show each cell exactly. Rivers are read cell by
-	// cell and blended in the shader.
+	// cell and blended in the shader. Relief is filtered too, and kept at full precision: the shader takes its slope
+	// from small differences.
 	gl.GenTextures(1, &renderer.terrain_cells)
 	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_cells)
 	gl.TexImage2D(
@@ -513,6 +559,23 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 	)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	gl.GenTextures(1, &renderer.terrain_relief)
+	gl.BindTexture(gl.TEXTURE_2D, renderer.terrain_relief)
+	gl.TexImage2D(
+		gl.TEXTURE_2D,
+		0,
+		gl.R32F,
+		RENDER_TERRAIN_WIDTH,
+		RENDER_TERRAIN_HEIGHT,
+		0,
+		gl.RED,
+		gl.FLOAT,
+		nil,
+	)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
@@ -621,18 +684,20 @@ void main() {
 // a cell exactly; texture blends neighbouring cells.
 // coast holds the signed distance to the coast in cells, positive on land, blended between cells.
 // river holds, per cell, the offset from its middle to the nearest point of a river line.
+// relief holds the smoothed elevation, from 0 to 1, blended between cells.
 @(private = "file")
 RENDER_MAP_FRAGMENT_SOURCE: cstring = `#version 330 core
 uniform sampler2D cells;
 uniform sampler2D coast;
 uniform sampler2D river;
+uniform sampler2D relief;
 uniform vec2 grid;
 // The cell at the middle of the view, and logical pixels per cell
 uniform vec2 center;
 uniform float zoom;
 uniform vec2 view_size;
 uniform float pixel_density;
-// 0 draws the map; 1 to 4 show surface, elevation, trees and moisture cell by cell
+// 0 draws the map; 1 to 4 show surface, elevation, trees and moisture cell by cell; 5 shows the hill shading
 uniform int debug_mode;
 uniform vec3 paper;
 uniform vec3 paper_stain;
@@ -646,6 +711,13 @@ uniform float coast_width;
 uniform float wobble;
 // River line width in logical pixels in the lowlands
 uniform float river_width;
+// Hill shading: toward the light (x east, y south, z up), how many cells tall the highest ground stands, and how
+// strongly slopes darken toward shade_color or lighten toward white
+uniform vec3 light;
+uniform float relief_height;
+uniform vec3 shade_color;
+uniform float relief_shade;
+uniform float relief_light;
 out vec4 out_color;
 
 float hash(vec2 p) {
@@ -694,7 +766,17 @@ float river_distance(vec2 p) {
     return min(min(distance(p, n[0]), distance(p, n[1])), min(distance(p, n[2]), distance(p, n[3])));
 }
 
-vec3 debug_color(vec4 cell) {
+// How much the ground at p turns toward the light, next to level ground: negative on slopes facing away. The slope is
+// taken across two cells of the blended relief, so it changes smoothly rather than cell by cell.
+float relief_at(vec2 p) {
+    float dx = texture(relief, (p + vec2(1.0, 0.0)) / grid).r - texture(relief, (p - vec2(1.0, 0.0)) / grid).r;
+    float dy = texture(relief, (p + vec2(0.0, 1.0)) / grid).r - texture(relief, (p - vec2(0.0, 1.0)) / grid).r;
+    vec3 n = normalize(vec3(-0.5 * relief_height * vec2(dx, dy), 1.0));
+    vec3 l = normalize(light);
+    return dot(n, l) - l.z;
+}
+
+vec3 debug_color(vec4 cell, vec2 p) {
     // Land, river, lake, sea
     int surface = int(cell.r * 3.0 + 0.5);
     bool water = surface >= 2;
@@ -707,6 +789,7 @@ vec3 debug_color(vec4 cell) {
     if (water) return vec3(0.12, 0.2, 0.3);
     if (debug_mode == 2) return vec3(cell.g);
     if (debug_mode == 3) return mix(vec3(0.85, 0.8, 0.65), vec3(0.15, 0.4, 0.15), cell.b);
+    if (debug_mode == 5) return vec3(clamp(0.6 + relief_at(p), 0.0, 1.0));
     return mix(vec3(0.8, 0.65, 0.4), vec3(0.3, 0.5, 0.75), cell.a);
 }
 
@@ -724,7 +807,7 @@ void main() {
 
     vec3 col;
     if (debug_mode > 0) {
-        col = debug_color(texelFetch(cells, ivec2(floor(p)), 0));
+        col = debug_color(texelFetch(cells, ivec2(floor(p)), 0), p);
         // Cell edges, once cells are big enough to tell apart
         vec2 g = fract(p);
         float edge = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y)) * px;
@@ -739,6 +822,11 @@ void main() {
         vec3 sea = col * mix(vec3(1.0), sea_color, sea_tint * (0.65 + 0.35 * exp(min(d, 0.0) / 5.0)));
         vec3 ground = col * mix(vec3(1.0), forest_color, cell.b * forest_tint);
         col = mix(sea, ground, land);
+
+        // Hill shading, lit from the same side as the drawn marks. Only the land is shaded.
+        float lit = relief_at(p);
+        col = mix(col, col * shade_color, clamp(-lit * relief_shade, 0.0, 1.0) * land);
+        col = mix(col, vec3(1.0), clamp(lit * relief_light, 0.0, 1.0) * land);
 
         // Rivers: a faint wash either side and a line that thins toward the hills, both stopping at the shore. The line
         // never grows past a third of a cell, so rivers fade out as the map zooms away.

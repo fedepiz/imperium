@@ -196,10 +196,10 @@ Debug_Pane :: struct {
 }
 
 // Named in the order of gfx.Render_Terrain_Debug
-TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture"}
+TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture", "Relief"}
 
 debug_pane_build :: proc(pane: ^Debug_Pane) {
-	#assert(len(gfx.Render_Terrain_Debug) == 5)
+	#assert(len(gfx.Render_Terrain_Debug) == 6)
 	// The column only places the pane; it takes no mouse, so the map gets it everywhere else.
 	if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{16, 16}}) {
 		if ui_panel("debug pane", MIDNIGHT_PANEL_STYLE) {
