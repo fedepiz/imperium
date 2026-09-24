@@ -63,10 +63,12 @@ main :: proc() {
 	}
 	defer render_destroy(renderer)
 
+	pixel_density := sdl.GetWindowPixelDensity(window)
+	if pixel_density <= 0 do pixel_density = 1
+
 	sprites_font_define(Font_Id(Font_Name.Default), "MeathFLF", 24)
 	sprites_font_define(Font_Id(Font_Name.Heading), "MeathFLF", 32)
 	sprites_image_define(Image_Id(Image_Name.Logo), "logo")
-	pixel_density := sdl.GetWindowPixelDensity(window)
 	sprites_load(renderer, pixel_density)
 	ui_init()
 
@@ -202,7 +204,7 @@ button_is_pressed :: proc(input: Input, button: u8) -> bool {
 	return bool(input.btns[.New][.Pressed][button])
 }
 
-// A small showcase in the colors of ui2's "Midnight" theme.
+// A small showcase of the widgets.
 Demo :: struct {
 	presses:         int,
 	locked:          bool,
@@ -212,35 +214,15 @@ Demo :: struct {
 
 DEMO_DIFFICULTIES := []string{"Easy", "Normal", "Hard"}
 
+// Midnight colors beyond the ui's base style
 MIDNIGHT_BACKGROUND :: [4]f32{0.07, 0.09, 0.13, 1}
 MIDNIGHT_PANEL :: [4]f32{0.105, 0.125, 0.165, 1}
-MIDNIGHT_BUTTON :: [4]f32{0.15, 0.17, 0.21, 1}
-MIDNIGHT_TEXT :: [4]f32{0.91, 0.92, 0.94, 1}
-MIDNIGHT_BORDER :: [4]f32{0.24, 0.29, 0.36, 1}
-MIDNIGHT_HOT :: [4]f32{0.24, 0.32, 0.43, 1}
-MIDNIGHT_ACTIVE :: [4]f32{0.29, 0.41, 0.56, 1}
 MIDNIGHT_GOLD :: [4]f32{0.9, 0.71, 0.38, 1}
 MIDNIGHT_MUTED :: [4]f32{0.55, 0.61, 0.7, 1}
 MIDNIGHT_PRIMARY :: [4]f32{0.23, 0.39, 0.61, 1}
 MIDNIGHT_DANGER :: [4]f32{0.48, 0.15, 0.19, 1}
 // Text drawn on the saturated primary and danger fills
 MIDNIGHT_TEXT_ON_FILL :: [4]f32{1, 1, 1, 1}
-// Text while hovered
-MIDNIGHT_HOT_TEXT :: [4]f32{1, 1, 1, 1}
-
-// Pushed over the whole demo: every box inherits these colors.
-MIDNIGHT :: Ui_Style {
-	background        = MIDNIGHT_BUTTON,
-	hot_background    = MIDNIGHT_HOT,
-	active_background = MIDNIGHT_ACTIVE,
-	border            = MIDNIGHT_BORDER,
-	focus_border      = MIDNIGHT_GOLD,
-	text_color        = MIDNIGHT_TEXT,
-	hot_text_color    = MIDNIGHT_HOT_TEXT,
-	radius            = 5,
-	thickness         = 1,
-}
-
 // Styles holding a Ui_Size are not compile-time constants, so they are globals; treat them as read-only.
 MIDNIGHT_PANEL_STYLE := Ui_Style {
 	width      = Ui_Size{.Fit, 0, 1},
@@ -271,9 +253,6 @@ MIDNIGHT_DANGER_BUTTON :: Ui_Style {
 }
 
 demo_build :: proc(demo: ^Demo) {
-	ui_style_push(MIDNIGHT)
-	defer ui_style_pop()
-
 	if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{24, 20}, gap = 16}) {
 		if ui_column({width = ui_fit(), height = ui_fit(), gap = 2}) {
 			demo_label("Imperium", MIDNIGHT_HEADING)

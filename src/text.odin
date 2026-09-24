@@ -134,14 +134,17 @@ text_from_string :: proc(text: string, font: Font_Id, color: [4]f32) -> Text_Id 
 	return text_end()
 }
 
+@(private = "file")
+ROOM_INF :: [2]f32{math.INF_F32, math.INF_F32}
+
 // The size of the text laid out in room: lines no wider than room.x, cut short with an ellipsis below room.y.
-// An infinite room leaves that axis unbounded.
-text_measure :: proc(id: Text_Id, room: [2]f32) -> [2]f32 {
+// An infinite room leaves that axis unbounded; without one, neither is.
+text_measure :: proc(id: Text_Id, room := ROOM_INF) -> [2]f32 {
 	return text_laid_out(id, room).size
 }
 
 // Whether laying the text out in room left some of it out.
-text_truncated :: proc(id: Text_Id, room: [2]f32) -> bool {
+text_truncated :: proc(id: Text_Id, room := ROOM_INF) -> bool {
 	return text_laid_out(id, room).truncated
 }
 
@@ -150,7 +153,7 @@ text_draw :: proc(
 	draw: ^Draw_Ctx,
 	id: Text_Id,
 	position: [2]f32,
-	room: [2]f32,
+	room := ROOM_INF,
 	tint := [4]f32{1, 1, 1, 1},
 ) {
 	text := text_laid_out(id, room)
@@ -169,7 +172,7 @@ text_draw :: proc(
 }
 
 // The tag of the run under point, relative to the text's top-left, laid out in room; 0 over untagged text or nothing.
-text_tag_at :: proc(id: Text_Id, room: [2]f32, point: [2]f32) -> u64 {
+text_tag_at :: proc(id: Text_Id, point: [2]f32, room := ROOM_INF) -> u64 {
 	text := text_laid_out(id, room)
 	for piece in TEXTS.pieces[text.pieces.begin:][:text.pieces.len] {
 		if piece.tag != 0 && rect_contains(piece.cell, point) {
@@ -502,4 +505,3 @@ text_pen_piece :: proc(
 	TEXTS.pieces[TEXTS.piece_count] = piece
 	TEXTS.piece_count += 1
 }
-

@@ -562,7 +562,7 @@ ui_update_interaction :: proc(input: Input) {
 		}
 		if !hot_found && .Hover_Text in box.flags {
 			local := mouse_pos - ui_text_origin(box)
-			if tag := text_tag_at(box.text, ui_text_room(box), local); tag != 0 {
+			if tag := text_tag_at(box.text, local, ui_text_room(box)); tag != 0 {
 				UI.hot = Ui_Key(tag)
 				UI.hovered_any = true
 				hot_found = true
@@ -596,24 +596,22 @@ ui_update_interaction :: proc(input: Input) {
 		}
 	}
 
-	left_pressed := input.btns[.New][.Pressed][sdl3.BUTTON_LEFT]
-	left_released :=
-		input.btns[.Old][.Down][sdl3.BUTTON_LEFT] && !input.btns[.New][.Down][sdl3.BUTTON_LEFT]
-	UI.pressed_any = bool(left_pressed)
+	left_pressed := button_is_pressed(input, sdl3.BUTTON_LEFT)
+	UI.pressed_any = left_pressed
 
 	UI.pressed = {}
-	if UI.active != UI_KEY_NIL {
-		// While something is held, nothing else reacts to the mouse.
-		if UI.hot != UI.active {
-			UI.hot = {}
-		}
-		if left_released {
-			UI.active = {}
-		}
-	} else if left_pressed && hot_is_box {
+	if UI.active == UI_KEY_NIL && left_pressed && hot_is_box {
 		UI.active = UI.hot
 		UI.pressed = UI.hot
 		UI.drag_start = mouse_pos
+	}
+	// Nothing stays held once the button is up, even when the press and the release came in the same frame.
+	if !button_is_down(input, sdl3.BUTTON_LEFT) {
+		UI.active = {}
+	}
+	// While something is held, nothing else reacts to the mouse.
+	if UI.active != UI_KEY_NIL && UI.hot != UI.active {
+		UI.hot = {}
 	}
 
 	// Any press moves focus: to the pressed box if it takes focus, otherwise away.
@@ -935,9 +933,7 @@ ui_compute_independent_sizes :: proc() {
 				value[axis] = size[axis].value
 			case .Text:
 				// On one line; a narrower final width wraps it and recomputes the height.
-				value[axis] =
-					text_measure(box.text, {math.INF_F32, math.INF_F32})[axis] +
-					2 * box.padding[axis]
+				value[axis] = text_measure(box.text)[axis] + 2 * box.padding[axis]
 			}
 		}
 
@@ -1100,13 +1096,14 @@ ui_grow :: proc(weight: f32 = 1, strictness: f32 = 0) -> Ui_Size {
 	return {.Grow, weight, strictness}
 }
 
-UI_PANEL_BACKGROUND :: [4]f32{0.93, 0.89, 0.80, 1}
-UI_PANEL_BORDER :: [4]f32{0.36, 0.24, 0.16, 1}
-UI_LABEL_COLOR :: [4]f32{0.20, 0.13, 0.09, 1}
-UI_HOT_LABEL_COLOR :: [4]f32{0.55, 0.30, 0.10, 1}
-UI_HOT_BACKGROUND :: [4]f32{0.87, 0.81, 0.69, 1}
-UI_ACTIVE_BACKGROUND :: [4]f32{0.80, 0.72, 0.58, 1}
-UI_FOCUS_BORDER :: [4]f32{0.72, 0.50, 0.20, 1}
+// The Midnight palette
+UI_BACKGROUND :: [4]f32{0.15, 0.17, 0.21, 1}
+UI_HOT_BACKGROUND :: [4]f32{0.24, 0.32, 0.43, 1}
+UI_ACTIVE_BACKGROUND :: [4]f32{0.29, 0.41, 0.56, 1}
+UI_BORDER :: [4]f32{0.24, 0.29, 0.36, 1}
+UI_FOCUS_BORDER :: [4]f32{0.9, 0.71, 0.38, 1}
+UI_TEXT_COLOR :: [4]f32{0.91, 0.92, 0.94, 1}
+UI_HOT_TEXT_COLOR :: [4]f32{1, 1, 1, 1}
 // The checkbox square and the space between it and its label
 UI_CHECK_SIZE :: 18
 UI_CHECK_GAP :: 8
@@ -1128,16 +1125,16 @@ ui_style_base :: proc() -> Ui_Style {
 		height = ui_px(1.5 * em),
 		padding = [2]f32{0, 0},
 		gap = 0,
-		background = UI_PANEL_BACKGROUND,
+		background = UI_BACKGROUND,
 		hot_background = UI_HOT_BACKGROUND,
 		active_background = UI_ACTIVE_BACKGROUND,
-		border = UI_PANEL_BORDER,
+		border = UI_BORDER,
 		focus_border = UI_FOCUS_BORDER,
 		thickness = 1,
-		radius = 4,
+		radius = 5,
 		font = font,
-		text_color = UI_LABEL_COLOR,
-		hot_text_color = UI_HOT_LABEL_COLOR,
+		text_color = UI_TEXT_COLOR,
+		hot_text_color = UI_HOT_TEXT_COLOR,
 		position = [2]f32{0, 0},
 	}
 }
