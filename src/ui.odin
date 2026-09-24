@@ -65,7 +65,7 @@ UI: struct {
 	anim_hash_table: Ui_Anim_Hashtable,
 }
 
-// The short live id for the ui boxes. Dobules up as the index in the table
+// The short live id for the ui boxes. Doubles up as the index in the table
 Ui_Id :: distinct u16
 
 @(private = "file")
@@ -904,7 +904,10 @@ ui_text_origin :: proc(box: ^Ui_Box) -> [2]f32 {
 // The room a box's text is laid out in: the box inside its padding. Text that does not fit ends in an ellipsis.
 @(private = "file")
 ui_text_room :: proc(box: ^Ui_Box) -> [2]f32 {
-	return {max(0, box.size_computed.x - 2 * box.padding.x), max(0, box.size_computed.y - 2 * box.padding.y)}
+	return {
+		max(0, box.size_computed.x - 2 * box.padding.x),
+		max(0, box.size_computed.y - 2 * box.padding.y),
+	}
 }
 
 @(private = "file")
@@ -932,7 +935,9 @@ ui_compute_independent_sizes :: proc() {
 				value[axis] = size[axis].value
 			case .Text:
 				// On one line; a narrower final width wraps it and recomputes the height.
-				value[axis] = text_measure(box.text, {math.INF_F32, math.INF_F32})[axis] + 2 * box.padding[axis]
+				value[axis] =
+					text_measure(box.text, {math.INF_F32, math.INF_F32})[axis] +
+					2 * box.padding[axis]
 			}
 		}
 
@@ -1487,4 +1492,3 @@ ui_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Sign
 	ui_box_set_label(&UI.boxes[text], label)
 	return signal
 }
-

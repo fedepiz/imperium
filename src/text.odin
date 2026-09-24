@@ -164,7 +164,7 @@ text_draw :: proc(
 		if piece.rect.z <= 0 {continue}
 		rect := piece.rect
 		rect.xy += position
-		draw_sprite(draw, piece.sprite, rect, piece.color * tint)
+		draw_sprite(draw, piece.sprite, rect, piece.color * tint, flags = {.Snap})
 	}
 }
 

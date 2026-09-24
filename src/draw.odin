@@ -1,8 +1,16 @@
 package main
 
+import "core:math/linalg"
 import "core:mem"
 
 DRAW_CLIP_DEPTH_MAX :: 32
+
+Draw_Flag :: enum {
+	// Moves the top-left corner to the nearest physical pixel, so a sprite drawn at its texture size stays sharp
+	Snap,
+}
+
+Draw_Flags :: bit_set[Draw_Flag]
 
 Draw_Ctx :: struct {
 	list:          ^Render_List,
@@ -11,6 +19,8 @@ Draw_Ctx :: struct {
 	// Clip rects stamped on every instance; the bottom entry is the clip given to draw_begin.
 	clip_stack:    [DRAW_CLIP_DEPTH_MAX][4]f32,
 	clip_depth:    int,
+	// Physical pixels per logical pixel
+	pixel_density: f32,
 }
 
 // Initializes the writer and clears its assigned instance_span.
@@ -20,12 +30,14 @@ draw_begin :: proc(
 	list: ^Render_List,
 	instance_span: Span,
 	clip: [4]f32,
+	pixel_density: f32,
 ) {
 	assert(instance_span.begin >= 0 && instance_span.len >= 0)
 	assert(instance_span.begin + instance_span.len <= RENDER_MAX_INSTANCES)
 	ctx^ = {
 		list          = list,
 		instance_span = instance_span,
+		pixel_density = pixel_density,
 	}
 	ctx.clip_stack[0] = clip
 	mem.zero_slice(list.keys[instance_span.begin:instance_span.begin + instance_span.len])
@@ -75,8 +87,9 @@ draw_image :: proc(
 	radii := [Corner]f32{},
 	thickness: f32 = 0,
 	softness: f32 = 0,
+	flags := Draw_Flags{},
 ) {
-	draw_sprite(ctx, sprite_of_image(image), rect, tint, radii, thickness, softness)
+	draw_sprite(ctx, sprite_of_image(image), rect, tint, radii, thickness, softness, flags)
 }
 
 @(private = "file")
@@ -107,7 +120,12 @@ draw_sprite :: proc(
 	radii := [Corner]f32{},
 	thickness: f32 = 0,
 	softness: f32 = 0,
+	flags := Draw_Flags{},
 ) {
+	rect := rect
+	if .Snap in flags {
+		rect.xy = linalg.round(rect.xy * ctx.pixel_density) / ctx.pixel_density
+	}
 	region := sprite_region(sprite)
 	instance: Render_Instance
 	if region.source.z > 0 && region.source.w > 0 {

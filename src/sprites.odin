@@ -75,6 +75,7 @@ Font_Info :: struct {
 @(private = "file")
 Sprite_Loaded_Font :: struct {
 	info:  stbtt.fontinfo,
+	// Font units to texture pixels: glyphs are rasterized at the window's pixel density
 	scale: f32,
 }
 
@@ -117,7 +118,7 @@ sprites_image_define :: proc(id: Image_Id, name: string) {
 
 // Startup load. Only derived metrics/regions and GPU textures survive a temp reset.
 // Image glyph metrics may be supplied by the caller for inline icons.
-sprites_load :: proc(renderer: ^Renderer) {
+sprites_load :: proc(renderer: ^Renderer, pixel_density: f32) {
 	workspace := Sprite_Load_Workspace {
 		images = make([]Bitmap, IMAGES_MAX, context.temp_allocator),
 		fonts  = make([]Sprite_Loaded_Font, FONTS_MAX, context.temp_allocator),
@@ -203,14 +204,15 @@ sprites_load :: proc(renderer: ^Renderer) {
 			fmt.eprintf("WARNING: Could not load font file %q: font initialization failed\n", path)
 			continue
 		}
-		loaded.scale = stbtt.ScaleForPixelHeight(&loaded.info, f32(desc.size))
+		loaded.scale = stbtt.ScaleForPixelHeight(&loaded.info, f32(desc.size) * pixel_density)
 
+		// Metrics are measured in texture pixels and kept in logical ones.
 		ascent, descent, line_gap: c.int
 		stbtt.GetFontVMetrics(&loaded.info, &ascent, &descent, &line_gap)
 		desc.info = {
-			ascent   = f32(ascent) * loaded.scale,
-			descent  = f32(descent) * loaded.scale,
-			line_gap = f32(line_gap) * loaded.scale,
+			ascent   = f32(ascent) * loaded.scale / pixel_density,
+			descent  = f32(descent) * loaded.scale / pixel_density,
+			line_gap = f32(line_gap) * loaded.scale / pixel_density,
 		}
 
 		for codepoint, codepoint_index in desc.codepoints {
@@ -220,7 +222,11 @@ sprites_load :: proc(renderer: ^Renderer) {
 			sprite_index := IMAGES_MAX + font_index * FONT_GLYPHS_MAX + codepoint_index
 			sprite := Sprite_Id(sprite_index)
 			glyph := font_glyph_metrics(loaded, codepoint)
-			SPRITES.glyphs[sprite] = glyph
+			SPRITES.glyphs[sprite] = {
+				offset  = glyph.offset / pixel_density,
+				size    = glyph.size / pixel_density,
+				advance = glyph.advance / pixel_density,
+			}
 			width, height := int(glyph.size.x), int(glyph.size.y)
 			if width == 0 || height == 0 {
 				continue
@@ -254,6 +260,7 @@ sprites_load :: proc(renderer: ^Renderer) {
 	}
 }
 
+// The glyph in texture pixels.
 @(private = "file")
 font_glyph_metrics :: proc(font: ^Sprite_Loaded_Font, codepoint: rune) -> Sprite_Glyph {
 	x0, y0, x1, y1, advance: c.int
@@ -429,4 +436,3 @@ sprite_of_glyph :: proc(font: Font_Id, ch: rune) -> (sprite: Sprite_Id, ok: bool
 	sprite_index := IMAGES_MAX + int(font) * FONT_GLYPHS_MAX + index
 	return Sprite_Id(sprite_index), true
 }
-

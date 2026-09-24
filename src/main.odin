@@ -66,7 +66,8 @@ main :: proc() {
 	sprites_font_define(Font_Id(Font_Name.Default), "MeathFLF", 24)
 	sprites_font_define(Font_Id(Font_Name.Heading), "MeathFLF", 32)
 	sprites_image_define(Image_Id(Image_Name.Logo), "logo")
-	sprites_load(renderer)
+	pixel_density := sdl.GetWindowPixelDensity(window)
+	sprites_load(renderer, pixel_density)
 	ui_init()
 
 	if !sdl.GL_SetSwapInterval(1) {
@@ -151,6 +152,7 @@ main :: proc() {
 				&GLOBAL.render_list,
 				span_from_array(&GLOBAL.render_list.instances),
 				{0, 0, f32(logical_width), f32(logical_height)},
+				pixel_density,
 			)
 
 			text_begin()
@@ -383,4 +385,3 @@ demo_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Si
 	ui_style_next({width = ui_fit(), padding = [2]f32{10, 0}})
 	return ui_checkbox(label, value, style)
 }
-
