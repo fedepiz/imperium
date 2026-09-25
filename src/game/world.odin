@@ -261,7 +261,7 @@ Culture :: enum u8 {
 
 // Every drawing is made at the same scale, so drawing each at this many cells per pixel of its image, times its pawn's
 // scale, keeps the pen line the same weight across them all.
-PAWN_CELLS_PER_PIXEL :: f32(7.5 / 400.0)
+PAWN_CELLS_PER_PIXEL :: f32(6.75 / 400.0)
 
 // The drawings of each pawn image, under assets/gfx/pawns, as <culture>_<name>, made from art/pawns by tools/pawnify
 @(private = "file")
