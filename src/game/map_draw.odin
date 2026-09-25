@@ -223,14 +223,18 @@ map_draw_init :: proc() {
 	}
 
 	WORLD.map_draw.render_terrain.style = {
-		paper       = {0.933, 0.878, 0.753, 1},
-		paper_stain = {0.847, 0.761, 0.588, 1},
-		ink         = {0.231, 0.165, 0.110, 1},
-		sea_color   = {0.616, 0.714, 0.788, 1},
-		sea_tint    = 0.55,
-		coast_width = 1.6,
-		wobble      = 0.3,
-		river_width = 10.,
+		paper              = {0.933, 0.878, 0.753, 1},
+		paper_stain        = {0.847, 0.761, 0.588, 1},
+		paper_stain_amount = 1,
+		ink                = {0.231, 0.165, 0.110, 1},
+		sea_shallow        = {0.616, 0.714, 0.788, 1},
+		sea_deep           = {0.20, 0.49, 0.78, 1},
+		sea_depth_from     = 5,
+		sea_depth_full     = 50,
+		sea_tint           = 0.55,
+		coast_width        = 1.6,
+		wobble             = 0.3,
+		river_width        = 10.,
 	}
 	WORLD.map_draw.render_terrain.cover.jitter = 0.8
 
@@ -304,6 +308,16 @@ map_draw_tick :: proc(viewport: [2]f32) {
 		view^ = gfx.Render_Terrain_Debug(
 			tweak.choice("Render/Terrain view", int(view^), TERRAIN_VIEW_NAMES),
 		)
+
+		{
+			style := &WORLD.map_draw.render_terrain.style
+			tweak.slider("Render/Paper stain", &style.paper_stain_amount, 0, 2)
+			tweak.slider("Render/Sea Colour/Red", &style.sea_deep.r, 0, 1)
+			tweak.slider("Render/Sea Colour/Green", &style.sea_deep.g, 0, 1)
+			tweak.slider("Render/Sea Colour/Blue", &style.sea_deep.b, 0, 1)
+			tweak.slider("Render/Sea Colour/Depth/From", &style.sea_depth_from, 0, 20)
+			tweak.slider("Render/Sea Colour/Depth/Full", &style.sea_depth_full, 0, 80)
+		}
 		placement_changed = tweak_placement()
 	}
 
@@ -930,4 +944,3 @@ distance_line :: proc(f, out: []f32, parabolas: []i32, bounds: []f32) {
 		out[q] = d * d + f[v[k]]
 	}
 }
-

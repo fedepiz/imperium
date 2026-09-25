@@ -57,16 +57,23 @@ Render_Terrain_Debug :: enum i32 {
 
 // How the map is drawn. Colors use straight RGBA; only RGB is used.
 Render_Terrain_Style :: struct {
-	paper:       [4]f32,
-	paper_stain: [4]f32,
-	ink:         [4]f32,
-	sea_color:   [4]f32,
-	sea_tint:    f32,
+	paper:              [4]f32,
+	paper_stain:        [4]f32,
+	// How strongly the stains show: 0 for none, 1 for full
+	paper_stain_amount: f32,
+	ink:                [4]f32,
+	// The water's color near the shore and out in the deep. It is shallow up to sea_depth_from cells from the shore,
+	// deep from sea_depth_full cells, and blends evenly in between.
+	sea_shallow:        [4]f32,
+	sea_deep:           [4]f32,
+	sea_depth_from:     f32,
+	sea_depth_full:     f32,
+	sea_tint:           f32,
 	// Coast line width in logical pixels, and how far the coast wanders from the cells, in cells
-	coast_width: f32,
-	wobble:      f32,
+	coast_width:        f32,
+	wobble:             f32,
 	// River line width in logical pixels, where a river reaches the lowlands; it thins toward its sources.
-	river_width: f32,
+	river_width:        f32,
 }
 
 // How many categories a layer can have, category 0 included

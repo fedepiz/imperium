@@ -28,15 +28,17 @@ Render_Texture :: struct {
 // The map shader's uniforms, laid out as the shader's Terrain struct
 @(private = "file")
 Render_Terrain_Uniforms :: struct {
-	grid, center, view_size:            [2]f32,
-	zoom, pixel_density:                f32,
-	paper, paper_stain, ink, sea_color: [4]f32,
-	debug_mode:                         i32,
-	sea_tint, coast_width, wobble:      f32,
-	river_width, cover_jitter:          f32,
-	_:                                  [2]f32,
+	grid, center, view_size:                        [2]f32,
+	zoom, pixel_density:                            f32,
+	paper, paper_stain, ink, sea_shallow, sea_deep: [4]f32,
+	debug_mode:                                     i32,
+	sea_tint, coast_width, wobble:                  f32,
+	river_width, cover_jitter:                      f32,
+	paper_stain_amount, sea_depth_from:             f32,
+	sea_depth_full:                                 f32,
+	_:                                              [3]f32,
 }
-#assert(size_of(Render_Terrain_Uniforms) == 128)
+#assert(size_of(Render_Terrain_Uniforms) == 160)
 
 Renderer :: struct {
 	window:                                    ^sdl.Window,
@@ -378,21 +380,25 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 
 	style := &terrain.style
 	uniforms := Render_Terrain_Uniforms {
-		grid          = {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
-		center        = terrain.center,
-		view_size     = renderer.view_size,
-		zoom          = terrain.zoom,
-		pixel_density = renderer.pixel_density if renderer.pixel_density > 0 else 1,
-		paper         = style.paper,
-		paper_stain   = style.paper_stain,
-		ink           = style.ink,
-		sea_color     = style.sea_color,
-		debug_mode    = i32(terrain.debug_mode),
-		sea_tint      = style.sea_tint,
-		coast_width   = style.coast_width,
-		wobble        = style.wobble,
-		river_width   = style.river_width,
-		cover_jitter  = cover.jitter,
+		grid               = {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
+		center             = terrain.center,
+		view_size          = renderer.view_size,
+		zoom               = terrain.zoom,
+		pixel_density      = renderer.pixel_density if renderer.pixel_density > 0 else 1,
+		paper              = style.paper,
+		paper_stain        = style.paper_stain,
+		ink                = style.ink,
+		sea_shallow        = style.sea_shallow,
+		sea_deep           = style.sea_deep,
+		debug_mode         = i32(terrain.debug_mode),
+		sea_tint           = style.sea_tint,
+		coast_width        = style.coast_width,
+		wobble             = style.wobble,
+		river_width        = style.river_width,
+		cover_jitter       = cover.jitter,
+		paper_stain_amount = style.paper_stain_amount,
+		sea_depth_from     = style.sea_depth_from,
+		sea_depth_full     = style.sea_depth_full,
 	}
 	wgpu.QueueWriteBuffer(renderer.queue, renderer.terrain_uniforms, 0, &uniforms, size_of(uniforms))
 
@@ -796,13 +802,17 @@ struct Terrain {
     paper: vec4f,
     paper_stain: vec4f,
     ink: vec4f,
-    sea_color: vec4f,
+    sea_shallow: vec4f,
+    sea_deep: vec4f,
     debug_mode: i32,
     sea_tint: f32,
     coast_width: f32,
     wobble: f32,
     river_width: f32,
     cover_jitter: f32,
+    paper_stain_amount: f32,
+    sea_depth_from: f32,
+    sea_depth_full: f32,
 }
 @group(0) @binding(0) var<uniform> u: Terrain;
 @group(0) @binding(1) var cells: texture_2d<f32>;
@@ -850,7 +860,7 @@ fn line_aa(dist: f32, half_w: f32) -> f32 {
 // Vellum: large stains fixed to the world, and a fine grain fixed to the screen.
 fn paper_at(p: vec2f, frag: vec2f) -> vec3f {
     let stain = smoothstep(0.35, 0.85, fbm(p * 0.02 + 3.1)) * 0.85 + (fbm(p * 0.09 + 11.3) - 0.5) * 0.2;
-    let c = mix(u.paper.rgb, u.paper_stain.rgb, clamp(stain, 0.0, 1.0));
+    let c = mix(u.paper.rgb, u.paper_stain.rgb, clamp(stain * u.paper_stain_amount, 0.0, 1.0));
     return c * (1.0 - (hash(floor(frag)) - 0.5) * 0.035);
 }
 
@@ -974,8 +984,10 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         let d = textureSampleLevel(coast, linear_sampler, p / u.grid, 0.0).r + u.wobble * (fbm(p * 0.45 + 7.7) - 0.5) * 1.6;
         let land = smoothstep(-0.5 / px, 0.5 / px, d);
         col = paper_at(p, frag.xy);
-        // The sea wash is strongest along the coast.
-        let sea = col * mix(vec3f(1.0), u.sea_color.rgb, u.sea_tint * (0.65 + 0.35 * exp(min(d, 0.0) / 5.0)));
+        // Water deepens in color away from its shore, and its wash is strongest along the coast.
+        let deep = clamp((-d - u.sea_depth_from) / max(u.sea_depth_full - u.sea_depth_from, 1e-3), 0.0, 1.0);
+        let sea_color = mix(u.sea_shallow.rgb, u.sea_deep.rgb, deep);
+        let sea = col * mix(vec3f(1.0), sea_color, u.sea_tint * (0.65 + 0.35 * exp(min(d, 0.0) / 5.0)));
         // What covers the land: each category's wash and ink pattern
         let cover = layer_at(cover_cells, cover_palette, p, u.cover_jitter);
         var ground = col * cover.tint;
@@ -985,9 +997,9 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         // Rivers: a faint wash either side and a line that thins toward the hills, both stopping at the shore. The line
         // never grows past a third of a cell, so rivers fade out as the map zooms away.
         let r = river_distance(p) + u.wobble * (fbm(p * 0.6 + 3.3) - 0.5) * 0.5;
-        col = mix(col, col * u.sea_color.rgb, u.sea_tint * 0.5 * (1.0 - smoothstep(0.0, 1.2, r)) * land);
+        col = mix(col, col * u.sea_shallow.rgb, u.sea_tint * 0.5 * (1.0 - smoothstep(0.0, 1.2, r)) * land);
         let river_half = min(u.river_width * 0.5 * u.pixel_density * mix(1.0, 0.4, smoothstep(0.2, 0.8, cell.g)), px / 6.0);
-        col = mix(col, mix(u.ink.rgb, u.sea_color.rgb, 0.3), line_aa(r * px, river_half) * land);
+        col = mix(col, mix(u.ink.rgb, u.sea_shallow.rgb, 0.3), line_aa(r * px, river_half) * land);
 
         let width = u.coast_width * 0.5 * u.pixel_density * (0.8 + 0.4 * value_noise(p * 0.8));
         col = mix(col, u.ink.rgb, line_aa(abs(d) * px, width));
