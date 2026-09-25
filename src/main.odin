@@ -183,6 +183,7 @@ main :: proc() {
 		}
 
 		tweak.begin()
+
 		tweak.label("Info/fps", fmt.tprintf("%.0f (%.2f ms)", fps, 1000 / max(fps, 1e-6)))
 		if tweak.button("Sys/quit", "Quit") {
 			keep_going = false
@@ -192,7 +193,7 @@ main :: proc() {
 		game.world_tick(game_input(GLOBAL.input, {f32(logical_width), f32(logical_height)}), dt)
 		// Tab steps through the map and the raw terrain properties.
 		if key_is_pressed(GLOBAL.input, .TAB) && !ui_keyboard_captured() {
-			debug := &game.WORLD.render_terrain.debug_mode
+			debug := &game.WORLD.map_draw.render_terrain.debug_mode
 			debug^ = gfx.Render_Terrain_Debug((int(debug^) + 1) % len(gfx.Render_Terrain_Debug))
 		}
 
@@ -214,8 +215,8 @@ main :: proc() {
 		}
 
 		renderer.view_size = {f32(logical_width), f32(logical_height)}
-		gfx.render_terrain(renderer, &game.WORLD.render_terrain)
-		gfx.render_list(renderer, &game.WORLD.render_list)
+		gfx.render_terrain(renderer, &game.WORLD.map_draw.render_terrain)
+		gfx.render_list(renderer, &game.WORLD.map_draw.render_list)
 		gfx.render_list(renderer, &GLOBAL.render_list)
 		sdl.GL_SwapWindow(window)
 	}

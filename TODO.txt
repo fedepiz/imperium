@@ -1,0 +1,26 @@
+Images with variants, in gfx sprites
+====================================
+
+Today the game hands gfx its image ids: main numbers its own with Image_Name, and the world numbers its marks
+from an image_base passed in (image_base + mark * TERRAIN_MARK_VARIANTS + variant, bounded by WORLD_IMAGES_MAX).
+Nobody owns the numbering, and every new group of images (pawns, data-driven ones) would add more arithmetic.
+
+Plan: gfx owns the numbering, and an image can have variants.
+
+- sprites_image_define(paths: ..string) -> Image_Id takes the next free id and returns it. At least one path, so
+  every image has at least one variant. The path strings are copied, so paths built at load time are safe.
+- An image records its first Sprite_Id and its variant count; its variants get consecutive sprites, so there is no
+  second array. Glyphs keep their own range; the bound between them becomes "image sprites", not "images".
+- Lookups: sprite_of_image(image, variant = 0), image_variants(image), and a sampling helper (image, roll).
+
+In the game:
+- Map_Draw holds [Terrain_Mark]gfx.Image_Id, declared in map_draw_init with the paths written in the calls.
+  The scatter picks the variant and a Mark stores the chosen Sprite_Id.
+- image_base, WORLD_IMAGES_MAX, TERRAIN_MARK_IMAGES and world_mark_image / world_mark_variants go away.
+- main keeps Image_Name as names, filling [Image_Name]gfx.Image_Id from the returned ids.
+
+Recolouring stays out of the numbering: a recolourable look is layers (a base, a greyscale mask tinted by data at
+draw time, an emblem), all ordinary images.
+
+Constraint accepted: the atlas is built once by sprites_load, so every image, data-driven ones included, is
+declared before it.

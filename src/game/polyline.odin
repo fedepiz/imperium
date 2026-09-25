@@ -1,3 +1,4 @@
+#+private
 package game
 
 import "core:math/linalg"
