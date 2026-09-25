@@ -1,6 +1,7 @@
 #+private
 package game
 
+import "../tweak"
 import "core:math"
 import "core:math/linalg"
 
@@ -67,6 +68,8 @@ camera_tick :: proc(input: Input, dt: f32) {
 	camera.center += camera.dv * dt
 
 	camera.center = linalg.clamp(camera.center, 0, world_size)
+
+	tweak.slider_in_place("Camera/Zoom", &camera.zoom, CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX)
 }
 
 camera_world_to_screen :: proc {

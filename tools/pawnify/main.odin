@@ -1,11 +1,14 @@
-// Turns the pawns' source drawings into the images the game draws. Each source is a drawing in ink and wash on white
-// paper; each becomes two images, cropped alike and scaled by OUT_SCALE:
+// Turns the pawns' source drawings into the images the game draws, for every set in SETS: the detailed drawings pawns
+// are seen as up close, and the medallions they are seen as from afar. Each source is a drawing in ink and wash on
+// white paper; each becomes two images, cropped alike and scaled by its set's scale:
 //   <name>.png       the drawing as ink and wash on glass: the white made clear, the ink a little heavier and in the
 //                    map's ink colour
 //   <name>_fill.png  its silhouette in white, a little wider than the drawing and soft at the edge, which the game
 //                    draws in the paper's colour under the drawing so the map's marks do not show through
+// Sources are named <culture>_<image>, as the game looks them up.
 //
-// Run from the repository root: odin run tools/pawnify [-- <source dir> <output dir>]
+// Run from the repository root, after adding or changing a source: odin run tools/pawnify
+// Every set is remade each run, and the outputs are committed alongside their sources.
 package pawnify
 
 import "core:c"
@@ -16,12 +19,18 @@ import "core:path/filepath"
 import "core:strings"
 import stbi "vendor:stb/image"
 
-SOURCE_DIR :: "art/pawns"
-OUTPUT_DIR :: "assets/gfx/pawns"
+Set :: struct {
+	source, output: string,
+	// How much the drawings are scaled down. Every source in a set is drawn at the same pen scale, so one factor for
+	// all keeps the line the same weight across the set; how large each pawn is drawn is up to the game.
+	scale:          f32,
+}
 
-// How much the drawings are scaled down. Every source is drawn at the same pen scale, so one factor for all keeps the
-// line the same weight across the set; how large each pawn is drawn is up to the game.
-OUT_SCALE :: f32(1.0 / 3.0)
+SETS :: [?]Set {
+	{source = "art/pawns", output = "assets/gfx/pawns", scale = 1.0 / 3.0},
+	{source = "art/medallions", output = "assets/gfx/medallions", scale = 0.15},
+}
+
 // How far each ink stroke is thickened, and how far the silhouette reaches past the drawing, in source pixels
 INK_GROW :: 2
 FILL_MARGIN :: 8
@@ -37,27 +46,28 @@ Image :: struct {
 }
 
 main :: proc() {
-	source, output := SOURCE_DIR, OUTPUT_DIR
-	if len(os.args) >= 3 {
-		source, output = os.args[1], os.args[2]
+	failed := false
+	for set in SETS {
+		entries, err := os.read_all_directory_by_path(set.source, context.allocator)
+		if err != nil {
+			fmt.eprintfln("Could not read %q: %v", set.source, err)
+			failed = true
+			continue
+		}
+		count := 0
+		for entry in entries {
+			if strings.to_lower(filepath.ext(entry.name)) != ".png" do continue
+			name := strings.trim_suffix(entry.name, filepath.ext(entry.name))
+			if pawnify(fmt.tprintf("%s/%s", set.source, entry.name), set.output, name, set.scale) do count += 1
+			free_all(context.temp_allocator)
+		}
+		fmt.printfln("Made %d pawns from %q into %q", count, set.source, set.output)
 	}
-	entries, err := os.read_all_directory_by_path(source, context.allocator)
-	if err != nil {
-		fmt.eprintfln("Could not read %q: %v", source, err)
-		os.exit(1)
-	}
-	count := 0
-	for entry in entries {
-		if strings.to_lower(filepath.ext(entry.name)) != ".png" do continue
-		name := strings.trim_suffix(entry.name, filepath.ext(entry.name))
-		if pawnify(fmt.tprintf("%s/%s", source, entry.name), output, name) do count += 1
-		free_all(context.temp_allocator)
-	}
-	fmt.printfln("Made %d pawns from %q into %q", count, source, output)
+	if failed do os.exit(1)
 }
 
 // Makes one source into its two images; says whether it could.
-pawnify :: proc(path, output, name: string) -> bool {
+pawnify :: proc(path, output, name: string, scale: f32) -> bool {
 	image, ok := load(path)
 	if !ok do return false
 	n := image.width * image.height
@@ -105,10 +115,11 @@ pawnify :: proc(path, output, name: string) -> bool {
 		fmt.eprintfln("%q has no drawing in it", path)
 		return false
 	}
-	ok = write(fmt.tprintf("%s/%s.png", output, name), glass, image.width, {x0, y0, x1, y1}, proc(g: [4]f32) -> [4]f32 {
+	rect := [4]int{x0, y0, x1, y1}
+	ok = write(fmt.tprintf("%s/%s.png", output, name), glass, image.width, rect, scale, proc(g: [4]f32) -> [4]f32 {
 		return g
 	})
-	ok &&= write(fmt.tprintf("%s/%s_fill.png", output, name), fill, image.width, {x0, y0, x1, y1}, proc(f: f32) -> [4]f32 {
+	ok &&= write(fmt.tprintf("%s/%s_fill.png", output, name), fill, image.width, rect, scale, proc(f: f32) -> [4]f32 {
 		return {1, 1, 1, f}
 	})
 	if ok do fmt.printfln("%s: %dx%d, drawing %dx%d", name, image.width, image.height, x1 - x0, y1 - y0)
@@ -203,9 +214,9 @@ silhouette :: proc(glass: [][4]f32, width, height: int) -> []f32 {
 	}
 }
 
-// Writes the part of an image inside rect ([x0, y0, x1, y1]) as a PNG scaled by OUT_SCALE, each value turned into a
+// Writes the part of an image inside rect ([x0, y0, x1, y1]) as a PNG scaled by scale, each value turned into a
 // straight-alpha colour by pixel. The scaling weighs colours by their alpha, so clear pixels do not darken edges.
-write :: proc(path: string, values: []$T, width: int, rect: [4]int, pixel: proc(v: T) -> [4]f32) -> bool {
+write :: proc(path: string, values: []$T, width: int, rect: [4]int, scale: f32, pixel: proc(v: T) -> [4]f32) -> bool {
 	w, h := rect[2] - rect[0], rect[3] - rect[1]
 	crop := make([]u8, w * h * 4, context.temp_allocator)
 	for y in 0 ..< h {
@@ -214,8 +225,8 @@ write :: proc(path: string, values: []$T, width: int, rect: [4]int, pixel: proc(
 			for ch in 0 ..< 4 do crop[(y * w + x) * 4 + ch] = u8(math.round(clamp(p[ch], 0, 1) * 255))
 		}
 	}
-	out_w := max(int(math.round(f32(w) * OUT_SCALE)), 1)
-	out_h := max(int(math.round(f32(h) * OUT_SCALE)), 1)
+	out_w := max(int(math.round(f32(w) * scale)), 1)
+	out_h := max(int(math.round(f32(h) * scale)), 1)
 	scaled := make([]u8, out_w * out_h * 4, context.temp_allocator)
 	stbi.resize_uint8_srgb(
 		raw_data(crop),

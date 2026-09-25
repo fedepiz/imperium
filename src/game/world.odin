@@ -7,6 +7,7 @@ import stbi "vendor:stb/image"
 
 import "../gfx"
 import "../span"
+import "../tweak"
 
 WORLD: struct {
 	camera:   Camera,
@@ -49,7 +50,27 @@ WATER :: bit_set[Surface]{.Lake, .Sea}
 world_init :: proc() {
 	camera_init()
 	map_draw_init(&WORLD.map_draw)
-	pawns_init(&WORLD.pawns)
+	pawns_init(&WORLD.pawns, WORLD.camera)
+
+	// Test pawn types, until they come from a scenario
+	Test_Pawn_Type :: struct {
+		name: string,
+		size: f32,
+	}
+	@(static, rodata)
+	TEST_PAWN_TYPES := [?]Test_Pawn_Type {
+		{"town_0", 1.1},
+		{"town_1", 1.3},
+		{"town_2", 1.4},
+		{"town_3", 1.7},
+		{"army", 1.1},
+		{"fleet", 1.0},
+		{"bishop", 1.1},
+		{"envoy", 1.1},
+		{"merchant", 1.1},
+		{"spy", 1.1},
+	}
+	for test in TEST_PAWN_TYPES do pawns_type_add(&WORLD.pawns, test.name, test.size)
 }
 
 // Loads a scenario's terrain from its folder: one greyscale PNG per property, WORLD_WIDTH by WORLD_HEIGHT.
@@ -162,71 +183,86 @@ world_tick :: proc(input: Input, dt: f32) {
 	// Test pawns in late-Roman Italy and Germanic lands north of the Alps, set every frame until there are pieces
 	Test_Pawn :: struct {
 		pos:     [2]f32,
-		image:   Pawn_Image,
-		scale:   f32,
+		type:    string,
 		name:    string,
 		culture: Culture,
 	}
 	@(static, rodata)
 	TEST_PAWNS := [?]Test_Pawn {
-		{{342, 432}, .Town_3, 1.8, "Roma", .Roman},
-		{{296, 374}, .Town_3, 1.5, "Mediolanum", .Roman},
-		{{345, 389}, .Town_2, 1.4, "Ravenna", .Roman},
-		{{367, 369}, .Town_2, 1.4, "Aquileia", .Roman},
-		{{367, 449}, .Town_2, 1.4, "Neapolis", .Roman},
-		{{360, 441}, .Town_0, 1.1, "Capua", .Roman},
-		{{411, 452}, .Town_0, 1.1, "Brundisium", .Roman},
-		{{334, 419}, .Army, 1.1, "", .Roman},
-		{{353, 455}, .Fleet, 1.1, "", .Roman},
-		{{355, 393}, .Fleet, 1.1, "", .Roman},
-		{{350, 430}, .Bishop, 1.2, "", .Roman},
-		{{306, 382}, .Envoy, 1.2, "", .Roman},
-		{{352, 438}, .Merchant, 1.2, "", .Roman},
-		{{373, 375}, .Spy, 1.2, "", .Roman},
-		{{300, 300}, .Town_3, 1.5, "Alamannia", .Germanic},
-		{{332, 318}, .Town_2, 1.4, "Castra Regina", .Germanic},
-		{{270, 322}, .Town_1, 1.4, "Brisiacum", .Germanic},
-		{{285, 285}, .Town_0, 1.1, "", .Germanic},
-		{{316, 342}, .Army, 1.1, "", .Germanic},
-		{{292, 340}, .Envoy, 1.2, "", .Germanic},
-		{{350, 330}, .Spy, 1.2, "", .Germanic},
+		{{342, 432}, "town_3", "Roma", .Roman},
+		{{296, 374}, "town_3", "Mediolanum", .Roman},
+		{{345, 389}, "town_2", "Ravenna", .Roman},
+		{{367, 369}, "town_2", "Aquileia", .Roman},
+		{{367, 449}, "town_2", "Neapolis", .Roman},
+		{{360, 441}, "town_0", "Capua", .Roman},
+		{{411, 452}, "town_0", "Brundisium", .Roman},
+		{{334, 419}, "army", "", .Roman},
+		{{353, 455}, "fleet", "", .Roman},
+		{{355, 393}, "fleet", "", .Roman},
+		{{350, 430}, "bishop", "", .Roman},
+		{{306, 382}, "envoy", "", .Roman},
+		{{300, 300}, "town_3", "Alamannia", .Germanic},
+		{{332, 318}, "town_2", "Castra Regina", .Germanic},
+		{{270, 322}, "town_1", "Brisiacum", .Germanic},
+		{{285, 285}, "town_0", "", .Germanic},
+		{{316, 342}, "army", "", .Germanic},
+		{{292, 340}, "envoy", "", .Germanic},
 	}
 	for test, i in TEST_PAWNS {
+		type, found := pawns_type_find(&WORLD.pawns, test.type)
 		WORLD.pawns.entries[i] = {
-			active  = true,
+			active  = found,
 			pos     = test.pos,
-			scale   = test.scale,
-			image   = test.image,
+			type    = type,
 			culture = test.culture,
 			name    = test.name,
 		}
 	}
+	pawns_tick(&WORLD.pawns, WORLD.camera, dt)
 	pawns_draw(&WORLD.pawns, input.viewport, WORLD.camera, input.pixel_density)
+
+	// Pawns tweaks
+	tweak.slider_in_place("Pawns/Medallion Zoom", &WORLD.pawns.picture_to_medallion_zoom, 1.0, 20.)
 }
 
 PAWNS_MAX :: 1024
+PAWN_TYPES_MAX :: 64
+
+Pawn_Type_Id :: distinct u8
+
+// What a pawn is, and how it is drawn: its drawing in each set and each culture's style, from <set>/<culture>_<name>
+// under assets/gfx. A drawing not there yet is the blank image.
+Pawn_Type :: struct {
+	// Must outlive the type
+	name:  string,
+	// How large the drawings are against their natural size: see PAWN_CELLS_PER_PIXEL
+	size:  f32,
+	image: [Pawn_Set][Culture]gfx.Image_Id,
+	// Each drawing's silhouette, drawn in paper under it so the map's marks do not show through
+	fill:  [Pawn_Set][Culture]gfx.Image_Id,
+}
 
 Pawns :: struct {
-	entries:     [PAWNS_MAX]Pawn,
-	// Each drawing a pawn can be, in each culture's style, defined by pawns_init; a culture may not have them all yet.
-	images:      [Culture][Pawn_Image]gfx.Image_Id,
-	has_image:   [Culture][Pawn_Image]bool,
-	// Each drawing's silhouette, drawn in paper under it so the map's marks do not show through; only drawings with a
-	// <name>_fill.png have one
-	fills:       [Culture][Pawn_Image]gfx.Image_Id,
-	has_fill:    [Culture][Pawn_Image]bool,
+	entries:                   [PAWNS_MAX]Pawn,
+	// Defined by pawns_type_add, the first type_count of them
+	types:                     [PAWN_TYPES_MAX]Pawn_Type,
+	type_count:                int,
+	// Drawn for a drawing that is not there yet: fully clear
+	blank:                     gfx.Image_Id,
 	// What pawns' names are written in
-	font:        gfx.Font_Id,
-	render_list: gfx.Render_List,
+	font:                      gfx.Font_Id,
+	render_list:               gfx.Render_List,
+	// Picture-Medallion interpolation progression, from 0 (pictures) to 1 (medallions)
+	picture_to_medallion_t:    f32,
+	// Zoom level at which the transition occours, in pixels per cell: medallions below it, pictures above
+	picture_to_medallion_zoom: f32,
 }
 
 Pawn :: struct {
 	active:  bool,
 	// Where the drawing is centred, in cells
 	pos:     [2]f32,
-	// How large the drawing is against its natural size: see PAWN_CELLS_PER_PIXEL
-	scale:   f32,
-	image:   Pawn_Image,
+	type:    Pawn_Type_Id,
 	// Whose style the drawing is in
 	culture: Culture,
 	// Written under the pawn, unless empty. Set every frame, so it can live in the temp allocator.
@@ -239,18 +275,10 @@ PAWN_NAME_INK :: [4]f32{0.150, 0.105, 0.070, 1}
 // The map's paper, which pawns' silhouettes and the halos round their names are drawn in
 PAWN_PAPER :: [4]f32{0.840, 0.772, 0.620, 1}
 
-// What a pawn is drawn as; each culture has its own drawing of each.
-Pawn_Image :: enum u8 {
-	Town_0,
-	Town_1,
-	Town_2,
-	Town_3,
-	Army,
-	Fleet,
-	Bishop,
-	Envoy,
-	Merchant,
-	Spy,
+// The two sets of drawings a pawn is seen as: its picture up close, its medallion from afar
+Pawn_Set :: enum u8 {
+	Picture,
+	Medallion,
 }
 
 // The peoples whose drawings pawns can be in
@@ -259,50 +287,82 @@ Culture :: enum u8 {
 	Germanic,
 }
 
-// Every drawing is made at the same scale, so drawing each at this many cells per pixel of its image, times its pawn's
-// scale, keeps the pen line the same weight across them all.
-PAWN_CELLS_PER_PIXEL :: f32(5.0 / 400.0)
+// Every drawing in a set is made at the same scale, so drawing each at its set's cells per pixel of its image, times
+// its pawn type's size, keeps the pen line the same weight across the set.
+PAWN_CELLS_PER_PIXEL := [Pawn_Set]f32 {
+	.Picture   = 5.0 / 400.0,
+	.Medallion = 5.0 / 150.0,
+}
+
+// The zoom, in pixels per cell, that pawns turn from pictures to medallions at, and how long the fade takes in seconds
+PAWN_MEDALLION_ZOOM :: 10
+PAWN_MEDALLION_FADE :: 0.25
 
 // How far past the view, as a fraction of its size, a pawn is still drawn, so its name hanging below stays in sight
 PAWN_VIEW_TOLERANCE :: 0.1
 
-// The drawings of each pawn image, under assets/gfx/pawns, as <culture>_<name>, made from art/pawns by tools/pawnify
+// The drawings of each pawn type, under assets/gfx/<set>, as <culture>_<name>, made from art/<set> by tools/pawnify
+@(private = "file")
+PAWN_SET_NAMES := [Pawn_Set]string {
+	.Picture   = "pawns",
+	.Medallion = "medallions",
+}
+
 @(private = "file")
 CULTURE_NAMES := [Culture]string {
 	.Roman    = "roman",
 	.Germanic = "germanic",
 }
 
-@(private = "file")
-PAWN_IMAGE_NAMES := [Pawn_Image]string {
-	.Town_0   = "town_0",
-	.Town_1   = "town_1",
-	.Town_2   = "town_2",
-	.Town_3   = "town_3",
-	.Army     = "army",
-	.Fleet    = "fleet",
-	.Bishop   = "bishop",
-	.Envoy    = "envoy",
-	.Merchant = "merchant",
-	.Spy      = "spy",
+// Defines the pawns' font and blank image, so call this before sprites_load, and before any pawns_type_add. Pawns start
+// as whichever set the camera's zoom shows.
+pawns_init :: proc(pawns: ^Pawns, camera: Camera) {
+	pawns.blank = gfx.sprites_image_add("blank")
+	pawns.font = gfx.sprites_font_add("forgotten_uncial", 22)
+	pawns.picture_to_medallion_zoom = PAWN_MEDALLION_ZOOM
+	pawns.picture_to_medallion_t = camera.zoom < pawns.picture_to_medallion_zoom ? 1 : 0
 }
 
-// Defines the pawns' images, so call this before sprites_load.
-pawns_init :: proc(pawns: ^Pawns) {
-	for culture_name, culture in CULTURE_NAMES {
-		for name, image in PAWN_IMAGE_NAMES {
-			drawing := fmt.tprintf("pawns/%s_%s", culture_name, name)
-			if !os.exists(fmt.tprintf("assets/gfx/%s.png", drawing)) do continue
-			pawns.images[culture][image] = gfx.sprites_image_add(drawing)
-			pawns.has_image[culture][image] = true
+// Defines a pawn type and its drawings, so call this before sprites_load.
+pawns_type_add :: proc(pawns: ^Pawns, name: string, size: f32) -> Pawn_Type_Id {
+	assert(pawns.type_count < PAWN_TYPES_MAX)
+	id := Pawn_Type_Id(pawns.type_count)
+	pawns.type_count += 1
+	type := &pawns.types[id]
+	type^ = {
+		name = name,
+		size = size,
+	}
+	for set_name, set in PAWN_SET_NAMES {
+		for culture_name, culture in CULTURE_NAMES {
+			drawing := fmt.tprintf("%s/%s_%s", set_name, culture_name, name)
 			fill := fmt.tprintf("%s_fill", drawing)
-			if os.exists(fmt.tprintf("assets/gfx/%s.png", fill)) {
-				pawns.fills[culture][image] = gfx.sprites_image_add(fill)
-				pawns.has_fill[culture][image] = true
-			}
+			type.image[set][culture] = pawns_image_or_blank(pawns, drawing)
+			type.fill[set][culture] = pawns_image_or_blank(pawns, fill)
 		}
 	}
-	pawns.font = gfx.sprites_font_add("forgotten_uncial", 22)
+	return id
+
+	pawns_image_or_blank :: proc(pawns: ^Pawns, name: string) -> gfx.Image_Id {
+		if !os.exists(fmt.tprintf("assets/gfx/%s.png", name)) do return pawns.blank
+		return gfx.sprites_image_add(name)
+	}
+}
+
+// The pawn type of that name, if there is one.
+pawns_type_find :: proc(pawns: ^Pawns, name: string) -> (Pawn_Type_Id, bool) {
+	for type, i in pawns.types[:pawns.type_count] {
+		if type.name == name do return Pawn_Type_Id(i), true
+	}
+	return 0, false
+}
+
+// Fades pawns towards medallions while the camera is farther out than the transition zoom, and towards pictures while
+// it is closer in.
+pawns_tick :: proc(pawns: ^Pawns, camera: Camera, dt: f32) {
+	target: f32 = camera.zoom < pawns.picture_to_medallion_zoom ? 1 : 0
+	step := dt / PAWN_MEDALLION_FADE
+	pawns.picture_to_medallion_t += clamp(target - pawns.picture_to_medallion_t, -step, step)
 }
 
 pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_density: f32) {
@@ -316,33 +376,48 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 		pixel_density,
 	)
 
+	// While the fade is under way, each pawn is drawn in both sets, the one fading in over the one fading out.
+	t := pawns.picture_to_medallion_t
+	weights := [Pawn_Set]f32 {
+		.Picture   = 1 - t,
+		.Medallion = t,
+	}
 	for pawn in pawns.entries {
 		if !pawn.active do continue
-		if !pawns.has_image[pawn.culture][pawn.image] do continue
-		image := pawns.images[pawn.culture][pawn.image]
-		source := gfx.sprite_region(gfx.sprite_of_image(image)).source
-		if source.z <= 0 do continue
-		size := source.zw * PAWN_CELLS_PER_PIXEL * pawn.scale
-		corner := pawn.pos - size / 2
-		rect, visible := camera_world_to_screen(
-			camera,
-			viewport,
-			[4]f32{corner.x, corner.y, size.x, size.y},
-			PAWN_VIEW_TOLERANCE,
-		)
-		if !visible do continue
-		if pawns.has_fill[pawn.culture][pawn.image] {
-			gfx.draw_image(&draw, pawns.fills[pawn.culture][pawn.image], rect, PAWN_PAPER)
+		type := &pawns.types[pawn.type]
+		// The name hangs under the drawings, between their bottoms as they fade.
+		name_at: [2]f32
+		name_weight: f32
+		for set in Pawn_Set {
+			weight := weights[set]
+			if weight <= 0 do continue
+			image := type.image[set][pawn.culture]
+			source := gfx.sprite_region(gfx.sprite_of_image(image)).source
+			if source.z <= 0 do continue
+			size := source.zw * PAWN_CELLS_PER_PIXEL[set] * type.size
+			corner := pawn.pos - size / 2
+			rect, visible := camera_world_to_screen(
+				camera,
+				viewport,
+				[4]f32{corner.x, corner.y, size.x, size.y},
+				PAWN_VIEW_TOLERANCE,
+			)
+			if !visible do continue
+			paper := PAWN_PAPER
+			paper.a *= weight
+			gfx.draw_image(&draw, type.fill[set][pawn.culture], rect, paper)
+			gfx.draw_image(&draw, image, rect, {1, 1, 1, weight})
+			name_at += [2]f32{rect.x + rect.z / 2, rect.y + rect.w} * weight
+			name_weight += weight
 		}
-		gfx.draw_image(&draw, image, rect, {1, 1, 1, 1})
 		// The name keeps its size on screen, centred under the drawing, over a halo of paper: the name drawn in the
 		// paper's colour a little way off all round.
-		if pawn.name != "" {
+		if pawn.name != "" && name_weight > 0 {
 			HALO :: 1.5
 			text := gfx.text_from_string(pawn.name, pawns.font, PAWN_NAME_INK)
 			halo := gfx.text_from_string(pawn.name, pawns.font, PAWN_PAPER)
 			text_size := gfx.text_measure(text)
-			at := [2]f32{rect.x + (rect.z - text_size.x) / 2, rect.y + rect.w}
+			at := name_at / name_weight - [2]f32{text_size.x / 2, 0}
 			for dy in -1 ..= 1 {
 				for dx in -1 ..= 1 {
 					if dx == 0 && dy == 0 do continue
