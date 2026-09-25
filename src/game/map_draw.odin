@@ -16,7 +16,8 @@ Map_Draw :: struct {
 	terrain_revision: u32,
 	// What covers each cell, worked out from the terrain whenever it changes
 	cover:            [CELLS_MAX]Cover_Cell,
-	// The marks scattered over the terrain, top to bottom, so nearer marks overlap farther ones
+	// The marks scattered over the terrain, by where they stand, top to bottom, so nearer marks overlap farther ones.
+	// Every drawing but the sea marks stands on its bottom edge.
 	marks:            [dynamic; MARKS_MAX]Mark,
 	// How the marks are scattered
 	placement:        Mark_Placement,
@@ -144,10 +145,13 @@ Mark_Placement :: struct {
 	width:           [Mark_Family]f32,
 	vary:            [Mark_Family]f32,
 	row_squash:      f32,
-	jitter:          [2]f32,
+	jitter:          [Mark_Family][2]f32,
 	river_clearance: f32,
 	// Over the signed distance to the coast, in cells, positive on land
 	coast:           [Mark_Family]Ramp,
+	// The ground each family's marks claim, so that no mark of a family scattered after it stands there: a trapezoid
+	// over the drawing, footprint[0] of its width wide at its foot and footprint[1] at its top. Zero claims nothing.
+	footprint:       [Mark_Family][2]f32,
 	// How densely each cover bears each of the COVER_FAMILIES where it is at full strength
 	density:         [Cover][Mark_Family]f32,
 	tree:            struct {
@@ -258,8 +262,18 @@ map_draw_init :: proc() {
 			.Dune = 3.4,
 		},
 		vary = #partial{.Tree = 0.15, .Tuft = 0.2, .Marsh = 0.15, .Dune = 0.2},
+		footprint = #partial{.Mountain = {0.85, 0.15}, .Molehill = {0.85, 0.2}, .Tree = {0.5, 0.9}},
 		row_squash = 0.8,
-		jitter = {0.7, 0.6},
+		// Mountains keep to their rows, so the peak behind always shows clear over the one in front
+		jitter = {
+			.Tree = {0.7, 0.6},
+			.Molehill = {0.7, 0.6},
+			.Mountain = {0.6, 0.15},
+			.Sea_Mark = {0.7, 0.6},
+			.Tuft = {0.7, 0.6},
+			.Marsh = {0.7, 0.6},
+			.Dune = {0.7, 0.6},
+		},
 		river_clearance = 0.6,
 		coast = {
 			.Tree = {0.7, 0.8},
@@ -337,7 +351,11 @@ tweak_placement :: proc() -> (changed: bool) {
 		tweak.slider(fmt.tprintf("Marks/%v/Spacing", family), &pl.spacing[family], 1, 20)
 		tweak.slider(fmt.tprintf("Marks/%v/Width", family), &pl.width[family], 0.2, 10)
 		tweak.slider(fmt.tprintf("Marks/%v/Vary", family), &pl.vary[family], 0, 1)
+		tweak.slider(fmt.tprintf("Marks/%v/Jitter across", family), &pl.jitter[family].x, 0, 1)
+		tweak.slider(fmt.tprintf("Marks/%v/Jitter down", family), &pl.jitter[family].y, 0, 1)
 		tweak_ramp(fmt.tprintf("Marks/%v/Coast", family), &pl.coast[family], -25, 5)
+		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Foot", family), &pl.footprint[family][0], 0, 1)
+		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Top", family), &pl.footprint[family][1], 0, 1)
 		if family not_in COVER_FAMILIES do continue
 		// Open land has no strength, so its cover bears nothing.
 		for cover in Cover {
@@ -351,8 +369,6 @@ tweak_placement :: proc() -> (changed: bool) {
 		}
 	}
 	tweak.slider("Marks/Row squash", &pl.row_squash, 0.3, 1.5)
-	tweak.slider("Marks/Jitter across", &pl.jitter.x, 0, 1)
-	tweak.slider("Marks/Jitter down", &pl.jitter.y, 0, 1)
 	tweak.slider("Marks/River clearance", &pl.river_clearance, 0, 2)
 
 	t := &pl.tree
@@ -738,7 +754,9 @@ random :: proc(x, y: int, stream: u32) -> f32 {
 scatter_marks :: proc() {
 	clear(&WORLD.map_draw.marks)
 	pl := &WORLD.map_draw.placement
-	scatter: for family in Mark_Family {
+	claimed := make([]u64, FOOTPRINT_BITS / 64, context.temp_allocator)
+	scatter: for family in SCATTER_ORDER {
+		first := len(WORLD.map_draw.marks)
 		spacing := pl.spacing[family]
 		rows := int(f32(WORLD_HEIGHT) / (spacing * pl.row_squash))
 		cols := int(f32(WORLD_WIDTH) / spacing)
@@ -750,10 +768,10 @@ scatter_marks :: proc() {
 					(f32(col) +
 						0.5 +
 						f32(row % 2) * 0.5 +
-						(random(col, row, stream) - 0.5) * pl.jitter.x) *
+						(random(col, row, stream) - 0.5) * pl.jitter[family].x) *
 					spacing
 				y :=
-					(f32(row) + 0.5 + (random(col, row, stream + 1) - 0.5) * pl.jitter.y) *
+					(f32(row) + 0.5 + (random(col, row, stream + 1) - 0.5) * pl.jitter[family].y) *
 					spacing *
 					pl.row_squash
 				cx, cy := int(x), int(y)
@@ -776,14 +794,18 @@ scatter_marks :: proc() {
 				mark.variant = u8(
 					random(col, row, stream + 3) * f32(WORLD.map_draw.mark_variants[mark.mark]),
 				)
+				// Nothing stands on ground an earlier family has claimed.
+				if footprint_claimed(claimed, {x, mark_foot(mark)}) do continue
 
 				// A full table keeps what it has; the marks are still sorted below.
 				if len(WORLD.map_draw.marks) == MARKS_MAX do break scatter
 				append(&WORLD.map_draw.marks, mark)
 			}
 		}
+		// The family claims its ground once it is all down, so its own marks can still overlap.
+		for mark in WORLD.map_draw.marks[first:] do footprint_claim(claimed, mark, pl.footprint[family])
 	}
-	slice.sort_by(WORLD.map_draw.marks[:], proc(a, b: Mark) -> bool {return a.pos.y < b.pos.y})
+	slice.sort_by(WORLD.map_draw.marks[:], proc(a, b: Mark) -> bool {return mark_foot(a) < mark_foot(b)})
 }
 
 // The chance a lattice point of family at cell i keeps its mark, and the mark: its drawing, how much wider than the
@@ -863,17 +885,74 @@ draw_marks :: proc(viewport: [2]f32) {
 		1,
 	)
 	for mark in WORLD.map_draw.marks[:] {
+		size := mark_size(mark) * camera.zoom
+		if size.x <= 0 do continue
+		// The drawing is centred on the mark.
 		image := WORLD.map_draw.mark_images[mark.mark][mark.variant]
-		source := gfx.sprite_region(gfx.sprite_of_image(image)).source
-		if source.z <= 0 do continue
-		// The drawing keeps its proportions and is centred on the mark.
-		width := mark.width * camera.zoom
-		size := [2]f32{width, width * source.w / source.z}
 		center := (mark.pos - camera.center) * camera.zoom + viewport / 2
 		rect := [4]f32{center.x - size.x / 2, center.y - size.y / 2, size.x, size.y}
 		if rect.x > viewport.x || rect.y > viewport.y || rect.x + rect.z < 0 || rect.y + rect.w < 0 do continue
 		gfx.draw_image(&draw, image, rect, {1, 1, 1, f32(mark.alpha) / f32(max(u8))})
 	}
+}
+
+// How big a mark is drawn, in cells: its width, and the height its drawing's proportions give it; zero when the
+// drawing is missing.
+@(private = "file")
+mark_size :: proc(mark: Mark) -> [2]f32 {
+	image := WORLD.map_draw.mark_images[mark.mark][mark.variant]
+	source := gfx.sprite_region(gfx.sprite_of_image(image)).source
+	if source.z <= 0 do return {}
+	return {mark.width, mark.width * source.w / source.z}
+}
+
+// The families in the order they are scattered, each claiming ground from those after it: see Mark_Placement.footprint.
+@(private = "file")
+SCATTER_ORDER := [?]Mark_Family{.Mountain, .Molehill, .Tree, .Tuft, .Marsh, .Dune, .Sea_Mark}
+#assert(len(SCATTER_ORDER) == len(Mark_Family))
+
+// Ground claimed by marks is kept FOOTPRINT_RES bits to a cell each way.
+@(private = "file")
+FOOTPRINT_RES :: 4
+@(private = "file")
+FOOTPRINT_BITS :: CELLS_MAX * FOOTPRINT_RES * FOOTPRINT_RES
+
+// Whether the ground at a point, in cells, is claimed.
+@(private = "file")
+footprint_claimed :: proc(claimed: []u64, p: [2]f32) -> bool {
+	x, y := int(p.x * FOOTPRINT_RES), int(p.y * FOOTPRINT_RES)
+	if x < 0 || y < 0 || x >= WORLD_WIDTH * FOOTPRINT_RES || y >= WORLD_HEIGHT * FOOTPRINT_RES do return false
+	bit := y * WORLD_WIDTH * FOOTPRINT_RES + x
+	return claimed[bit / 64] & (1 << uint(bit % 64)) != 0
+}
+
+// Claims the ground a mark's drawing covers: a trapezoid over it, shape[0] of its width wide at its foot and
+// shape[1] at its top.
+@(private = "file")
+footprint_claim :: proc(claimed: []u64, mark: Mark, shape: [2]f32) {
+	if shape == {} do return
+	size := mark_size(mark)
+	if size.y <= 0 do return
+	foot := mark_foot(mark)
+	y0 := max(int((foot - size.y) * FOOTPRINT_RES), 0)
+	y1 := min(int(foot * FOOTPRINT_RES) + 1, WORLD_HEIGHT * FOOTPRINT_RES)
+	for y in y0 ..< y1 {
+		// How far up the drawing this row is, from 0 at its foot to 1 at its top
+		up := clamp((foot - (f32(y) + 0.5) / FOOTPRINT_RES) / size.y, 0, 1)
+		half := size.x / 2 * math.lerp(shape[0], shape[1], up)
+		x0 := max(int((mark.pos.x - half) * FOOTPRINT_RES), 0)
+		x1 := min(int((mark.pos.x + half) * FOOTPRINT_RES) + 1, WORLD_WIDTH * FOOTPRINT_RES)
+		for x in x0 ..< x1 {
+			bit := y * WORLD_WIDTH * FOOTPRINT_RES + x
+			claimed[bit / 64] |= 1 << uint(bit % 64)
+		}
+	}
+}
+
+// Where a mark stands, in cells down the map: its drawing's bottom edge.
+@(private = "file")
+mark_foot :: proc(mark: Mark) -> f32 {
+	return mark.pos.y + mark_size(mark).y / 2
 }
 
 // Euclidean distance from every cell to the nearest cell whose water matches.
