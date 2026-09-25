@@ -118,18 +118,18 @@ Cover_Cell :: struct {
 }
 
 @(rodata)
-COVER_SAND := [4]f32{0.965, 0.878, 0.690, 1}
+COVER_SAND := [4]f32{0.900, 0.800, 0.600, 1}
 
 // How each cover is drawn
 COVER_LOOKS := [Cover]gfx.Render_Layer_Palette {
 	.Open = {},
-	.Forest = {color = {0.725, 0.784, 0.576, 1}, wash = 0.45},
+	.Forest = {color = {0.600, 0.640, 0.470, 1}, wash = 0.45},
 	.Desert = {color = COVER_SAND, wash = 0.55, pattern = .Stipple, pattern_ink = 0.45},
 	.Steppe = {color = COVER_SAND, wash = 0.25},
-	.Fertile = {color = {0.780, 0.820, 0.560, 1}, wash = 0.7},
-	.Marsh = {color = {0.616, 0.714, 0.788, 1}, wash = 0.5},
-	.Highland = {color = {0.800, 0.700, 0.520, 1}, wash = 0.35},
-	.Fields = {color = {0.820, 0.835, 0.640, 1}, wash = 0.35},
+	.Fertile = {color = {0.720, 0.740, 0.540, 1}, wash = 0.7},
+	.Marsh = {color = {0.580, 0.640, 0.640, 1}, wash = 0.5},
+	.Highland = {color = {0.740, 0.620, 0.460, 1}, wash = 0.35},
+	.Fields = {color = {0.790, 0.770, 0.600, 1}, wash = 0.35},
 }
 
 Mark_Family :: enum {
@@ -242,12 +242,12 @@ map_draw_init :: proc(md: ^Map_Draw) {
 	}
 
 	md.render_terrain.style = {
-		paper              = {0.933, 0.878, 0.753, 1},
-		paper_stain        = {0.847, 0.761, 0.588, 1},
-		paper_stain_amount = 0.60,
-		ink                = {0.231, 0.165, 0.110, 1},
-		sea_shallow        = {0.616, 0.714, 0.788, 1},
-		sea_deep           = {0.20, 0.49, 0.78, 1},
+		paper              = {0.840, 0.772, 0.620, 1},
+		paper_stain        = {0.720, 0.620, 0.460, 1},
+		paper_stain_amount = 0.50,
+		ink                = {0.150, 0.105, 0.070, 1},
+		sea_shallow        = {0.560, 0.610, 0.620, 1},
+		sea_deep           = {0.200, 0.330, 0.480, 1},
 		sea_depth_from     = 0,
 		sea_depth_full     = 80,
 		sea_tint           = 0.55,
@@ -334,7 +334,13 @@ TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture
 
 // Keeps the map's drawing in step with the world: the terrain when it changes, the marks when their placement does, and
 // the marks in view every frame.
-map_draw_tick :: proc(md: ^Map_Draw, atlas: ^Atlas, camera: Camera, viewport: [2]f32, pixel_density: f32) {
+map_draw_tick :: proc(
+	md: ^Map_Draw,
+	atlas: ^Atlas,
+	camera: Camera,
+	viewport: [2]f32,
+	pixel_density: f32,
+) {
 	placement_changed: bool
 
 	if tweak.is_open() {
@@ -457,12 +463,7 @@ update_render_terrain :: proc(md: ^Map_Draw, atlas: ^Atlas, camera: Camera) {
 	terrain := atlas.terrain[:]
 
 	for cell, i in terrain {
-		rt.cells[i] = {
-			u8(cell.surface) * 85,
-			cell.elevation,
-			cell.trees,
-			cell.moisture,
-		}
+		rt.cells[i] = {u8(cell.surface) * 85, cell.elevation, cell.trees, cell.moisture}
 	}
 
 	// Rivers and coasts are traced into lines, smoothed, and stamped around themselves: each cell near a river learns
@@ -629,7 +630,14 @@ classify_cover :: proc(md: ^Map_Draw, terrain: []Terrain, land: ^Land) {
 // mountains' placement, so it lies where they stand, and wins over forest, desert and steppe where they are at their
 // fullest.
 @(private = "file")
-cover_of :: proc(terrain: []Terrain, pl: ^Mark_Placement, land: ^Land, i: int) -> (best: Cover_Cell) {
+cover_of :: proc(
+	terrain: []Terrain,
+	pl: ^Mark_Placement,
+	land: ^Land,
+	i: int,
+) -> (
+	best: Cover_Cell,
+) {
 	if terrain[i].surface in WATER do return
 	p := place_of(terrain, i)
 	low := ramp(0.22, 0.12, p.elevation)
@@ -887,11 +895,10 @@ scatter_marks :: proc(md: ^Map_Draw, terrain: []Terrain) {
 						([2]f32{x, y} - [2]f32{f32(cx), f32(cy)} - 0.5)
 					if linalg.length(offset) < mark.width * pl.river_clearance do continue
 				}
-				mark.variant = u8(
-					random(col, row, stream + 3) * f32(md.mark_variants[mark.mark]),
-				)
+				mark.variant = u8(random(col, row, stream + 3) * f32(md.mark_variants[mark.mark]))
 				// A mark whose drawing is missing is never drawn, so it is not kept.
-				source := gfx.sprite_region(gfx.sprite_of_image(md.mark_images[mark.mark][mark.variant])).source
+				source :=
+					gfx.sprite_region(gfx.sprite_of_image(md.mark_images[mark.mark][mark.variant])).source
 				if source.z <= 0 do continue
 				mark.height = mark.width * source.w / source.z
 				// Nothing stands on ground an earlier family has claimed.
@@ -908,10 +915,7 @@ scatter_marks :: proc(md: ^Map_Draw, terrain: []Terrain) {
 			for mark in md.marks[first:] do footprint_claim(claimed, mark, pl.footprint[family])
 		}
 	}
-	slice.sort_by(
-		md.marks[:],
-		proc(a, b: Mark) -> bool {return mark_foot(a) < mark_foot(b)},
-	)
+	slice.sort_by(md.marks[:], proc(a, b: Mark) -> bool {return mark_foot(a) < mark_foot(b)})
 }
 
 // The chance a lattice point of family at cell i keeps its mark, and the mark: its drawing, how much wider than the

@@ -203,7 +203,7 @@ Pawn :: struct {
 }
 
 // The ink pawns' names are written in: the map's
-PAWN_NAME_INK :: [4]f32{0.231, 0.165, 0.110, 1}
+PAWN_NAME_INK :: [4]f32{0.150, 0.105, 0.070, 1}
 
 // What a pawn is drawn as; each culture has its own drawing of each.
 Pawn_Image :: enum u8 {
@@ -273,7 +273,7 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 		// The name keeps its size on screen, centred under the drawing, over a halo of paper: the name drawn in the
 		// paper's colour a little way off all round.
 		if pawn.name != "" {
-			PAPER :: [4]f32{0.933, 0.878, 0.753, 1}
+			PAPER :: [4]f32{0.840, 0.772, 0.620, 1}
 			HALO :: 1.5
 			text := gfx.text_from_string(pawn.name, pawns.font, PAWN_NAME_INK)
 			halo := gfx.text_from_string(pawn.name, pawns.font, PAPER)
