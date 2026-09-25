@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "game"
 import "gfx"
@@ -88,9 +89,12 @@ main :: proc() {
 	renderer.pixel_density = pixel_density
 	ui_init()
 
-	if !sdl.GL_SetSwapInterval(1) {
+	vsync := sdl.GL_SetSwapInterval(1)
+	if !vsync {
 		fmt.eprintf("Enabling VSync failed: %s\n", sdl.GetError())
 	}
+	// Seconds the display shows each frame for, or 0 when unknown
+	refresh_period := display_refresh_period(window)
 
 	demo: Demo_Ui
 	palette: Palette
@@ -104,6 +108,12 @@ main :: proc() {
 		frame_now := sdl.GetTicksNS()
 		dt := f32(f64(frame_now - frame_previous) / 1e9)
 		frame_previous = frame_now
+
+		// With vsync, a frame stays on screen for a whole number of refreshes, whenever the loop happened to wake;
+		// stepping by the time shown rather than the time measured keeps motion even.
+		if vsync && refresh_period > 0 {
+			dt = max(1, math.round(dt / refresh_period)) * refresh_period
+		}
 		event: sdl.Event
 		GLOBAL.input.keys[.Old] = GLOBAL.input.keys[.New]
 		GLOBAL.input.btns[.Old] = GLOBAL.input.btns[.New]
@@ -150,6 +160,8 @@ main :: proc() {
 			case .WINDOW_FOCUS_LOST:
 				GLOBAL.input.keys[.New][.Down] = {}
 				GLOBAL.input.btns[.New][.Down] = {}
+			case .WINDOW_DISPLAY_CHANGED, .DISPLAY_CURRENT_MODE_CHANGED:
+				refresh_period = display_refresh_period(window)
 			}
 		}
 
@@ -242,6 +254,15 @@ game_input :: proc(input: Input, viewport: [2]f32) -> game.Input {
 
 // Seconds over which the frame rate is averaged
 FPS_PERIOD :: 0.5
+
+// Seconds between refreshes of the display the window is on, or 0 when the display does not say.
+display_refresh_period :: proc(window: ^sdl.Window) -> f32 {
+	mode := sdl.GetCurrentDisplayMode(sdl.GetDisplayForWindow(window))
+	if mode == nil || mode.refresh_rate_numerator <= 0 || mode.refresh_rate_denominator <= 0 {
+		return 0
+	}
+	return f32(mode.refresh_rate_denominator) / f32(mode.refresh_rate_numerator)
+}
 
 Old_New :: enum {
 	Old,
@@ -472,4 +493,3 @@ demo_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Si
 	ui_style_next({width = ui_fit(), padding = [2]f32{10, 0}})
 	return ui_checkbox(label, value, style)
 }
-
