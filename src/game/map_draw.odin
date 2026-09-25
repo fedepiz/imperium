@@ -276,7 +276,14 @@ map_draw_init :: proc(md: ^Map_Draw) {
 			.Marsh = 2.3,
 			.Dune = 3.4,
 		},
-		vary = #partial{.Tree = 0.3, .Tuft = 0.2, .Marsh = 0.15, .Dune = 0.2},
+		vary = #partial{
+			.Tree = 0.3,
+			.Tuft = 0.2,
+			.Marsh = 0.15,
+			.Dune = 0.2,
+			.Molehill = 0.2,
+			.Mountain = 0.2,
+		},
 		footprint = #partial{
 			.Mountain = {foot = 0.85, top = 0.15, below = 0.45},
 			.Molehill = {foot = 0.85, top = 0.2, below = 0.5},
@@ -589,9 +596,9 @@ ramp_over :: proc(r: Ramp, value: f32) -> f32 {
 
 @(private = "file")
 ramp_between :: proc(from, full, value: f32) -> f32 {
-	return(
-		full > from ? math.smoothstep(from, full, value) : 1 - math.smoothstep(full, from, value) \
-	)
+	value :=
+		full > from ? math.smoothstep(from, full, value) : 1 - math.smoothstep(full, from, value)
+	return value
 }
 
 // A cell's terrain as fractions from 0 to 1, and how far north it is
