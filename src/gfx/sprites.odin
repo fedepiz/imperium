@@ -242,7 +242,7 @@ sprites_load :: proc(renderer: ^Renderer, pixel_density: f32) {
 	}
 
 	// Reuse packing and raster scratch across atlas batches.
-	workspace.max_texture_size = render_max_texture_size()
+	workspace.max_texture_size = render_max_texture_size(renderer)
 	workspace.rect_storage = make([]stbrp.Rect, SPRITES_MAX, context.temp_allocator)
 	workspace.nodes = make([]stbrp.Node, workspace.max_texture_size, context.temp_allocator)
 	workspace.glyph_pixels = make([]u8, max_glyph_pixels, context.temp_allocator)

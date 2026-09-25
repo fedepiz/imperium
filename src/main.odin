@@ -7,7 +7,6 @@ import "game"
 import "gfx"
 import "span"
 import "tweak"
-import gl "vendor:OpenGL"
 import sdl "vendor:sdl3"
 
 GLOBAL: struct {
@@ -35,39 +34,22 @@ main :: proc() {
 	}
 	defer sdl.Quit()
 
-	if !sdl.GL_SetAttribute(.CONTEXT_MAJOR_VERSION, 3) ||
-	   !sdl.GL_SetAttribute(.CONTEXT_MINOR_VERSION, 3) ||
-	   !sdl.GL_SetAttribute(.CONTEXT_PROFILE_MASK, i32(sdl.GL_CONTEXT_PROFILE_CORE)) ||
-	   !sdl.GL_SetAttribute(.CONTEXT_FLAGS, i32(sdl.GL_CONTEXT_FORWARD_COMPATIBLE_FLAG)) ||
-	   !sdl.GL_SetAttribute(.DOUBLEBUFFER, 1) {
-		fmt.eprintf("OpenGL attribute setup failed: %s\n", sdl.GetError())
+	render_flags, render_flags_ok := gfx.render_window_flags()
+	if !render_flags_ok {
 		return
 	}
-
-	window := sdl.CreateWindow("Imperium", 1600, 900, {.OPENGL, .HIGH_PIXEL_DENSITY, .RESIZABLE})
+	window := sdl.CreateWindow("Imperium", 1600, 900, render_flags + {.HIGH_PIXEL_DENSITY, .RESIZABLE})
 	if window == nil {
 		fmt.eprintf("Window creation failed: %s\n", sdl.GetError())
 		return
 	}
 	defer sdl.DestroyWindow(window)
 
-	gl_context := sdl.GL_CreateContext(window)
-	if gl_context == nil {
-		fmt.eprintf("OpenGL context creation failed: %s\n", sdl.GetError())
-		return
-	}
-	defer sdl.GL_DestroyContext(gl_context)
-
-	if !sdl.GL_MakeCurrent(window, gl_context) {
-		fmt.eprintf("Making the OpenGL context current failed: %s\n", sdl.GetError())
-		return
-	}
-	gl.load_up_to(3, 3, sdl.gl_set_proc_address)
 	if !sdl.StartTextInput(window) {
 		fmt.eprintf("Starting text input failed: %s\n", sdl.GetError())
 	}
 	renderer := &GLOBAL.renderer
-	if !gfx.render_init(renderer) {
+	if !gfx.render_init(renderer, window) {
 		return
 	}
 	defer gfx.render_destroy(renderer)
@@ -89,10 +71,6 @@ main :: proc() {
 	renderer.pixel_density = pixel_density
 	ui_init()
 
-	vsync := sdl.GL_SetSwapInterval(1)
-	if !vsync {
-		fmt.eprintf("Enabling VSync failed: %s\n", sdl.GetError())
-	}
 	// Seconds the display shows each frame for, or 0 when unknown
 	refresh_period := display_refresh_period(window)
 
@@ -111,7 +89,7 @@ main :: proc() {
 
 		// With vsync, a frame stays on screen for a whole number of refreshes, whenever the loop happened to wake;
 		// stepping by the time shown rather than the time measured keeps motion even.
-		if vsync && refresh_period > 0 {
+		if renderer.vsync && refresh_period > 0 {
 			dt = max(1, math.round(dt / refresh_period)) * refresh_period
 		}
 		event: sdl.Event
@@ -171,15 +149,6 @@ main :: proc() {
 			break
 		}
 
-		width, height: i32
-		if !sdl.GetWindowSizeInPixels(window, &width, &height) {
-			fmt.eprintf("Getting the window pixel size failed: %s\n", sdl.GetError())
-			return
-		}
-		gl.Viewport(0, 0, width, height)
-		gl.ClearColor(MIDNIGHT_BACKGROUND.r, MIDNIGHT_BACKGROUND.g, MIDNIGHT_BACKGROUND.b, 1.0)
-		gl.Clear(gl.COLOR_BUFFER_BIT)
-
 		logical_width, logical_height: i32
 		if !sdl.GetWindowSize(window, &logical_width, &logical_height) {
 			fmt.eprintf("Getting the window size failed: %s\n", sdl.GetError())
@@ -227,10 +196,12 @@ main :: proc() {
 		}
 
 		renderer.view_size = {f32(logical_width), f32(logical_height)}
-		gfx.render_terrain(renderer, &game.WORLD.map_draw.render_terrain)
-		gfx.render_list(renderer, &game.WORLD.map_draw.render_list)
-		gfx.render_list(renderer, &GLOBAL.render_list)
-		sdl.GL_SwapWindow(window)
+		if gfx.render_frame_begin(renderer, {MIDNIGHT_BACKGROUND.r, MIDNIGHT_BACKGROUND.g, MIDNIGHT_BACKGROUND.b, 1}) {
+			gfx.render_terrain(renderer, &game.WORLD.map_draw.render_terrain)
+			gfx.render_list(renderer, &game.WORLD.map_draw.render_list)
+			gfx.render_list(renderer, &GLOBAL.render_list)
+			gfx.render_frame_end(renderer)
+		}
 	}
 }
 
