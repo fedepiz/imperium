@@ -149,9 +149,11 @@ Mark_Placement :: struct {
 	river_clearance: f32,
 	// Over the signed distance to the coast, in cells, positive on land
 	coast:           [Mark_Family]Ramp,
-	// The ground each family's marks claim, so that no mark of a family scattered after it stands there: a trapezoid
-	// over the drawing, footprint[0] of its width wide at its foot and footprint[1] at its top. Zero claims nothing.
-	footprint:       [Mark_Family][2]f32,
+	// The ground each family's marks claim, so that no mark of a family scattered after it stands there
+	footprint:       [Mark_Family]Footprint,
+	// The families whose marks claim their ground from their own family too, each as it is placed: those that would
+	// show through one another
+	claims_own:      bit_set[Mark_Family],
 	// How densely each cover bears each of the COVER_FAMILIES where it is at full strength
 	density:         [Cover][Mark_Family]f32,
 	tree:            struct {
@@ -191,6 +193,13 @@ Mark_Placement :: struct {
 		wet:       Ramp,
 		elevation: Ramp,
 	},
+}
+
+// The ground a mark claims: a trapezoid over its drawing, foot of its width wide at its foot and top of it at its top,
+// running on at the foot's width for below of its height in front of it, so nothing stands just in front of it either.
+// All zero claims nothing.
+Footprint :: struct {
+	foot, top, below: f32,
 }
 
 // A smooth step over a value, 0 at from and 1 at full; full below from makes it fall.
@@ -262,7 +271,12 @@ map_draw_init :: proc() {
 			.Dune = 3.4,
 		},
 		vary = #partial{.Tree = 0.15, .Tuft = 0.2, .Marsh = 0.15, .Dune = 0.2},
-		footprint = #partial{.Mountain = {0.85, 0.15}, .Molehill = {0.85, 0.2}, .Tree = {0.5, 0.9}},
+		footprint = #partial{
+			.Mountain = {foot = 0.85, top = 0.15, below = 0.45},
+			.Molehill = {foot = 0.85, top = 0.2, below = 0.5},
+			.Tree = {foot = 0.5, top = 0.9},
+		},
+		claims_own = {.Mountain, .Molehill},
 		row_squash = 0.8,
 		// Mountains keep to their rows, so the peak behind always shows clear over the one in front
 		jitter = {
@@ -354,8 +368,11 @@ tweak_placement :: proc() -> (changed: bool) {
 		tweak.slider(fmt.tprintf("Marks/%v/Jitter across", family), &pl.jitter[family].x, 0, 1)
 		tweak.slider(fmt.tprintf("Marks/%v/Jitter down", family), &pl.jitter[family].y, 0, 1)
 		tweak_ramp(fmt.tprintf("Marks/%v/Coast", family), &pl.coast[family], -25, 5)
-		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Foot", family), &pl.footprint[family][0], 0, 1)
-		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Top", family), &pl.footprint[family][1], 0, 1)
+		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Foot", family), &pl.footprint[family].foot, 0, 1)
+		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Top", family), &pl.footprint[family].top, 0, 1)
+		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Below", family), &pl.footprint[family].below, 0, 1)
+		own := tweak.toggle(fmt.tprintf("Marks/%v/Footprint/Claims own", family), "", family in pl.claims_own)
+		pl.claims_own = own ? pl.claims_own + {family} : pl.claims_own - {family}
 		if family not_in COVER_FAMILIES do continue
 		// Open land has no strength, so its cover bears nothing.
 		for cover in Cover {
@@ -800,10 +817,13 @@ scatter_marks :: proc() {
 				// A full table keeps what it has; the marks are still sorted below.
 				if len(WORLD.map_draw.marks) == MARKS_MAX do break scatter
 				append(&WORLD.map_draw.marks, mark)
+				if family in pl.claims_own do footprint_claim(claimed, mark, pl.footprint[family])
 			}
 		}
-		// The family claims its ground once it is all down, so its own marks can still overlap.
-		for mark in WORLD.map_draw.marks[first:] do footprint_claim(claimed, mark, pl.footprint[family])
+		// Otherwise the family claims its ground once it is all down, so its own marks can still overlap.
+		if family not_in pl.claims_own {
+			for mark in WORLD.map_draw.marks[first:] do footprint_claim(claimed, mark, pl.footprint[family])
+		}
 	}
 	slice.sort_by(WORLD.map_draw.marks[:], proc(a, b: Mark) -> bool {return mark_foot(a) < mark_foot(b)})
 }
@@ -926,20 +946,19 @@ footprint_claimed :: proc(claimed: []u64, p: [2]f32) -> bool {
 	return claimed[bit / 64] & (1 << uint(bit % 64)) != 0
 }
 
-// Claims the ground a mark's drawing covers: a trapezoid over it, shape[0] of its width wide at its foot and
-// shape[1] at its top.
+// Claims the ground a mark's footprint covers.
 @(private = "file")
-footprint_claim :: proc(claimed: []u64, mark: Mark, shape: [2]f32) {
-	if shape == {} do return
+footprint_claim :: proc(claimed: []u64, mark: Mark, footprint: Footprint) {
+	if footprint == {} do return
 	size := mark_size(mark)
 	if size.y <= 0 do return
 	foot := mark_foot(mark)
 	y0 := max(int((foot - size.y) * FOOTPRINT_RES), 0)
-	y1 := min(int(foot * FOOTPRINT_RES) + 1, WORLD_HEIGHT * FOOTPRINT_RES)
+	y1 := min(int((foot + footprint.below * size.y) * FOOTPRINT_RES) + 1, WORLD_HEIGHT * FOOTPRINT_RES)
 	for y in y0 ..< y1 {
-		// How far up the drawing this row is, from 0 at its foot to 1 at its top
+		// How far up the drawing this row is, from 0 at its foot and in front of it to 1 at its top
 		up := clamp((foot - (f32(y) + 0.5) / FOOTPRINT_RES) / size.y, 0, 1)
-		half := size.x / 2 * math.lerp(shape[0], shape[1], up)
+		half := size.x / 2 * math.lerp(footprint.foot, footprint.top, up)
 		x0 := max(int((mark.pos.x - half) * FOOTPRINT_RES), 0)
 		x1 := min(int((mark.pos.x + half) * FOOTPRINT_RES) + 1, WORLD_WIDTH * FOOTPRINT_RES)
 		for x in x0 ..< x1 {
