@@ -7,7 +7,7 @@
 //                    draws in the paper's colour under the drawing so the map's marks do not show through
 // Sources are named <culture>_<image>, as the game looks them up.
 //
-// Run from the repository root, after adding or changing a source: odin run tools/pawnify
+// Run from the repository root, after adding or changing a source: odin run tools/pawnify -o:speed
 // Every set is remade each run, and the outputs are committed alongside their sources.
 package pawnify
 

@@ -2,12 +2,14 @@ package game
 
 import "core:c"
 import "core:fmt"
+import "core:math"
 import "core:os"
 import stbi "vendor:stb/image"
 
 import "../gfx"
 import "../span"
 import "../tweak"
+import "../ui"
 
 WORLD: struct {
 	camera:   Camera,
@@ -52,25 +54,6 @@ world_init :: proc() {
 	map_draw_init(&WORLD.map_draw)
 	pawns_init(&WORLD.pawns, WORLD.camera)
 
-	// Test pawn types, until they come from a scenario
-	Test_Pawn_Type :: struct {
-		name: string,
-		size: f32,
-	}
-	@(static, rodata)
-	TEST_PAWN_TYPES := [?]Test_Pawn_Type {
-		{"town_0", 1.1},
-		{"town_1", 1.3},
-		{"town_2", 1.4},
-		{"town_3", 1.7},
-		{"army", 1.1},
-		{"fleet", 1.0},
-		{"bishop", 1.1},
-		{"envoy", 1.1},
-		{"merchant", 1.1},
-		{"spy", 1.1},
-	}
-	for test in TEST_PAWN_TYPES do pawns_type_add(&WORLD.pawns, test.name, test.size)
 }
 
 // Loads a scenario's terrain from its folder: one greyscale PNG per property, WORLD_WIDTH by WORLD_HEIGHT.
@@ -169,6 +152,8 @@ Input :: struct {
 	on_map:        bool,
 	// The button that drags the map is held
 	grab:          bool,
+	// The button that selects went down this frame, over the map
+	click:         bool,
 	// Keyboard panning along each axis, from -1 to 1; positive y is down the map
 	pan:           [2]f32,
 	// Wheel movement this frame, in notches; positive zooms in
@@ -210,7 +195,7 @@ world_tick :: proc(input: Input, dt: f32) {
 	}
 	for test, i in TEST_PAWNS {
 		type, found := pawns_type_find(&WORLD.pawns, test.type)
-		WORLD.pawns.entries[i] = {
+		WORLD.pawns.entries[i + 1] = {
 			active  = found,
 			pos     = test.pos,
 			type    = type,
@@ -218,12 +203,71 @@ world_tick :: proc(input: Input, dt: f32) {
 			name    = test.name,
 		}
 	}
+	if input.click do WORLD.pawns.selected = pawns_pick(&WORLD.pawns, WORLD.camera, input.viewport, input.cursor)
 	pawns_tick(&WORLD.pawns, WORLD.camera, dt)
 	pawns_draw(&WORLD.pawns, input.viewport, WORLD.camera, input.pixel_density)
 
 	// Pawns tweaks
 	tweak.slider_in_place("Pawns/Medallion Zoom", &WORLD.pawns.picture_to_medallion_zoom, 1.0, 20.)
+	// Which test pawn is selected: each choice after None is the test pawn placed at that id
+	choices := make([]string, len(TEST_PAWNS) + 1, context.temp_allocator)
+	choices[0] = "None"
+	for test, i in TEST_PAWNS do choices[i + 1] = test.name != "" ? test.name : fmt.tprintf("%s %d", test.type, i + 1)
+	selected := int(WORLD.pawns.selected)
+	tweak.choice_in_place("Pawns/Selected", &selected, choices)
+	WORLD.pawns.selected = Pawn_Id(selected)
 }
+
+// Called between ui.begin() and ui.end(). The selected pawn is described on a card of the map's paper at the bottom
+// left of the view: its medallion and name, or its type's when it has none, over what it is.
+world_ui :: proc() {
+	pawns := &WORLD.pawns
+	if pawns.selected == 0 do return
+	pawn := pawns.entries[pawns.selected]
+	type := &pawns.types[pawn.type]
+
+	ui.style_push(
+		{
+			font = pawns.font,
+			text_color = PAWN_NAME_INK,
+			width = ui.text_dim(),
+			height = ui.text_dim(),
+		},
+	)
+	defer ui.style_pop()
+	if ui.column({width = ui.grow(), height = ui.grow(), padding = PAWN_CARD_MARGIN}) {
+		ui.spacer(ui.grow())
+		card := ui.Style {
+			width      = ui.fit(),
+			height     = ui.fit(),
+			padding    = [2]f32{16, 12},
+			gap        = 6,
+			background = PAWN_PAPER,
+			border     = PAWN_NAME_INK,
+			thickness  = 1.5,
+			radius     = 3,
+		}
+		if ui.panel("selected pawn", card) {
+			title := [?]ui.Text {
+				{image = type.image[.Medallion][pawn.culture], color = [4]f32{1, 1, 1, 1}},
+				{text = " "},
+				{text = pawn.name != "" ? pawn.name : type.tag},
+			}
+			ui.label_text(title[:], {font = pawns.title_font})
+			pawn_card_row("Type", type.name)
+			pawn_card_row("Culture", fmt.tprintf("%v", pawn.culture))
+		}
+	}
+
+	// A property on the card: its name, faded, in a column as wide for every row, then its value
+	pawn_card_row :: proc(name, value: string) {
+		if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
+			ui.label(name, {width = ui.em(5), text_color = PAWN_CARD_FADED_INK})
+			ui.label(value)
+		}
+	}
+}
+
 
 PAWNS_MAX :: 1024
 PAWN_TYPES_MAX :: 64
@@ -234,6 +278,8 @@ Pawn_Type_Id :: distinct u8
 // under assets/gfx. A drawing not there yet is the blank image.
 Pawn_Type :: struct {
 	// Must outlive the type
+	tag:   string,
+	// Visible name
 	name:  string,
 	// How large the drawings are against their natural size: see PAWN_CELLS_PER_PIXEL
 	size:  f32,
@@ -244,19 +290,26 @@ Pawn_Type :: struct {
 
 Pawns :: struct {
 	entries:                   [PAWNS_MAX]Pawn,
-	// Defined by pawns_type_add, the first type_count of them
-	types:                     [PAWN_TYPES_MAX]Pawn_Type,
-	type_count:                int,
+	// Defined by pawns_type_add
+	types:                     [dynamic; PAWN_TYPES_MAX]Pawn_Type,
+	// The pawn drawn with a pulsing tint, or zero for none
+	selected:                  Pawn_Id,
+	// Seconds the pawns have been ticked for, which the selected pawn's tint pulses by
+	time:                      f32,
 	// Drawn for a drawing that is not there yet: fully clear
 	blank:                     gfx.Image_Id,
-	// What pawns' names are written in
+	// What pawns' names are written in, and the selected pawn's name on its card
 	font:                      gfx.Font_Id,
+	title_font:                gfx.Font_Id,
 	render_list:               gfx.Render_List,
 	// Picture-Medallion interpolation progression, from 0 (pictures) to 1 (medallions)
 	picture_to_medallion_t:    f32,
 	// Zoom level at which the transition occours, in pixels per cell: medallions below it, pictures above
 	picture_to_medallion_zoom: f32,
 }
+
+// Zero pawn canonically though to be null
+Pawn_Id :: distinct u16
 
 Pawn :: struct {
 	active:  bool,
@@ -274,6 +327,15 @@ PAWN_NAME_INK :: [4]f32{0.150, 0.105, 0.070, 1}
 
 // The map's paper, which pawns' silhouettes and the halos round their names are drawn in
 PAWN_PAPER :: [4]f32{0.840, 0.772, 0.620, 1}
+
+// The selected pawn's card: the ink its property names are written in, and its space from the edges of the view
+PAWN_CARD_FADED_INK :: [4]f32{0.150, 0.105, 0.070, 0.6}
+PAWN_CARD_MARGIN :: [2]f32{20, 20}
+
+// The tint the selected pawn pulses towards, over its drawing and its paper, and how many seconds it takes to pulse
+// there and back
+PAWN_SELECTED_TINT :: [4]f32{1.000, 0.700, 0.350, 1}
+PAWN_SELECTED_PULSE :: 1.2
 
 // The two sets of drawings a pawn is seen as: its picture up close, its medallion from afar
 Pawn_Set :: enum u8 {
@@ -319,23 +381,39 @@ CULTURE_NAMES := [Culture]string {
 pawns_init :: proc(pawns: ^Pawns, camera: Camera) {
 	pawns.blank = gfx.sprites_image_add("blank")
 	pawns.font = gfx.sprites_font_add("forgotten_uncial", 22)
+	pawns.title_font = gfx.sprites_font_add("forgotten_uncial", 36)
 	pawns.picture_to_medallion_zoom = PAWN_MEDALLION_ZOOM
 	pawns.picture_to_medallion_t = camera.zoom < pawns.picture_to_medallion_zoom ? 1 : 0
+
+	// Pawn types
+	Pawn_Type_Def :: struct {
+		name_raw:     string,
+		name_display: string,
+		size:         f32,
+	}
+	@(static, rodata)
+	PAWN_TYPES := [?]Pawn_Type_Def {
+		{"town_0", "Village", 1.1},
+		{"town_1", "Town", 1.3},
+		{"town_2", "City", 1.4},
+		{"town_3", "Large City", 1.7},
+		{"army", "Army", 1.1},
+		{"fleet", "Fleet", 1.0},
+		{"bishop", "Priest", 1.1},
+		{"envoy", "Envoy", 1.1},
+	}
+	for type in PAWN_TYPES do pawns_type_add(&WORLD.pawns, type.name_raw, type.name_display, type.size)
 }
 
 // Defines a pawn type and its drawings, so call this before sprites_load.
-pawns_type_add :: proc(pawns: ^Pawns, name: string, size: f32) -> Pawn_Type_Id {
-	assert(pawns.type_count < PAWN_TYPES_MAX)
-	id := Pawn_Type_Id(pawns.type_count)
-	pawns.type_count += 1
+pawns_type_add :: proc(pawns: ^Pawns, tag: string, name: string, size: f32) -> Pawn_Type_Id {
+	assert(len(pawns.types) < PAWN_TYPES_MAX)
+	id := Pawn_Type_Id(len(pawns.types))
+	append(&pawns.types, Pawn_Type{tag = tag, name = name, size = size})
 	type := &pawns.types[id]
-	type^ = {
-		name = name,
-		size = size,
-	}
 	for set_name, set in PAWN_SET_NAMES {
 		for culture_name, culture in CULTURE_NAMES {
-			drawing := fmt.tprintf("%s/%s_%s", set_name, culture_name, name)
+			drawing := fmt.tprintf("%s/%s_%s", set_name, culture_name, tag)
 			fill := fmt.tprintf("%s_fill", drawing)
 			type.image[set][culture] = pawns_image_or_blank(pawns, drawing)
 			type.fill[set][culture] = pawns_image_or_blank(pawns, fill)
@@ -351,8 +429,8 @@ pawns_type_add :: proc(pawns: ^Pawns, name: string, size: f32) -> Pawn_Type_Id {
 
 // The pawn type of that name, if there is one.
 pawns_type_find :: proc(pawns: ^Pawns, name: string) -> (Pawn_Type_Id, bool) {
-	for type, i in pawns.types[:pawns.type_count] {
-		if type.name == name do return Pawn_Type_Id(i), true
+	for type, i in pawns.types {
+		if type.tag == name do return Pawn_Type_Id(i), true
 	}
 	return 0, false
 }
@@ -363,6 +441,32 @@ pawns_tick :: proc(pawns: ^Pawns, camera: Camera, dt: f32) {
 	target: f32 = camera.zoom < pawns.picture_to_medallion_zoom ? 1 : 0
 	step := dt / PAWN_MEDALLION_FADE
 	pawns.picture_to_medallion_t += clamp(target - pawns.picture_to_medallion_t, -step, step)
+	pawns.time += dt
+}
+
+// The rect a pawn's drawing in a set covers, in cells
+pawn_bounds :: proc(pawns: ^Pawns, pawn: Pawn, set: Pawn_Set) -> [4]f32 {
+	type := &pawns.types[pawn.type]
+	source := gfx.sprite_region(gfx.sprite_of_image(type.image[set][pawn.culture])).source
+	size := source.zw * PAWN_CELLS_PER_PIXEL[set] * type.size
+	corner := pawn.pos - size / 2
+	return {corner.x, corner.y, size.x, size.y}
+}
+
+// The first pawn whose drawing, in the set that shows more, covers the point on screen, or zero for none
+pawns_pick :: proc(pawns: ^Pawns, camera: Camera, viewport: [2]f32, point: [2]f32) -> Pawn_Id {
+	set: Pawn_Set = pawns.picture_to_medallion_t < 0.5 ? .Picture : .Medallion
+	for pawn, index in pawns.entries {
+		if index == 0 || !pawn.active do continue
+		rect, _ := camera_world_to_screen(camera, viewport, pawn_bounds(pawns, pawn, set))
+		if point.x >= rect.x &&
+		   point.y >= rect.y &&
+		   point.x < rect.x + rect.z &&
+		   point.y < rect.y + rect.w {
+			return Pawn_Id(index)
+		}
+	}
+	return 0
 }
 
 pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_density: f32) {
@@ -382,9 +486,13 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 		.Picture   = 1 - t,
 		.Medallion = t,
 	}
-	for pawn in pawns.entries {
+	pulse := 0.5 - 0.5 * math.cos(2 * math.PI * pawns.time / PAWN_SELECTED_PULSE)
+	for pawn, index in pawns.entries {
 		if !pawn.active do continue
 		type := &pawns.types[pawn.type]
+		selected := pawns.selected != 0 && Pawn_Id(index) == pawns.selected
+		tint :=
+			selected ? math.lerp([4]f32{1, 1, 1, 1}, PAWN_SELECTED_TINT, pulse) : [4]f32{1, 1, 1, 1}
 		// The name hangs under the drawings, between their bottoms as they fade.
 		name_at: [2]f32
 		name_weight: f32
@@ -392,21 +500,17 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 			weight := weights[set]
 			if weight <= 0 do continue
 			image := type.image[set][pawn.culture]
-			source := gfx.sprite_region(gfx.sprite_of_image(image)).source
-			if source.z <= 0 do continue
-			size := source.zw * PAWN_CELLS_PER_PIXEL[set] * type.size
-			corner := pawn.pos - size / 2
 			rect, visible := camera_world_to_screen(
 				camera,
 				viewport,
-				[4]f32{corner.x, corner.y, size.x, size.y},
+				pawn_bounds(pawns, pawn, set),
 				PAWN_VIEW_TOLERANCE,
 			)
 			if !visible do continue
-			paper := PAWN_PAPER
+			paper := PAWN_PAPER * tint
 			paper.a *= weight
 			gfx.draw_image(&draw, type.fill[set][pawn.culture], rect, paper)
-			gfx.draw_image(&draw, image, rect, {1, 1, 1, weight})
+			gfx.draw_image(&draw, image, rect, tint * {1, 1, 1, weight})
 			name_at += [2]f32{rect.x + rect.z / 2, rect.y + rect.w} * weight
 			name_weight += weight
 		}

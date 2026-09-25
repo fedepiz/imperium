@@ -7,6 +7,7 @@ import "game"
 import "gfx"
 import "span"
 import "tweak"
+import "ui"
 import sdl "vendor:sdl3"
 
 GLOBAL: struct {
@@ -78,7 +79,7 @@ main :: proc() {
 	}
 	gfx.sprites_load(renderer, pixel_density)
 	renderer.pixel_density = pixel_density
-	ui_init(GLOBAL.fonts[.Default])
+	ui.init(GLOBAL.fonts[.Default])
 
 	// Seconds the display shows each frame for, or 0 when unknown
 	refresh_period := display_refresh_period(window)
@@ -153,7 +154,7 @@ main :: proc() {
 		}
 
 		// Escape leaves the game when nothing in the ui is focused; otherwise the ui takes it to drop the focus.
-		keep_going &= !(key_is_pressed(GLOBAL.input, .ESCAPE) && !ui_focused_any())
+		keep_going &= !(key_is_pressed(GLOBAL.input, .ESCAPE) && !ui.focused_any())
 		if !keep_going {
 			break
 		}
@@ -187,7 +188,7 @@ main :: proc() {
 			game.world_tick(game_input(GLOBAL.input, viewport, pixel_density), dt)
 		}
 		// Tab steps through the map and the raw terrain properties.
-		if key_is_pressed(GLOBAL.input, .TAB) && !ui_keyboard_captured() {
+		if key_is_pressed(GLOBAL.input, .TAB) && !ui.keyboard_captured() {
 			debug := &game.WORLD.map_draw.render_terrain.debug_mode
 			debug^ = gfx.Render_Terrain_Debug((int(debug^) + 1) % len(gfx.Render_Terrain_Debug))
 		}
@@ -202,10 +203,11 @@ main :: proc() {
 				pixel_density,
 			)
 
-			ui_begin({f32(logical_width), f32(logical_height)})
+			ui.begin({f32(logical_width), f32(logical_height)})
 			if demo.enabled do demo_build(&demo)
 			palette_build(&palette, GLOBAL.input)
-			ui_end(GLOBAL.input, &draw, dt)
+			game.world_ui()
+			ui.end(ui_input(GLOBAL.input), &draw, dt)
 		}
 
 		renderer.view_size = {f32(logical_width), f32(logical_height)}
@@ -222,9 +224,21 @@ main :: proc() {
 	}
 }
 
+ui_input :: proc(input: Input) -> ui.Input {
+	return {
+		cursor = input.pos,
+		cursor_valid = bool(input.pos_is_valid),
+		wheel = input.wheel,
+		press_down = button_is_down(input, sdl.BUTTON_LEFT),
+		press = button_is_pressed(input, sdl.BUTTON_LEFT),
+		escape = key_is_pressed(input, .ESCAPE),
+		events = input.events,
+	}
+}
+
 game_input :: proc(input: Input, viewport: [2]f32, pixel_density: f32) -> game.Input {
 	pan: [2]f32
-	if !ui_keyboard_captured() {
+	if !ui.keyboard_captured() {
 		if key_is_down(input, .A) || key_is_down(input, .LEFT) do pan.x -= 1
 		if key_is_down(input, .D) || key_is_down(input, .RIGHT) do pan.x += 1
 		if key_is_down(input, .W) || key_is_down(input, .UP) do pan.y -= 1
@@ -234,8 +248,11 @@ game_input :: proc(input: Input, viewport: [2]f32, pixel_density: f32) -> game.I
 		viewport = viewport,
 		pixel_density = pixel_density,
 		cursor = input.pos,
-		on_map = bool(input.pos_is_valid) && !ui_hovered_any(),
+		on_map = bool(input.pos_is_valid) && !ui.hovered_any(),
 		grab = button_is_down(input, sdl.BUTTON_LEFT),
+		click = bool(input.pos_is_valid) &&
+		!ui.hovered_any() &&
+		button_is_pressed(input, sdl.BUTTON_LEFT),
 		pan = pan,
 		wheel = input.wheel.y,
 	}
@@ -271,25 +288,11 @@ Input :: struct {
 	// Wheel movement this frame, in notches (fractional on touchpads); positive y is away from the user, positive x to the right
 	wheel:        [2]f32,
 	// Keys going down, repeats included, and typed characters, in the order they came this frame; the rest are dropped
-	events:       [dynamic; INPUT_EVENTS_MAX]Input_Event,
+	events:       [dynamic; ui.EVENTS_MAX]ui.Event,
 }
 
-INPUT_EVENTS_MAX :: 64
-
-Input_Event_Kind :: enum {
-	Key,
-	Char,
-}
-
-// A key going down, or a character typed
-Input_Event :: struct {
-	kind: Input_Event_Kind,
-	key:  sdl.Scancode,
-	char: rune,
-}
-
-input_event_push :: proc(input: ^Input, event: Input_Event) {
-	if len(input.events) < INPUT_EVENTS_MAX {
+input_event_push :: proc(input: ^Input, event: ui.Event) {
+	if len(input.events) < ui.EVENTS_MAX {
 		append(&input.events, event)
 	}
 }
@@ -332,60 +335,60 @@ MIDNIGHT_PRIMARY :: [4]f32{0.23, 0.39, 0.61, 1}
 MIDNIGHT_DANGER :: [4]f32{0.48, 0.15, 0.19, 1}
 // Text drawn on the saturated primary and danger fills
 MIDNIGHT_TEXT_ON_FILL :: [4]f32{1, 1, 1, 1}
-// Styles holding a Ui_Size are not compile-time constants, so they are globals; treat them as read-only once main has
+// Styles holding a ui.Size are not compile-time constants, so they are globals; treat them as read-only once main has
 // set them up.
-MIDNIGHT_PANEL_STYLE := Ui_Style {
-	width      = Ui_Size{.Fit, 0, 1},
-	height     = Ui_Size{.Fit, 0, 1},
+MIDNIGHT_PANEL_STYLE := ui.Style {
+	width      = ui.Size{.Fit, 0, 1},
+	height     = ui.Size{.Fit, 0, 1},
 	padding    = [2]f32{16, 14},
 	gap        = 8,
 	background = MIDNIGHT_PANEL,
 }
 
 // Its font is the heading font, set by main once the fonts are defined
-MIDNIGHT_HEADING := Ui_Style {
-	height     = Ui_Size{.Text, 0, 1},
+MIDNIGHT_HEADING := ui.Style {
+	height     = ui.Size{.Text, 0, 1},
 	text_color = MIDNIGHT_GOLD,
 }
 
-MIDNIGHT_MUTED_TEXT :: Ui_Style {
+MIDNIGHT_MUTED_TEXT :: ui.Style {
 	text_color = MIDNIGHT_MUTED,
 }
 
-MIDNIGHT_PRIMARY_BUTTON :: Ui_Style {
+MIDNIGHT_PRIMARY_BUTTON :: ui.Style {
 	background = MIDNIGHT_PRIMARY,
 	text_color = MIDNIGHT_TEXT_ON_FILL,
 }
 
-MIDNIGHT_DANGER_BUTTON :: Ui_Style {
+MIDNIGHT_DANGER_BUTTON :: ui.Style {
 	background = MIDNIGHT_DANGER,
 	text_color = MIDNIGHT_TEXT_ON_FILL,
 }
 
 demo_build :: proc(demo: ^Demo_Ui) {
-	if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{24, 20}, gap = 16}) {
-		if ui_column({width = ui_fit(), height = ui_fit(), gap = 2}) {
+	if ui.column({width = ui.grow(), height = ui.grow(), padding = [2]f32{24, 20}, gap = 16}) {
+		if ui.column({width = ui.fit(), height = ui.fit(), gap = 2}) {
 			demo_label("Imperium", MIDNIGHT_HEADING)
 			demo_label("Lorem ipsum dolor sit amet.", MIDNIGHT_MUTED_TEXT)
 		}
 
-		if ui_row({width = ui_fit(), height = ui_fit(), gap = 16}) {
-			if ui_panel("controls", MIDNIGHT_PANEL_STYLE) {
+		if ui.row({width = ui.fit(), height = ui.fit(), gap = 16}) {
+			if ui.panel("controls", MIDNIGHT_PANEL_STYLE) {
 				demo_label("Controls", MIDNIGHT_HEADING)
 				demo_label(fmt.tprintf("Button presses: %d", demo.presses))
-				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
+				if ui.row({width = ui.fit(), height = ui.fit(), gap = 8}) {
 					press := demo_button("Press me", MIDNIGHT_PRIMARY_BUTTON)
 					if press.pressed {
 						demo.presses += 1
 					}
 					if press.hovered {
-						if ui_tooltip(MIDNIGHT_PANEL_STYLE) {
+						if ui.tooltip(MIDNIGHT_PANEL_STYLE) {
 							demo_label("Lorem ipsum dolor sit amet.")
 							demo_label(
 								"Consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
 								{
-									width = ui_em(14),
-									height = ui_text_dim(),
+									width = ui.em(14),
+									height = ui.text_dim(),
 									text_color = MIDNIGHT_MUTED,
 								},
 							)
@@ -395,28 +398,28 @@ demo_build :: proc(demo: ^Demo_Ui) {
 						demo.presses = 0
 					}
 				}
-				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
+				if ui.row({width = ui.fit(), height = ui.fit(), gap = 8}) {
 					demo_checkbox("Locked", &demo.locked)
 					demo_button("Guarded", {disabled = demo.locked})
 				}
-				ui_label_text(
+				ui.label_text(
 					{
 						{text = "Sed do eiusmod "},
 						{text = "tempor", color = MIDNIGHT_GOLD, key = "tempor", underline = true},
 						{text = " incididunt."},
 					},
-					{width = ui_text_dim(), text_color = MIDNIGHT_MUTED},
+					{width = ui.text_dim(), text_color = MIDNIGHT_MUTED},
 				)
-				if ui_signal("tempor").hovered {
-					if ui_tooltip(MIDNIGHT_PANEL_STYLE) {
+				if ui.signal("tempor").hovered {
+					if ui.tooltip(MIDNIGHT_PANEL_STYLE) {
 						demo_label("Lorem ipsum dolor sit amet.")
 					}
 				}
 			}
 
-			if ui_panel("styles", MIDNIGHT_PANEL_STYLE) {
+			if ui.panel("styles", MIDNIGHT_PANEL_STYLE) {
 				demo_label("Styles", MIDNIGHT_HEADING)
-				ui_label_text(
+				ui.label_text(
 					{
 						{text = "Ut enim "},
 						{image = GLOBAL.images[.Logo]},
@@ -424,40 +427,40 @@ demo_build :: proc(demo: ^Demo_Ui) {
 						{text = "veniam", color = MIDNIGHT_GOLD},
 						{text = "."},
 					},
-					{width = ui_text_dim()},
+					{width = ui.text_dim()},
 				)
-				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
+				if ui.row({width = ui.fit(), height = ui.fit(), gap = 8}) {
 					demo_button("Ordinary")
 					demo_button("Primary", MIDNIGHT_PRIMARY_BUTTON)
 				}
-				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
+				if ui.row({width = ui.fit(), height = ui.fit(), gap = 8}) {
 					demo_button("Danger", MIDNIGHT_DANGER_BUTTON)
 					demo_button("Unavailable", {disabled = true})
 				}
-				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
+				if ui.row({width = ui.fit(), height = ui.fit(), gap = 8}) {
 					demo_label("Difficulty")
-					ui_combo(
+					ui.combo(
 						"difficulty",
 						&demo.difficulty,
 						&demo.difficulty_open,
 						DEMO_DIFFICULTIES,
-						{width = ui_px(120), padding = [2]f32{10, 0}},
+						{width = ui.px(120), padding = [2]f32{10, 0}},
 					)
 				}
-				if ui_row({width = ui_fit(), height = ui_fit(), gap = 8}) {
+				if ui.row({width = ui.fit(), height = ui.fit(), gap = 8}) {
 					demo_label("Name")
-					ui_input(
+					ui.input(
 						"name",
 						demo.name[:],
 						&demo.name_len,
-						{width = ui_px(160), padding = [2]f32{10, 0}},
+						{width = ui.px(160), padding = [2]f32{10, 0}},
 					)
 				}
 				demo_label("Quis nostrud exercitation.", MIDNIGHT_MUTED_TEXT)
 			}
 
-			ui_style_next(MIDNIGHT_PANEL_STYLE)
-			if ui_scroll_panel("scrolling", {height = ui_px(180)}) {
+			ui.style_next(MIDNIGHT_PANEL_STYLE)
+			if ui.scroll_panel("scrolling", {height = ui.px(180)}) {
 				demo_label("Scrolling", MIDNIGHT_HEADING)
 				for i in 1 ..= 20 {
 					demo_button(fmt.tprintf("Entry %d###entry%d", i, i))
@@ -468,18 +471,19 @@ demo_build :: proc(demo: ^Demo_Ui) {
 }
 
 // Labels and buttons in the demo hug their text; the style still wins over these.
-demo_label :: proc(text: string, style := Ui_Style{}) {
-	ui_style_next({width = ui_text_dim()})
-	ui_label(text, style)
+demo_label :: proc(text: string, style := ui.Style{}) {
+	ui.style_next({width = ui.text_dim()})
+	ui.label(text, style)
 }
 
-demo_button :: proc(label: string, style := Ui_Style{}) -> Ui_Signal {
-	ui_style_next({width = ui_text_dim(), padding = [2]f32{10, 0}})
-	return ui_button(label, style)
+demo_button :: proc(label: string, style := ui.Style{}) -> ui.Signal {
+	ui.style_next({width = ui.text_dim(), padding = [2]f32{10, 0}})
+	return ui.button(label, style)
 }
 
 // A checkbox is a row of boxes, so it fits its children rather than a text.
-demo_checkbox :: proc(label: string, value: ^bool, style := Ui_Style{}) -> Ui_Signal {
-	ui_style_next({width = ui_fit(), padding = [2]f32{10, 0}})
-	return ui_checkbox(label, value, style)
+demo_checkbox :: proc(label: string, value: ^bool, style := ui.Style{}) -> ui.Signal {
+	ui.style_next({width = ui.fit(), padding = [2]f32{10, 0}})
+	return ui.checkbox(label, value, style)
 }
+

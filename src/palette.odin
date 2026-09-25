@@ -6,6 +6,7 @@ import "core:unicode"
 import "core:unicode/utf8"
 import "gfx"
 import "tweak"
+import "ui"
 
 // A list of this frame's tweaks floating over everything while tweak is open, filtered by what is typed on top.
 Palette :: struct {
@@ -32,11 +33,11 @@ palette_build :: proc(p: ^Palette, input: Input) {
 	// Space opens and closes it unless the ui takes the keys, and Escape in the filter closes it.
 	open := tweak.is_open()
 	opening := false
-	if key_is_pressed(input, .SPACE) && !ui_keyboard_captured() {
+	if key_is_pressed(input, .SPACE) && !ui.keyboard_captured() {
 		open = !open
 		opening = open
 	}
-	if ui_key_pressed(.ESCAPE) {
+	if ui.key_pressed(.ESCAPE) {
 		open = false
 	}
 	tweak.set_open(open)
@@ -67,55 +68,55 @@ palette_build :: proc(p: ^Palette, input: Input) {
 	}
 	p.selected = 0
 	if len(selectable) > 0 {
-		if ui_key_pressed(.DOWN) {
+		if ui.key_pressed(.DOWN) {
 			at = min(at + 1, len(selectable) - 1)
 		}
-		if ui_key_pressed(.UP) {
+		if ui.key_pressed(.UP) {
 			at = max(at - 1, 0)
 		}
 		s := rows[selectable[at]]
 		p.selected = s.id
-		if ui_key_pressed(.RETURN) || ui_key_pressed(.KP_ENTER) {
+		if ui.key_pressed(.RETURN) || ui.key_pressed(.KP_ENTER) {
 			palette_activate(s)
 		}
 	}
 
 	// Everything in the palette is in the small font, one and a half lines of it tall.
 	small := GLOBAL.fonts[.Small]
-	ui_style_push({font = small, height = ui_px(1.5 * gfx.font_size(small))})
-	defer ui_style_pop()
+	ui.style_push({font = small, height = ui.px(1.5 * gfx.font_size(small))})
+	defer ui.style_pop()
 
-	if ui_overlay() {
-		if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{0, PALETTE_TOP}}) {
-			if ui_row({width = ui_grow(), height = ui_fit()}) {
-				ui_spacer(ui_grow())
-				ui_style_next(MIDNIGHT_PANEL_STYLE)
-				if ui_panel("tweak palette", {width = ui_px(PALETTE_WIDTH)}) {
+	if ui.overlay() {
+		if ui.column({width = ui.grow(), height = ui.grow(), padding = [2]f32{0, PALETTE_TOP}}) {
+			if ui.row({width = ui.grow(), height = ui.fit()}) {
+				ui.spacer(ui.grow())
+				ui.style_next(MIDNIGHT_PANEL_STYLE)
+				if ui.panel("tweak palette", {width = ui.px(PALETTE_WIDTH)}) {
 					// The filter keeps the keyboard while the palette is open.
-					if opening || !ui_focused_any() {
-						ui_focus("filter")
+					if opening || !ui.focused_any() {
+						ui.focus("filter")
 					}
-					ui_input(
+					ui.input(
 						"filter",
 						p.filter[:],
 						&p.filter_len,
-						{width = ui_grow(), padding = PALETTE_WIDGET_PADDING},
+						{width = ui.grow(), padding = PALETTE_WIDGET_PADDING},
 					)
-					ui_style_next(
+					ui.style_next(
 						{
-							width = ui_grow(),
-							height = ui_px(PALETTE_LIST_HEIGHT),
+							width = ui.grow(),
+							height = ui.px(PALETTE_LIST_HEIGHT),
 							padding = [2]f32{6, 6},
 							gap = 2,
 						},
 					)
-					if ui_scroll_panel("tweaks") {
+					if ui.scroll_panel("tweaks") {
 						for s in rows {
 							palette_row(p, s)
 						}
 					}
 				}
-				ui_spacer(ui_grow())
+				ui.spacer(ui.grow())
 			}
 		}
 	}
@@ -142,25 +143,25 @@ palette_row :: proc(p: ^Palette, s: tweak.Shown) {
 	name := tweak.display(label)
 	text := tweak.shown_text(s)
 	background := MIDNIGHT_PRIMARY if s.id == p.selected else [4]f32{}
-	ui_style_next(
+	ui.style_next(
 		{
-			width = ui_grow(),
-			height = ui_fit(),
+			width = ui.grow(),
+			height = ui.fit(),
 			padding = [2]f32{8, 4},
 			gap = 8,
 			background = background,
 			thickness = 0,
 		},
 	)
-	if ui_panel(label, {}, .X) {
+	if ui.panel(label, {}, .X) {
 		// The name may be cut short, so hovering it shows all of it.
-		ui_label_text({{text = name, key = "name"}}, {width = ui_grow()})
-		if ui_signal("name").hovered {
-			if ui_tooltip(MIDNIGHT_PANEL_STYLE) {
-				ui_label(name, {width = ui_text_dim()})
+		ui.label_text({{text = name, key = "name"}}, {width = ui.grow()})
+		if ui.signal("name").hovered {
+			if ui.tooltip(MIDNIGHT_PANEL_STYLE) {
+				ui.label(name, {width = ui.text_dim()})
 			}
 		}
-		if ui_row({width = ui_px(PALETTE_WIDGET_WIDTH), height = ui_fit(), gap = 8}) {
+		if ui.row({width = ui.px(PALETTE_WIDGET_WIDTH), height = ui.fit(), gap = 8}) {
 			palette_widget(p, s, text)
 		}
 	}
@@ -171,25 +172,25 @@ palette_widget :: proc(p: ^Palette, s: tweak.Shown, text: string) {
 	t := tweak.get(s.id)
 	switch s.kind {
 	case .Label:
-		ui_label(text, {width = ui_grow(), text_color = MIDNIGHT_MUTED})
+		ui.label(text, {width = ui.grow(), text_color = MIDNIGHT_MUTED})
 	case .Button:
-		if ui_button(fmt.tprintf("%s###button", text), {width = ui_grow(), padding = PALETTE_WIDGET_PADDING}).pressed {
+		if ui.button(fmt.tprintf("%s###button", text), {width = ui.grow(), padding = PALETTE_WIDGET_PADDING}).pressed {
 			tweak.fire(s.id)
 		}
 	case .Toggle:
 		flag := t.flag
-		ui_checkbox(
+		ui.checkbox(
 			fmt.tprintf("%s###toggle", text),
 			&flag,
-			{width = ui_grow(), padding = PALETTE_WIDGET_PADDING},
+			{width = ui.grow(), padding = PALETTE_WIDGET_PADDING},
 		)
 		if flag != t.flag {
 			tweak.set_flag(s.id, flag)
 		}
 	case .Slider:
 		value := t.value
-		ui_slider("slider", &value, s.lo, s.hi, {width = ui_grow()})
-		ui_label(fmt.tprintf("%.2f", value), {width = ui_em(3)})
+		ui.slider("slider", &value, s.lo, s.hi, {width = ui.grow()})
+		ui.label(fmt.tprintf("%.2f", value), {width = ui.em(3)})
 		if value != t.value {
 			tweak.set_value(s.id, value)
 		}
@@ -200,12 +201,12 @@ palette_widget :: proc(p: ^Palette, s: tweak.Shown, text: string) {
 		}
 		selection := t.selection
 		open := p.choice_open == s.id
-		ui_combo(
+		ui.combo(
 			"choice",
 			&selection,
 			&open,
 			choices,
-			{width = ui_grow(), padding = PALETTE_WIDGET_PADDING},
+			{width = ui.grow(), padding = PALETTE_WIDGET_PADDING},
 		)
 		if open {
 			p.choice_open = s.id
