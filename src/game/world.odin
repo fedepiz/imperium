@@ -8,84 +8,10 @@ import stbi "vendor:stb/image"
 import "../gfx"
 
 WORLD: struct {
-	camera:     Camera,
-	atlas:      Atlas,
-	// The first of the image ids given to the world; its own images are numbered from here
-	image_base: gfx.Image_Id,
+	camera:   Camera,
+	atlas:    Atlas,
 	// What the map is drawn from, kept up to date by world_tick
-	map_draw:   Map_Draw,
-}
-
-// The drawings a mark can be, each with up to TERRAIN_MARK_VARIANTS variants. Where each is placed is up to
-// Mark_Placement.
-Terrain_Mark :: enum {
-	Conifer,
-	Broadleaf,
-	Cypress,
-	Palm,
-	Molehill,
-	Mountain,
-	Sea_Mark,
-	// Steppe grass
-	Tuft,
-	Marsh,
-	Dune,
-}
-
-// Each mark has up to this many drawings, so the scatter does not look stamped
-TERRAIN_MARK_VARIANTS :: 4
-
-// The drawings of each mark, under assets/gfx; an empty name is a variant the mark does not have.
-@(private = "file")
-TERRAIN_MARK_IMAGES := [Terrain_Mark][TERRAIN_MARK_VARIANTS]string {
-	.Conifer   = {
-		"terrain/conifer_0",
-		"terrain/conifer_1",
-		"terrain/conifer_2",
-		"terrain/conifer_3",
-	},
-	.Broadleaf = {
-		"terrain/broadleaf_0",
-		"terrain/broadleaf_1",
-		"terrain/broadleaf_2",
-		"terrain/broadleaf_3",
-	},
-	.Cypress   = {
-		"terrain/cypress_0",
-		"terrain/cypress_1",
-		"terrain/cypress_2",
-		"terrain/cypress_3",
-	},
-	.Palm      = {"terrain/palm_0", "terrain/palm_1", "terrain/palm_2", "terrain/palm_3"},
-	.Molehill  = {"terrain/hill_0", "terrain/hill_1", "terrain/hill_2", "terrain/hill_3"},
-	.Mountain  = {
-		"terrain/mountain_0",
-		"terrain/mountain_1",
-		"terrain/mountain_2",
-		"terrain/mountain_3",
-	},
-	.Sea_Mark  = {"terrain/sea_0", "terrain/sea_1", "", ""},
-	.Tuft      = {"terrain/tuft_0", "terrain/tuft_1", "terrain/tuft_2", "terrain/tuft_3"},
-	.Marsh     = {"terrain/marsh_0", "terrain/marsh_1", "terrain/marsh_2", "terrain/marsh_3"},
-	.Dune      = {"terrain/dune_0", "terrain/dune_1", "terrain/dune_2", "terrain/dune_3"},
-}
-
-// The world's images, numbered from its image base
-WORLD_IMAGES_MAX :: len(Terrain_Mark) * TERRAIN_MARK_VARIANTS
-
-// How many variants a mark has: its leading named drawings.
-world_mark_variants :: proc(mark: Terrain_Mark) -> int {
-	count := 0
-	for name in TERRAIN_MARK_IMAGES[mark] {
-		if name == "" do break
-		count += 1
-	}
-	return count
-}
-
-// The image of a mark's variant.
-world_mark_image :: proc(mark: Terrain_Mark, variant: int) -> gfx.Image_Id {
-	return WORLD.image_base + gfx.Image_Id(int(mark) * TERRAIN_MARK_VARIANTS + variant)
+	map_draw: Map_Draw,
 }
 
 WORLD_WIDTH :: 1024
@@ -115,18 +41,9 @@ Surface :: enum u8 {
 
 WATER :: bit_set[Surface]{.Lake, .Sea}
 
-// The world's images are defined from img_base_index up to WORLD_IMAGES_MAX more, so call this before sprites_load.
-// The terrain comes from a scenario, with world_load.
-world_init :: proc(img_base_index: gfx.Image_Id) {
+// Defines the world's images, so call this before sprites_load. The terrain comes from a scenario, with world_load.
+world_init :: proc() {
 	camera_init()
-
-	WORLD.image_base = img_base_index
-	for variants, mark in TERRAIN_MARK_IMAGES {
-		for name, variant in variants {
-			if name == "" do continue
-			gfx.sprites_image_define(world_mark_image(mark, variant), name)
-		}
-	}
 	map_draw_init()
 }
 

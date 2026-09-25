@@ -24,8 +24,10 @@ Sprite_Id :: distinct u16
 // The atlas: every font and image, loaded once by sprites_load
 @(private = "file")
 SPRITES: struct {
-	fonts:   [FONTS_MAX]Font_Desc,
-	images:  [IMAGES_MAX]Image_Desc,
+	// In id order: a font's id is its index
+	fonts:   [dynamic; FONTS_MAX]Font_Desc,
+	// In id order: an image's id is its index
+	images:  [dynamic; IMAGES_MAX]Image_Desc,
 	regions: [SPRITES_MAX]Sprite_Region,
 	glyphs:  [SPRITES_MAX]Sprite_Glyph,
 	// Set by sprites_load; everything that reads the atlas needs it first
@@ -97,23 +99,32 @@ Sprite_Load_Workspace :: struct {
 	max_texture_size: int,
 }
 
-// Defines printable ASCII by default. The codepoint table can be edited before loading.
-sprites_font_define :: proc(id: Font_Id, name: string, size: u16) {
-	if id < FONTS_MAX {
-		font := &SPRITES.fonts[id]
-		assert(len(font.name) == 0)
-		font.name = name
-		font.size = size
-		for codepoint in 32 ..< 127 {
-			font.codepoints[codepoint - 32] = rune(codepoint)
-		}
+// Defines a font, to be loaded by sprites_load, and returns its id. Defines printable ASCII by default; the codepoint
+// table can be edited before loading.
+sprites_font_add :: proc(name: string, size: u16) -> Font_Id {
+	assert(!SPRITES.loaded, "fonts are defined before sprites_load")
+	assert(name != "")
+	assert(len(SPRITES.fonts) < FONTS_MAX)
+	id := Font_Id(len(SPRITES.fonts))
+	font := Font_Desc {
+		name = name,
+		size = size,
 	}
+	for codepoint in 32 ..< 127 {
+		font.codepoints[codepoint - 32] = rune(codepoint)
+	}
+	append(&SPRITES.fonts, font)
+	return id
 }
 
-sprites_image_define :: proc(id: Image_Id, name: string) {
-	SPRITES.images[id] = {
-		name = name,
-	}
+// Defines an image, to be loaded by sprites_load, and returns its id.
+sprites_image_add :: proc(name: string) -> Image_Id {
+	assert(!SPRITES.loaded, "images are defined before sprites_load")
+	assert(name != "")
+	assert(len(SPRITES.images) < IMAGES_MAX)
+	id := Image_Id(len(SPRITES.images))
+	append(&SPRITES.images, Image_Desc{name = name})
+	return id
 }
 
 // Startup load. Only derived metrics/regions and GPU textures survive a temp reset.
@@ -128,8 +139,7 @@ sprites_load :: proc(renderer: ^Renderer, pixel_density: f32) {
 	mem.zero_slice(SPRITES.regions[:])
 	mem.zero_slice(SPRITES.glyphs[IMAGES_MAX:])
 
-	for image, image_index in SPRITES.images {
-		if image.name == "" {continue}
+	for image, image_index in SPRITES.images[:] {
 		assert(int(image.atlas) < ATLAS_MAX)
 		filename := fmt.tprintf("assets/gfx/%v.png", image.name)
 		file_data, err := os.read_entire_file(filename, context.temp_allocator)
@@ -177,10 +187,9 @@ sprites_load :: proc(renderer: ^Renderer, pixel_density: f32) {
 	}
 
 	max_glyph_pixels := 0
-	for &desc, font_index in SPRITES.fonts {
+	for &desc, font_index in SPRITES.fonts[:] {
 		slice.sort(desc.codepoints[:])
 		desc.info = {}
-		if desc.name == "" {continue}
 		assert(int(desc.atlas) < ATLAS_MAX)
 		if desc.size == 0 {continue}
 		path := fmt.tprintf("assets/fonts/%s.ttf", desc.name)
@@ -421,13 +430,13 @@ font_size :: proc(font: Font_Id) -> f32 {
 }
 
 sprite_of_image :: proc(image: Image_Id) -> Sprite_Id {
-	assert(int(image) < IMAGES_MAX)
+	assert(int(image) < len(SPRITES.images))
 	return Sprite_Id(image)
 }
 
 sprite_of_glyph :: proc(font: Font_Id, ch: rune) -> (sprite: Sprite_Id, ok: bool) #optional_ok {
 	assert(SPRITES.loaded, "sprites_load comes first")
-	assert(int(font) < FONTS_MAX)
+	assert(int(font) < len(SPRITES.fonts))
 	index, found := slice.binary_search(SPRITES.fonts[font].codepoints[:], ch)
 	if !found {
 		return {}, false

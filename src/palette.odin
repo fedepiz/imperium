@@ -81,7 +81,7 @@ palette_build :: proc(p: ^Palette, input: Input) {
 	}
 
 	// Everything in the palette is in the small font, one and a half lines of it tall.
-	small := gfx.Font_Id(Font_Name.Small)
+	small := GLOBAL.fonts[.Small]
 	ui_style_push({font = small, height = ui_px(1.5 * gfx.font_size(small))})
 	defer ui_style_pop()
 

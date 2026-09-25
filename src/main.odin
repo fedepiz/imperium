@@ -13,6 +13,8 @@ GLOBAL: struct {
 	input:       Input,
 	render_list: gfx.Render_List,
 	renderer:    gfx.Renderer,
+	fonts:       [Font_Name]gfx.Font_Id,
+	images:      [Image_Name]gfx.Image_Id,
 }
 
 Font_Name :: enum {
@@ -58,18 +60,20 @@ main :: proc() {
 	if pixel_density <= 0 do pixel_density = 1
 
 	font_file := "aniron" //MeathFLF"
-	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Default), font_file, 26)
-	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Heading), font_file, 34)
-	gfx.sprites_font_define(gfx.Font_Id(Font_Name.Small), font_file, 18)
-	gfx.sprites_image_define(gfx.Image_Id(Image_Name.Logo), "logo")
-	// The world's images follow main's own, and must be defined before the atlas loads.
-	game.world_init(gfx.Image_Id(len(Image_Name)))
+	GLOBAL.fonts = {
+		.Default = gfx.sprites_font_add(font_file, 26),
+		.Heading = gfx.sprites_font_add(font_file, 34),
+		.Small   = gfx.sprites_font_add(font_file, 18),
+	}
+	MIDNIGHT_HEADING.font = GLOBAL.fonts[.Heading]
+	GLOBAL.images[.Logo] = gfx.sprites_image_add("logo")
+	game.world_init()
 	if !game.world_load("assets/scenarios/roman") {
 		fmt.eprintln("The scenario did not load; the world is all water.")
 	}
 	gfx.sprites_load(renderer, pixel_density)
 	renderer.pixel_density = pixel_density
-	ui_init()
+	ui_init(GLOBAL.fonts[.Default])
 
 	// Seconds the display shows each frame for, or 0 when unknown
 	refresh_period := display_refresh_period(window)
@@ -314,7 +318,8 @@ MIDNIGHT_PRIMARY :: [4]f32{0.23, 0.39, 0.61, 1}
 MIDNIGHT_DANGER :: [4]f32{0.48, 0.15, 0.19, 1}
 // Text drawn on the saturated primary and danger fills
 MIDNIGHT_TEXT_ON_FILL :: [4]f32{1, 1, 1, 1}
-// Styles holding a Ui_Size are not compile-time constants, so they are globals; treat them as read-only.
+// Styles holding a Ui_Size are not compile-time constants, so they are globals; treat them as read-only once main has
+// set them up.
 MIDNIGHT_PANEL_STYLE := Ui_Style {
 	width      = Ui_Size{.Fit, 0, 1},
 	height     = Ui_Size{.Fit, 0, 1},
@@ -323,8 +328,8 @@ MIDNIGHT_PANEL_STYLE := Ui_Style {
 	background = MIDNIGHT_PANEL,
 }
 
+// Its font is the heading font, set by main once the fonts are defined
 MIDNIGHT_HEADING := Ui_Style {
-	font       = gfx.Font_Id(Font_Name.Heading),
 	height     = Ui_Size{.Text, 0, 1},
 	text_color = MIDNIGHT_GOLD,
 }
@@ -400,7 +405,7 @@ demo_build :: proc(demo: ^Demo_Ui) {
 				ui_label_text(
 					{
 						{text = "Ut enim "},
-						{image = gfx.Image_Id(Image_Name.Logo)},
+						{image = GLOBAL.images[.Logo]},
 						{text = " ad minim "},
 						{text = "veniam", color = MIDNIGHT_GOLD},
 						{text = "."},

@@ -20,6 +20,9 @@ Map_Draw :: struct {
 	marks:            [dynamic; MARKS_MAX]Mark,
 	// How the marks are scattered
 	placement:        Mark_Placement,
+	// Each mark's drawings, defined by map_draw_init: the first mark_variants[mark] of them
+	mark_images:      [Terrain_Mark][TERRAIN_MARK_VARIANTS]gfx.Image_Id,
+	mark_variants:    [Terrain_Mark]u8,
 	// What the map pass draws
 	render_terrain:   gfx.Render_Terrain,
 	render_list:      gfx.Render_List,
@@ -36,6 +39,61 @@ Mark :: struct {
 	variant: u8,
 	// Opacity, up to max(u8): sea marks fade with distance from the shore.
 	alpha:   u8,
+}
+
+// The drawings a mark can be, each with up to TERRAIN_MARK_VARIANTS variants. Where each is placed is up to
+// Mark_Placement.
+Terrain_Mark :: enum {
+	Conifer,
+	Broadleaf,
+	Cypress,
+	Palm,
+	Molehill,
+	Mountain,
+	Sea_Mark,
+	// Steppe grass
+	Tuft,
+	Marsh,
+	Dune,
+}
+
+// Each mark has up to this many drawings, so the scatter does not look stamped
+TERRAIN_MARK_VARIANTS :: 4
+
+// The drawings of each mark, under assets/gfx; the named variants come first, and an empty name is a variant the
+// mark does not have.
+@(private = "file")
+TERRAIN_MARK_IMAGES := [Terrain_Mark][TERRAIN_MARK_VARIANTS]string {
+	.Conifer   = {
+		"terrain/conifer_0",
+		"terrain/conifer_1",
+		"terrain/conifer_2",
+		"terrain/conifer_3",
+	},
+	.Broadleaf = {
+		"terrain/broadleaf_0",
+		"terrain/broadleaf_1",
+		"terrain/broadleaf_2",
+		"terrain/broadleaf_3",
+	},
+	.Cypress   = {
+		"terrain/cypress_0",
+		"terrain/cypress_1",
+		"terrain/cypress_2",
+		"terrain/cypress_3",
+	},
+	.Palm      = {"terrain/palm_0", "terrain/palm_1", "terrain/palm_2", "terrain/palm_3"},
+	.Molehill  = {"terrain/hill_0", "terrain/hill_1", "terrain/hill_2", "terrain/hill_3"},
+	.Mountain  = {
+		"terrain/mountain_0",
+		"terrain/mountain_1",
+		"terrain/mountain_2",
+		"terrain/mountain_3",
+	},
+	.Sea_Mark  = {"terrain/sea_0", "terrain/sea_1", "", ""},
+	.Tuft      = {"terrain/tuft_0", "terrain/tuft_1", "terrain/tuft_2", "terrain/tuft_3"},
+	.Marsh     = {"terrain/marsh_0", "terrain/marsh_1", "terrain/marsh_2", "terrain/marsh_3"},
+	.Dune      = {"terrain/dune_0", "terrain/dune_1", "terrain/dune_2", "terrain/dune_3"},
 }
 
 // What covers a cell. Each land cell has one cover, and how strongly it has it; Open land has none.
@@ -154,8 +212,16 @@ TREE_MARKS := [Tree_Kind]Terrain_Mark {
 	.Broadleaf = .Broadleaf,
 }
 
-// Sets how the map is drawn.
+// Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
 map_draw_init :: proc() {
+	for names, mark in TERRAIN_MARK_IMAGES {
+		for name, variant in names {
+			if name == "" do break
+			WORLD.map_draw.mark_images[mark][variant] = gfx.sprites_image_add(name)
+			WORLD.map_draw.mark_variants[mark] += 1
+		}
+	}
+
 	WORLD.map_draw.render_terrain.style = {
 		paper       = {0.933, 0.878, 0.753, 1},
 		paper_stain = {0.847, 0.761, 0.588, 1},
@@ -694,7 +760,7 @@ scatter_marks :: proc() {
 					if linalg.length(offset) < mark.width * pl.river_clearance do continue
 				}
 				mark.variant = u8(
-					random(col, row, stream + 3) * f32(world_mark_variants(mark.mark)),
+					random(col, row, stream + 3) * f32(WORLD.map_draw.mark_variants[mark.mark]),
 				)
 
 				// A full table keeps what it has; the marks are still sorted below.
@@ -783,7 +849,7 @@ draw_marks :: proc(viewport: [2]f32) {
 		1,
 	)
 	for mark in WORLD.map_draw.marks[:] {
-		image := world_mark_image(mark.mark, int(mark.variant))
+		image := WORLD.map_draw.mark_images[mark.mark][mark.variant]
 		source := gfx.sprite_region(gfx.sprite_of_image(image)).source
 		if source.z <= 0 do continue
 		// The drawing keeps its proportions and is centred on the mark.

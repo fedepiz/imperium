@@ -29,6 +29,8 @@ UI: struct {
 	// This box contains all the overlay stuff, such as the tooltip
 	overlay:           Ui_Id,
 	viewport:          [2]f32,
+	// The base style's font, set by ui_init
+	font:              gfx.Font_Id,
 	// Key -> Id hashmap
 	key_hash_table:    Ui_Key_Hashtable,
 	// Parent stack
@@ -261,7 +263,7 @@ ui_px :: proc(value: f32, strictness: f32 = 1) -> Ui_Size {
 
 // Pixels in multiples of the current font's size, resolved when called.
 ui_em :: proc(value: f32, strictness: f32 = 1) -> Ui_Size {
-	font := ui_style_top().font.? or_else gfx.Font_Id(0)
+	font := ui_style_top().font.? or_else UI.font
 	return ui_px(value * gfx.font_size(font), strictness)
 }
 
@@ -454,8 +456,10 @@ ui_box_set_text :: proc(box: ^Ui_Box, parts: []Ui_Text) {
 	box.text = gfx.text_end()
 }
 
-ui_init :: proc() {
+// font is the base style's: what boxes use unless a font is pushed.
+ui_init :: proc(font: gfx.Font_Id) {
 	UI = {}
+	UI.font = font
 }
 
 ui_begin :: proc(viewport: [2]f32) {
@@ -1184,7 +1188,7 @@ UI_SCROLL_PANE :: "scroll pane"
 // The look of every box unless pushed or overridden: pushed at the bottom of the stack in ui_begin.
 @(private = "file")
 ui_style_base :: proc() -> Ui_Style {
-	font := gfx.Font_Id(0)
+	font := UI.font
 	em := gfx.font_size(font)
 	return {
 		width = ui_px(10 * em),
