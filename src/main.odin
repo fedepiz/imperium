@@ -40,7 +40,12 @@ main :: proc() {
 	if !render_flags_ok {
 		return
 	}
-	window := sdl.CreateWindow("Imperium", 1600, 900, render_flags + {.HIGH_PIXEL_DENSITY, .RESIZABLE})
+	window := sdl.CreateWindow(
+		"Imperium",
+		1600,
+		900,
+		render_flags + {.HIGH_PIXEL_DENSITY, .RESIZABLE},
+	)
 	if window == nil {
 		fmt.eprintf("Window creation failed: %s\n", sdl.GetError())
 		return
@@ -175,7 +180,12 @@ main :: proc() {
 		}
 		demo.enabled = tweak.toggle("Demo.UI", "Shown", demo.enabled)
 
-		game.world_tick(game_input(GLOBAL.input, {f32(logical_width), f32(logical_height)}), dt)
+		// Texts last one frame; the world writes names before the ui builds its texts.
+		gfx.text_begin()
+		{
+			viewport: [2]f32 = {f32(logical_width), f32(logical_height)}
+			game.world_tick(game_input(GLOBAL.input, viewport, pixel_density), dt)
+		}
 		// Tab steps through the map and the raw terrain properties.
 		if key_is_pressed(GLOBAL.input, .TAB) && !ui_keyboard_captured() {
 			debug := &game.WORLD.map_draw.render_terrain.debug_mode
@@ -192,7 +202,6 @@ main :: proc() {
 				pixel_density,
 			)
 
-			gfx.text_begin()
 			ui_begin({f32(logical_width), f32(logical_height)})
 			if demo.enabled do demo_build(&demo)
 			palette_build(&palette, GLOBAL.input)
@@ -200,16 +209,20 @@ main :: proc() {
 		}
 
 		renderer.view_size = {f32(logical_width), f32(logical_height)}
-		if gfx.render_frame_begin(renderer, {MIDNIGHT_BACKGROUND.r, MIDNIGHT_BACKGROUND.g, MIDNIGHT_BACKGROUND.b, 1}) {
+		if gfx.render_frame_begin(
+			renderer,
+			{MIDNIGHT_BACKGROUND.r, MIDNIGHT_BACKGROUND.g, MIDNIGHT_BACKGROUND.b, 1},
+		) {
 			gfx.render_terrain(renderer, &game.WORLD.map_draw.render_terrain)
 			gfx.render_list(renderer, &game.WORLD.map_draw.render_list)
+			gfx.render_list(renderer, &game.WORLD.pawns.render_list)
 			gfx.render_list(renderer, &GLOBAL.render_list)
 			gfx.render_frame_end(renderer)
 		}
 	}
 }
 
-game_input :: proc(input: Input, viewport: [2]f32) -> game.Input {
+game_input :: proc(input: Input, viewport: [2]f32, pixel_density: f32) -> game.Input {
 	pan: [2]f32
 	if !ui_keyboard_captured() {
 		if key_is_down(input, .A) || key_is_down(input, .LEFT) do pan.x -= 1
@@ -219,6 +232,7 @@ game_input :: proc(input: Input, viewport: [2]f32) -> game.Input {
 	}
 	return {
 		viewport = viewport,
+		pixel_density = pixel_density,
 		cursor = input.pos,
 		on_map = bool(input.pos_is_valid) && !ui_hovered_any(),
 		grab = button_is_down(input, sdl.BUTTON_LEFT),

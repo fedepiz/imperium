@@ -12,30 +12,30 @@ import "../tweak"
 
 // What the map is drawn from: everything worked out from the world's terrain for the map pass and the marks over it
 Map_Draw :: struct {
-	// Bumped whenever the terrain changes, so what is derived from it can be rebuilt
-	terrain_revision: u32,
 	// What covers each cell, worked out from the terrain whenever it changes
-	cover:            [CELLS_MAX]Cover_Cell,
+	cover:          [CELLS_MAX]Cover_Cell,
 	// The marks scattered over the terrain, by where they stand, top to bottom, so nearer marks overlap farther ones.
 	// Every drawing but the sea marks stands on its bottom edge.
-	marks:            [dynamic; MARKS_MAX]Mark,
+	marks:          [dynamic; MARKS_MAX]Mark,
 	// How the marks are scattered
-	placement:        Mark_Placement,
+	placement:      Mark_Placement,
 	// Each mark's drawings, defined by map_draw_init: the first mark_variants[mark] of them
-	mark_images:      [Terrain_Mark][TERRAIN_MARK_VARIANTS]gfx.Image_Id,
-	mark_variants:    [Terrain_Mark]u8,
+	mark_images:    [Terrain_Mark][TERRAIN_MARK_VARIANTS]gfx.Image_Id,
+	mark_variants:  [Terrain_Mark]u8,
 	// What the map pass draws
-	render_terrain:   gfx.Render_Terrain,
-	render_list:      gfx.Render_List,
+	render_terrain: gfx.Render_Terrain,
+	render_list:    gfx.Render_List,
 }
 
 // Enough marks for a full world at the densities map_draw_init sets
 MARKS_MAX :: 1 << 17
 
-// One drawing on the map: where its middle sits, in cells, and how wide it is, in cells.
+// One drawing on the map: where its middle sits, in cells, and how wide and tall it is, in cells.
 Mark :: struct {
 	pos:     [2]f32,
 	width:   f32,
+	// Given by its drawing's proportions once its width is set
+	height:  f32,
 	mark:    Terrain_Mark,
 	variant: u8,
 	// Opacity, up to max(u8): sea marks fade with distance from the shore.
@@ -232,16 +232,16 @@ TREE_MARKS := [Tree_Kind]Terrain_Mark {
 }
 
 // Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
-map_draw_init :: proc() {
+map_draw_init :: proc(md: ^Map_Draw) {
 	for names, mark in TERRAIN_MARK_IMAGES {
 		for name, variant in names {
 			if name == "" do break
-			WORLD.map_draw.mark_images[mark][variant] = gfx.sprites_image_add(name)
-			WORLD.map_draw.mark_variants[mark] += 1
+			md.mark_images[mark][variant] = gfx.sprites_image_add(name)
+			md.mark_variants[mark] += 1
 		}
 	}
 
-	WORLD.map_draw.render_terrain.style = {
+	md.render_terrain.style = {
 		paper              = {0.933, 0.878, 0.753, 1},
 		paper_stain        = {0.847, 0.761, 0.588, 1},
 		paper_stain_amount = 0.60,
@@ -255,9 +255,9 @@ map_draw_init :: proc() {
 		wobble             = 0.3,
 		river_width        = 10.,
 	}
-	WORLD.map_draw.render_terrain.cover.jitter = 0.8
+	md.render_terrain.cover.jitter = 0.8
 
-	WORLD.map_draw.placement = {
+	md.placement = {
 		spacing = {
 			.Tree = 2.1,
 			.Molehill = 3.84,
@@ -334,17 +334,17 @@ TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture
 
 // Keeps the map's drawing in step with the world: the terrain when it changes, the marks when their placement does, and
 // the marks in view every frame.
-map_draw_tick :: proc(viewport: [2]f32) {
+map_draw_tick :: proc(md: ^Map_Draw, atlas: ^Atlas, camera: Camera, viewport: [2]f32, pixel_density: f32) {
 	placement_changed: bool
 
 	if tweak.is_open() {
-		view := &WORLD.map_draw.render_terrain.debug_mode
+		view := &md.render_terrain.debug_mode
 		view^ = gfx.Render_Terrain_Debug(
 			tweak.choice("Render/Terrain view", int(view^), TERRAIN_VIEW_NAMES),
 		)
 
 		{
-			style := &WORLD.map_draw.render_terrain.style
+			style := &md.render_terrain.style
 			tweak.slider("Render/Paper stain", &style.paper_stain_amount, 0, 2)
 			tweak.slider("Render/Sea Colour/Red", &style.sea_deep.r, 0, 1)
 			tweak.slider("Render/Sea Colour/Green", &style.sea_deep.g, 0, 1)
@@ -352,20 +352,19 @@ map_draw_tick :: proc(viewport: [2]f32) {
 			tweak.slider("Render/Sea Colour/Depth/From", &style.sea_depth_from, 0, 20)
 			tweak.slider("Render/Sea Colour/Depth/Full", &style.sea_depth_full, 0, 80)
 		}
-		placement_changed = tweak_placement()
+		placement_changed = tweak_placement(&md.placement)
 	}
 
-	update_render_terrain()
+	update_render_terrain(md, atlas, camera)
 	if placement_changed {
-		scatter_marks()
+		scatter_marks(md, atlas.terrain[:])
 	}
-	draw_marks(viewport)
+	draw_marks(md, camera, viewport, pixel_density)
 }
 
 // Declares a tweak for every value of the mark placement, and says whether one changed it.
 @(private = "file")
-tweak_placement :: proc() -> (changed: bool) {
-	pl := &WORLD.map_draw.placement
+tweak_placement :: proc(pl: ^Mark_Placement) -> (changed: bool) {
 	before := pl^
 	for family in Mark_Family {
 		tweak.slider(fmt.tprintf("Marks/%v/Spacing", family), &pl.spacing[family], 1, 20)
@@ -447,21 +446,22 @@ tweak_ramp :: proc(label: string, r: ^Ramp, lo, hi: f32) {
 // Keeps the map pass in step with the world: the camera every frame; the cells, coast, rivers, covers and marks when
 // the terrain has changed.
 @(private = "file")
-update_render_terrain :: proc() {
-	rt := &WORLD.map_draw.render_terrain
-	rt.center = WORLD.camera.center
-	rt.zoom = WORLD.camera.zoom
-	if rt.revision == WORLD.map_draw.terrain_revision {
+update_render_terrain :: proc(md: ^Map_Draw, atlas: ^Atlas, camera: Camera) {
+	rt := &md.render_terrain
+	rt.center = camera.center
+	rt.zoom = camera.zoom
+	if rt.revision == atlas.revision {
 		return
 	}
-	rt.revision = WORLD.map_draw.terrain_revision
+	rt.revision = atlas.revision
+	terrain := atlas.terrain[:]
 
-	for terrain, i in WORLD.atlas.terrain {
+	for cell, i in terrain {
 		rt.cells[i] = {
-			u8(terrain.surface) * 85,
-			terrain.elevation,
-			terrain.trees,
-			terrain.moisture,
+			u8(cell.surface) * 85,
+			cell.elevation,
+			cell.trees,
+			cell.moisture,
 		}
 	}
 
@@ -469,9 +469,9 @@ update_render_terrain :: proc() {
 	// the offset to its nearest point, and each cell near the coast which side of it it lies on.
 	lines := &POLYLINES
 	polylines_clear(lines)
-	trace_rivers(lines)
+	trace_rivers(lines, terrain)
 	rivers := len(lines.runs)
-	trace_coasts(lines)
+	trace_coasts(lines, terrain)
 	polylines_smooth(lines)
 
 	for &offset in rt.river do offset = gfx.RENDER_RIVER_FAR
@@ -488,10 +488,10 @@ update_render_terrain :: proc() {
 	// cell to cell, half a cell at the cells either side of the coast, the two blending over the last cell of reach.
 	to_water := make([]f32, CELLS_MAX, context.temp_allocator)
 	to_land := make([]f32, CELLS_MAX, context.temp_allocator)
-	distance_to(to_water, true)
-	distance_to(to_land, false)
-	for terrain, i in WORLD.atlas.terrain {
-		water := terrain.surface in WATER
+	distance_to(to_water, terrain, true)
+	distance_to(to_land, terrain, false)
+	for cell, i in terrain {
+		water := cell.surface in WATER
 		far := water ? -(to_land[i] - 0.5) : to_water[i] - 0.5
 		near := linalg.length(to_coast[i])
 		// Away from the line, the cell itself says which side it is on.
@@ -503,9 +503,9 @@ update_render_terrain :: proc() {
 		)
 	}
 
-	land := measure_land()
-	classify_cover(&land)
-	scatter_marks()
+	land := measure_land(terrain)
+	classify_cover(md, terrain, &land)
+	scatter_marks(md, terrain)
 }
 
 // What the terrain does not hold but covers and marks need, worked out whenever it changes, in the temp allocator:
@@ -522,8 +522,7 @@ Land :: struct {
 BASIN_REACH :: 24
 
 @(private = "file")
-measure_land :: proc() -> (land: Land) {
-	terrain := &WORLD.atlas.terrain
+measure_land :: proc(terrain: []Terrain) -> (land: Land) {
 	is_river := make([]bool, CELLS_MAX, context.temp_allocator)
 	is_sea := make([]bool, CELLS_MAX, context.temp_allocator)
 	for cell, i in terrain {
@@ -601,8 +600,8 @@ Place :: struct {
 }
 
 @(private = "file")
-place_of :: proc(i: int) -> Place {
-	cell := WORLD.atlas.terrain[i]
+place_of :: proc(terrain: []Terrain, i: int) -> Place {
+	cell := terrain[i]
 	return {
 		elevation = f32(cell.elevation) / f32(max(u8)),
 		trees = f32(cell.trees) / f32(max(u8)),
@@ -613,10 +612,10 @@ place_of :: proc(i: int) -> Place {
 
 // Gives every cell its cover, and hands the covers to the map to draw.
 @(private = "file")
-classify_cover :: proc(land: ^Land) {
-	layer := &WORLD.map_draw.render_terrain.cover
-	for &cell, i in WORLD.map_draw.cover {
-		cell = cover_of(land, i)
+classify_cover :: proc(md: ^Map_Draw, terrain: []Terrain, land: ^Land) {
+	layer := &md.render_terrain.cover
+	for &cell, i in md.cover {
+		cell = cover_of(terrain, &md.placement, land, i)
 		layer.cells[i] = {u8(cell.cover), cell.strength}
 	}
 	for look, cover in COVER_LOOKS do layer.palette[cover] = look
@@ -630,9 +629,9 @@ classify_cover :: proc(land: ^Land) {
 // mountains' placement, so it lies where they stand, and wins over forest, desert and steppe where they are at their
 // fullest.
 @(private = "file")
-cover_of :: proc(land: ^Land, i: int) -> (best: Cover_Cell) {
-	if WORLD.atlas.terrain[i].surface in WATER do return
-	p := place_of(i)
+cover_of :: proc(terrain: []Terrain, pl: ^Mark_Placement, land: ^Land, i: int) -> (best: Cover_Cell) {
+	if terrain[i].surface in WATER do return
+	p := place_of(terrain, i)
 	low := ramp(0.22, 0.12, p.elevation)
 	delta := ramp(6, 2, land.to_river[i]) * ramp(16, 6, land.to_sea[i])
 	dry_river := ramp(0.62, 0.52, p.moisture) * ramp(5, 1.5, land.to_river[i])
@@ -647,7 +646,7 @@ cover_of :: proc(land: ^Land, i: int) -> (best: Cover_Cell) {
 		.Steppe   = ramp(0.40, 0.47, p.moisture) * ramp(0.58, 0.48, p.moisture),
 		.Fertile  = 1.3 * max(dry_river, valley),
 		.Marsh    = 1.5 * low * max(delta, ramp(0.80, 0.88, p.moisture)),
-		.Highland = 1.2 * ramp(WORLD.map_draw.placement.mountain.elevation, p.elevation),
+		.Highland = 1.2 * ramp(pl.mountain.elevation, p.elevation),
 		.Fields   = 0.6 * ramp(0.52, 0.62, p.moisture) * ramp(0.3, 0.1, p.trees),
 	}
 	most: f32
@@ -680,45 +679,45 @@ POLYLINES: Polylines
 // Traces the river cells into lines through the middles of their cells. Lines run between ends and forks, so rivers
 // meet where they join; what is left over are closed loops.
 @(private = "file")
-trace_rivers :: proc(lines: ^Polylines) {
+trace_rivers :: proc(lines: ^Polylines, terrain: []Terrain) {
 	visited := make([]bool, CELLS_MAX, context.temp_allocator)
 	for i in 0 ..< CELLS_MAX {
-		if WORLD.atlas.terrain[i].surface != .River do continue
+		if terrain[i].surface != .River do continue
 		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
 		next: [8][2]int
-		count := river_next(cell, &next)
+		count := river_next(terrain, cell, &next)
 		if count == 2 do continue
 		// Every line from this end or fork, unless it has been traced from its other end
 		for n in next[:count] {
 			j := n.y * WORLD_WIDTH + n.x
 			if visited[j] do continue
-			if river_next(n, &{}) != 2 && j < i do continue
-			river_follow(lines, visited, cell, n)
+			if river_next(terrain, n, &{}) != 2 && j < i do continue
+			river_follow(lines, terrain, visited, cell, n)
 		}
 	}
 	for i in 0 ..< CELLS_MAX {
-		if WORLD.atlas.terrain[i].surface != .River || visited[i] do continue
+		if terrain[i].surface != .River || visited[i] do continue
 		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
 		next: [8][2]int
-		if river_next(cell, &next) != 2 do continue
+		if river_next(terrain, cell, &next) != 2 do continue
 		visited[i] = true
-		river_follow(lines, visited, cell, next[0])
+		river_follow(lines, terrain, visited, cell, next[0])
 	}
 }
 
 // The river cells a river cell leads to: those beside it, and those diagonal to it that are not already reached
 // through one beside it, so a river one cell wide has two.
 @(private = "file")
-river_next :: proc(cell: [2]int, out: ^[8][2]int) -> (count: int) {
-	is_river :: proc(x, y: int) -> bool {
+river_next :: proc(terrain: []Terrain, cell: [2]int, out: ^[8][2]int) -> (count: int) {
+	is_river :: proc(terrain: []Terrain, x, y: int) -> bool {
 		if x < 0 || y < 0 || x >= WORLD_WIDTH || y >= WORLD_HEIGHT do return false
-		return WORLD.atlas.terrain[y * WORLD_WIDTH + x].surface == .River
+		return terrain[y * WORLD_WIDTH + x].surface == .River
 	}
 	for dy in -1 ..= 1 {
 		for dx in -1 ..= 1 {
 			if dx == 0 && dy == 0 do continue
-			if !is_river(cell.x + dx, cell.y + dy) do continue
-			if dx != 0 && dy != 0 && (is_river(cell.x + dx, cell.y) || is_river(cell.x, cell.y + dy)) do continue
+			if !is_river(terrain, cell.x + dx, cell.y + dy) do continue
+			if dx != 0 && dy != 0 && (is_river(terrain, cell.x + dx, cell.y) || is_river(terrain, cell.x, cell.y + dy)) do continue
 			out[count] = cell + {dx, dy}
 			count += 1
 		}
@@ -729,32 +728,32 @@ river_next :: proc(cell: [2]int, out: ^[8][2]int) -> (count: int) {
 // Walks a river from cell through next until it reaches an end, a fork, or a cell already walked, through the middle
 // of every cell on the way. A river that ends by the sea or a lake is carried on to the shore.
 @(private = "file")
-river_follow :: proc(lines: ^Polylines, visited: []bool, cell, next: [2]int) {
+river_follow :: proc(lines: ^Polylines, terrain: []Terrain, visited: []bool, cell, next: [2]int) {
 	middle :: proc(cell: [2]int) -> [2]f32 {return {f32(cell.x), f32(cell.y)} + 0.5}
-	river_mouth(lines, cell)
+	river_mouth(lines, terrain, cell)
 	polylines_add(lines, middle(cell))
 	prev, cur := cell, next
 	for {
 		polylines_add(lines, middle(cur))
 		i := cur.y * WORLD_WIDTH + cur.x
 		ahead: [8][2]int
-		if river_next(cur, &ahead) != 2 || visited[i] do break
+		if river_next(terrain, cur, &ahead) != 2 || visited[i] do break
 		visited[i] = true
 		prev, cur = cur, ahead[0] == prev ? ahead[1] : ahead[0]
 	}
-	river_mouth(lines, cur)
+	river_mouth(lines, terrain, cur)
 	polylines_end(lines, false, RIVER_SMOOTHING)
 }
 
 // If the river ends at cell and cell touches water, a point most of the way into the water.
 @(private = "file")
-river_mouth :: proc(lines: ^Polylines, cell: [2]int) {
-	if river_next(cell, &{}) != 1 do return
+river_mouth :: proc(lines: ^Polylines, terrain: []Terrain, cell: [2]int) {
+	if river_next(terrain, cell, &{}) != 1 do return
 	for dy in -1 ..= 1 {
 		for dx in -1 ..= 1 {
 			x, y := cell.x + dx, cell.y + dy
 			if x < 0 || y < 0 || x >= WORLD_WIDTH || y >= WORLD_HEIGHT do continue
-			if WORLD.atlas.terrain[y * WORLD_WIDTH + x].surface in WATER {
+			if terrain[y * WORLD_WIDTH + x].surface in WATER {
 				polylines_add(
 					lines,
 					[2]f32{f32(cell.x), f32(cell.y)} + 0.5 + [2]f32{f32(dx), f32(dy)} * 0.75,
@@ -768,7 +767,7 @@ river_mouth :: proc(lines: ^Polylines, cell: [2]int) {
 // Traces the coasts: the edges between land and water cells, joined corner to corner into lines with the land on
 // their left. A coast that runs off the map ends there; the rest close.
 @(private = "file")
-trace_coasts :: proc(lines: ^Polylines) {
+trace_coasts :: proc(lines: ^Polylines, terrain: []Terrain) {
 	// Corners are numbered y * (WORLD_WIDTH + 1) + x. From each leave up to two edges, one step east, south, west or
 	// north (see COAST_STEPS); two only where land and water meet across a corner.
 	CORNERS :: (WORLD_WIDTH + 1) * (WORLD_HEIGHT + 1)
@@ -783,17 +782,17 @@ trace_coasts :: proc(lines: ^Polylines) {
 		step := COAST_STEPS[direction]
 		arriving[corner(x + step.x, y + step.y)] += 1
 	}
-	is_water :: proc(x, y: int) -> bool {return(
-			WORLD.atlas.terrain[y * WORLD_WIDTH + x].surface in
+	is_water :: proc(terrain: []Terrain, x, y: int) -> bool {return(
+			terrain[y * WORLD_WIDTH + x].surface in
 			WATER \
 		)}
 	for y in 0 ..< WORLD_HEIGHT {
 		for x in 0 ..< WORLD_WIDTH {
-			if is_water(x, y) do continue
-			if y > 0 && is_water(x, y - 1) do edge(leaving, count, arriving, x + 1, y, 2)
-			if y < WORLD_HEIGHT - 1 && is_water(x, y + 1) do edge(leaving, count, arriving, x, y + 1, 0)
-			if x > 0 && is_water(x - 1, y) do edge(leaving, count, arriving, x, y, 1)
-			if x < WORLD_WIDTH - 1 && is_water(x + 1, y) do edge(leaving, count, arriving, x + 1, y + 1, 3)
+			if is_water(terrain, x, y) do continue
+			if y > 0 && is_water(terrain, x, y - 1) do edge(leaving, count, arriving, x + 1, y, 2)
+			if y < WORLD_HEIGHT - 1 && is_water(terrain, x, y + 1) do edge(leaving, count, arriving, x, y + 1, 0)
+			if x > 0 && is_water(terrain, x - 1, y) do edge(leaving, count, arriving, x, y, 1)
+			if x < WORLD_WIDTH - 1 && is_water(terrain, x + 1, y) do edge(leaving, count, arriving, x + 1, y + 1, 3)
 		}
 	}
 
@@ -848,12 +847,12 @@ random :: proc(x, y: int, stream: u32) -> f32 {
 
 // Scatters every family's marks over the terrain, each family on its own jittered lattice: see Mark_Placement.
 @(private = "file")
-scatter_marks :: proc() {
-	clear(&WORLD.map_draw.marks)
-	pl := &WORLD.map_draw.placement
+scatter_marks :: proc(md: ^Map_Draw, terrain: []Terrain) {
+	clear(&md.marks)
+	pl := &md.placement
 	claimed := make([]u64, FOOTPRINT_BITS / 64, context.temp_allocator)
 	scatter: for family in SCATTER_ORDER {
-		first := len(WORLD.map_draw.marks)
+		first := len(md.marks)
 		spacing := pl.spacing[family]
 		rows := int(f32(WORLD_HEIGHT) / (spacing * pl.row_squash))
 		cols := int(f32(WORLD_WIDTH) / spacing)
@@ -875,7 +874,7 @@ scatter_marks :: proc() {
 				if cx < 0 || cy < 0 || cx >= WORLD_WIDTH || cy >= WORLD_HEIGHT do continue
 				i := cy * WORLD_WIDTH + cx
 
-				mark, chance := mark_at(family, i, random(col, row, stream + 6))
+				mark, chance := mark_at(md, terrain, family, i, random(col, row, stream + 6))
 				if random(col, row, stream + 5) >= chance do continue
 				mark.pos = {x, y}
 				mark.width *=
@@ -884,29 +883,33 @@ scatter_marks :: proc() {
 				// No mark sits on a river, so rivers stay in view.
 				if family != .Sea_Mark {
 					offset :=
-						WORLD.map_draw.render_terrain.river[i] -
+						md.render_terrain.river[i] -
 						([2]f32{x, y} - [2]f32{f32(cx), f32(cy)} - 0.5)
 					if linalg.length(offset) < mark.width * pl.river_clearance do continue
 				}
 				mark.variant = u8(
-					random(col, row, stream + 3) * f32(WORLD.map_draw.mark_variants[mark.mark]),
+					random(col, row, stream + 3) * f32(md.mark_variants[mark.mark]),
 				)
+				// A mark whose drawing is missing is never drawn, so it is not kept.
+				source := gfx.sprite_region(gfx.sprite_of_image(md.mark_images[mark.mark][mark.variant])).source
+				if source.z <= 0 do continue
+				mark.height = mark.width * source.w / source.z
 				// Nothing stands on ground an earlier family has claimed.
 				if footprint_claimed(claimed, {x, mark_foot(mark)}) do continue
 
 				// A full table keeps what it has; the marks are still sorted below.
-				if len(WORLD.map_draw.marks) == MARKS_MAX do break scatter
-				append(&WORLD.map_draw.marks, mark)
+				if len(md.marks) == MARKS_MAX do break scatter
+				append(&md.marks, mark)
 				if family in pl.claims_own do footprint_claim(claimed, mark, pl.footprint[family])
 			}
 		}
 		// Otherwise the family claims its ground once it is all down, so its own marks can still overlap.
 		if family not_in pl.claims_own {
-			for mark in WORLD.map_draw.marks[first:] do footprint_claim(claimed, mark, pl.footprint[family])
+			for mark in md.marks[first:] do footprint_claim(claimed, mark, pl.footprint[family])
 		}
 	}
 	slice.sort_by(
-		WORLD.map_draw.marks[:],
+		md.marks[:],
 		proc(a, b: Mark) -> bool {return mark_foot(a) < mark_foot(b)},
 	)
 }
@@ -914,11 +917,20 @@ scatter_marks :: proc() {
 // The chance a lattice point of family at cell i keeps its mark, and the mark: its drawing, how much wider than the
 // family's width it is, and its opacity. roll, from 0 to 1, picks between drawings. See Mark_Placement.
 @(private = "file")
-mark_at :: proc(family: Mark_Family, i: int, roll: f32) -> (mark: Mark, chance: f32) {
-	pl := &WORLD.map_draw.placement
-	p := place_of(i)
-	coast := WORLD.map_draw.render_terrain.coast[i]
-	cover := WORLD.map_draw.cover[i]
+mark_at :: proc(
+	md: ^Map_Draw,
+	terrain: []Terrain,
+	family: Mark_Family,
+	i: int,
+	roll: f32,
+) -> (
+	mark: Mark,
+	chance: f32,
+) {
+	pl := &md.placement
+	p := place_of(terrain, i)
+	coast := md.render_terrain.coast[i]
+	cover := md.cover[i]
 	mark.width, mark.alpha = 1, max(u8)
 	chance = ramp(pl.coast[family], coast)
 	if family in COVER_FAMILIES {
@@ -959,7 +971,7 @@ mark_at :: proc(family: Mark_Family, i: int, roll: f32) -> (mark: Mark, chance: 
 		// Lakes have none.
 		mark.mark = .Sea_Mark
 		fade := ramp(pl.sea.fade, coast)
-		if WORLD.atlas.terrain[i].surface != .Sea || fade < pl.sea.fade_min {
+		if terrain[i].surface != .Sea || fade < pl.sea.fade_min {
 			chance = 0
 			return
 		}
@@ -977,21 +989,19 @@ mark_at :: proc(family: Mark_Family, i: int, roll: f32) -> (mark: Mark, chance: 
 // Fills the world's render list with the marks in view. Marks are fixed in the world and scale with the map; marks
 // past the list's room are dropped.
 @(private = "file")
-draw_marks :: proc(viewport: [2]f32) {
-	camera := &WORLD.camera
+draw_marks :: proc(md: ^Map_Draw, camera: Camera, viewport: [2]f32, pixel_density: f32) {
 	draw: gfx.Draw_Ctx
 	gfx.draw_begin(
 		&draw,
-		&WORLD.map_draw.render_list,
-		span.from_array(&WORLD.map_draw.render_list.instances),
+		&md.render_list,
+		span.from_array(&md.render_list.instances),
 		{0, 0, viewport.x, viewport.y},
-		1,
+		pixel_density,
 	)
-	for mark in WORLD.map_draw.marks[:] {
+	for mark in md.marks[:] {
 		size := mark_size(mark) * camera.zoom
-		if size.x <= 0 do continue
 		// The drawing is centred on the mark.
-		image := WORLD.map_draw.mark_images[mark.mark][mark.variant]
+		image := md.mark_images[mark.mark][mark.variant]
 		center := (mark.pos - camera.center) * camera.zoom + viewport / 2
 		rect := [4]f32{center.x - size.x / 2, center.y - size.y / 2, size.x, size.y}
 		if rect.x > viewport.x || rect.y > viewport.y || rect.x + rect.z < 0 || rect.y + rect.w < 0 do continue
@@ -999,14 +1009,10 @@ draw_marks :: proc(viewport: [2]f32) {
 	}
 }
 
-// How big a mark is drawn, in cells: its width, and the height its drawing's proportions give it; zero when the
-// drawing is missing.
+// How big a mark is drawn, in cells
 @(private = "file")
 mark_size :: proc(mark: Mark) -> [2]f32 {
-	image := WORLD.map_draw.mark_images[mark.mark][mark.variant]
-	source := gfx.sprite_region(gfx.sprite_of_image(image)).source
-	if source.z <= 0 do return {}
-	return {mark.width, mark.width * source.w / source.z}
+	return {mark.width, mark.height}
 }
 
 // The families in the order they are scattered, each claiming ground from those after it: see Mark_Placement.footprint.
@@ -1062,9 +1068,9 @@ mark_foot :: proc(mark: Mark) -> f32 {
 
 // Euclidean distance from every cell to the nearest cell whose water matches.
 @(private = "file")
-distance_to :: proc(out: []f32, water: bool) {
+distance_to :: proc(out: []f32, terrain: []Terrain, water: bool) {
 	source := make([]bool, CELLS_MAX, context.temp_allocator)
-	for cell, i in WORLD.atlas.terrain do source[i] = (cell.surface in WATER) == water
+	for cell, i in terrain do source[i] = (cell.surface in WATER) == water
 	distance_from(out, source)
 }
 
