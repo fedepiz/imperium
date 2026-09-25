@@ -276,7 +276,7 @@ map_draw_init :: proc(md: ^Map_Draw) {
 			.Marsh = 2.3,
 			.Dune = 3.4,
 		},
-		vary = #partial{.Tree = 0.15, .Tuft = 0.2, .Marsh = 0.15, .Dune = 0.2},
+		vary = #partial{.Tree = 0.3, .Tuft = 0.2, .Marsh = 0.15, .Dune = 0.2},
 		footprint = #partial{
 			.Mountain = {foot = 0.85, top = 0.15, below = 0.45},
 			.Molehill = {foot = 0.85, top = 0.2, below = 0.5},
@@ -1006,7 +1006,11 @@ draw_marks :: proc(md: ^Map_Draw, camera: Camera, viewport: [2]f32, pixel_densit
 		// The drawing is centred on the mark.
 		size := mark_size(mark)
 		corner := mark.pos - size / 2
-		rect, visible := camera_world_to_screen(camera, viewport, [4]f32{corner.x, corner.y, size.x, size.y})
+		rect, visible := camera_world_to_screen(
+			camera,
+			viewport,
+			[4]f32{corner.x, corner.y, size.x, size.y},
+		)
 		if !visible do continue
 		image := md.mark_images[mark.mark][mark.variant]
 		gfx.draw_image(&draw, image, rect, {1, 1, 1, f32(mark.alpha) / f32(max(u8))})
@@ -1138,3 +1142,4 @@ distance_line :: proc(f, out: []f32, parabolas: []i32, bounds: []f32) {
 		out[q] = d * d + f[v[k]]
 	}
 }
+
