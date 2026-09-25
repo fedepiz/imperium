@@ -1003,12 +1003,12 @@ draw_marks :: proc(md: ^Map_Draw, camera: Camera, viewport: [2]f32, pixel_densit
 		pixel_density,
 	)
 	for mark in md.marks[:] {
-		size := mark_size(mark) * camera.zoom
 		// The drawing is centred on the mark.
+		size := mark_size(mark)
+		corner := mark.pos - size / 2
+		rect, visible := camera_world_to_screen(camera, viewport, [4]f32{corner.x, corner.y, size.x, size.y})
+		if !visible do continue
 		image := md.mark_images[mark.mark][mark.variant]
-		center := (mark.pos - camera.center) * camera.zoom + viewport / 2
-		rect := [4]f32{center.x - size.x / 2, center.y - size.y / 2, size.x, size.y}
-		if rect.x > viewport.x || rect.y > viewport.y || rect.x + rect.z < 0 || rect.y + rect.w < 0 do continue
 		gfx.draw_image(&draw, image, rect, {1, 1, 1, f32(mark.alpha) / f32(max(u8))})
 	}
 }

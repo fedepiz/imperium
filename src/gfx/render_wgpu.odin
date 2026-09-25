@@ -92,14 +92,26 @@ Renderer :: struct {
 	river_half:                                [RENDER_TERRAIN_CELLS][2]f16,
 }
 
-// The window draws through a Metal layer, which the surface is made from.
+// The backend wgpu draws through: Metal on macOS, Vulkan elsewhere.
+RENDER_BACKENDS :: wgpu.InstanceBackendFlags{.Metal} when ODIN_OS == .Darwin else wgpu.InstanceBackendFlags{.Vulkan}
+
+// On macOS the window draws through a Metal layer, which the surface is made from; elsewhere the surface is made
+// from the native window handle.
 render_window_flags :: proc() -> (sdl.WindowFlags, bool) {
-	return {.METAL}, true
+	when ODIN_OS == .Darwin {
+		return {.METAL}, true
+	} else {
+		return {}, true
+	}
 }
 
 render_init :: proc(renderer: ^Renderer, window: ^sdl.Window) -> bool {
 	renderer.window = window
-	renderer.instance = wgpu.CreateInstance(nil)
+	instance_extras := wgpu.InstanceExtras {
+		sType    = .InstanceExtras,
+		backends = RENDER_BACKENDS,
+	}
+	renderer.instance = wgpu.CreateInstance(&{nextInChain = &instance_extras})
 	if renderer.instance == nil {
 		fmt.eprintln("wgpu instance creation failed")
 		return false
@@ -833,14 +845,19 @@ fn hash(p_in: vec2f) -> f32 {
     p += dot(p, p + 45.32);
     return fract(p.x * p.y);
 }
+// Hash of a lattice point, in 0..1
+fn lattice_hash(i: vec2f) -> f32 {
+    let h = bitcast<vec2u>(vec2i(i)) * vec2u(1597334677u, 3812015801u);
+    return f32(((h.x ^ h.y) * 1597334677u) >> 8u) / 16777216.0;
+}
 fn value_noise(p: vec2f) -> f32 {
     let i = floor(p);
     var f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
-    let a = hash(i);
-    let b = hash(i + vec2f(1.0, 0.0));
-    let c = hash(i + vec2f(0.0, 1.0));
-    let d = hash(i + vec2f(1.0, 1.0));
+    let a = lattice_hash(i);
+    let b = lattice_hash(i + vec2f(1.0, 0.0));
+    let c = lattice_hash(i + vec2f(0.0, 1.0));
+    let d = lattice_hash(i + vec2f(1.0, 1.0));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 // Four octaves of value noise, in 0..1

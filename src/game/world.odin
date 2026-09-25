@@ -261,7 +261,10 @@ Culture :: enum u8 {
 
 // Every drawing is made at the same scale, so drawing each at this many cells per pixel of its image, times its pawn's
 // scale, keeps the pen line the same weight across them all.
-PAWN_CELLS_PER_PIXEL :: f32(6.75 / 400.0)
+PAWN_CELLS_PER_PIXEL :: f32(5.0 / 400.0)
+
+// How far past the view, as a fraction of its size, a pawn is still drawn, so its name hanging below stays in sight
+PAWN_VIEW_TOLERANCE :: 0.1
 
 // The drawings of each pawn image, under assets/gfx/pawns, as <culture>_<name>, made from art/pawns by tools/pawnify
 @(private = "file")
@@ -319,10 +322,15 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 		image := pawns.images[pawn.culture][pawn.image]
 		source := gfx.sprite_region(gfx.sprite_of_image(image)).source
 		if source.z <= 0 do continue
-		size := source.zw * PAWN_CELLS_PER_PIXEL * pawn.scale * camera.zoom
-		center := (pawn.pos - camera.center) * camera.zoom + viewport / 2
-		rect := [4]f32{center.x - size.x / 2, center.y - size.y / 2, size.x, size.y}
-		if rect.x > viewport.x || rect.y > viewport.y || rect.x + rect.z < 0 || rect.y + rect.w < 0 do continue
+		size := source.zw * PAWN_CELLS_PER_PIXEL * pawn.scale
+		corner := pawn.pos - size / 2
+		rect, visible := camera_world_to_screen(
+			camera,
+			viewport,
+			[4]f32{corner.x, corner.y, size.x, size.y},
+			PAWN_VIEW_TOLERANCE,
+		)
+		if !visible do continue
 		if pawns.has_fill[pawn.culture][pawn.image] {
 			gfx.draw_image(&draw, pawns.fills[pawn.culture][pawn.image], rect, PAWN_PAPER)
 		}
@@ -334,7 +342,7 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 			text := gfx.text_from_string(pawn.name, pawns.font, PAWN_NAME_INK)
 			halo := gfx.text_from_string(pawn.name, pawns.font, PAWN_PAPER)
 			text_size := gfx.text_measure(text)
-			at := [2]f32{center.x - text_size.x / 2, rect.y + rect.w}
+			at := [2]f32{rect.x + (rect.z - text_size.x) / 2, rect.y + rect.w}
 			for dy in -1 ..= 1 {
 				for dx in -1 ..= 1 {
 					if dx == 0 && dy == 0 do continue
@@ -345,3 +353,4 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 		}
 	}
 }
+

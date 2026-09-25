@@ -69,3 +69,33 @@ camera_tick :: proc(input: Input, dt: f32) {
 	camera.center = linalg.clamp(camera.center, 0, world_size)
 }
 
+camera_world_to_screen :: proc {
+	camera_world_to_screen_point,
+	camera_world_to_screen_rect,
+}
+
+// The point on screen, in pixels, that a point in the world, in cells, is seen at.
+camera_world_to_screen_point :: proc(camera: Camera, viewport: [2]f32, pos: [2]f32) -> [2]f32 {
+	return (pos - camera.center) * camera.zoom + viewport / 2
+}
+
+// The rect on screen, in pixels, that a rect in the world, in cells, is seen at, and whether any of it falls within
+// the view. The view is widened by the tolerance, as a fraction of its size, on every side.
+camera_world_to_screen_rect :: proc(
+	camera: Camera,
+	viewport: [2]f32,
+	rect: [4]f32,
+	tolerance: f32 = 0,
+) -> (
+	screen: [4]f32,
+	visible: bool,
+) {
+	pos := camera_world_to_screen_point(camera, viewport, rect.xy)
+	size := rect.zw * camera.zoom
+	screen = {pos.x, pos.y, size.x, size.y}
+	lo := -viewport * tolerance
+	hi := viewport * (1 + tolerance)
+	visible = pos.x <= hi.x && pos.y <= hi.y && pos.x + size.x >= lo.x && pos.y + size.y >= lo.y
+	return
+}
+
