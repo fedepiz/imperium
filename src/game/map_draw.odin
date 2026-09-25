@@ -105,6 +105,10 @@ Cover :: enum u8 {
 	Steppe,
 	Fertile,
 	Marsh,
+	// Mountain country, where the mountains stand
+	Highland,
+	// Open, well-watered land: fields and pasture
+	Fields,
 }
 
 Cover_Cell :: struct {
@@ -124,6 +128,8 @@ COVER_LOOKS := [Cover]gfx.Render_Layer_Palette {
 	.Steppe = {color = COVER_SAND, wash = 0.25},
 	.Fertile = {color = {0.780, 0.820, 0.560, 1}, wash = 0.7},
 	.Marsh = {color = {0.616, 0.714, 0.788, 1}, wash = 0.5},
+	.Highland = {color = {0.800, 0.700, 0.520, 1}, wash = 0.35},
+	.Fields = {color = {0.820, 0.835, 0.640, 1}, wash = 0.35},
 }
 
 Mark_Family :: enum {
@@ -238,7 +244,7 @@ map_draw_init :: proc() {
 	WORLD.map_draw.render_terrain.style = {
 		paper              = {0.933, 0.878, 0.753, 1},
 		paper_stain        = {0.847, 0.761, 0.588, 1},
-		paper_stain_amount = 0.0,
+		paper_stain_amount = 0.60,
 		ink                = {0.231, 0.165, 0.110, 1},
 		sea_shallow        = {0.616, 0.714, 0.788, 1},
 		sea_deep           = {0.20, 0.49, 0.78, 1},
@@ -368,10 +374,29 @@ tweak_placement :: proc() -> (changed: bool) {
 		tweak.slider(fmt.tprintf("Marks/%v/Jitter across", family), &pl.jitter[family].x, 0, 1)
 		tweak.slider(fmt.tprintf("Marks/%v/Jitter down", family), &pl.jitter[family].y, 0, 1)
 		tweak_ramp(fmt.tprintf("Marks/%v/Coast", family), &pl.coast[family], -25, 5)
-		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Foot", family), &pl.footprint[family].foot, 0, 1)
-		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Top", family), &pl.footprint[family].top, 0, 1)
-		tweak.slider(fmt.tprintf("Marks/%v/Footprint/Below", family), &pl.footprint[family].below, 0, 1)
-		own := tweak.toggle(fmt.tprintf("Marks/%v/Footprint/Claims own", family), "", family in pl.claims_own)
+		tweak.slider(
+			fmt.tprintf("Marks/%v/Footprint/Foot", family),
+			&pl.footprint[family].foot,
+			0,
+			1,
+		)
+		tweak.slider(
+			fmt.tprintf("Marks/%v/Footprint/Top", family),
+			&pl.footprint[family].top,
+			0,
+			1,
+		)
+		tweak.slider(
+			fmt.tprintf("Marks/%v/Footprint/Below", family),
+			&pl.footprint[family].below,
+			0,
+			1,
+		)
+		own := tweak.toggle(
+			fmt.tprintf("Marks/%v/Footprint/Claims own", family),
+			"",
+			family in pl.claims_own,
+		)
 		pl.claims_own = own ? pl.claims_own + {family} : pl.claims_own - {family}
 		if family not_in COVER_FAMILIES do continue
 		// Open land has no strength, so its cover bears nothing.
@@ -484,10 +509,17 @@ update_render_terrain :: proc() {
 }
 
 // What the terrain does not hold but covers and marks need, worked out whenever it changes, in the temp allocator:
-// cells to the nearest river and to the sea, and how much the ground rises and falls within two cells.
+// cells to the nearest river and to the sea, and how far each land cell lies below the land around it.
 Land :: struct {
 	to_river, to_sea: []f32,
+	// The mean elevation of the land within BASIN_REACH cells, less the cell's own: above 0 in basins and valleys.
+	// Elevation has no fixed sea level, so this, not elevation, tells lowland.
+	basin:            []f32,
 }
+
+// How far around a cell, in cells either way, the land it is compared with to find basins reaches
+@(private = "file")
+BASIN_REACH :: 24
 
 @(private = "file")
 measure_land :: proc() -> (land: Land) {
@@ -502,7 +534,45 @@ measure_land :: proc() -> (land: Land) {
 	land.to_sea = make([]f32, CELLS_MAX, context.temp_allocator)
 	distance_from(land.to_river, is_river)
 	distance_from(land.to_sea, is_sea)
+
+	elevation := make([]f32, CELLS_MAX, context.temp_allocator)
+	is_land := make([]f32, CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain {
+		if cell.surface in WATER do continue
+		elevation[i] = f32(cell.elevation) / f32(max(u8))
+		is_land[i] = 1
+	}
+	around := make([]f32, CELLS_MAX, context.temp_allocator)
+	count := make([]f32, CELLS_MAX, context.temp_allocator)
+	box_sum(around, elevation, BASIN_REACH)
+	box_sum(count, is_land, BASIN_REACH)
+	land.basin = make([]f32, CELLS_MAX, context.temp_allocator)
+	for i in 0 ..< CELLS_MAX {
+		if is_land[i] > 0 do land.basin[i] = around[i] / count[i] - elevation[i]
+	}
 	return
+}
+
+// Sums values over a square reaching reach cells either way of each cell, cut off at the world's edge: along the rows,
+// then down the columns, each from running totals.
+@(private = "file")
+box_sum :: proc(out, values: []f32, reach: int) {
+	totals := make([]f32, max(WORLD_WIDTH, WORLD_HEIGHT) + 1, context.temp_allocator)
+	rows := make([]f32, CELLS_MAX, context.temp_allocator)
+	for y in 0 ..< WORLD_HEIGHT {
+		for x in 0 ..< WORLD_WIDTH do totals[x + 1] = totals[x] + values[y * WORLD_WIDTH + x]
+		for x in 0 ..< WORLD_WIDTH {
+			rows[y * WORLD_WIDTH + x] =
+				totals[min(x + reach + 1, WORLD_WIDTH)] - totals[max(x - reach, 0)]
+		}
+	}
+	for x in 0 ..< WORLD_WIDTH {
+		for y in 0 ..< WORLD_HEIGHT do totals[y + 1] = totals[y] + rows[y * WORLD_WIDTH + x]
+		for y in 0 ..< WORLD_HEIGHT {
+			out[y * WORLD_WIDTH + x] =
+				totals[min(y + reach + 1, WORLD_HEIGHT)] - totals[max(y - reach, 0)]
+		}
+	}
 }
 
 // 0 at from, 1 at full, smooth between; full below from makes it fall.
@@ -554,21 +624,31 @@ classify_cover :: proc(land: ^Land) {
 }
 
 // Cell i's cover: whichever suits it best, how well being its strength, unless none suits it by at least a sixth.
-// Desert and steppe follow the moisture, forest the trees. Dry land along a river is fertile, and low, level ground is
-// marsh where it is very wet or where a river meets the sea; both win over the rest.
+// Desert, steppe and fields follow the moisture, forest the trees. Land along a river is fertile: close along it in dry
+// country, and farther out where a wet river valley or basin lies below the land around it. Low, level ground is marsh
+// where it is very wet or where a river meets the sea; fertile land and marsh win over the rest. Highland follows the
+// mountains' placement, so it lies where they stand, and wins over forest, desert and steppe where they are at their
+// fullest.
 @(private = "file")
 cover_of :: proc(land: ^Land, i: int) -> (best: Cover_Cell) {
 	if WORLD.atlas.terrain[i].surface in WATER do return
 	p := place_of(i)
 	low := ramp(0.22, 0.12, p.elevation)
 	delta := ramp(6, 2, land.to_river[i]) * ramp(16, 6, land.to_sea[i])
+	dry_river := ramp(0.62, 0.52, p.moisture) * ramp(5, 1.5, land.to_river[i])
+	valley :=
+		ramp(0.55, 0.65, p.moisture) *
+		ramp(12, 4, land.to_river[i]) *
+		ramp(0.02, 0.07, land.basin[i])
 	suits := [Cover]f32 {
-		.Open    = 1.0 / 6,
-		.Forest  = ramp(0.05, 0.75, p.trees),
-		.Desert  = ramp(0.47, 0.35, p.moisture),
-		.Steppe  = ramp(0.40, 0.47, p.moisture) * ramp(0.58, 0.48, p.moisture),
-		.Fertile = 1.3 * ramp(0.62, 0.52, p.moisture) * ramp(5, 1.5, land.to_river[i]),
-		.Marsh   = 1.5 * low * max(delta, ramp(0.80, 0.88, p.moisture)),
+		.Open     = 1.0 / 6,
+		.Forest   = ramp(0.05, 0.75, p.trees),
+		.Desert   = ramp(0.47, 0.35, p.moisture),
+		.Steppe   = ramp(0.40, 0.47, p.moisture) * ramp(0.58, 0.48, p.moisture),
+		.Fertile  = 1.3 * max(dry_river, valley),
+		.Marsh    = 1.5 * low * max(delta, ramp(0.80, 0.88, p.moisture)),
+		.Highland = 1.2 * ramp(WORLD.map_draw.placement.mountain.elevation, p.elevation),
+		.Fields   = 0.6 * ramp(0.52, 0.62, p.moisture) * ramp(0.3, 0.1, p.trees),
 	}
 	most: f32
 	for s, cover in suits {
@@ -825,7 +905,10 @@ scatter_marks :: proc() {
 			for mark in WORLD.map_draw.marks[first:] do footprint_claim(claimed, mark, pl.footprint[family])
 		}
 	}
-	slice.sort_by(WORLD.map_draw.marks[:], proc(a, b: Mark) -> bool {return mark_foot(a) < mark_foot(b)})
+	slice.sort_by(
+		WORLD.map_draw.marks[:],
+		proc(a, b: Mark) -> bool {return mark_foot(a) < mark_foot(b)},
+	)
 }
 
 // The chance a lattice point of family at cell i keeps its mark, and the mark: its drawing, how much wider than the
@@ -954,7 +1037,10 @@ footprint_claim :: proc(claimed: []u64, mark: Mark, footprint: Footprint) {
 	if size.y <= 0 do return
 	foot := mark_foot(mark)
 	y0 := max(int((foot - size.y) * FOOTPRINT_RES), 0)
-	y1 := min(int((foot + footprint.below * size.y) * FOOTPRINT_RES) + 1, WORLD_HEIGHT * FOOTPRINT_RES)
+	y1 := min(
+		int((foot + footprint.below * size.y) * FOOTPRINT_RES) + 1,
+		WORLD_HEIGHT * FOOTPRINT_RES,
+	)
 	for y in y0 ..< y1 {
 		// How far up the drawing this row is, from 0 at its foot and in front of it to 1 at its top
 		up := clamp((foot - (f32(y) + 0.5) / FOOTPRINT_RES) / size.y, 0, 1)
