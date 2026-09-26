@@ -74,6 +74,11 @@ Render_Terrain_Style :: struct {
 	wobble:             f32,
 	// River line width in logical pixels, where a river reaches the lowlands; it thins toward its sources.
 	river_width:        f32,
+	// Road width in logical pixels, edges included, and the band of bare paper either side of it. Roads are ochre
+	// between two ink edges; zoomed out too far for the edges to read, they narrow to a single line.
+	road_width:         f32,
+	road_halo:          f32,
+	road_fill:          [4]f32,
 }
 
 // How many categories a layer can have, category 0 included
@@ -108,21 +113,24 @@ Render_Layer :: struct {
 	jitter:   f32,
 }
 
-// How far around a river its offsets reach, in cells. Cells farther away hold RENDER_RIVER_FAR.
-RENDER_RIVER_REACH :: 4
-RENDER_RIVER_FAR :: [2]f32{RENDER_RIVER_REACH, RENDER_RIVER_REACH}
+// The kinds of way the map draws as lines: rivers, then roads
+RENDER_WAY_KINDS :: 2
+// How far around a way its offsets reach, in cells. Cells farther away hold RENDER_WAY_FAR.
+RENDER_WAY_REACH :: 4
+RENDER_WAY_FAR :: [2]f32{RENDER_WAY_REACH, RENDER_WAY_REACH}
 
 // Everything the map pass draws from. Cells are indexed y * RENDER_TERRAIN_WIDTH + x, with cell (0, 0) at the top left.
 Render_Terrain :: struct {
 	// Bumped whenever cells or coast change; the renderer uploads them again only then.
 	revision:   u32,
-	// The terrain as the rules see it, one texel per cell: surface (land, river, lake, sea as 0, 85, 170, 255),
-	// elevation, trees, moisture.
+	// The terrain as the rules see it, one texel per cell: surface (land, lake, sea as 0, 127, 254), elevation, trees,
+	// moisture.
 	cells:      [RENDER_TERRAIN_CELLS][4]u8,
 	// Derived from the cells: signed distance to the coast, in cells, positive on land.
 	coast:      [RENDER_TERRAIN_CELLS]f32,
-	// Derived from the cells: from the middle of each cell to the nearest point of a river line, in cells.
-	river:      [RENDER_TERRAIN_CELLS][2]f32,
+	// Derived from the cells: for each kind of way, from the middle of each cell to the nearest point of a line of that
+	// kind, in cells.
+	ways:       [RENDER_WAY_KINDS][RENDER_TERRAIN_CELLS][2]f32,
 	// What covers the land, drawn onto it: forest, desert and so on. Water is drawn over it.
 	cover:      Render_Layer,
 	// The cell at the middle of the view, and logical pixels per cell

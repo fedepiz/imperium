@@ -22,6 +22,7 @@ WORLD_HEIGHT :: 1024
 CELLS_MAX :: WORLD_WIDTH * WORLD_HEIGHT
 
 #assert(gfx.RENDER_TERRAIN_WIDTH == WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == WORLD_HEIGHT)
+#assert(len(Way_Kind) == gfx.RENDER_WAY_KINDS)
 
 Atlas :: struct {
 	// Bumped whenever the terrain changes, so what is derived from it can be rebuilt
@@ -34,15 +35,25 @@ Terrain :: struct {
 	elevation: u8,
 	trees:     u8,
 	moisture:  u8,
+	// For each way kind, which way is this cell assigned to. (Way_Id = 0 is nil)
+	way:       [Way_Kind]Way_Id,
 }
 
-// What covers a cell. A river is land it runs across: the rules treat it as land, the map draws it as a line.
+// What covers a cell
 Surface :: enum u8 {
 	Land,
-	River,
 	Lake,
 	Sea,
 }
+
+// Ways run over land from cell to cell, one cell wide. The rules treat their cells as land; the map draws each as a line.
+Way_Kind :: enum u8 {
+	River,
+	Road,
+}
+
+// Which way of its kind runs through a cell. Id 0 is none.
+Way_Id :: distinct u16
 
 WATER :: bit_set[Surface]{.Lake, .Sea}
 
@@ -55,8 +66,8 @@ world_init :: proc() {
 }
 
 // Loads a scenario's terrain from its folder: one greyscale PNG per property, WORLD_WIDTH by WORLD_HEIGHT.
-// surface.png is black for land, then darker to lighter grey for river, lake and sea; elevation.png, trees.png and
-// moisture.png run from 0 to 255 on land.
+// surface.png is black for land, grey for lake and white for sea; elevation.png, trees.png and moisture.png run from 0
+// to 255 on land. rivers.png and roads.png hold, in 16 bits, the id of the way through each land cell.
 // If a layer is missing or the wrong size, the world is left all water, so the failure shows, and false is returned.
 world_load :: proc(scenario: string) -> bool {
 	terrain := &WORLD.atlas.terrain
@@ -66,12 +77,16 @@ world_load :: proc(scenario: string) -> bool {
 		Elevation,
 		Trees,
 		Moisture,
+		Rivers,
+		Roads,
 	}
 	names := [Layer]string {
 		.Surface   = "surface",
 		.Elevation = "elevation",
 		.Trees     = "trees",
 		.Moisture  = "moisture",
+		.Rivers    = "rivers",
+		.Roads     = "roads",
 	}
 	for name, layer in names {
 		path := fmt.tprintf("%s/%s.png", scenario, name)
@@ -83,15 +98,20 @@ world_load :: proc(scenario: string) -> bool {
 			return false
 		}
 		for value, i in pixels {
+			byte := u8(value >> 8)
 			switch layer {
 			case .Surface:
-				terrain[i].surface = Surface(min((int(value) + 42) / 85, int(max(Surface))))
+				terrain[i].surface = Surface(min((int(byte) + 64) / 128, int(max(Surface))))
 			case .Elevation:
-				terrain[i].elevation = value
+				terrain[i].elevation = byte
 			case .Trees:
-				terrain[i].trees = value
+				terrain[i].trees = byte
 			case .Moisture:
-				terrain[i].moisture = value
+				terrain[i].moisture = byte
+			case .Rivers:
+				terrain[i].way[.River] = Way_Id(value)
+			case .Roads:
+				terrain[i].way[.Road] = Way_Id(value)
 			}
 		}
 	}
@@ -102,16 +122,17 @@ world_load :: proc(scenario: string) -> bool {
 	return true
 }
 
-// One greyscale layer, WORLD_WIDTH by WORLD_HEIGHT; the pixels live in the temp allocator.
+// One greyscale layer, WORLD_WIDTH by WORLD_HEIGHT, in 16 bits: an 8-bit image's values are widened, so their high
+// byte is the value. The pixels live in the temp allocator.
 @(private = "file")
-world_load_layer :: proc(path: string) -> (pixels: []u8, ok: bool) {
+world_load_layer :: proc(path: string) -> (pixels: []u16, ok: bool) {
 	data, err := os.read_entire_file(path, context.temp_allocator)
 	if err != nil {
 		fmt.eprintfln("Could not read terrain layer %q: %v", path, err)
 		return
 	}
 	width, height, channels: c.int
-	loaded := stbi.load_from_memory(
+	loaded := stbi.load_16_from_memory(
 		raw_data(data),
 		c.int(len(data)),
 		&width,
@@ -135,7 +156,7 @@ world_load_layer :: proc(path: string) -> (pixels: []u8, ok: bool) {
 		)
 		return
 	}
-	pixels = make([]u8, CELLS_MAX, context.temp_allocator)
+	pixels = make([]u16, CELLS_MAX, context.temp_allocator)
 	copy(pixels, loaded[:CELLS_MAX])
 	return pixels, true
 }

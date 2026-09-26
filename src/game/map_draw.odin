@@ -144,15 +144,15 @@ Mark_Family :: enum {
 
 // How marks are scattered. Marks of a family share a jittered lattice, spacing cells apart, its rows row_squash of
 // spacing apart and every other row shifted half a step; each point wanders within its step by up to jitter of it
-// across and down. Each mark is about width cells wide, varying by up to vary either way, and keeps river_clearance
-// of its width clear of rivers. Whether a point keeps its mark is a chance built from ramps.
+// across and down. Each mark is about width cells wide, varying by up to vary either way, and keeps way_clearance of
+// its width clear of ways. Whether a point keeps its mark is a chance built from ramps.
 Mark_Placement :: struct {
 	spacing:         [Mark_Family]f32,
 	width:           [Mark_Family]f32,
 	vary:            [Mark_Family]f32,
 	row_squash:      f32,
 	jitter:          [Mark_Family][2]f32,
-	river_clearance: f32,
+	way_clearance:   f32,
 	// Over the signed distance to the coast, in cells, positive on land
 	coast:           [Mark_Family]Ramp,
 	// The ground each family's marks claim, so that no mark of a family scattered after it stands there
@@ -254,6 +254,9 @@ map_draw_init :: proc(md: ^Map_Draw) {
 		coast_width        = 1.6,
 		wobble             = 0.3,
 		river_width        = 10.,
+		road_width         = 8,
+		road_halo          = 1.5,
+		road_fill          = {0.780, 0.540, 0.250, 1},
 	}
 	md.render_terrain.cover.jitter = 0.8
 
@@ -301,7 +304,7 @@ map_draw_init :: proc(md: ^Map_Draw) {
 			.Marsh = {0.7, 0.6},
 			.Dune = {0.7, 0.6},
 		},
-		river_clearance = 0.6,
+		way_clearance = 0.6,
 		coast = {
 			.Tree = {0.7, 0.8},
 			.Molehill = {0.9, 1},
@@ -364,6 +367,12 @@ map_draw_tick :: proc(
 			tweak.slider("Render/Sea Colour/Blue", &style.sea_deep.b, 0, 1)
 			tweak.slider("Render/Sea Colour/Depth/From", &style.sea_depth_from, 0, 20)
 			tweak.slider("Render/Sea Colour/Depth/Full", &style.sea_depth_full, 0, 80)
+			tweak.slider("Render/River width", &style.river_width, 0, 20)
+			tweak.slider("Render/Road/Width", &style.road_width, 0, 20)
+			tweak.slider("Render/Road/Halo", &style.road_halo, 0, 6)
+			tweak.slider("Render/Road/Colour/Red", &style.road_fill.r, 0, 1)
+			tweak.slider("Render/Road/Colour/Green", &style.road_fill.g, 0, 1)
+			tweak.slider("Render/Road/Colour/Blue", &style.road_fill.b, 0, 1)
 		}
 		placement_changed = tweak_placement(&md.placement)
 	}
@@ -423,7 +432,7 @@ tweak_placement :: proc(pl: ^Mark_Placement) -> (changed: bool) {
 		}
 	}
 	tweak.slider("Marks/Row squash", &pl.row_squash, 0.3, 1.5)
-	tweak.slider("Marks/River clearance", &pl.river_clearance, 0, 2)
+	tweak.slider("Marks/Way clearance", &pl.way_clearance, 0, 2)
 
 	t := &pl.tree
 	tweak_ramp("Marks/Tree/Elevation", &t.elevation, 0, 1)
@@ -456,7 +465,7 @@ tweak_ramp :: proc(label: string, r: ^Ramp, lo, hi: f32) {
 	tweak.slider(fmt.tprintf("%s/Full", label), &r.full, lo, hi)
 }
 
-// Keeps the map pass in step with the world: the camera every frame; the cells, coast, rivers, covers and marks when
+// Keeps the map pass in step with the world: the camera every frame; the cells, coast, ways, covers and marks when
 // the terrain has changed.
 @(private = "file")
 update_render_terrain :: proc(md: ^Map_Draw, atlas: ^Atlas, camera: Camera) {
@@ -470,26 +479,36 @@ update_render_terrain :: proc(md: ^Map_Draw, atlas: ^Atlas, camera: Camera) {
 	terrain := atlas.terrain[:]
 
 	for cell, i in terrain {
-		rt.cells[i] = {u8(cell.surface) * 85, cell.elevation, cell.trees, cell.moisture}
+		rt.cells[i] = {u8(cell.surface) * 127, cell.elevation, cell.trees, cell.moisture}
 	}
 
-	// Rivers and coasts are traced into lines, smoothed, and stamped around themselves: each cell near a river learns
-	// the offset to its nearest point, and each cell near the coast which side of it it lies on.
+	// Ways and coasts are traced into lines, smoothed, and stamped around themselves: each cell near a way learns the
+	// offset to the nearest point of a line of its kind, and each cell near the coast which side of it it lies on.
 	lines := &POLYLINES
 	polylines_clear(lines)
-	trace_rivers(lines, terrain)
-	rivers := len(lines.runs)
+	way_runs: [Way_Kind]span.Span
+	for kind in Way_Kind {
+		begin := len(lines.runs)
+		trace_ways(lines, terrain, kind)
+		way_runs[kind] = span.from_range(begin, len(lines.runs))
+	}
+	coast_runs := len(lines.runs)
 	trace_coasts(lines, terrain)
 	polylines_smooth(lines)
 
-	for &offset in rt.river do offset = gfx.RENDER_RIVER_FAR
+	for &kind in rt.ways do for &offset in kind do offset = gfx.RENDER_WAY_FAR
 	to_coast := make([][2]f32, CELLS_MAX, context.temp_allocator)
 	coast_side := make([]f32, CELLS_MAX, context.temp_allocator)
 	for &offset in to_coast do offset = COAST_REACH
-	for r in 0 ..< len(lines.runs) {
+	for runs, kind in way_runs {
+		for r in runs.begin ..< runs.begin + runs.len {
+			points, closed := polylines_smoothed(lines, r), lines.runs[r].closed
+			polyline_stamp(points, closed, gfx.RENDER_WAY_REACH, rt.ways[kind][:], nil)
+		}
+	}
+	for r in coast_runs ..< len(lines.runs) {
 		points, closed := polylines_smoothed(lines, r), lines.runs[r].closed
-		if r < rivers do polyline_stamp(points, closed, gfx.RENDER_RIVER_REACH, rt.river[:], nil)
-		else do polyline_stamp(points, closed, COAST_REACH, to_coast, coast_side)
+		polyline_stamp(points, closed, COAST_REACH, to_coast, coast_side)
 	}
 
 	// Signed distance to the coast, in cells, positive on land: to the smoothed coast near it, and farther out from
@@ -534,7 +553,7 @@ measure_land :: proc(terrain: []Terrain) -> (land: Land) {
 	is_river := make([]bool, CELLS_MAX, context.temp_allocator)
 	is_sea := make([]bool, CELLS_MAX, context.temp_allocator)
 	for cell, i in terrain {
-		is_river[i] = cell.surface == .River
+		is_river[i] = cell.way[.River] != 0
 		is_sea[i] = cell.surface == .Sea
 	}
 	land.to_river = make([]f32, CELLS_MAX, context.temp_allocator)
@@ -675,64 +694,73 @@ cover_of :: proc(
 // How far around the coast its smoothed line decides the distance to it, in cells
 COAST_REACH :: f32(3)
 
-// Rivers are smoothed fully; coasts keep more of their shape, losing mostly the steps of the cells.
-RIVER_SMOOTHING :: Polyline_Smoothing {
-	softness  = 1,
-	cut_iter  = 2,
-	cut_ratio = 0.25,
+// How each kind of way is traced: how its lines are smoothed, and whether an end by the water is carried on to the
+// shore. Rivers are smoothed fully; roads keep more of their course.
+Way_Trace :: struct {
+	smoothing: Polyline_Smoothing,
+	to_shore:  bool,
 }
+
+@(private = "file", rodata)
+WAY_TRACE := [Way_Kind]Way_Trace {
+	.River = {smoothing = {softness = 1, cut_iter = 2, cut_ratio = 0.25}, to_shore = true},
+	.Road = {smoothing = {softness = 0.5, cut_iter = 2, cut_ratio = 0.25}},
+}
+
+// Coasts keep more of their shape, losing mostly the steps of the cells.
 COAST_SMOOTHING :: Polyline_Smoothing {
 	softness  = 0.3,
 	cut_iter  = 2,
 	cut_ratio = 0.2,
 }
 
-// The rivers and coasts, traced and smoothed whenever the terrain changes
+// The ways and coasts, traced and smoothed whenever the terrain changes
 @(private = "file")
 POLYLINES: Polylines
 
-// Traces the river cells into lines through the middles of their cells. Lines run between ends and forks, so rivers
-// meet where they join; what is left over are closed loops.
+// Traces the cells of a kind of way into lines through the middles of their cells. Lines run between ends and forks,
+// so ways meet where they join; what is left over are closed loops.
 @(private = "file")
-trace_rivers :: proc(lines: ^Polylines, terrain: []Terrain) {
+trace_ways :: proc(lines: ^Polylines, terrain: []Terrain, kind: Way_Kind) {
 	visited := make([]bool, CELLS_MAX, context.temp_allocator)
 	for i in 0 ..< CELLS_MAX {
-		if terrain[i].surface != .River do continue
+		if terrain[i].way[kind] == 0 do continue
 		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
 		next: [8][2]int
-		count := river_next(terrain, cell, &next)
+		count := way_next(terrain, kind, cell, &next)
 		if count == 2 do continue
 		// Every line from this end or fork, unless it has been traced from its other end
 		for n in next[:count] {
 			j := n.y * WORLD_WIDTH + n.x
 			if visited[j] do continue
-			if river_next(terrain, n, &{}) != 2 && j < i do continue
-			river_follow(lines, terrain, visited, cell, n)
+			if way_next(terrain, kind, n, &{}) != 2 && j < i do continue
+			way_follow(lines, terrain, kind, visited, cell, n)
 		}
 	}
 	for i in 0 ..< CELLS_MAX {
-		if terrain[i].surface != .River || visited[i] do continue
+		if terrain[i].way[kind] == 0 || visited[i] do continue
 		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
 		next: [8][2]int
-		if river_next(terrain, cell, &next) != 2 do continue
+		if way_next(terrain, kind, cell, &next) != 2 do continue
 		visited[i] = true
-		river_follow(lines, terrain, visited, cell, next[0])
+		way_follow(lines, terrain, kind, visited, cell, next[0])
 	}
 }
 
-// The river cells a river cell leads to: those beside it, and those diagonal to it that are not already reached
-// through one beside it, so a river one cell wide has two.
+// The cells of a kind of way that a cell of it leads to: those beside it, and those diagonal to it that are not
+// already reached through one beside it, so a way one cell wide has two. Ways of a kind lead into each other where
+// they meet.
 @(private = "file")
-river_next :: proc(terrain: []Terrain, cell: [2]int, out: ^[8][2]int) -> (count: int) {
-	is_river :: proc(terrain: []Terrain, x, y: int) -> bool {
+way_next :: proc(terrain: []Terrain, kind: Way_Kind, cell: [2]int, out: ^[8][2]int) -> (count: int) {
+	is_way :: proc(terrain: []Terrain, kind: Way_Kind, x, y: int) -> bool {
 		if x < 0 || y < 0 || x >= WORLD_WIDTH || y >= WORLD_HEIGHT do return false
-		return terrain[y * WORLD_WIDTH + x].surface == .River
+		return terrain[y * WORLD_WIDTH + x].way[kind] != 0
 	}
 	for dy in -1 ..= 1 {
 		for dx in -1 ..= 1 {
 			if dx == 0 && dy == 0 do continue
-			if !is_river(terrain, cell.x + dx, cell.y + dy) do continue
-			if dx != 0 && dy != 0 && (is_river(terrain, cell.x + dx, cell.y) || is_river(terrain, cell.x, cell.y + dy)) do continue
+			if !is_way(terrain, kind, cell.x + dx, cell.y + dy) do continue
+			if dx != 0 && dy != 0 && (is_way(terrain, kind, cell.x + dx, cell.y) || is_way(terrain, kind, cell.x, cell.y + dy)) do continue
 			out[count] = cell + {dx, dy}
 			count += 1
 		}
@@ -740,30 +768,37 @@ river_next :: proc(terrain: []Terrain, cell: [2]int, out: ^[8][2]int) -> (count:
 	return
 }
 
-// Walks a river from cell through next until it reaches an end, a fork, or a cell already walked, through the middle
-// of every cell on the way. A river that ends by the sea or a lake is carried on to the shore.
+// Walks a way from cell through next until it reaches an end, a fork, or a cell already walked, through the middle of
+// every cell on the way.
 @(private = "file")
-river_follow :: proc(lines: ^Polylines, terrain: []Terrain, visited: []bool, cell, next: [2]int) {
+way_follow :: proc(
+	lines: ^Polylines,
+	terrain: []Terrain,
+	kind: Way_Kind,
+	visited: []bool,
+	cell, next: [2]int,
+) {
 	middle :: proc(cell: [2]int) -> [2]f32 {return {f32(cell.x), f32(cell.y)} + 0.5}
-	river_mouth(lines, terrain, cell)
+	way_shore(lines, terrain, kind, cell)
 	polylines_add(lines, middle(cell))
 	prev, cur := cell, next
 	for {
 		polylines_add(lines, middle(cur))
 		i := cur.y * WORLD_WIDTH + cur.x
 		ahead: [8][2]int
-		if river_next(terrain, cur, &ahead) != 2 || visited[i] do break
+		if way_next(terrain, kind, cur, &ahead) != 2 || visited[i] do break
 		visited[i] = true
 		prev, cur = cur, ahead[0] == prev ? ahead[1] : ahead[0]
 	}
-	river_mouth(lines, terrain, cur)
-	polylines_end(lines, false, RIVER_SMOOTHING)
+	way_shore(lines, terrain, kind, cur)
+	polylines_end(lines, false, WAY_TRACE[kind].smoothing)
 }
 
-// If the river ends at cell and cell touches water, a point most of the way into the water.
+// If ways of the kind are carried to the shore, the way ends at cell, and cell touches water: a point most of the way
+// into the water.
 @(private = "file")
-river_mouth :: proc(lines: ^Polylines, terrain: []Terrain, cell: [2]int) {
-	if river_next(terrain, cell, &{}) != 1 do return
+way_shore :: proc(lines: ^Polylines, terrain: []Terrain, kind: Way_Kind, cell: [2]int) {
+	if !WAY_TRACE[kind].to_shore || way_next(terrain, kind, cell, &{}) != 1 do return
 	for dy in -1 ..= 1 {
 		for dx in -1 ..= 1 {
 			x, y := cell.x + dx, cell.y + dy
@@ -895,12 +930,14 @@ scatter_marks :: proc(md: ^Map_Draw, terrain: []Terrain) {
 				mark.width *=
 					pl.width[family] *
 					(1 + pl.vary[family] * (2 * random(col, row, stream + 2) - 1))
-				// No mark sits on a river, so rivers stay in view.
+				// No mark sits on a way, so ways stay in view.
 				if family != .Sea_Mark {
-					offset :=
-						md.render_terrain.river[i] -
-						([2]f32{x, y} - [2]f32{f32(cx), f32(cy)} - 0.5)
-					if linalg.length(offset) < mark.width * pl.river_clearance do continue
+					from_middle := [2]f32{x, y} - [2]f32{f32(cx), f32(cy)} - 0.5
+					on_way := false
+					for &kind in md.render_terrain.ways {
+						on_way ||= linalg.length(kind[i] - from_middle) < mark.width * pl.way_clearance
+					}
+					if on_way do continue
 				}
 				mark.variant = u8(random(col, row, stream + 3) * f32(md.mark_variants[mark.mark]))
 				// A mark whose drawing is missing is never drawn, so it is not kept.

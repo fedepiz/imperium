@@ -5,7 +5,7 @@ import "core:math/linalg"
 
 import "../span"
 
-// Lines through the world, in cells: rivers and coasts, and later borders or roads. They are traced from the cells into
+// Lines through the world, in cells: ways and coasts, and later borders. They are traced from the cells into
 // runs of points, stepping from cell to cell, smoothed all together by polylines_smooth, then read out run by run.
 
 POLYLINE_POINTS_MAX :: 1 << 16
