@@ -34,6 +34,11 @@ Polyline_Run :: struct {
 	smoothing: Polyline_Smoothing,
 }
 
+Polyline_Smoothed :: struct {
+	points: [][2]f32,
+	closed: bool,
+}
+
 Polylines :: struct {
 	// The traced points, and the runs of them that make lines
 	points:        [dynamic; POLYLINE_POINTS_MAX][2]f32,
@@ -79,10 +84,21 @@ polylines_end :: proc(lines: ^Polylines, closed: bool, smoothing: Polyline_Smoot
 	append(&lines.runs, Polyline_Run{points, closed, smoothing})
 }
 
-// A run's smoothed points.
-polylines_smoothed :: proc(lines: ^Polylines, run: int) -> [][2]f32 {
+// A smoothed run, as polylines_get reads it out: its points, and whether they close from the last back to the first
+Polyline :: struct {
+	points: [][2]f32,
+	closed: bool,
+}
+
+// How many runs have been ended since the last clear
+polylines_count :: proc(lines: ^Polylines) -> int {
+	return len(lines.runs)
+}
+
+// A run, smoothed. Call polylines_smooth first.
+polylines_get :: proc(lines: ^Polylines, run: int) -> Polyline {
 	s := lines.smoothed_runs[run]
-	return lines.smoothed[s.begin:][:s.len]
+	return {points = lines.smoothed[s.begin:][:s.len], closed = lines.runs[run].closed}
 }
 
 // Smooths every run as it asks: see Polyline_Smoothing. Open runs keep their ends where they are.

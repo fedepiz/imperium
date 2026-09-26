@@ -22,6 +22,8 @@ Map_Draw :: struct {
 	// Each mark's drawings, defined by map_draw_init: the first mark_variants[mark] of them
 	mark_images:    [Terrain_Mark][TERRAIN_MARK_VARIANTS]gfx.Image_Id,
 	mark_variants:  [Terrain_Mark]u8,
+	// From the middle of each cell to the nearest point of a way's line, of any kind, in cells, within WAY_REACH of one
+	to_way:         [CELLS_MAX][2]f32,
 	// What the map pass draws
 	render_terrain: gfx.Render_Terrain,
 	render_list:    gfx.Render_List,
@@ -31,6 +33,7 @@ Map_Draw :: struct {
 MARKS_MAX :: 1 << 17
 
 // One drawing on the map: where its middle sits, in cells, and how wide and tall it is, in cells.
+@(private = "file")
 Mark :: struct {
 	pos:     [2]f32,
 	width:   f32,
@@ -147,22 +150,22 @@ Mark_Family :: enum {
 // across and down. Each mark is about width cells wide, varying by up to vary either way, and keeps way_clearance of
 // its width clear of ways. Whether a point keeps its mark is a chance built from ramps.
 Mark_Placement :: struct {
-	spacing:         [Mark_Family]f32,
-	width:           [Mark_Family]f32,
-	vary:            [Mark_Family]f32,
-	row_squash:      f32,
-	jitter:          [Mark_Family][2]f32,
-	way_clearance:   f32,
+	spacing:       [Mark_Family]f32,
+	width:         [Mark_Family]f32,
+	vary:          [Mark_Family]f32,
+	row_squash:    f32,
+	jitter:        [Mark_Family][2]f32,
+	way_clearance: f32,
 	// Over the signed distance to the coast, in cells, positive on land
-	coast:           [Mark_Family]Ramp,
+	coast:         [Mark_Family]Ramp,
 	// The ground each family's marks claim, so that no mark of a family scattered after it stands there
-	footprint:       [Mark_Family]Footprint,
+	footprint:     [Mark_Family]Footprint,
 	// The families whose marks claim their ground from their own family too, each as it is placed: those that would
 	// show through one another
-	claims_own:      bit_set[Mark_Family],
+	claims_own:    bit_set[Mark_Family],
 	// How densely each cover bears each of the COVER_FAMILIES where it is at full strength
-	density:         [Cover][Mark_Family]f32,
-	tree:            struct {
+	density:       [Cover][Mark_Family]f32,
+	tree:          struct {
 		// Over elevation: trees thin out where mountains take over
 		elevation:      Ramp,
 		// How often each kind is drawn where its climate holds fully
@@ -179,22 +182,22 @@ Mark_Placement :: struct {
 		palm_north:     Ramp,
 		palm_wet:       Ramp,
 	},
-	molehill:        struct {
+	molehill:      struct {
 		// Over elevation: hills rise with the land, and give way as mountains take over
 		rise: Ramp,
 		fall: Ramp,
 	},
-	mountain:        struct {
+	mountain:      struct {
 		// Over elevation, which also widens mountains by up to grow of their width
 		elevation: Ramp,
 		grow:      f32,
 	},
-	sea:             struct {
+	sea:           struct {
 		// Over the signed distance to the coast: sea marks fade over the open sea, and are dropped below fade_min
 		fade:     Ramp,
 		fade_min: f32,
 	},
-	dune:            struct {
+	dune:          struct {
 		// Over moisture and elevation: dunes only in the deep desert, and not on hills
 		wet:       Ramp,
 		elevation: Ramp,
@@ -482,33 +485,47 @@ update_render_terrain :: proc(md: ^Map_Draw, atlas: ^Atlas, camera: Camera) {
 		rt.cells[i] = {u8(cell.surface) * 127, cell.elevation, cell.trees, cell.moisture}
 	}
 
-	// Ways and coasts are traced into lines, smoothed, and stamped around themselves: each cell near a way learns the
-	// offset to the nearest point of a line of its kind, and each cell near the coast which side of it it lies on.
+	// Ways and coasts are traced into lines and smoothed. The ways are drawn from their segments, and stamped around
+	// themselves: each cell near a way learns the offset to its nearest point. Each cell near the coast learns the offset
+	// to it, and which side of it it lies on.
 	lines := &POLYLINES
 	polylines_clear(lines)
 	way_runs: [Way_Kind]span.Span
 	for kind in Way_Kind {
-		begin := len(lines.runs)
+		begin := polylines_count(lines)
 		trace_ways(lines, terrain, kind)
-		way_runs[kind] = span.from_range(begin, len(lines.runs))
+		way_runs[kind] = span.from_range(begin, polylines_count(lines))
 	}
-	coast_runs := len(lines.runs)
+	coast_runs := polylines_count(lines)
 	trace_coasts(lines, terrain)
 	polylines_smooth(lines)
 
-	for &kind in rt.ways do for &offset in kind do offset = gfx.RENDER_WAY_FAR
+	for &offset in md.to_way do offset = WAY_REACH
+	for runs, kind in way_runs {
+		segments := &rt.way_segments[int(kind)]
+		clear(segments)
+		for r in runs.begin ..< runs.begin + runs.len {
+			line := polylines_get(lines, r)
+			points := len(line.points)
+			for s in 0 ..< (line.closed ? points : points - 1) {
+				append(
+					segments,
+					gfx.Render_Segment {
+						start = line.points[s],
+						end = line.points[(s + 1) % points],
+					},
+				)
+			}
+			polyline_stamp(line.points, line.closed, WAY_REACH, md.to_way[:], nil)
+		}
+	}
+
 	to_coast := make([][2]f32, CELLS_MAX, context.temp_allocator)
 	coast_side := make([]f32, CELLS_MAX, context.temp_allocator)
 	for &offset in to_coast do offset = COAST_REACH
-	for runs, kind in way_runs {
-		for r in runs.begin ..< runs.begin + runs.len {
-			points, closed := polylines_smoothed(lines, r), lines.runs[r].closed
-			polyline_stamp(points, closed, gfx.RENDER_WAY_REACH, rt.ways[kind][:], nil)
-		}
-	}
-	for r in coast_runs ..< len(lines.runs) {
-		points, closed := polylines_smoothed(lines, r), lines.runs[r].closed
-		polyline_stamp(points, closed, COAST_REACH, to_coast, coast_side)
+	for r in coast_runs ..< polylines_count(lines) {
+		line := polylines_get(lines, r)
+		polyline_stamp(line.points, line.closed, COAST_REACH, to_coast, coast_side)
 	}
 
 	// Signed distance to the coast, in cells, positive on land: to the smoothed coast near it, and farther out from
@@ -694,6 +711,9 @@ cover_of :: proc(
 // How far around the coast its smoothed line decides the distance to it, in cells
 COAST_REACH :: f32(3)
 
+// How far around the ways the offset to them is kept, in cells: enough to keep marks clear of them
+WAY_REACH :: f32(4)
+
 // How each kind of way is traced: how its lines are smoothed, and whether an end by the water is carried on to the
 // shore. Rivers are smoothed fully; roads keep more of their course.
 Way_Trace :: struct {
@@ -751,7 +771,14 @@ trace_ways :: proc(lines: ^Polylines, terrain: []Terrain, kind: Way_Kind) {
 // already reached through one beside it, so a way one cell wide has two. Ways of a kind lead into each other where
 // they meet.
 @(private = "file")
-way_next :: proc(terrain: []Terrain, kind: Way_Kind, cell: [2]int, out: ^[8][2]int) -> (count: int) {
+way_next :: proc(
+	terrain: []Terrain,
+	kind: Way_Kind,
+	cell: [2]int,
+	out: ^[8][2]int,
+) -> (
+	count: int,
+) {
 	is_way :: proc(terrain: []Terrain, kind: Way_Kind, x, y: int) -> bool {
 		if x < 0 || y < 0 || x >= WORLD_WIDTH || y >= WORLD_HEIGHT do return false
 		return terrain[y * WORLD_WIDTH + x].way[kind] != 0
@@ -933,11 +960,7 @@ scatter_marks :: proc(md: ^Map_Draw, terrain: []Terrain) {
 				// No mark sits on a way, so ways stay in view.
 				if family != .Sea_Mark {
 					from_middle := [2]f32{x, y} - [2]f32{f32(cx), f32(cy)} - 0.5
-					on_way := false
-					for &kind in md.render_terrain.ways {
-						on_way ||= linalg.length(kind[i] - from_middle) < mark.width * pl.way_clearance
-					}
-					if on_way do continue
+					if linalg.length(md.to_way[i] - from_middle) < mark.width * pl.way_clearance do continue
 				}
 				mark.variant = u8(random(col, row, stream + 3) * f32(md.mark_variants[mark.mark]))
 				// A mark whose drawing is missing is never drawn, so it is not kept.

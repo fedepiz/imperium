@@ -20,7 +20,7 @@ Render_Image :: struct {
 
 // A texture with the one view the shaders read it through
 @(private = "file")
-Render_Texture :: struct {
+Texture :: struct {
 	texture: wgpu.Texture,
 	view:    wgpu.TextureView,
 }
@@ -81,18 +81,37 @@ Renderer :: struct {
 	// The map pass
 	terrain_pipeline:                    wgpu.RenderPipeline,
 	terrain_layout:                      wgpu.BindGroupLayout,
+	// Made again with the surface, as it reads the way field
 	terrain_group:                       wgpu.BindGroup,
 	terrain_uniforms:                    wgpu.Buffer,
-	terrain_cells, terrain_coast:        Render_Texture,
-	terrain_ways:                        Render_Texture,
-	cover_cells, cover_palette:          Render_Texture,
+	terrain_cells, terrain_coast:        Texture,
+	cover_cells, cover_palette:          Texture,
 	// The revisions the textures hold, once anything has been uploaded
 	terrain_revision, cover_revision:    u32,
 	terrain_uploaded, cover_uploaded:    bool,
-	// Coast and ways converted to half floats for upload, as the textures hold them: each cell's ways side by side
+	// The coast converted to half floats for upload, as its texture holds it
 	coast_half:                          [RENDER_TERRAIN_CELLS]f16,
-	ways_half:                           [RENDER_TERRAIN_CELLS][RENDER_WAY_KINDS][2]f16,
+	// The ways pass: a pipeline for each kind of way, drawing into its own channel of the field, and each kind's
+	// segments
+	way_pipelines:                       [RENDER_WAY_KINDS]wgpu.RenderPipeline,
+	way_layout:                          wgpu.BindGroupLayout,
+	way_group:                           wgpu.BindGroup,
+	way_segments:                        [RENDER_WAY_KINDS]wgpu.Buffer,
+	// For each pixel of the frame, the distance to the nearest line of each kind of way, in cells, in a channel for
+	// each kind. Made again with the surface, at its size.
+	way_field:                           Texture,
 }
+
+// The binding's BlendOperation leaves out webgpu.h's Undefined, so each of its values is one below the native one, and
+// .Min is taken for ReverseSubtract. This is the native Min.
+@(private = "file")
+RENDER_BLEND_MIN :: wgpu.BlendOperation(4)
+
+// The way field's distance where no way is near, in cells
+@(private = "file")
+RENDER_WAY_FAR :: 1000
+
+#assert(RENDER_WAY_KINDS <= 2, "the way field has a channel for each kind of way")
 
 // The backend wgpu draws through: Metal on macOS, Vulkan elsewhere.
 RENDER_BACKENDS ::
@@ -259,7 +278,7 @@ render_destroy :: proc(renderer: ^Renderer) {
 		if image.view != nil do wgpu.TextureViewRelease(image.view)
 		if image.texture != nil do wgpu.TextureRelease(image.texture)
 	}
-	texture_release :: proc(texture: Render_Texture) {
+	texture_release :: proc(texture: Texture) {
 		if texture.view != nil do wgpu.TextureViewRelease(texture.view)
 		if texture.texture != nil do wgpu.TextureRelease(texture.texture)
 	}
@@ -267,13 +286,17 @@ render_destroy :: proc(renderer: ^Renderer) {
 	image_release(renderer.white)
 	texture_release(renderer.terrain_cells)
 	texture_release(renderer.terrain_coast)
-	texture_release(renderer.terrain_ways)
+	texture_release(renderer.way_field)
 	texture_release(renderer.cover_cells)
 	texture_release(renderer.cover_palette)
 	if renderer.terrain_group != nil do wgpu.BindGroupRelease(renderer.terrain_group)
 	if renderer.terrain_layout != nil do wgpu.BindGroupLayoutRelease(renderer.terrain_layout)
 	if renderer.terrain_uniforms != nil do wgpu.BufferRelease(renderer.terrain_uniforms)
 	if renderer.terrain_pipeline != nil do wgpu.RenderPipelineRelease(renderer.terrain_pipeline)
+	for pipeline in renderer.way_pipelines do if pipeline != nil do wgpu.RenderPipelineRelease(pipeline)
+	if renderer.way_group != nil do wgpu.BindGroupRelease(renderer.way_group)
+	if renderer.way_layout != nil do wgpu.BindGroupLayoutRelease(renderer.way_layout)
+	for buffer in renderer.way_segments do if buffer != nil do wgpu.BufferRelease(buffer)
 	if renderer.list_view_group != nil do wgpu.BindGroupRelease(renderer.list_view_group)
 	if renderer.list_view_layout != nil do wgpu.BindGroupLayoutRelease(renderer.list_view_layout)
 	if renderer.list_image_layout != nil do wgpu.BindGroupLayoutRelease(renderer.list_image_layout)
@@ -325,22 +348,37 @@ render_frame_begin :: proc(renderer: ^Renderer, clear_color: [4]f32) -> bool {
 	renderer.frame_texture = surface_texture.texture
 	renderer.frame_view = wgpu.TextureCreateView(renderer.frame_texture, nil)
 	renderer.frame_encoder = wgpu.DeviceCreateCommandEncoder(renderer.device, nil)
-	color := [4]f64{f64(clear_color.r), f64(clear_color.g), f64(clear_color.b), f64(clear_color.a)}
-	renderer.frame_pass = wgpu.CommandEncoderBeginRenderPass(
+	renderer.frame_pass = render_pass_begin(renderer, renderer.frame_view, .Clear, clear_color)
+	renderer.frame_lists = 0
+	return true
+}
+
+// Begins a pass of the frame's commands drawing into view: cleared to clear_color, or keeping what it holds.
+@(private = "file")
+render_pass_begin :: proc(
+	renderer: ^Renderer,
+	view: wgpu.TextureView,
+	load: wgpu.LoadOp,
+	clear_color: [4]f32 = {},
+) -> wgpu.RenderPassEncoder {
+	return wgpu.CommandEncoderBeginRenderPass(
 		renderer.frame_encoder,
 		&{
 			colorAttachmentCount = 1,
 			colorAttachments = &wgpu.RenderPassColorAttachment {
-				view = renderer.frame_view,
+				view = view,
 				depthSlice = wgpu.DEPTH_SLICE_UNDEFINED,
-				loadOp = .Clear,
+				loadOp = load,
 				storeOp = .Store,
-				clearValue = color,
+				clearValue = {
+					f64(clear_color.r),
+					f64(clear_color.g),
+					f64(clear_color.b),
+					f64(clear_color.a),
+				},
 			},
 		},
 	)
-	renderer.frame_lists = 0
-	return true
 }
 
 // Submits the frame and presents it; presenting waits for the display's refresh.
@@ -373,9 +411,49 @@ render_surface_configure :: proc(renderer: ^Renderer, size: [2]u32) {
 		},
 	)
 	renderer.surface_size = size
+	render_way_field_create(renderer, size)
+}
+
+// Makes the way field at size, and the map pass's bind group, which reads it.
+@(private = "file")
+render_way_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
+	if renderer.terrain_group != nil do wgpu.BindGroupRelease(renderer.terrain_group)
+	if renderer.way_field.view != nil do wgpu.TextureViewRelease(renderer.way_field.view)
+	if renderer.way_field.texture != nil do wgpu.TextureRelease(renderer.way_field.texture)
+	renderer.way_field.texture = wgpu.DeviceCreateTexture(
+		renderer.device,
+		&{
+			usage = {.RenderAttachment, .TextureBinding},
+			dimension = ._2D,
+			size = {size.x, size.y, 1},
+			format = .RG16Float,
+			mipLevelCount = 1,
+			sampleCount = 1,
+		},
+	)
+	renderer.way_field.view = wgpu.TextureCreateView(renderer.way_field.texture, nil)
+
+	group_entries := [7]wgpu.BindGroupEntry {
+		{binding = 0, buffer = renderer.terrain_uniforms, size = size_of(Render_Terrain_Uniforms)},
+		{binding = 1, textureView = renderer.terrain_cells.view},
+		{binding = 2, textureView = renderer.terrain_coast.view},
+		{binding = 3, textureView = renderer.way_field.view},
+		{binding = 4, textureView = renderer.cover_cells.view},
+		{binding = 5, textureView = renderer.cover_palette.view},
+		{binding = 6, sampler = renderer.linear_sampler},
+	}
+	renderer.terrain_group = wgpu.DeviceCreateBindGroup(
+		renderer.device,
+		&{
+			layout = renderer.terrain_layout,
+			entryCount = len(group_entries),
+			entries = &group_entries[0],
+		},
+	)
 }
 
 // Draws the map over the whole view. Cells, coast and ways are uploaded again only when the revision has changed.
+// The ways are drawn first, in a pass of their own, into the way field the map reads.
 render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	if renderer.view_size.x <= 0 || renderer.view_size.y <= 0 || terrain.zoom <= 0 {
 		return
@@ -384,11 +462,6 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	if !renderer.terrain_uploaded || renderer.terrain_revision != terrain.revision {
 		for coast, i in terrain.coast {
 			renderer.coast_half[i] = f16(coast)
-		}
-		for &kind, k in terrain.ways {
-			for way, i in kind {
-				renderer.ways_half[i][k] = {f16(way.x), f16(way.y)}
-			}
 		}
 		render_texture_write(
 			renderer,
@@ -402,12 +475,16 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 			raw_data(renderer.coast_half[:]),
 			2,
 		)
-		render_texture_write(
-			renderer,
-			renderer.terrain_ways.texture,
-			raw_data(renderer.ways_half[:]),
-			size_of(renderer.ways_half[0]),
-		)
+		for &segments, k in terrain.way_segments {
+			if len(segments) == 0 do continue
+			wgpu.QueueWriteBuffer(
+				renderer.queue,
+				renderer.way_segments[k],
+				0,
+				raw_data(segments[:]),
+				uint(len(segments) * size_of(Render_Segment)),
+			)
+		}
 		renderer.terrain_revision = terrain.revision
 		renderer.terrain_uploaded = true
 	}
@@ -466,6 +543,32 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		&uniforms,
 		size_of(uniforms),
 	)
+
+	// The frame's pass ends for the ways' own, and begins again keeping what it holds.
+	wgpu.RenderPassEncoderEnd(renderer.frame_pass)
+	wgpu.RenderPassEncoderRelease(renderer.frame_pass)
+	ways_pass := render_pass_begin(
+		renderer,
+		renderer.way_field.view,
+		.Clear,
+		{RENDER_WAY_FAR, RENDER_WAY_FAR, RENDER_WAY_FAR, RENDER_WAY_FAR},
+	)
+	for &segments, k in terrain.way_segments {
+		if len(segments) == 0 do continue
+		wgpu.RenderPassEncoderSetPipeline(ways_pass, renderer.way_pipelines[k])
+		wgpu.RenderPassEncoderSetBindGroup(ways_pass, 0, renderer.way_group)
+		wgpu.RenderPassEncoderSetVertexBuffer(
+			ways_pass,
+			0,
+			renderer.way_segments[k],
+			0,
+			u64(len(segments) * size_of(Render_Segment)),
+		)
+		wgpu.RenderPassEncoderDraw(ways_pass, 6, u32(len(segments)), 0, 0)
+	}
+	wgpu.RenderPassEncoderEnd(ways_pass)
+	wgpu.RenderPassEncoderRelease(ways_pass)
+	renderer.frame_pass = render_pass_begin(renderer, renderer.frame_view, .Load)
 
 	pass := renderer.frame_pass
 	wgpu.RenderPassEncoderSetPipeline(pass, renderer.terrain_pipeline)
@@ -570,7 +673,7 @@ render_texture_create :: proc(
 	format: wgpu.TextureFormat,
 	size: [2]u32,
 ) -> (
-	texture: Render_Texture,
+	texture: Texture,
 ) {
 	texture.texture = wgpu.DeviceCreateTexture(
 		renderer.device,
@@ -752,11 +855,6 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 		.R16Float,
 		{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
 	)
-	renderer.terrain_ways = render_texture_create(
-		renderer,
-		.RGBA16Float,
-		{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
-	)
 	renderer.cover_cells = render_texture_create(
 		renderer,
 		.RG8Unorm,
@@ -799,24 +897,6 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 		device,
 		&{entryCount = len(layout_entries), entries = &layout_entries[0]},
 	)
-	group_entries := [7]wgpu.BindGroupEntry {
-		{binding = 0, buffer = renderer.terrain_uniforms, size = size_of(Render_Terrain_Uniforms)},
-		{binding = 1, textureView = renderer.terrain_cells.view},
-		{binding = 2, textureView = renderer.terrain_coast.view},
-		{binding = 3, textureView = renderer.terrain_ways.view},
-		{binding = 4, textureView = renderer.cover_cells.view},
-		{binding = 5, textureView = renderer.cover_palette.view},
-		{binding = 6, sampler = renderer.linear_sampler},
-	}
-	renderer.terrain_group = wgpu.DeviceCreateBindGroup(
-		device,
-		&{
-			layout = renderer.terrain_layout,
-			entryCount = len(group_entries),
-			entries = &group_entries[0],
-		},
-	)
-
 	module := render_shader_create(renderer, RENDER_MAP_SOURCE)
 	defer wgpu.ShaderModuleRelease(module)
 	pipeline_layout := wgpu.DeviceCreatePipelineLayout(
@@ -844,7 +924,94 @@ render_terrain_init :: proc(renderer: ^Renderer) -> bool {
 			},
 		},
 	)
-	return renderer.terrain_pipeline != nil && !renderer.failed
+	return render_ways_init(renderer) && renderer.terrain_pipeline != nil && !renderer.failed
+}
+
+// Makes the ways pass: its pipelines, and storage for the most segments of each kind of way.
+@(private = "file")
+render_ways_init :: proc(renderer: ^Renderer) -> bool {
+	device := renderer.device
+	for &buffer in renderer.way_segments {
+		buffer = wgpu.DeviceCreateBuffer(
+			device,
+			&{
+				usage = {.Vertex, .CopyDst},
+				size = RENDER_WAY_SEGMENTS_MAX * size_of(Render_Segment),
+			},
+		)
+	}
+
+	// The ways read the map's uniforms, for the view.
+	entry := wgpu.BindGroupLayoutEntry {
+		binding = 0,
+		visibility = {.Vertex},
+		buffer = {type = .Uniform, minBindingSize = size_of(Render_Terrain_Uniforms)},
+	}
+	renderer.way_layout = wgpu.DeviceCreateBindGroupLayout(
+		device,
+		&{entryCount = 1, entries = &entry},
+	)
+	group_entry := wgpu.BindGroupEntry {
+		binding = 0,
+		buffer  = renderer.terrain_uniforms,
+		size    = size_of(Render_Terrain_Uniforms),
+	}
+	renderer.way_group = wgpu.DeviceCreateBindGroup(
+		device,
+		&{layout = renderer.way_layout, entryCount = 1, entries = &group_entry},
+	)
+
+	module := render_shader_create(renderer, RENDER_WAYS_SOURCE)
+	defer wgpu.ShaderModuleRelease(module)
+	pipeline_layout := wgpu.DeviceCreatePipelineLayout(
+		device,
+		&{bindGroupLayoutCount = 1, bindGroupLayouts = &renderer.way_layout},
+	)
+	defer wgpu.PipelineLayoutRelease(pipeline_layout)
+	attributes := [2]wgpu.VertexAttribute {
+		{format = .Float32x2, offset = u64(offset_of(Render_Segment, start)), shaderLocation = 0},
+		{format = .Float32x2, offset = u64(offset_of(Render_Segment, end)), shaderLocation = 1},
+	}
+	buffer := wgpu.VertexBufferLayout {
+		stepMode       = .Instance,
+		arrayStride    = size_of(Render_Segment),
+		attributeCount = len(attributes),
+		attributes     = &attributes[0],
+	}
+	// Where quads overlap, the field keeps the nearest distance.
+	nearest := wgpu.BlendState {
+		color = {operation = RENDER_BLEND_MIN, srcFactor = .One, dstFactor = .One},
+		alpha = {operation = RENDER_BLEND_MIN, srcFactor = .One, dstFactor = .One},
+	}
+	for &pipeline, k in renderer.way_pipelines {
+		target := wgpu.ColorTargetState {
+			format    = .RG16Float,
+			blend     = &nearest,
+			writeMask = {wgpu.ColorWriteMask(k)},
+		}
+		pipeline = wgpu.DeviceCreateRenderPipeline(
+			device,
+			&{
+				layout = pipeline_layout,
+				vertex = {
+					module = module,
+					entryPoint = "vs_main",
+					bufferCount = 1,
+					buffers = &buffer,
+				},
+				primitive = {topology = .TriangleList},
+				multisample = {count = 1, mask = max(u32)},
+				fragment = &{
+					module = module,
+					entryPoint = "fs_main",
+					targetCount = 1,
+					targets = &target,
+				},
+			},
+		)
+		if pipeline == nil do return false
+	}
+	return true
 }
 
 // The render list shader
@@ -943,15 +1110,9 @@ fn fs_main(in: Varyings) -> @location(0) vec4f {
 }
 `
 
-// The map pass: one triangle covering the view, drawn before the render lists.
-// Positions are in cells: the world is grid cells wide and tall, with cell (0, 0) at the top left.
-// cells holds the terrain as the rules see it, one texel per cell: surface, elevation, trees, moisture. textureLoad reads
-// a cell exactly; sampling blends neighbouring cells.
-// coast holds the signed distance to the coast in cells, positive on land, blended between cells.
-// ways holds, per cell, the offset from its middle to the nearest point of a river line in rg, and of a road line in ba.
-// cover_cells and cover_palette are the cover layer: see layer_at.
+// The map shaders' uniforms, laid out as Render_Terrain_Uniforms
 @(private = "file")
-RENDER_MAP_SOURCE :: `
+RENDER_TERRAIN_UNIFORMS_SOURCE :: `
 struct Terrain {
     grid: vec2f,
     center: vec2f,
@@ -976,6 +1137,67 @@ struct Terrain {
     road_halo: f32,
     road_fill: vec4f,
 }
+`
+
+// The ways pass: each segment of a kind of way drawn as a quad around it, reaching as far as the map draws anything
+// from a way, writing its distance, in cells, into that kind's channel of the way field.
+@(private = "file")
+RENDER_WAYS_SOURCE ::
+	RENDER_TERRAIN_UNIFORMS_SOURCE +
+	`
+@group(0) @binding(0) var<uniform> u: Terrain;
+
+struct Varyings {
+    @builtin(position) position: vec4f,
+    // In cells
+    @location(0) p: vec2f,
+    @location(1) @interpolate(flat) start: vec2f,
+    @location(2) @interpolate(flat) end: vec2f,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32, @location(0) start: vec2f, @location(1) end: vec2f) -> Varyings {
+    // Along the segment from 0 at the start to 1 at the end, and across it from -1 to 1
+    var corners = array<vec2f, 6>(
+        vec2f(0.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
+        vec2f(0.0, -1.0), vec2f(1.0, 1.0), vec2f(0.0, 1.0));
+    let corner = corners[vertex];
+    let length = distance(start, end);
+    let along = select(vec2f(1.0, 0.0), (end - start) / length, length > 1e-6);
+    let across = vec2f(-along.y, along.x);
+    // Two cells, for the rivers' wash and the wander, and room for the widest road and its halo
+    let reach = 2.0 + 24.0 / u.zoom;
+    let p = mix(start - along * reach, end + along * reach, corner.x) + across * reach * corner.y;
+    let screen = (p - u.center) * u.zoom + u.view_size * 0.5;
+    var out: Varyings;
+    out.position = vec4f(screen / u.view_size * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), 0.0, 1.0);
+    out.p = p;
+    out.start = start;
+    out.end = end;
+    return out;
+}
+
+@fragment
+fn fs_main(in: Varyings) -> @location(0) vec4f {
+    let ab = in.end - in.start;
+    let t = clamp(dot(in.p - in.start, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+    let d = distance(in.p, in.start + ab * t);
+    return vec4f(d, d, d, d);
+}
+`
+
+// The map pass: one triangle covering the view, drawn before the render lists.
+// Positions are in cells: the world is grid cells wide and tall, with cell (0, 0) at the top left.
+// cells holds the terrain as the rules see it, one texel per cell: surface, elevation, trees, moisture. textureLoad reads
+// a cell exactly; sampling blends neighbouring cells.
+// coast holds the signed distance to the coast in cells, positive on land, blended between cells.
+// ways is the way field: for each pixel of the view, the distance to the nearest river line in r and road line in g, in
+// cells.
+// cover_cells and cover_palette are the cover layer: see layer_at.
+@(private = "file")
+RENDER_MAP_SOURCE ::
+	RENDER_TERRAIN_UNIFORMS_SOURCE +
+	`
 @group(0) @binding(0) var<uniform> u: Terrain;
 @group(0) @binding(1) var cells: texture_2d<f32>;
 @group(0) @binding(2) var coast: texture_2d<f32>;
@@ -1037,22 +1259,12 @@ fn paper_at(p: vec2f, frag: vec2f) -> vec3f {
     return c * (1.0 - (hash(floor(frag)) - 0.5) * 0.035);
 }
 
-// Distance from p to the nearest line of a kind of way, in cells: kind 0 for rivers, 1 for roads. Each of the four cells
-// around p knows its nearest point of one; blending them is exact along a straight line. Where they see different
-// lines, blending would draw a false line between the two, so the nearest of their points is taken instead.
+// Distance from p to the nearest line of a kind of way, in cells: kind 0 for rivers, 1 for roads. It is read from the
+// way field where p shows in the view, blended between pixels.
 fn way_distance(p: vec2f, kind: i32) -> f32 {
-    let q = p - 0.5;
-    let base = floor(q);
-    let f = q - base;
-    var n: array<vec2f, 4>;
-    for (var k = 0; k < 4; k++) {
-        let c = base + vec2f(f32(k & 1), f32(k >> 1u));
-        let offsets = textureLoad(ways, clamp(vec2i(c), vec2i(0), vec2i(u.grid) - 1), 0);
-        n[k] = c + 0.5 + select(offsets.rg, offsets.ba, kind == 1);
-    }
-    let spread = max(max(distance(n[0], n[1]), distance(n[2], n[3])), max(distance(n[0], n[2]), distance(n[1], n[3])));
-    if (spread < 2.0) { return distance(p, mix(mix(n[0], n[1], f.x), mix(n[2], n[3], f.x), f.y)); }
-    return min(min(distance(p, n[0]), distance(p, n[1])), min(distance(p, n[2]), distance(p, n[3])));
+    let pixel = ((p - u.center) * u.zoom + u.view_size * 0.5) * u.pixel_density;
+    let d = textureSampleLevel(ways, linear_sampler, pixel / vec2f(textureDimensions(ways)), 0.0);
+    return select(d.r, d.g, kind == 1);
 }
 
 // Ink dots on a grid fixed to the world, spacing cells apart: each grid square keeps its dot with the chance density,

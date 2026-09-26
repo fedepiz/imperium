@@ -115,27 +115,32 @@ Render_Layer :: struct {
 
 // The kinds of way the map draws as lines: rivers, then roads
 RENDER_WAY_KINDS :: 2
-// How far around a way its offsets reach, in cells. Cells farther away hold RENDER_WAY_FAR.
-RENDER_WAY_REACH :: 4
-RENDER_WAY_FAR :: [2]f32{RENDER_WAY_REACH, RENDER_WAY_REACH}
+// A straight piece of a way's line, its ends in cells
+Render_Segment :: struct {
+	start: [2]f32,
+	end:   [2]f32,
+}
+
+// The most segments a kind of way can have
+RENDER_WAY_SEGMENTS_MAX :: 1 << 19
 
 // Everything the map pass draws from. Cells are indexed y * RENDER_TERRAIN_WIDTH + x, with cell (0, 0) at the top left.
 Render_Terrain :: struct {
-	// Bumped whenever cells or coast change; the renderer uploads them again only then.
-	revision:   u32,
+	// Bumped whenever cells, coast or ways change; the renderer uploads them again only then.
+	revision:     u32,
 	// The terrain as the rules see it, one texel per cell: surface (land, lake, sea as 0, 127, 254), elevation, trees,
 	// moisture.
-	cells:      [RENDER_TERRAIN_CELLS][4]u8,
+	cells:        [RENDER_TERRAIN_CELLS][4]u8,
 	// Derived from the cells: signed distance to the coast, in cells, positive on land.
-	coast:      [RENDER_TERRAIN_CELLS]f32,
-	// Derived from the cells: for each kind of way, from the middle of each cell to the nearest point of a line of that
-	// kind, in cells.
-	ways:       [RENDER_WAY_KINDS][RENDER_TERRAIN_CELLS][2]f32,
+	coast:        [RENDER_TERRAIN_CELLS]f32,
+	// Derived from the cells: the lines of each kind of way, as segments
+	way_segments: [RENDER_WAY_KINDS][dynamic; RENDER_WAY_SEGMENTS_MAX]Render_Segment,
 	// What covers the land, drawn onto it: forest, desert and so on. Water is drawn over it.
-	cover:      Render_Layer,
+	cover:        Render_Layer,
 	// The cell at the middle of the view, and logical pixels per cell
-	center:     [2]f32,
-	zoom:       f32,
-	debug_mode: Render_Terrain_Debug,
-	style:      Render_Terrain_Style,
+	center:       [2]f32,
+	zoom:         f32,
+	debug_mode:   Render_Terrain_Debug,
+	style:        Render_Terrain_Style,
 }
+

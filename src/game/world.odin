@@ -23,6 +23,7 @@ CELLS_MAX :: WORLD_WIDTH * WORLD_HEIGHT
 
 #assert(gfx.RENDER_TERRAIN_WIDTH == WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == WORLD_HEIGHT)
 #assert(len(Way_Kind) == gfx.RENDER_WAY_KINDS)
+#assert(POLYLINE_SMOOTHED_MAX <= gfx.RENDER_WAY_SEGMENTS_MAX)
 
 Atlas :: struct {
 	// Bumped whenever the terrain changes, so what is derived from it can be rebuilt
