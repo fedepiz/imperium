@@ -30,18 +30,41 @@ WORLD: struct {
 	movement:    Movement,
 }
 
+Move_Plan :: struct {
+	subject: Piece_Id,
+	target:  Piece_Id,
+	path:    [dynamic; PATH_MAX_LEN][2]f32,
+	cost:    [dynamic; PATH_MAX_LEN]f32,
+}
+
+@(private = "file")
+move_plan_raw :: proc(
+	subject_id: Piece_Id,
+	destination: [2]f32,
+	target: Piece_Id,
+	plan: ^Move_Plan,
+) {
+	subject := piece_get(subject_id)
+	if subject != nil {
+		plan.subject = subject_id
+		plan.target = target
+		pathfind_trace(subject.pos, .Land, destination, {}, &plan.path, &plan.cost)
+	}
+}
+
+move_plan_to :: proc(subject: Piece_Id, target_id: Piece_Id, plan: ^Move_Plan) {
+	target := piece_get(target_id)
+	if target != nil {
+		move_plan_raw(subject, target.pos, target_id, plan)
+	}
+}
+
+
 // A piece walking to a place along the cheapest way there
 Movement :: struct {
-	// The piece walking, or nil for none
-	subject:     Piece_Id,
-	// The way is to be traced again, from where the subject stands to the destination
-	dirty:       bool,
-	destination: [2]f32,
-	// The centres of the cells along the way, and the cost of entering each, per cell walked
-	path:        [dynamic; PATH_MAX_LEN][2]f32,
-	costs:       [dynamic; PATH_MAX_LEN]f32,
+	plan: Move_Plan,
 	// The point of the way being walked towards
-	next:        int,
+	next: int,
 }
 
 // How much cost a walking piece spends a second: the cells it covers on ground of cost 1
@@ -150,12 +173,12 @@ world_load :: proc(scenario: string) -> bool {
 	}
 	// Land
 	{
-		ROAD_SPEED :: 1
-		OFF_ROAD_SPEED :: 0.4
+		OFF_ROAD_COST :: 1
+		ROAD_COST :: 0.4
+
 		grid := pathfind_build_begin(.Land)
 		for cell, i in WORLD.atlas.terrain {
-			grid[i] =
-				cell.way[.Road] != 0 ? OFF_ROAD_SPEED : cell.surface == .Land ? ROAD_SPEED : 0
+			grid[i] = cell.way[.Road] != 0 ? ROAD_COST : cell.surface == .Land ? OFF_ROAD_COST : 0
 		}
 		pathfind_build_end(.Land)
 	}
@@ -236,57 +259,55 @@ world_tick :: proc(input: Input, dt: f32) {
 	// point, and stops moving at its end
 	{
 		mov := &WORLD.movement
-		subject := piece_get(mov.subject)
-		if subject != nil {
-			if mov.dirty {
-				if !pathfind_trace(
-					subject.pos,
-					.Land,
-					mov.destination,
-					{},
-					&mov.path,
-					&mov.costs,
-				) {
-					fmt.eprintfln("No way from %v to %v", subject.pos, mov.destination)
+		if mov.plan.subject != {} {
+			subject := piece_get(mov.plan.subject)
+			is_over: bool
+			if subject == nil {
+				is_over = true
+			} else {
+				budget := MOVEMENT_SPEED * dt
+				for budget > 0 && mov.next < len(mov.plan.path) {
+					target, cost := mov.plan.path[mov.next], mov.plan.cost[mov.next]
+					price := linalg.distance(subject.pos, target) * cost
+					if budget < price {
+						subject.pos += linalg.normalize(target - subject.pos) * budget / cost
+						break
+					}
+					budget -= price
+					subject.pos = target
+					mov.next += 1
 				}
+
+				is_over = mov.next >= len(mov.plan.path)
+			}
+
+			if is_over {
+				mov.plan.subject = {}
+				mov.plan.target = {}
 				mov.next = 0
-				mov.dirty = false
 			}
+		}
 
-			budget: f32 = MOVEMENT_SPEED * dt
-			for budget > 0 && mov.next < len(mov.path) {
-				target, cost := mov.path[mov.next], mov.costs[mov.next]
-				price := linalg.distance(subject.pos, target) * cost
-				if budget < price {
-					subject.pos += linalg.normalize(target - subject.pos) * budget / cost
-					break
+
+		// Once nothing is walking, the Roman army walks to a Roman settlement picked at random, other than one it stands at
+		if mov.plan.subject == {} {
+			SETTLEMENTS :: bit_set[Icon]{.Village, .Town, .City, .Large_City}
+			army: Piece_Id
+			for piece, index in WORLD.pieces {
+				if piece_alive(piece) && piece.culture == .Roman && piece.icon == .Army do army = piece_id(index)
+			}
+			if subject := piece_get(army); subject != nil {
+				destinations := make([dynamic]Piece_Id, context.temp_allocator)
+				for piece, index in WORLD.pieces {
+					if !piece_alive(piece) || piece.culture != .Roman || piece.icon not_in SETTLEMENTS do continue
+					if linalg.distance(piece.pos, subject.pos) < 1 do continue
+					append(&destinations, piece_id(index))
 				}
-				budget -= price
-				subject.pos = target
-				mov.next += 1
-			}
-			if mov.next >= len(mov.path) do mov.subject = {}
-		}
-	}
-
-	// Once nothing is walking, the Roman army walks to a Roman settlement picked at random, other than one it stands at
-	if WORLD.movement.subject == {} {
-		SETTLEMENTS :: bit_set[Icon]{.Village, .Town, .City, .Large_City}
-		army: Piece_Id
-		for piece, index in WORLD.pieces {
-			if piece_alive(piece) && piece.culture == .Roman && piece.icon == .Army do army = piece_id(index)
-		}
-		if subject := piece_get(army); subject != nil {
-			destinations := make([dynamic][2]f32, context.temp_allocator)
-			for piece in WORLD.pieces {
-				if !piece_alive(piece) || piece.culture != .Roman || piece.icon not_in SETTLEMENTS do continue
-				if linalg.distance(piece.pos, subject.pos) < 1 do continue
-				append(&destinations, piece.pos)
-			}
-			if len(destinations) > 0 {
-				WORLD.movement.subject = army
-				WORLD.movement.destination = rand.choice(destinations[:])
-				WORLD.movement.dirty = true
+				if len(destinations) > 0 {
+					target_id := rand.choice(destinations[:])
+					move_plan_to(army, target_id, &mov.plan)
+					mov.next = 0
+				}
 			}
 		}
 	}
