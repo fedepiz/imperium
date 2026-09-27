@@ -2,11 +2,12 @@ package game
 
 import "core:c"
 import "core:fmt"
+import "core:math/linalg"
+import "core:math/rand"
 import "core:os"
 import stbi "vendor:stb/image"
 
 import "../gfx"
-import "../tweak"
 import "../ui"
 
 WORLD_WIDTH :: 1024
@@ -18,13 +19,33 @@ WORLD_SIZE :: [2]int{WORLD_WIDTH, WORLD_HEIGHT}
 PIECE_MAX :: 1024
 
 WORLD: struct {
-	camera:           Camera,
-	atlas:            Atlas,
-	pieces:           [PIECE_MAX]Piece,
-	pieces_free_list: [PIECE_MAX]int,
-	pawns:            Pawns,
+	camera:      Camera,
+	atlas:       Atlas,
+	// Every slot a piece can be in
+	pieces:      [PIECE_MAX]Piece,
+	// The slots with no piece in them, the next to be used last
+	pieces_free: [dynamic; PIECE_MAX]u16,
+	// The piece described on the card, and drawn with a pulsing tint
+	selected:    Piece_Id,
+	movement:    Movement,
 }
 
+// A piece walking to a place along the cheapest way there
+Movement :: struct {
+	// The piece walking, or nil for none
+	subject:     Piece_Id,
+	// The way is to be traced again, from where the subject stands to the destination
+	dirty:       bool,
+	destination: [2]f32,
+	// The centres of the cells along the way, and the cost of entering each, per cell walked
+	path:        [dynamic; PATH_MAX_LEN][2]f32,
+	costs:       [dynamic; PATH_MAX_LEN]f32,
+	// The point of the way being walked towards
+	next:        int,
+}
+
+// How much cost a walking piece spends a second: the cells it covers on ground of cost 1
+MOVEMENT_SPEED :: 4
 
 #assert(gfx.RENDER_TERRAIN_WIDTH == WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == WORLD_HEIGHT)
 #assert(len(Way_Kind) == gfx.RENDER_WAY_KINDS)
@@ -67,7 +88,9 @@ WATER :: bit_set[Surface]{.Lake, .Sea}
 world_init :: proc() {
 	camera_init()
 	map_draw_init()
-	pawns_init(&WORLD.pawns, WORLD.camera)
+	iconography_init()
+	pawns_init(WORLD.camera)
+	for index := PIECE_MAX - 1; index >= 0; index -= 1 do append(&WORLD.pieces_free, u16(index))
 }
 
 // Loads a scenario's terrain from its folder: one greyscale PNG per property, WORLD_WIDTH by WORLD_HEIGHT.
@@ -127,9 +150,12 @@ world_load :: proc(scenario: string) -> bool {
 	}
 	// Land
 	{
+		ROAD_SPEED :: 1
+		OFF_ROAD_SPEED :: 0.4
 		grid := pathfind_build_begin(.Land)
 		for cell, i in WORLD.atlas.terrain {
-			grid[i] = cell.way[.Road] != 0 ? 0.5 : cell.surface == .Land ? 1 : 0
+			grid[i] =
+				cell.way[.Road] != 0 ? OFF_ROAD_SPEED : cell.surface == .Land ? ROAD_SPEED : 0
 		}
 		pathfind_build_end(.Land)
 	}
@@ -142,6 +168,7 @@ world_load :: proc(scenario: string) -> bool {
 		pathfind_build_end(.Sea)
 	}
 	WORLD.atlas.revision += 1
+	world_load_test_pieces()
 	return ok
 }
 
@@ -204,18 +231,91 @@ Input :: struct {
 
 // Called every frame
 world_tick :: proc(input: Input, dt: f32) {
+
+	// Handle movement: the subject spends a steady cost a second walking the way, from where it stands towards the next
+	// point, and stops moving at its end
+	{
+		mov := &WORLD.movement
+		subject := piece_get(mov.subject)
+		if subject != nil {
+			if mov.dirty {
+				if !pathfind_trace(
+					subject.pos,
+					.Land,
+					mov.destination,
+					{},
+					&mov.path,
+					&mov.costs,
+				) {
+					fmt.eprintfln("No way from %v to %v", subject.pos, mov.destination)
+				}
+				mov.next = 0
+				mov.dirty = false
+			}
+
+			budget: f32 = MOVEMENT_SPEED * dt
+			for budget > 0 && mov.next < len(mov.path) {
+				target, cost := mov.path[mov.next], mov.costs[mov.next]
+				price := linalg.distance(subject.pos, target) * cost
+				if budget < price {
+					subject.pos += linalg.normalize(target - subject.pos) * budget / cost
+					break
+				}
+				budget -= price
+				subject.pos = target
+				mov.next += 1
+			}
+			if mov.next >= len(mov.path) do mov.subject = {}
+		}
+	}
+
+	// Once nothing is walking, the Roman army walks to a Roman settlement picked at random, other than one it stands at
+	if WORLD.movement.subject == {} {
+		SETTLEMENTS :: bit_set[Icon]{.Village, .Town, .City, .Large_City}
+		army: Piece_Id
+		for piece, index in WORLD.pieces {
+			if piece_alive(piece) && piece.culture == .Roman && piece.icon == .Army do army = piece_id(index)
+		}
+		if subject := piece_get(army); subject != nil {
+			destinations := make([dynamic][2]f32, context.temp_allocator)
+			for piece in WORLD.pieces {
+				if !piece_alive(piece) || piece.culture != .Roman || piece.icon not_in SETTLEMENTS do continue
+				if linalg.distance(piece.pos, subject.pos) < 1 do continue
+				append(&destinations, piece.pos)
+			}
+			if len(destinations) > 0 {
+				WORLD.movement.subject = army
+				WORLD.movement.destination = rand.choice(destinations[:])
+				WORLD.movement.dirty = true
+			}
+		}
+	}
+
+
 	camera_tick(input, dt)
 	map_draw_tick(&WORLD.atlas, WORLD.camera, input.viewport, input.pixel_density)
 
-	// Test pawns in late-Roman Italy and Germanic lands north of the Alps, set every frame until there are pieces
-	Test_Pawn :: struct {
+	if input.click do WORLD.selected = pawns_pick(WORLD.camera, input.viewport, input.cursor)
+	pawns_begin(WORLD.camera, input.viewport, input.pixel_density, dt)
+	for piece, index in WORLD.pieces {
+		if !piece_alive(piece) do continue
+		id := piece_id(index)
+		pawns_add(id, piece.pos, piece.icon, piece.culture, piece.name, id == WORLD.selected)
+	}
+	pawns_end()
+}
+
+// Test pieces in late-Roman Italy and Germanic lands north of the Alps, in place of whatever pieces there were
+@(private = "file")
+world_load_test_pieces :: proc() {
+	Test_Piece :: struct {
 		pos:     [2]f32,
-		type:    Pawn_Type,
+		icon:    Icon,
 		name:    string,
 		culture: Culture,
 	}
 	@(static, rodata)
-	TEST_PAWNS := [?]Test_Pawn {
+	TEST_PIECES := [?]Test_Piece {
 		{{342, 432}, .Large_City, "Roma", .Roman},
 		{{296, 374}, .Large_City, "Mediolanum", .Roman},
 		{{351, 400}, .City, "Ravenna", .Roman},
@@ -240,34 +340,37 @@ world_tick :: proc(input: Input, dt: f32) {
 		{{316, 342}, .Army, "", .Germanic},
 		{{292, 340}, .Envoy, "", .Germanic},
 	}
-	for test, i in TEST_PAWNS {
-		WORLD.pawns.entries[i + 1] = {
-			active  = true,
-			pos     = test.pos,
-			type    = test.type,
-			culture = test.culture,
-			name    = test.name,
-		}
+	// What each test piece is, by its icon
+	@(static, rodata)
+	TEST_TITLES := [Icon]string {
+		.Village    = "Village",
+		.Town       = "Town",
+		.City       = "City",
+		.Large_City = "Large City",
+		.Army       = "Army",
+		.Fleet      = "Fleet",
+		.Priest     = "Priest",
+		.Envoy      = "Envoy",
 	}
-	if input.click do WORLD.pawns.selected = pawns_pick(&WORLD.pawns, WORLD.camera, input.viewport, input.cursor)
-	pawns_tick(&WORLD.pawns, WORLD.camera, dt)
-	pawns_draw(&WORLD.pawns, input.viewport, WORLD.camera, input.pixel_density)
-
-	// Pawns tweaks
-	tweak.slider_in_place("Pawns/Medallion Zoom", &WORLD.pawns.medallion_zoom, 1.0, 20.)
-	// Which test pawn is selected: each choice after None is the test pawn placed at that id
-	choices := make([]string, len(TEST_PAWNS) + 1, context.temp_allocator)
-	choices[0] = "None"
-	for test, i in TEST_PAWNS do choices[i + 1] = test.name != "" ? test.name : fmt.tprintf("%s %d", PAWN_TYPES[test.type].name, i + 1)
-	selected := int(WORLD.pawns.selected)
-	tweak.choice_in_place("Pawns/Selected", &selected, choices)
-	WORLD.pawns.selected = Pawn_Id(selected)
+	for piece, index in WORLD.pieces do if piece_alive(piece) do piece_despawn(piece_id(index))
+	// The Roman army walks to Neapolis.
+	for piece in TEST_PIECES {
+		piece_spawn(
+			{
+				pos = piece.pos,
+				icon = piece.icon,
+				culture = piece.culture,
+				name = piece.name,
+				title = TEST_TITLES[piece.icon],
+			},
+		)
+	}
 }
 
 // Draws the world: the map, then the pawns over it
 world_render :: proc(renderer: ^gfx.Renderer) {
 	map_draw_render(renderer)
-	gfx.render_list(renderer, &WORLD.pawns.render_list)
+	pawns_render(renderer)
 }
 
 // Steps the map to its next view: the map itself, then each raw terrain property in turn
@@ -275,19 +378,26 @@ world_next_map_view :: proc() {
 	map_draw_next_view()
 }
 
-// Called between ui.begin() and ui.end(). The selected pawn is described on a card of the map's paper at the bottom
-// left of the view: its medallion and name, or its type's when it has none, over what it is.
+// The selected piece's card: the ink its property names are written in, and its space from the edges of the view
+PIECE_CARD_FADED_INK :: [4]f32{MAP_INK.r, MAP_INK.g, MAP_INK.b, 0.6}
+PIECE_CARD_MARGIN :: [2]f32{20, 20}
+
+// Called between ui.begin() and ui.end(). The selected piece is described on a card of the map's paper at the bottom
+// left of the view: its medallion and name, or what it is when it has none, over what it is.
 world_ui :: proc() {
-	pawns := &WORLD.pawns
-	if pawns.selected == 0 do return
-	pawn := pawns.entries[pawns.selected]
-	type := PAWN_TYPES[pawn.type]
+	piece := piece_get(WORLD.selected)
+	if piece == nil do return
 
 	ui.style_push(
-		{font = pawns.font, text_color = MAP_INK, width = ui.text_dim(), height = ui.text_dim()},
+		{
+			font = font_id(.Text),
+			text_color = MAP_INK,
+			width = ui.text_dim(),
+			height = ui.text_dim(),
+		},
 	)
 	defer ui.style_pop()
-	if ui.column({width = ui.grow(), height = ui.grow(), padding = PAWN_CARD_MARGIN}) {
+	if ui.column({width = ui.grow(), height = ui.grow(), padding = PIECE_CARD_MARGIN}) {
 		ui.spacer(ui.grow())
 		card := ui.Style {
 			width      = ui.fit(),
@@ -299,38 +409,89 @@ world_ui :: proc() {
 			thickness  = 1.5,
 			radius     = 3,
 		}
-		if ui.panel("selected pawn", card) {
+		if ui.panel("selected piece", card) {
 			title := [?]ui.Text {
 				{
-					image = pawns.image[pawn.type][.Medallion][pawn.culture],
+					image = icon_image(piece.icon, .Medallion, piece.culture),
 					color = [4]f32{1, 1, 1, 1},
 				},
 				{text = " "},
-				{text = pawn.name != "" ? pawn.name : type.tag},
+				{text = piece.name != "" ? piece.name : piece.title},
 			}
-			ui.label_text(title[:], {font = pawns.title_font})
-			pawn_card_row("Type", type.name)
-			pawn_card_row("Culture", fmt.tprintf("%v", pawn.culture))
+			ui.label_text(title[:], {font = font_id(.Title)})
+			piece_card_row("Type", piece.title)
+			piece_card_row("Culture", fmt.tprintf("%v", piece.culture))
 		}
 	}
 
 	// A property on the card: its name, faded, in a column as wide for every row, then its value
-	pawn_card_row :: proc(name, value: string) {
+	piece_card_row :: proc(name, value: string) {
 		if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
-			ui.label(name, {width = ui.em(5), text_color = PAWN_CARD_FADED_INK})
+			ui.label(name, {width = ui.em(5), text_color = PIECE_CARD_FADED_INK})
 			ui.label(value)
 		}
 	}
 }
 
-// The peoples whose drawings pawns can be in
+// The peoples, each with its own style of drawings
 Culture :: enum u8 {
 	Roman,
 	Germanic,
 }
 
-// Logical pieces. The on-map game entities. The logical correspondent to the visual pawn
+// A thing of the game's that stands on the map, drawn as a pawn
 Piece :: struct {
-	pos: [2]f32,
+	// Bumped as the slot takes a piece and as it frees it: odd while there is a piece in the slot, even while it is
+	// free. Ids to earlier pieces go stale. Set by piece_spawn.
+	generation: u16,
+	// Where it stands, in cells
+	pos:        [2]f32,
+	icon:       Icon,
+	culture:    Culture,
+	name:       string,
+	title:      string,
+}
+
+// Which piece: its slot, and the slot's generation while the piece is in it. An id with an even generation, like the
+// zero id, is nil.
+Piece_Id :: struct {
+	index:      u16,
+	generation: u16,
+}
+
+// Puts a piece in a free slot, returning its id, or nil when every slot is full
+piece_spawn :: proc(piece: Piece) -> Piece_Id {
+	index, ok := pop_safe(&WORLD.pieces_free)
+	if !ok do return {}
+	slot := &WORLD.pieces[index]
+	generation := slot.generation + 1
+	slot^ = piece
+	slot.generation = generation
+	return {index, generation}
+}
+
+// Frees a piece's slot. A stale or nil id does nothing.
+piece_despawn :: proc(id: Piece_Id) {
+	piece := piece_get(id)
+	if piece == nil do return
+	piece.generation += 1
+	append(&WORLD.pieces_free, id.index)
+}
+
+// The piece an id is to, or nil when the id is stale or nil
+piece_get :: proc(id: Piece_Id) -> ^Piece {
+	piece := &WORLD.pieces[id.index]
+	if id.generation & 1 == 0 || piece.generation != id.generation do return nil
+	return piece
+}
+
+// There is a piece in the slot
+piece_alive :: proc(piece: Piece) -> bool {
+	return piece.generation & 1 == 1
+}
+
+// The id of the piece in a slot
+piece_id :: proc(index: int) -> Piece_Id {
+	return {u16(index), WORLD.pieces[index].generation}
 }
 

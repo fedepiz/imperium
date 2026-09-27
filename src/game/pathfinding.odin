@@ -431,20 +431,25 @@ blocks_dijkstra :: proc(table: ^Pathfind_Table, start: int, reverse: bool, cost:
 }
 
 // Finds the cheapest way from src to dst, both in cells: out gets the centres of the cells along it, after src's up to
-// and including dst's. False, with out empty, if there is no way or it is longer than out holds.
+// and including dst's, and costs the cost of entering each of those cells, per cell walked. False, with both empty, if
+// there is no way or it is longer than they hold.
 pathfind_trace :: proc(
-	src: [2]f32, // Which pathfind domain
-	domain: Pathfind_Domain, // Where does the path start from
-	// Where does it end
+	// Where the path starts from
+	src: [2]f32,
+	// Which pathfind domain
+	domain: Pathfind_Domain,
+	// Where it ends
 	dst: [2]f32,
 	// Relevant zones. For now assumed to always mean opposition zone of conrol
 	zones: []Disc,
 	// Output
 	out: ^[dynamic; PATH_MAX_LEN][2]f32,
+	costs: ^[dynamic; PATH_MAX_LEN]f32,
 ) -> (
 	ok: bool,
 ) {
 	clear(out)
+	clear(costs)
 	table := &TABLE[domain]
 	from := [2]int{int(math.floor(src.x)), int(math.floor(src.y))}
 	to := [2]int{int(math.floor(dst.x)), int(math.floor(dst.y))}
@@ -470,12 +475,16 @@ pathfind_trace :: proc(
 	for cell := to; cell != from; {
 		if len(out) == PATH_MAX_LEN {
 			clear(out)
+			clear(costs)
 			return false
 		}
+		index := grid_index(cell, WORLD_SIZE)
 		append(out, [2]f32{f32(cell.x), f32(cell.y)} + 0.5)
-		cell += DIR_OFFSET[SCRATCH.search[.Fine].node[grid_index(cell, WORLD_SIZE)].parent]
+		append(costs, table.grid[index])
+		cell += DIR_OFFSET[SCRATCH.search[.Fine].node[index].parent]
 	}
 	slice.reverse(out[:])
+	slice.reverse(costs[:])
 	return true
 }
 
