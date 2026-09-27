@@ -48,10 +48,11 @@ move_plan_raw :: proc(
 ) {
 	plan.seq_num += 1
 	subject := piece_get(subject_id)
-	if subject != nil {
+	if subject != nil && subject.movement != nil {
 		plan.subject = subject_id
 		plan.target = target
-		has_path := pathfind_trace(subject.pos, .Land, destination, {}, &plan.path, &plan.cost)
+		domain := subject.movement.(Pathfind_Domain)
+		has_path := pathfind_trace(subject.pos, domain, destination, {}, &plan.path, &plan.cost)
 		if !has_path {
 			fmt.eprintfln("No way over land from %v to %v", subject.pos, destination)
 		}
@@ -341,36 +342,37 @@ world_tick :: proc(input: Input, dt: f32) {
 @(private = "file")
 world_load_test_pieces :: proc() {
 	Test_Piece :: struct {
-		pos:     [2]f32,
-		icon:    Icon,
-		name:    string,
-		culture: Culture,
+		pos:      [2]f32,
+		icon:     Icon,
+		name:     string,
+		culture:  Culture,
+		movement: Maybe(Pathfind_Domain),
 	}
 	@(static, rodata)
 	TEST_PIECES := [?]Test_Piece {
-		{{342, 432}, .Large_City, "Roma", .Roman},
-		{{296, 374}, .Large_City, "Mediolanum", .Roman},
-		{{351, 400}, .City, "Ravenna", .Roman},
-		{{412, 462}, .City, "Tarentum", .Roman},
-		{{367, 369}, .Town, "Aquileia", .Roman},
-		{{367, 449}, .Town, "Neapolis", .Roman},
-		{{330, 401}, .Town, "Florentia", .Roman},
-		{{296, 391}, .Town, "Genua", .Roman},
-		{{327, 374}, .Town, "Verona", .Roman},
-		{{260, 379}, .Town, "Segusio", .Roman},
-		{{394, 506}, .Town, "Rhegium", .Roman},
-		{{385, 527}, .Town, "Syracusae", .Roman},
-		{{334, 419}, .Army, "", .Roman},
-		{{353, 455}, .Fleet, "", .Roman},
-		{{355, 393}, .Fleet, "", .Roman},
-		{{350, 430}, .Priest, "", .Roman},
-		{{306, 382}, .Envoy, "", .Roman},
-		{{300, 300}, .Large_City, "Alamannia", .Germanic},
-		{{332, 318}, .City, "Castra Regina", .Germanic},
-		{{270, 322}, .Town, "Brisiacum", .Germanic},
-		{{285, 285}, .Village, "", .Germanic},
-		{{316, 342}, .Army, "", .Germanic},
-		{{292, 340}, .Envoy, "", .Germanic},
+		{{342, 432}, .Large_City, "Roma", .Roman, nil},
+		{{296, 374}, .Large_City, "Mediolanum", .Roman, nil},
+		{{351, 400}, .City, "Ravenna", .Roman, nil},
+		{{412, 462}, .City, "Tarentum", .Roman, nil},
+		{{367, 369}, .Town, "Aquileia", .Roman, nil},
+		{{367, 449}, .Town, "Neapolis", .Roman, nil},
+		{{330, 401}, .Town, "Florentia", .Roman, nil},
+		{{296, 391}, .Town, "Genua", .Roman, nil},
+		{{327, 374}, .Town, "Verona", .Roman, nil},
+		{{260, 379}, .Town, "Segusio", .Roman, nil},
+		{{394, 506}, .Town, "Rhegium", .Roman, nil},
+		{{385, 527}, .Town, "Syracusae", .Roman, nil},
+		{{334, 419}, .Army, "", .Roman, .Land},
+		{{353, 455}, .Fleet, "", .Roman, .Sea},
+		{{355, 393}, .Fleet, "", .Roman, .Sea},
+		{{350, 430}, .Priest, "", .Roman, .Land},
+		{{306, 382}, .Envoy, "", .Roman, .Land},
+		{{300, 300}, .Large_City, "Alamannia", .Germanic, nil},
+		{{332, 318}, .City, "Castra Regina", .Germanic, nil},
+		{{270, 322}, .Town, "Brisiacum", .Germanic, nil},
+		{{285, 285}, .Village, "", .Germanic, nil},
+		{{316, 342}, .Army, "", .Germanic, .Land},
+		{{292, 340}, .Envoy, "", .Germanic, .Land},
 	}
 	// What each test piece is, by its icon
 	@(static, rodata)
@@ -394,6 +396,7 @@ world_load_test_pieces :: proc() {
 				culture = piece.culture,
 				name = piece.name,
 				title = TEST_TITLES[piece.icon],
+				movement = piece.movement,
 			},
 		)
 	}
@@ -482,6 +485,7 @@ Piece :: struct {
 	culture:    Culture,
 	name:       string,
 	title:      string,
+	movement:   Maybe(Pathfind_Domain),
 }
 
 // Which piece: its slot, and the slot's generation while the piece is in it. An id with an even generation, like the
