@@ -241,15 +241,17 @@ game_input :: proc(input: Input, viewport: [2]f32, pixel_density: f32) -> game.I
 		if key_is_down(input, .W) || key_is_down(input, .UP) do pan.y -= 1
 		if key_is_down(input, .S) || key_is_down(input, .DOWN) do pan.y += 1
 	}
+
+	has_mouse := bool(input.pos_is_valid) && !ui.hovered_any()
+
 	return {
 		viewport = viewport,
 		pixel_density = pixel_density,
 		cursor = input.pos,
 		on_map = bool(input.pos_is_valid) && !ui.hovered_any(),
 		grab = button_is_down(input, sdl.BUTTON_LEFT),
-		click = bool(input.pos_is_valid) &&
-		!ui.hovered_any() &&
-		button_is_pressed(input, sdl.BUTTON_LEFT),
+		left_click = has_mouse && button_is_pressed(input, sdl.BUTTON_LEFT),
+		right_click = has_mouse && button_is_pressed(input, sdl.BUTTON_RIGHT),
 		pan = pan,
 		wheel = input.wheel.y,
 	}

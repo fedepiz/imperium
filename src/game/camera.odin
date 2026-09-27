@@ -102,3 +102,7 @@ camera_world_to_screen_rect :: proc(
 	return
 }
 
+camera_screen_to_world_point :: proc(camera: Camera, viewport: [2]f32, pos: [2]f32) -> [2]f32 {
+	return (pos - viewport / 2) / camera.zoom + camera.center
+}
+

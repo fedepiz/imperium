@@ -31,6 +31,8 @@ WORLD: struct {
 }
 
 Move_Plan :: struct {
+	// The plan's sequence number, bumped every time the plan is updated.
+	seq_num: u32,
 	subject: Piece_Id,
 	target:  Piece_Id,
 	path:    [dynamic; PATH_MAX_LEN][2]f32,
@@ -44,11 +46,15 @@ move_plan_raw :: proc(
 	target: Piece_Id,
 	plan: ^Move_Plan,
 ) {
+	plan.seq_num += 1
 	subject := piece_get(subject_id)
 	if subject != nil {
 		plan.subject = subject_id
 		plan.target = target
-		pathfind_trace(subject.pos, .Land, destination, {}, &plan.path, &plan.cost)
+		has_path := pathfind_trace(subject.pos, .Land, destination, {}, &plan.path, &plan.cost)
+		if !has_path {
+			fmt.eprintfln("No way over land from %v to %v", subject.pos, destination)
+		}
 	}
 }
 
@@ -59,12 +65,17 @@ move_plan_to :: proc(subject: Piece_Id, target_id: Piece_Id, plan: ^Move_Plan) {
 	}
 }
 
+move_plan_to_point :: proc(subject: Piece_Id, destination: [2]f32, plan: ^Move_Plan) {
+	move_plan_raw(subject, destination, {}, plan)
+}
 
 // A piece walking to a place along the cheapest way there
 Movement :: struct {
-	plan: Move_Plan,
+	plan:    Move_Plan,
+	// The sequence number of the movement advance state
+	seq_num: u32,
 	// The point of the way being walked towards
-	next: int,
+	next:    int,
 }
 
 // How much cost a walking piece spends a second: the cells it covers on ground of cost 1
@@ -245,7 +256,8 @@ Input :: struct {
 	// The button that drags the map is held
 	grab:          bool,
 	// The button that selects went down this frame, over the map
-	click:         bool,
+	left_click:    bool,
+	right_click:   bool,
 	// Keyboard panning along each axis, from -1 to 1; positive y is down the map
 	pan:           [2]f32,
 	// Wheel movement this frame, in notches; positive zooms in
@@ -265,6 +277,12 @@ world_tick :: proc(input: Input, dt: f32) {
 			if subject == nil {
 				is_over = true
 			} else {
+				// This is a fresh plan
+				if mov.plan.seq_num != mov.seq_num {
+					mov.next = 0
+					mov.seq_num = mov.plan.seq_num
+				}
+
 				budget := MOVEMENT_SPEED * dt
 				for budget > 0 && mov.next < len(mov.plan.path) {
 					target, cost := mov.plan.path[mov.next], mov.plan.cost[mov.next]
@@ -287,36 +305,29 @@ world_tick :: proc(input: Input, dt: f32) {
 				mov.next = 0
 			}
 		}
-
-
-		// Once nothing is walking, the Roman army walks to a Roman settlement picked at random, other than one it stands at
-		if mov.plan.subject == {} {
-			SETTLEMENTS :: bit_set[Icon]{.Village, .Town, .City, .Large_City}
-			army: Piece_Id
-			for piece, index in WORLD.pieces {
-				if piece_alive(piece) && piece.culture == .Roman && piece.icon == .Army do army = piece_id(index)
-			}
-			if subject := piece_get(army); subject != nil {
-				destinations := make([dynamic]Piece_Id, context.temp_allocator)
-				for piece, index in WORLD.pieces {
-					if !piece_alive(piece) || piece.culture != .Roman || piece.icon not_in SETTLEMENTS do continue
-					if linalg.distance(piece.pos, subject.pos) < 1 do continue
-					append(&destinations, piece_id(index))
-				}
-				if len(destinations) > 0 {
-					target_id := rand.choice(destinations[:])
-					move_plan_to(army, target_id, &mov.plan)
-					mov.next = 0
-				}
-			}
-		}
 	}
-
 
 	camera_tick(input, dt)
 	map_draw_tick(&WORLD.atlas, WORLD.camera, input.viewport, input.pixel_density)
 
-	if input.click do WORLD.selected = pawns_pick(WORLD.camera, input.viewport, input.cursor)
+	if input.left_click do WORLD.selected = pawns_pick(WORLD.camera, input.viewport, input.cursor)
+
+	if input.right_click {
+		if WORLD.selected != {} {
+			target := pawns_pick(WORLD.camera, input.viewport, input.cursor)
+			if target != {} {
+				move_plan_to(WORLD.selected, target, &WORLD.movement.plan)
+			} else {
+				destination := camera_screen_to_world_point(
+					WORLD.camera,
+					input.viewport,
+					input.cursor,
+				)
+				move_plan_to_point(WORLD.selected, destination, &WORLD.movement.plan)
+			}
+		}
+	}
+
 	pawns_begin(WORLD.camera, input.viewport, input.pixel_density, dt)
 	for piece, index in WORLD.pieces {
 		if !piece_alive(piece) do continue
