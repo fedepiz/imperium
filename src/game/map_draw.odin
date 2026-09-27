@@ -80,13 +80,14 @@ map_derive :: proc(md: ^Map_Draw, terrain: []Terrain) {
 		rt.cells[i] = {u8(cell.surface) * 127, cell.elevation, cell.trees, cell.moisture}
 	}
 
-	// Each kind of way, traced into smoothed lines, then drawn from their segments and stamped around themselves:
-	// each cell near a way learns the offset from its middle to the nearest point of one.
+	// Each kind of way, traced into smoothed lines, then drawn from their segments, and stamped around themselves so each
+	// cell near one learns the offset from its middle to its nearest point: from which it preclaims the ground along it.
+	claimed := make([]u8, FOOTPRINT_SIZE.x * FOOTPRINT_SIZE.y, context.temp_allocator)
 	to_way := make([][2]f32, CELLS_MAX, context.temp_allocator)
-	for &offset in to_way do offset = WAY_REACH
 	for kind in Way_Kind {
+		for &offset in to_way do offset = WAY_REACH
 		polylines_clear()
-		trace_ways(terrain, kind)
+		ways_trace(terrain, kind)
 		segments := &rt.way_segments[int(kind)]
 		clear(segments)
 		for r in 0 ..< polylines_count() {
@@ -103,6 +104,7 @@ map_derive :: proc(md: ^Map_Draw, terrain: []Terrain) {
 			}
 			polyline_stamp(line, WAY_REACH, to_way, nil)
 		}
+		ways_claim_ground(claimed, to_way, WAY_TRACE[kind].band)
 	}
 
 	// The coasts, the boundaries of the land, traced into smoothed lines, then stamped around themselves: each cell near
@@ -138,11 +140,14 @@ map_derive :: proc(md: ^Map_Draw, terrain: []Terrain) {
 		)
 	}
 
+	// The water near the shore, preclaimed so no mark's drawing spills into it
+	preclaim_coast_water(claimed, rt.coast[:], COAST_WATER_BAND)
+
 	// What covers each cell, drawn as the cover layer, and the marks over the land
 	land := measure_land(terrain)
 	cover := make([]Cover_Cell, CELLS_MAX, context.temp_allocator)
 	classify_cover(&rt.cover, cover, terrain, &land)
-	marks_place(&md.marks, terrain, rt.coast[:], cover, to_way)
+	marks_place(&md.marks, terrain, rt.coast[:], cover, claimed)
 }
 
 // Cover ---------------------------------------------------------------------------------------------------------------
@@ -292,28 +297,53 @@ cover_of :: proc(terrain: []Terrain, land: ^Land, i: int) -> (best: Cover_Cell) 
 // Ways ----------------------------------------------------------------------------------------------------------------
 // Ways: rivers and roads, traced from their cells into lines
 
-// How far around the ways the offset to them is kept, in cells: enough to keep marks clear of them
+// How far around the ways the offset to them is kept, in cells: enough for the ground they claim
 @(private = "file")
 WAY_REACH :: f32(4)
 
-// How each kind of way is traced: how its lines are smoothed, and whether an end by the water is carried on to the
-// shore. Rivers are smoothed fully; roads keep more of their course.
+// How each kind of way is traced: how its lines are smoothed, whether an end by the water is carried on to the shore,
+// and how far either side of its lines, in cells, it claims ground that no mark's drawing may cover. Rivers are
+// smoothed fully; roads keep more of their course.
 @(private = "file")
 Way_Trace :: struct {
 	smoothing: Polyline_Smoothing,
 	to_shore:  bool,
+	band:      f32,
 }
 
 @(private = "file", rodata)
 WAY_TRACE := [Way_Kind]Way_Trace {
-	.River = {smoothing = {softness = 1, cut_iter = 2, cut_ratio = 0.25}, to_shore = true},
-	.Road = {smoothing = {softness = 0.5, cut_iter = 2, cut_ratio = 0.25}},
+	.River = {
+		smoothing = {softness = 1, cut_iter = 2, cut_ratio = 0.25},
+		to_shore = true,
+		band = 1.0,
+	},
+	.Road = {smoothing = {softness = 0.5, cut_iter = 2, cut_ratio = 0.25}, band = 1.2},
+}
+
+// Preclaims the ground within band of the ways: each square of claimed ground whose middle lies within band of the
+// nearest point of a way. to_way holds, for each cell, the offset from its middle to the nearest point of a way.
+@(private = "file")
+ways_claim_ground :: proc(claimed: []u8, to_way: [][2]f32, band: f32) {
+	for offset, i in to_way {
+		if linalg.length(offset) > band + 1 do continue
+		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
+		way := [2]f32{f32(cell.x), f32(cell.y)} + 0.5 + offset
+		for y in 0 ..< FOOTPRINT_RES {
+			for x in 0 ..< FOOTPRINT_RES {
+				square := cell * FOOTPRINT_RES + {x, y}
+				middle := ([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES
+				if linalg.length(middle - way) >= band do continue
+				claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
+			}
+		}
+	}
 }
 
 // Traces the cells of a kind of way into lines through the middles of their cells. Lines run between ends and forks,
 // so ways meet where they join; what is left over are closed loops.
 @(private = "file")
-trace_ways :: proc(terrain: []Terrain, kind: Way_Kind) {
+ways_trace :: proc(terrain: []Terrain, kind: Way_Kind) {
 	visited := make([]bool, CELLS_MAX, context.temp_allocator)
 	for i in 0 ..< CELLS_MAX {
 		if terrain[i].way[kind] == 0 do continue
@@ -500,11 +530,57 @@ distance_to :: proc(out: []f32, terrain: []Terrain, water: bool) {
 	distance_from(out, source, WORLD_SIZE)
 }
 
+// How far out from the shore, in cells, the water is preclaimed
+@(private = "file")
+COAST_WATER_BAND :: f32(3)
+
+// Preclaims the water within reach of the shore: each square of claimed ground where coast, the signed distance to the
+// coast, blended between cells, is below 0 and above -reach.
+@(private = "file")
+preclaim_coast_water :: proc(claimed: []u8, coast: []f32, reach: f32) {
+	for distance, i in coast {
+		// A distance changes by at most as far as its point moves, so only cells this near the strip have squares in it.
+		if distance >= 1 || distance <= -reach - 1 do continue
+		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
+		for y in 0 ..< FOOTPRINT_RES {
+			for x in 0 ..< FOOTPRINT_RES {
+				square := cell * FOOTPRINT_RES + {x, y}
+				at := bilinear(
+					coast,
+					WORLD_SIZE,
+					([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES,
+				)
+				if at < 0 && at > -reach do claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
+			}
+		}
+	}
+}
+
 // Marks ---------------------------------------------------------------------------------------------------------------
 // The marks: drawings scattered over the map, laid layer by layer, each layer on a jittered grid of points over the
 // world. At a point, every marking of the layer scores how densely it grows there, by whether the cell's distance to
 // the coast, elevation and temperature are in its ranges, and by its cover; the point keeps a mark with the sum of the
 // scores as its chance, and the mark is one of the markings, picked in proportion to its score.
+
+// Ground where no mark may stand, kept FOOTPRINT_RES squares to a cell each way, row by row. Each square holds who
+// claimed it first: 0 for none, PRECLAIMED for what claims it before any mark is placed, such as the ways, and a
+// layer's number plus 2 for its marks. No mark's drawing may cover preclaimed ground.
+@(private = "file")
+FOOTPRINT_RES :: 4
+@(private = "file")
+FOOTPRINT_SIZE :: [2]int{WORLD_WIDTH * FOOTPRINT_RES, WORLD_HEIGHT * FOOTPRINT_RES}
+@(private = "file")
+PRECLAIMED :: 1
+
+// How much of its width, about its middle, a mark's drawing covers, as far as keeping it off preclaimed ground
+@(private = "file")
+MARK_DRAWN_WIDTH :: 0.7
+
+// The square of claimed ground a point, in cells, lies in
+@(private = "file")
+footprint_square :: proc(p: [2]f32) -> [2]int {
+	return {int(p.x * FOOTPRINT_RES), int(p.y * FOOTPRINT_RES)}
+}
 
 @(private = "file")
 Map_Marks :: struct {
@@ -547,21 +623,20 @@ Layer :: enum {
 
 // How a layer lays its marks. Its points are spacing cells apart across and row_squash of that down, every other row
 // shifted half a step; each wanders within its step by up to jitter of it, across and down. A mark is width cells wide,
-// varying by up to vary of that either way, and keeps way_clearance of its width clear of ways. It claims footprint of
-// ground as it is laid: no mark of a later layer stands there, nor, if claims_own, a later mark of its own layer.
+// varying by up to vary of that either way. It claims footprint of ground as it is laid: no mark of a later layer
+// stands there, nor, if claims_own, a later mark of its own layer.
 @(private = "file")
 Layer_Def :: struct {
-	spacing:       f32,
-	row_squash:    f32,
-	jitter:        [2]f32,
-	width:         f32,
-	vary:          f32,
-	way_clearance: f32,
-	footprint:     struct {
+	spacing:    f32,
+	row_squash: f32,
+	jitter:     [2]f32,
+	width:      f32,
+	vary:       f32,
+	footprint:  struct {
 		width: f32,
 		below: f32,
 	},
-	claims_own:    bool,
+	claims_own: bool,
 }
 
 @(private = "file", rodata)
@@ -573,7 +648,6 @@ LAYERS := [Layer]Layer_Def {
 		jitter = {0.6, 0.15},
 		width = 4.7,
 		vary = 0.2,
-		way_clearance = 0.6,
 		footprint = {width = 0.5, below = 0.45},
 		claims_own = true,
 	},
@@ -583,7 +657,6 @@ LAYERS := [Layer]Layer_Def {
 		jitter = {0.7, 0.6},
 		width = 3.29,
 		vary = 0.2,
-		way_clearance = 0.6,
 		footprint = {width = 0.525, below = 0.5},
 		claims_own = true,
 	},
@@ -593,33 +666,11 @@ LAYERS := [Layer]Layer_Def {
 		jitter = {0.7, 0.6},
 		width = 1.6,
 		vary = 0.3,
-		way_clearance = 0.6,
 		footprint = {width = 0.7},
 	},
-	.Tuft = {
-		spacing = 3.8,
-		row_squash = 0.8,
-		jitter = {0.7, 0.6},
-		width = 1.3,
-		vary = 0.2,
-		way_clearance = 0.6,
-	},
-	.Marsh = {
-		spacing = 3.2,
-		row_squash = 0.8,
-		jitter = {0.7, 0.6},
-		width = 2.3,
-		vary = 0.15,
-		way_clearance = 0.6,
-	},
-	.Dune = {
-		spacing = 5.5,
-		row_squash = 0.8,
-		jitter = {0.7, 0.6},
-		width = 3.4,
-		vary = 0.2,
-		way_clearance = 0.6,
-	},
+	.Tuft = {spacing = 3.8, row_squash = 0.8, jitter = {0.7, 0.6}, width = 1.3, vary = 0.2},
+	.Marsh = {spacing = 3.2, row_squash = 0.8, jitter = {0.7, 0.6}, width = 2.3, vary = 0.15},
+	.Dune = {spacing = 5.5, row_squash = 0.8, jitter = {0.7, 0.6}, width = 3.4, vary = 0.2},
 	.Sea = {spacing = 12, row_squash = 0.8, jitter = {0.7, 0.6}, width = 3},
 }
 
@@ -773,28 +824,20 @@ marks_init :: proc(mm: ^Map_Marks) {
 }
 
 // Lays the marks over the terrain, in three passes: every layer's grid points, scored; a candidate mark at each point
-// that keeps one; and, in order, each candidate that fits, stamping its footprint. coast, cover and to_way are for
-// every cell: the signed distance to the coast, the cover, and the offset to the nearest way.
+// that keeps one; and, in order, each candidate that fits, stamping its footprint. coast and cover are for every cell:
+// the signed distance to the coast, and the cover. claimed holds the preclaimed ground: see FOOTPRINT_RES.
 @(private = "file")
 marks_place :: proc(
 	mm: ^Map_Marks,
 	terrain: []Terrain,
 	coast: []f32,
 	cover: []Cover_Cell,
-	to_way: [][2]f32,
+	claimed: []u8,
 ) {
 	// Each layer has sixteen random streams, one for each use at a point.
 	stream :: proc(layer: Layer, use: u32) -> u32 {return u32(layer) * 16 + use}
 	// Where a mark stands, in cells down the map: its drawing's bottom edge
 	mark_foot :: proc(mark: Mark) -> f32 {return mark.pos.y + mark.height / 2}
-	// Ground claimed by marks is kept FOOTPRINT_RES squares to a cell each way, row by row.
-	FOOTPRINT_RES :: 4
-	FOOTPRINT_SIZE :: [2]int{WORLD_WIDTH * FOOTPRINT_RES, WORLD_HEIGHT * FOOTPRINT_RES}
-	// The square of claimed ground a point, in cells, lies in
-	footprint_square :: proc(p: [2]f32) -> [2]int {return{
-			int(p.x * FOOTPRINT_RES),
-			int(p.y * FOOTPRINT_RES),
-		}}
 	// A point of a layer's grid, col across and row down, where it lies, in cells, the cell it lies in, and how densely
 	// each marking grows there, 0 for the markings of other layers
 	Point :: struct {
@@ -871,11 +914,8 @@ marks_place :: proc(
 			math.lerp(1 - def.vary, 1 + def.vary, random_xy(col, row, stream(layer, 5)))
 		if marking.grow != 0 {
 			band := marking.elevation
-			up := clamp(
-				(normalized(terrain[point.cell].elevation) - band.lo) / (band.hi - band.lo),
-				0,
-				1,
-			)
+			up := (normalized(terrain[point.cell].elevation) - band.lo) / (band.hi - band.lo)
+			up = clamp(up, 0, 1)
 			width *= 1 + marking.grow * up
 		}
 		mark := Mark {
@@ -895,20 +935,25 @@ marks_place :: proc(
 		append(&candidates, mark)
 	}
 
-	// In order, each candidate that fits: clear of the ways, so they stay in view, and standing on ground no earlier
-	// layer has claimed, nor its own if it claims its own. Each square of claimed ground holds the first layer to claim
-	// it, plus 1.
+	// In order, each candidate that fits: standing on ground nothing before its layer has claimed, nor its own layer if
+	// it claims its own, and with no preclaimed ground under its drawing
 	clear(&mm.marks)
-	claimed := make([]u8, FOOTPRINT_SIZE.x * FOOTPRINT_SIZE.y, context.temp_allocator)
-	for mark in candidates {
+	candidate: for mark in candidates {
 		def := LAYERS[mark.layer]
-		cell := [2]int{int(mark.pos.x), int(mark.pos.y)}
-		from_middle := mark.pos - [2]f32{f32(cell.x), f32(cell.y)} - 0.5
-		if linalg.length(to_way[cell.y * WORLD_WIDTH + cell.x] - from_middle) < mark.width * def.way_clearance do continue
 		foot := footprint_square({mark.pos.x, mark_foot(mark)})
 		if foot.y < FOOTPRINT_SIZE.y {
 			by := int(claimed[foot.y * FOOTPRINT_SIZE.x + foot.x])
-			if by != 0 && (by - 1 < int(mark.layer) || def.claims_own) do continue
+			if by != 0 && (by - 2 < int(mark.layer) || def.claims_own) do continue
+		}
+		{
+			half := mark.width * MARK_DRAWN_WIDTH / 2
+			first := footprint_square({mark.pos.x - half, mark_foot(mark) - mark.height})
+			last := footprint_square({mark.pos.x + half, mark_foot(mark)})
+			for y in max(first.y, 0) ..= min(last.y, FOOTPRINT_SIZE.y - 1) {
+				for x in max(first.x, 0) ..= min(last.x, FOOTPRINT_SIZE.x - 1) {
+					if claimed[y * FOOTPRINT_SIZE.x + x] == PRECLAIMED do continue candidate
+				}
+			}
 		}
 		assert(len(mm.marks) < MARKS_MAX, "more marks than MARKS_MAX")
 		append(&mm.marks, mark)
@@ -923,7 +968,7 @@ marks_place :: proc(
 		for y in max(first.y, 0) ..= min(last.y, FOOTPRINT_SIZE.y - 1) {
 			for x in max(first.x, 0) ..= min(last.x, FOOTPRINT_SIZE.x - 1) {
 				square := &claimed[y * FOOTPRINT_SIZE.x + x]
-				if square^ == 0 do square^ = u8(mark.layer) + 1
+				if square^ == 0 do square^ = u8(mark.layer) + 2
 			}
 		}
 	}

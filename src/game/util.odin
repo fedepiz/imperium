@@ -134,3 +134,17 @@ ramp_between :: proc(from, full, value: f32) -> f32 {
 normalized :: proc(value: u8) -> f32 {
 	return f32(value) / f32(max(u8))
 }
+
+// The value of a grid, size across and down, at p, in cells: each cell's value at its middle, blended between them,
+// and held at the edges
+bilinear :: proc(values: []f32, size: [2]int, p: [2]f32) -> f32 {
+	q := p - 0.5
+	base := [2]int{int(math.floor(q.x)), int(math.floor(q.y))}
+	f := q - [2]f32{f32(base.x), f32(base.y)}
+	at :: proc(values: []f32, size: [2]int, x, y: int) -> f32 {
+		return values[clamp(y, 0, size.y - 1) * size.x + clamp(x, 0, size.x - 1)]
+	}
+	top := math.lerp(at(values, size, base.x, base.y), at(values, size, base.x + 1, base.y), f.x)
+	bottom := math.lerp(at(values, size, base.x, base.y + 1), at(values, size, base.x + 1, base.y + 1), f.x)
+	return math.lerp(top, bottom, f.y)
+}
