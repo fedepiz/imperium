@@ -5,13 +5,15 @@ import "core:math/linalg"
 
 import "../span"
 
-// Lines through the world, in cells: ways and coasts, and later borders. They are traced from the cells into
-// runs of points, stepping from cell to cell, smoothed all together by polylines_smooth, then read out run by run.
+// Lines through the world, in cells: ways and coasts, and later borders. They are traced from the cells into runs of
+// points, stepping from cell to cell; each run is smoothed as it ends, then read out run by run.
 
+// The most points a run is traced with, and the most runs
 POLYLINE_POINTS_MAX :: 1 << 16
 POLYLINE_RUNS_MAX :: 1 << 13
 // The most times a run's corners can be cut. Each cut doubles its points, so this sizes the smoothed points.
 POLYLINE_CORNER_ITER_MAX :: 3
+// Room for the smoothed points of all the runs
 POLYLINE_SMOOTHED_MAX :: POLYLINE_POINTS_MAX << POLYLINE_CORNER_ITER_MAX
 // Runs of up to this many points are not softened, which would shrink them to specks.
 POLYLINE_SHORT :: 8
@@ -26,106 +28,83 @@ Polyline_Smoothing :: struct {
 	cut_ratio: f32,
 }
 
-// A run: a span of points making a line, whether it closes from its last point back to its first, and how it is
-// smoothed.
-Polyline_Run :: struct {
-	points:    span.Span,
-	closed:    bool,
-	smoothing: Polyline_Smoothing,
-}
-
-Polyline_Smoothed :: struct {
-	points: [][2]f32,
-	closed: bool,
-}
-
-Polylines :: struct {
-	// The traced points, and the runs of them that make lines
-	points:        [dynamic; POLYLINE_POINTS_MAX][2]f32,
-	runs:          [dynamic; POLYLINE_RUNS_MAX]Polyline_Run,
-	// Written by polylines_smooth: each run, smoothed. A run that did not fit is left empty.
-	smoothed:      [POLYLINE_SMOOTHED_MAX][2]f32,
-	smoothed_runs: [POLYLINE_RUNS_MAX]span.Span,
-}
-
-polylines_clear :: proc(lines: ^Polylines) {
-	clear(&lines.points)
-	clear(&lines.runs)
-}
-
-// Adds a point to the run being traced. A full table takes no more.
-polylines_add :: proc(lines: ^Polylines, point: [2]f32) {
-	if len(lines.points) < POLYLINE_POINTS_MAX {
-		append(&lines.points, point)
-	}
-}
-
-// Ends the run being traced: the points added since the last run ended. Runs of fewer than two points are dropped.
-polylines_end :: proc(lines: ^Polylines, closed: bool, smoothing: Polyline_Smoothing) {
-	assert(smoothing.softness >= 0 && smoothing.softness <= 1, "softness runs from 0 to 1")
-	assert(
-		smoothing.cut_iter >= 0 && smoothing.cut_iter <= POLYLINE_CORNER_ITER_MAX,
-		"too many corner cuts",
-	)
-	assert(
-		smoothing.cut_ratio > 0 && smoothing.cut_ratio <= 0.5,
-		"cut_ratio runs above 0 up to 0.5",
-	)
-	begin := 0
-	if len(lines.runs) > 0 {
-		last := lines.runs[len(lines.runs) - 1].points
-		begin = last.begin + last.len
-	}
-	points := span.from_range(begin, len(lines.points))
-	if points.len < 2 || len(lines.runs) == POLYLINE_RUNS_MAX {
-		resize(&lines.points, begin)
-		return
-	}
-	append(&lines.runs, Polyline_Run{points, closed, smoothing})
-}
-
 // A smoothed run, as polylines_get reads it out: its points, and whether they close from the last back to the first
 Polyline :: struct {
 	points: [][2]f32,
 	closed: bool,
 }
 
-// How many runs have been ended since the last clear
-polylines_count :: proc(lines: ^Polylines) -> int {
-	return len(lines.runs)
+@(private = "file")
+POLYLINES: struct {
+	// The points of the run being traced
+	tracing: [dynamic; POLYLINE_POINTS_MAX][2]f32,
+	// The runs ended since the last clear, smoothed
+	points:  [dynamic; POLYLINE_SMOOTHED_MAX][2]f32,
+	runs:    [dynamic; POLYLINE_RUNS_MAX]Polyline_Run,
 }
 
-// A run, smoothed. Call polylines_smooth first.
-polylines_get :: proc(lines: ^Polylines, run: int) -> Polyline {
-	s := lines.smoothed_runs[run]
-	return {points = lines.smoothed[s.begin:][:s.len], closed = lines.runs[run].closed}
+// A smoothed run: a span of the points, and whether it closes from its last point back to its first
+@(private = "file")
+Polyline_Run :: struct {
+	points: span.Span,
+	closed: bool,
 }
 
-// Smooths every run as it asks: see Polyline_Smoothing. Open runs keep their ends where they are.
-polylines_smooth :: proc(lines: ^Polylines) {
-	out := 0
-	for run, r in lines.runs[:] {
-		n := run.points.len
-		closed, smoothing := run.closed, run.smoothing
-		lines.smoothed_runs[r] = {}
-		size := n << uint(smoothing.cut_iter)
-		if out + size > POLYLINE_SMOOTHED_MAX do continue
-		p := lines.smoothed[out:][:size]
-		copy(p, lines.points[run.points.begin:][:n])
-		for _ in 0 ..< (n > POLYLINE_SHORT ? 2 : 0) {
-			first, prev := p[0], closed ? p[n - 1] : p[0]
-			for i in 0 ..< n {
-				if !closed && (i == 0 || i == n - 1) do continue
-				here := p[i]
-				average := (prev + 2 * here + (i + 1 < n ? p[i + 1] : first)) / 4
-				p[i] = here + (average - here) * smoothing.softness
-				prev = here
-			}
+polylines_clear :: proc() {
+	lines := &POLYLINES
+	clear(&lines.tracing)
+	clear(&lines.points)
+	clear(&lines.runs)
+}
+
+// Adds a point to the run being traced. A full run takes no more.
+polylines_add :: proc(point: [2]f32) {
+	lines := &POLYLINES
+	if len(lines.tracing) < POLYLINE_POINTS_MAX do append(&lines.tracing, point)
+}
+
+// Ends the run being traced, the points added since the last run ended, and smooths it as it asks: see
+// Polyline_Smoothing. An open run keeps its ends where they are. Runs of fewer than two points are dropped, as are runs
+// past the room there is.
+polylines_end :: proc(closed: bool, smoothing: Polyline_Smoothing) {
+	lines := &POLYLINES
+	defer clear(&lines.tracing)
+	assert(smoothing.softness >= 0 && smoothing.softness <= 1, "softness runs from 0 to 1")
+	assert(smoothing.cut_iter >= 0 && smoothing.cut_iter <= POLYLINE_CORNER_ITER_MAX, "too many corner cuts")
+	assert(smoothing.cut_ratio > 0 && smoothing.cut_ratio <= 0.5, "cut_ratio runs above 0 up to 0.5")
+	n := len(lines.tracing)
+	begin := len(lines.points)
+	size := n << uint(smoothing.cut_iter)
+	if n < 2 || len(lines.runs) == POLYLINE_RUNS_MAX || begin + size > POLYLINE_SMOOTHED_MAX do return
+
+	resize(&lines.points, begin + size)
+	p := lines.points[begin:]
+	copy(p, lines.tracing[:])
+	for _ in 0 ..< (n > POLYLINE_SHORT ? 2 : 0) {
+		first, prev := p[0], closed ? p[n - 1] : p[0]
+		for i in 0 ..< n {
+			if !closed && (i == 0 || i == n - 1) do continue
+			here := p[i]
+			average := (prev + 2 * here + (i + 1 < n ? p[i + 1] : first)) / 4
+			p[i] = here + (average - here) * smoothing.softness
+			prev = here
 		}
-		for _ in 0 ..< smoothing.cut_iter do n = polyline_cut_corners(p, n, closed, smoothing.cut_ratio)
-		lines.smoothed_runs[r] = {out, n}
-		out += n
 	}
+	for _ in 0 ..< smoothing.cut_iter do n = polyline_cut_corners(p, n, closed, smoothing.cut_ratio)
+	resize(&lines.points, begin + n)
+	append(&lines.runs, Polyline_Run{points = {begin, n}, closed = closed})
+}
+
+// How many runs have been ended since the last clear
+polylines_count :: proc() -> int {
+	return len(POLYLINES.runs)
+}
+
+// A run, smoothed
+polylines_get :: proc(run: int) -> Polyline {
+	lines := &POLYLINES
+	r := lines.runs[run]
+	return {points = lines.points[r.points.begin:][:r.points.len], closed = r.closed}
 }
 
 // Cuts every corner of the first n points of p, in place, and returns how many points there are now: twice as many.
@@ -152,17 +131,11 @@ polyline_cut_corners :: proc(p: [][2]f32, n: int, closed: bool, ratio: f32) -> i
 // Records a line as the nearest one of every cell within reach cells of it, where it is nearer than what the cell
 // holds: nearest gets the offset from the cell's middle to the nearest point of the line, and side, if given, which
 // side of the line the middle lies on, 1 to the left of its direction and -1 to the right.
-polyline_stamp :: proc(
-	points: [][2]f32,
-	closed: bool,
-	reach: f32,
-	nearest: [][2]f32,
-	side: []f32,
-) {
-	n := len(points)
-	segments := closed ? n : n - 1
+polyline_stamp :: proc(line: Polyline, reach: f32, nearest: [][2]f32, side: []f32) {
+	n := len(line.points)
+	segments := line.closed ? n : n - 1
 	for s in 0 ..< segments {
-		a, b := points[s], points[(s + 1) % n]
+		a, b := line.points[s], line.points[(s + 1) % n]
 		ab := b - a
 		length2 := max(linalg.dot(ab, ab), 1e-6)
 		x0 := max(int(min(a.x, b.x) - reach), 0)

@@ -20,6 +20,7 @@ WORLD: struct {
 WORLD_WIDTH :: 1024
 WORLD_HEIGHT :: 1024
 CELLS_MAX :: WORLD_WIDTH * WORLD_HEIGHT
+WORLD_SIZE :: [2]int{WORLD_WIDTH, WORLD_HEIGHT}
 
 #assert(gfx.RENDER_TERRAIN_WIDTH == WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == WORLD_HEIGHT)
 #assert(len(Way_Kind) == gfx.RENDER_WAY_KINDS)
@@ -188,37 +189,36 @@ world_tick :: proc(input: Input, dt: f32) {
 	// Test pawns in late-Roman Italy and Germanic lands north of the Alps, set every frame until there are pieces
 	Test_Pawn :: struct {
 		pos:     [2]f32,
-		type:    string,
+		type:    Pawn_Type,
 		name:    string,
 		culture: Culture,
 	}
 	@(static, rodata)
 	TEST_PAWNS := [?]Test_Pawn {
-		{{342, 432}, "town_3", "Roma", .Roman},
-		{{296, 374}, "town_3", "Mediolanum", .Roman},
-		{{345, 389}, "town_2", "Ravenna", .Roman},
-		{{367, 369}, "town_2", "Aquileia", .Roman},
-		{{367, 449}, "town_2", "Neapolis", .Roman},
-		{{360, 441}, "town_0", "Capua", .Roman},
-		{{411, 452}, "town_0", "Brundisium", .Roman},
-		{{334, 419}, "army", "", .Roman},
-		{{353, 455}, "fleet", "", .Roman},
-		{{355, 393}, "fleet", "", .Roman},
-		{{350, 430}, "bishop", "", .Roman},
-		{{306, 382}, "envoy", "", .Roman},
-		{{300, 300}, "town_3", "Alamannia", .Germanic},
-		{{332, 318}, "town_2", "Castra Regina", .Germanic},
-		{{270, 322}, "town_1", "Brisiacum", .Germanic},
-		{{285, 285}, "town_0", "", .Germanic},
-		{{316, 342}, "army", "", .Germanic},
-		{{292, 340}, "envoy", "", .Germanic},
+		{{342, 432}, .Large_City, "Roma", .Roman},
+		{{296, 374}, .Large_City, "Mediolanum", .Roman},
+		{{345, 389}, .City, "Ravenna", .Roman},
+		{{367, 369}, .City, "Aquileia", .Roman},
+		{{367, 449}, .City, "Neapolis", .Roman},
+		{{360, 441}, .Village, "Capua", .Roman},
+		{{411, 452}, .Village, "Brundisium", .Roman},
+		{{334, 419}, .Army, "", .Roman},
+		{{353, 455}, .Fleet, "", .Roman},
+		{{355, 393}, .Fleet, "", .Roman},
+		{{350, 430}, .Priest, "", .Roman},
+		{{306, 382}, .Envoy, "", .Roman},
+		{{300, 300}, .Large_City, "Alamannia", .Germanic},
+		{{332, 318}, .City, "Castra Regina", .Germanic},
+		{{270, 322}, .Town, "Brisiacum", .Germanic},
+		{{285, 285}, .Village, "", .Germanic},
+		{{316, 342}, .Army, "", .Germanic},
+		{{292, 340}, .Envoy, "", .Germanic},
 	}
 	for test, i in TEST_PAWNS {
-		type, found := pawns_type_find(&WORLD.pawns, test.type)
 		WORLD.pawns.entries[i + 1] = {
-			active  = found,
+			active  = true,
 			pos     = test.pos,
-			type    = type,
+			type    = test.type,
 			culture = test.culture,
 			name    = test.name,
 		}
@@ -228,11 +228,11 @@ world_tick :: proc(input: Input, dt: f32) {
 	pawns_draw(&WORLD.pawns, input.viewport, WORLD.camera, input.pixel_density)
 
 	// Pawns tweaks
-	tweak.slider_in_place("Pawns/Medallion Zoom", &WORLD.pawns.picture_to_medallion_zoom, 1.0, 20.)
+	tweak.slider_in_place("Pawns/Medallion Zoom", &WORLD.pawns.medallion_zoom, 1.0, 20.)
 	// Which test pawn is selected: each choice after None is the test pawn placed at that id
 	choices := make([]string, len(TEST_PAWNS) + 1, context.temp_allocator)
 	choices[0] = "None"
-	for test, i in TEST_PAWNS do choices[i + 1] = test.name != "" ? test.name : fmt.tprintf("%s %d", test.type, i + 1)
+	for test, i in TEST_PAWNS do choices[i + 1] = test.name != "" ? test.name : fmt.tprintf("%s %d", PAWN_TYPES[test.type].name, i + 1)
 	selected := int(WORLD.pawns.selected)
 	tweak.choice_in_place("Pawns/Selected", &selected, choices)
 	WORLD.pawns.selected = Pawn_Id(selected)
@@ -244,12 +244,12 @@ world_ui :: proc() {
 	pawns := &WORLD.pawns
 	if pawns.selected == 0 do return
 	pawn := pawns.entries[pawns.selected]
-	type := &pawns.types[pawn.type]
+	type := PAWN_TYPES[pawn.type]
 
 	ui.style_push(
 		{
 			font = pawns.font,
-			text_color = PAWN_NAME_INK,
+			text_color = MAP_INK,
 			width = ui.text_dim(),
 			height = ui.text_dim(),
 		},
@@ -262,14 +262,14 @@ world_ui :: proc() {
 			height     = ui.fit(),
 			padding    = [2]f32{16, 12},
 			gap        = 6,
-			background = PAWN_PAPER,
-			border     = PAWN_NAME_INK,
+			background = MAP_PAPER,
+			border     = MAP_INK,
 			thickness  = 1.5,
 			radius     = 3,
 		}
 		if ui.panel("selected pawn", card) {
 			title := [?]ui.Text {
-				{image = type.image[.Medallion][pawn.culture], color = [4]f32{1, 1, 1, 1}},
+				{image = pawns.image[pawn.type][.Medallion][pawn.culture], color = [4]f32{1, 1, 1, 1}},
 				{text = " "},
 				{text = pawn.name != "" ? pawn.name : type.tag},
 			}
