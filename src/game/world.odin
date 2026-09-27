@@ -48,10 +48,10 @@ move_plan_raw :: proc(
 ) {
 	plan.seq_num += 1
 	subject := piece_get(subject_id)
-	if subject != nil && subject.movement != nil {
+	if subject != nil && subject.movement_domain != nil {
 		plan.subject = subject_id
 		plan.target = target
-		domain := subject.movement.(Pathfind_Domain)
+		domain := subject.movement_domain.(Pathfind_Domain)
 		has_path := pathfind_trace(subject.pos, domain, destination, {}, &plan.path, &plan.cost)
 		if !has_path {
 			fmt.eprintfln("No way over land from %v to %v", subject.pos, destination)
@@ -315,16 +315,19 @@ world_tick :: proc(input: Input, dt: f32) {
 
 	if input.right_click {
 		if WORLD.selected != {} {
-			target := pawns_pick(WORLD.camera, input.viewport, input.cursor)
-			if target != {} {
-				move_plan_to(WORLD.selected, target, &WORLD.movement.plan)
-			} else {
-				destination := camera_screen_to_world_point(
-					WORLD.camera,
-					input.viewport,
-					input.cursor,
-				)
-				move_plan_to_point(WORLD.selected, destination, &WORLD.movement.plan)
+			selected := piece_get(WORLD.selected)
+			if selected.movement_domain != nil {
+				target := pawns_pick(WORLD.camera, input.viewport, input.cursor)
+				if target != {} {
+					move_plan_to(WORLD.selected, target, &WORLD.movement.plan)
+				} else {
+					destination := camera_screen_to_world_point(
+						WORLD.camera,
+						input.viewport,
+						input.cursor,
+					)
+					move_plan_to_point(WORLD.selected, destination, &WORLD.movement.plan)
+				}
 			}
 		}
 	}
@@ -396,7 +399,7 @@ world_load_test_pieces :: proc() {
 				culture = piece.culture,
 				name = piece.name,
 				title = TEST_TITLES[piece.icon],
-				movement = piece.movement,
+				movement_domain = piece.movement,
 			},
 		)
 	}
@@ -478,14 +481,14 @@ Culture :: enum u8 {
 Piece :: struct {
 	// Bumped as the slot takes a piece and as it frees it: odd while there is a piece in the slot, even while it is
 	// free. Ids to earlier pieces go stale. Set by piece_spawn.
-	generation: u16,
+	generation:      u16,
 	// Where it stands, in cells
-	pos:        [2]f32,
-	icon:       Icon,
-	culture:    Culture,
-	name:       string,
-	title:      string,
-	movement:   Maybe(Pathfind_Domain),
+	pos:             [2]f32,
+	icon:            Icon,
+	culture:         Culture,
+	name:            string,
+	title:           string,
+	movement_domain: Maybe(Pathfind_Domain),
 }
 
 // Which piece: its slot, and the slot's generation while the piece is in it. An id with an even generation, like the
