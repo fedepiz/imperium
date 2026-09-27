@@ -9,7 +9,7 @@ import "../gfx"
 import "../span"
 
 @(private = "file")
-PAWNS_MAX :: 1024
+PAWNS_MAX :: PIECE_MAX
 
 // What a pawn is
 Pawn_Type :: enum u8 {
@@ -53,7 +53,7 @@ Pawns :: struct {
 	// The pawn drawn with a pulsing tint, or zero for none
 	selected:       Pawn_Id,
 	// Seconds the pawns have been ticked for, which the selected pawn's tint pulses by
-	time:           f32,
+	selected_time:  f32,
 	// Drawn for a drawing that is not there yet: fully clear
 	blank:          gfx.Image_Id,
 	// What pawns' names are written in, and the selected pawn's name on its card
@@ -143,7 +143,10 @@ pawns_init :: proc(pawns: ^Pawns, camera: Camera) {
 			for culture_name, culture in CULTURE_NAMES {
 				drawing := fmt.tprintf("%s/%s_%s", set_name, culture_name, def.tag)
 				pawns.image[type][set][culture] = image_or_blank(pawns, drawing)
-				pawns.fill[type][set][culture] = image_or_blank(pawns, fmt.tprintf("%s_fill", drawing))
+				pawns.fill[type][set][culture] = image_or_blank(
+					pawns,
+					fmt.tprintf("%s_fill", drawing),
+				)
 			}
 		}
 	}
@@ -154,19 +157,19 @@ pawns_init :: proc(pawns: ^Pawns, camera: Camera) {
 	}
 }
 
-// Fades pawns towards medallions while the camera is farther out than the transition zoom, and towards pictures while
-// it is closer in.
+// Update the pawns
 pawns_tick :: proc(pawns: ^Pawns, camera: Camera, dt: f32) {
 	target: f32 = camera.zoom < pawns.medallion_zoom ? 1 : 0
 	step := dt / PAWN_MEDALLION_FADE
 	pawns.medallion_t += clamp(target - pawns.medallion_t, -step, step)
-	pawns.time += dt
+	pawns.selected_time = pawns.selected == 0 ? 0 : pawns.selected_time + dt
 }
 
 // The rect a pawn's drawing in a set covers, in cells
 @(private = "file")
 pawn_bounds :: proc(pawns: ^Pawns, pawn: Pawn, set: Pawn_Set) -> [4]f32 {
-	source := gfx.sprite_region(gfx.sprite_of_image(pawns.image[pawn.type][set][pawn.culture])).source
+	source :=
+		gfx.sprite_region(gfx.sprite_of_image(pawns.image[pawn.type][set][pawn.culture])).source
 	size := source.zw * PAWN_CELLS_PER_PIXEL[set] * PAWN_TYPES[pawn.type].size
 	corner := pawn.pos - size / 2
 	return {corner.x, corner.y, size.x, size.y}
@@ -200,13 +203,14 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 		.Picture   = 1 - pawns.medallion_t,
 		.Medallion = pawns.medallion_t,
 	}
-	pulse := 0.5 - 0.5 * math.cos(2 * math.PI * pawns.time / PAWN_SELECTED_PULSE)
+	pulse := 0.5 - 0.5 * math.cos(2 * math.PI * pawns.selected_time / PAWN_SELECTED_PULSE)
 	name_at: [PAWNS_MAX][2]f32
 	name_weight: [PAWNS_MAX]f32
 	for pawn, index in pawns.entries {
 		if !pawn.active do continue
 		selected := pawns.selected != 0 && Pawn_Id(index) == pawns.selected
-		tint := selected ? math.lerp([4]f32{1, 1, 1, 1}, PAWN_SELECTED_TINT, pulse) : [4]f32{1, 1, 1, 1}
+		tint :=
+			selected ? math.lerp([4]f32{1, 1, 1, 1}, PAWN_SELECTED_TINT, pulse) : [4]f32{1, 1, 1, 1}
 		for weight, set in weights {
 			if weight <= 0 do continue
 			rect, visible := camera_world_to_screen(
@@ -219,7 +223,12 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 			paper := MAP_PAPER * tint
 			paper.a *= weight
 			gfx.draw_image(&draw, pawns.fill[pawn.type][set][pawn.culture], rect, paper)
-			gfx.draw_image(&draw, pawns.image[pawn.type][set][pawn.culture], rect, tint * {1, 1, 1, weight})
+			gfx.draw_image(
+				&draw,
+				pawns.image[pawn.type][set][pawn.culture],
+				rect,
+				tint * {1, 1, 1, weight},
+			)
 			name_at[index] += [2]f32{rect.x + rect.z / 2, rect.y + rect.w} * weight
 			name_weight[index] += weight
 		}
@@ -241,3 +250,4 @@ pawns_draw :: proc(pawns: ^Pawns, viewport: [2]f32, camera: Camera, pixel_densit
 		gfx.text_draw(&draw, text, at)
 	}
 }
+

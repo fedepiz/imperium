@@ -9,18 +9,22 @@ import "../gfx"
 import "../tweak"
 import "../ui"
 
-WORLD: struct {
-	camera:   Camera,
-	atlas:    Atlas,
-	pawns:    Pawns,
-	// What the map is drawn from, kept up to date by world_tick
-	map_draw: Map_Draw,
-}
-
 WORLD_WIDTH :: 1024
 WORLD_HEIGHT :: 1024
 CELLS_MAX :: WORLD_WIDTH * WORLD_HEIGHT
 WORLD_SIZE :: [2]int{WORLD_WIDTH, WORLD_HEIGHT}
+
+
+PIECE_MAX :: 1024
+
+WORLD: struct {
+	camera:           Camera,
+	atlas:            Atlas,
+	pieces:           [PIECE_MAX]Piece,
+	pieces_free_list: [PIECE_MAX]int,
+	pawns:            Pawns,
+}
+
 
 #assert(gfx.RENDER_TERRAIN_WIDTH == WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == WORLD_HEIGHT)
 #assert(len(Way_Kind) == gfx.RENDER_WAY_KINDS)
@@ -62,9 +66,8 @@ WATER :: bit_set[Surface]{.Lake, .Sea}
 // Defines the world's images, so call this before sprites_load. The terrain comes from a scenario, with world_load.
 world_init :: proc() {
 	camera_init()
-	map_draw_init(&WORLD.map_draw)
+	map_draw_init()
 	pawns_init(&WORLD.pawns, WORLD.camera)
-
 }
 
 // Loads a scenario's terrain from its folder: one greyscale PNG per property, WORLD_WIDTH by WORLD_HEIGHT.
@@ -73,7 +76,6 @@ world_init :: proc() {
 // If a layer is missing or the wrong size, the world is left all water, so the failure shows, and false is returned.
 world_load :: proc(scenario: string) -> bool {
 	terrain := &WORLD.atlas.terrain
-	defer WORLD.atlas.revision += 1
 	Layer :: enum {
 		Surface,
 		Elevation,
@@ -90,14 +92,13 @@ world_load :: proc(scenario: string) -> bool {
 		.Rivers    = "rivers",
 		.Roads     = "roads",
 	}
+	ok := true
 	for name, layer in names {
 		path := fmt.tprintf("%s/%s.png", scenario, name)
-		pixels, ok := world_load_layer(path)
-		if !ok {
-			for &cell in terrain do cell = {
-				surface = .Sea,
-			}
-			return false
+		pixels, loaded := world_load_layer(path)
+		if !loaded {
+			ok = false
+			break
 		}
 		for value, i in pixels {
 			byte := u8(value >> 8)
@@ -117,11 +118,31 @@ world_load :: proc(scenario: string) -> bool {
 			}
 		}
 	}
+	if !ok do for &cell in terrain do cell = {
+		surface = .Sea,
+	}
 	// Water cells carry nothing else.
 	for &cell in terrain do if cell.surface in WATER do cell = {
 		surface = cell.surface,
 	}
-	return true
+	// Land
+	{
+		grid := pathfind_build_begin(.Land)
+		for cell, i in WORLD.atlas.terrain {
+			grid[i] = cell.way[.Road] != 0 ? 0.5 : cell.surface == .Land ? 1 : 0
+		}
+		pathfind_build_end(.Land)
+	}
+	// Sea
+	{
+		grid := pathfind_build_begin(.Sea)
+		for cell, i in WORLD.atlas.terrain {
+			grid[i] = cell.surface == .Land ? 0 : 1
+		}
+		pathfind_build_end(.Sea)
+	}
+	WORLD.atlas.revision += 1
+	return ok
 }
 
 // One greyscale layer, WORLD_WIDTH by WORLD_HEIGHT, in 16 bits: an 8-bit image's values are widened, so their high
@@ -184,7 +205,7 @@ Input :: struct {
 // Called every frame
 world_tick :: proc(input: Input, dt: f32) {
 	camera_tick(input, dt)
-	map_draw_tick(&WORLD.map_draw, &WORLD.atlas, WORLD.camera, input.viewport, input.pixel_density)
+	map_draw_tick(&WORLD.atlas, WORLD.camera, input.viewport, input.pixel_density)
 
 	// Test pawns in late-Roman Italy and Germanic lands north of the Alps, set every frame until there are pieces
 	Test_Pawn :: struct {
@@ -243,6 +264,17 @@ world_tick :: proc(input: Input, dt: f32) {
 	WORLD.pawns.selected = Pawn_Id(selected)
 }
 
+// Draws the world: the map, then the pawns over it
+world_render :: proc(renderer: ^gfx.Renderer) {
+	map_draw_render(renderer)
+	gfx.render_list(renderer, &WORLD.pawns.render_list)
+}
+
+// Steps the map to its next view: the map itself, then each raw terrain property in turn
+world_next_map_view :: proc() {
+	map_draw_next_view()
+}
+
 // Called between ui.begin() and ui.end(). The selected pawn is described on a card of the map's paper at the bottom
 // left of the view: its medallion and name, or its type's when it has none, over what it is.
 world_ui :: proc() {
@@ -252,12 +284,7 @@ world_ui :: proc() {
 	type := PAWN_TYPES[pawn.type]
 
 	ui.style_push(
-		{
-			font = pawns.font,
-			text_color = MAP_INK,
-			width = ui.text_dim(),
-			height = ui.text_dim(),
-		},
+		{font = pawns.font, text_color = MAP_INK, width = ui.text_dim(), height = ui.text_dim()},
 	)
 	defer ui.style_pop()
 	if ui.column({width = ui.grow(), height = ui.grow(), padding = PAWN_CARD_MARGIN}) {
@@ -274,7 +301,10 @@ world_ui :: proc() {
 		}
 		if ui.panel("selected pawn", card) {
 			title := [?]ui.Text {
-				{image = pawns.image[pawn.type][.Medallion][pawn.culture], color = [4]f32{1, 1, 1, 1}},
+				{
+					image = pawns.image[pawn.type][.Medallion][pawn.culture],
+					color = [4]f32{1, 1, 1, 1},
+				},
 				{text = " "},
 				{text = pawn.name != "" ? pawn.name : type.tag},
 			}
@@ -297,5 +327,10 @@ world_ui :: proc() {
 Culture :: enum u8 {
 	Roman,
 	Germanic,
+}
+
+// Logical pieces. The on-map game entities. The logical correspondent to the visual pawn
+Piece :: struct {
+	pos: [2]f32,
 }
 

@@ -16,7 +16,8 @@ MAP_PAPER :: [4]f32{0.840, 0.772, 0.620, 1}
 MAP_INK :: [4]f32{0.150, 0.105, 0.070, 1}
 
 // What the map is drawn from: everything worked out from the world's terrain for the map pass and the marks over it
-Map_Draw :: struct {
+@(private = "file")
+MAP_DRAW: struct {
 	// The drawings scattered over the terrain
 	marks:          Map_Marks,
 	// What the map pass draws
@@ -25,10 +26,10 @@ Map_Draw :: struct {
 }
 
 // Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
-map_draw_init :: proc(md: ^Map_Draw) {
-	marks_init(&md.marks)
+map_draw_init :: proc() {
+	marks_init(&MAP_DRAW.marks)
 
-	md.render_terrain.style = {
+	MAP_DRAW.render_terrain.style = {
 		paper              = MAP_PAPER,
 		paper_stain        = {0.720, 0.620, 0.460, 1},
 		paper_stain_amount = 0.50,
@@ -45,7 +46,7 @@ map_draw_init :: proc(md: ^Map_Draw) {
 		road_halo          = 1.5,
 		road_fill          = {0.780, 0.540, 0.250, 1},
 	}
-	md.render_terrain.cover.jitter = 0.8
+	MAP_DRAW.render_terrain.cover.jitter = 0.8
 
 }
 
@@ -55,27 +56,33 @@ TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture
 
 // Keeps the map's drawing in step with the world: the camera every frame, everything drawn from the terrain when it
 // changes, and the marks in view every frame.
-map_draw_tick :: proc(
-	md: ^Map_Draw,
-	atlas: ^Atlas,
-	camera: Camera,
-	viewport: [2]f32,
-	pixel_density: f32,
-) {
-	rt := &md.render_terrain
+map_draw_tick :: proc(atlas: ^Atlas, camera: Camera, viewport: [2]f32, pixel_density: f32) {
+	rt := &MAP_DRAW.render_terrain
 	rt.center, rt.zoom = camera.center, camera.zoom
 	if rt.revision != atlas.revision {
 		rt.revision = atlas.revision
-		map_derive(md, atlas.terrain[:])
+		map_derive(atlas.terrain[:])
 	}
-	marks_draw(&md.marks, &md.render_list, camera, viewport, pixel_density)
+	marks_draw(&MAP_DRAW.marks, &MAP_DRAW.render_list, camera, viewport, pixel_density)
+}
+
+// Draws the map: the terrain, then the marks over it
+map_draw_render :: proc(renderer: ^gfx.Renderer) {
+	gfx.render_terrain(renderer, &MAP_DRAW.render_terrain)
+	gfx.render_list(renderer, &MAP_DRAW.render_list)
+}
+
+// Steps the map to its next view: the map itself, then each raw terrain property in turn
+map_draw_next_view :: proc() {
+	debug := &MAP_DRAW.render_terrain.debug_mode
+	debug^ = gfx.Render_Terrain_Debug((int(debug^) + 1) % len(gfx.Render_Terrain_Debug))
 }
 
 // Works out everything the map draws from the terrain, stage by stage: its cells, its ways, its coast, the land's
 // covers, and the marks over it.
 @(private = "file")
-map_derive :: proc(md: ^Map_Draw, terrain: []Terrain) {
-	rt := &md.render_terrain
+map_derive :: proc(terrain: []Terrain) {
+	rt := &MAP_DRAW.render_terrain
 	for cell, i in terrain {
 		rt.cells[i] = {u8(cell.surface) * 127, cell.elevation, cell.trees, cell.moisture}
 	}
@@ -147,7 +154,7 @@ map_derive :: proc(md: ^Map_Draw, terrain: []Terrain) {
 	land := measure_land(terrain)
 	cover := make([]Cover_Cell, CELLS_MAX, context.temp_allocator)
 	classify_cover(&rt.cover, cover, terrain, &land)
-	marks_place(&md.marks, terrain, rt.coast[:], cover, claimed)
+	marks_place(&MAP_DRAW.marks, terrain, rt.coast[:], cover, claimed)
 }
 
 // Cover ---------------------------------------------------------------------------------------------------------------

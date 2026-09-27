@@ -189,8 +189,7 @@ main :: proc() {
 		}
 		// Tab steps through the map and the raw terrain properties.
 		if key_is_pressed(GLOBAL.input, .TAB) && !ui.keyboard_captured() {
-			debug := &game.WORLD.map_draw.render_terrain.debug_mode
-			debug^ = gfx.Render_Terrain_Debug((int(debug^) + 1) % len(gfx.Render_Terrain_Debug))
+			game.world_next_map_view()
 		}
 
 		{
@@ -215,9 +214,7 @@ main :: proc() {
 			renderer,
 			{MIDNIGHT_BACKGROUND.r, MIDNIGHT_BACKGROUND.g, MIDNIGHT_BACKGROUND.b, 1},
 		) {
-			gfx.render_terrain(renderer, &game.WORLD.map_draw.render_terrain)
-			gfx.render_list(renderer, &game.WORLD.map_draw.render_list)
-			gfx.render_list(renderer, &game.WORLD.pawns.render_list)
+			game.world_render(renderer)
 			gfx.render_list(renderer, &GLOBAL.render_list)
 			gfx.render_frame_end(renderer)
 		}
