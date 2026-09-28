@@ -28,6 +28,10 @@ WORLD: struct {
 	// The piece described on the card, and drawn with a pulsing tint
 	selected:    Piece_Id,
 	movement:    Movement,
+	// The turn being played, counting from 1
+	turn:        int,
+	// Set to end the turn; world_tick ends it and clears this
+	turn_ending: bool,
 }
 
 Move_Plan :: struct {
@@ -39,35 +43,56 @@ Move_Plan :: struct {
 	cost:    [dynamic; PATH_MAX_LEN]f32,
 }
 
+// Plans the subject's walk to the destination. Rejected, returning false and leaving the plan as it was, when the
+// subject cannot move, there is no way there, or the way costs more than the subject's movement budget.
 @(private = "file")
 move_plan_raw :: proc(
 	subject_id: Piece_Id,
 	destination: [2]f32,
 	target: Piece_Id,
 	plan: ^Move_Plan,
-) {
-	plan.seq_num += 1
+) -> bool {
 	subject := piece_get(subject_id)
-	if subject != nil && subject.movement_domain != nil {
-		plan.subject = subject_id
-		plan.target = target
-		domain := subject.movement_domain.(Pathfind_Domain)
-		has_path := pathfind_trace(subject.pos, domain, destination, {}, &plan.path, &plan.cost)
-		if !has_path {
-			fmt.eprintfln("No way over land from %v to %v", subject.pos, destination)
-		}
+	if subject == nil || subject.movement_domain == nil do return false
+	domain := subject.movement_domain.(Pathfind_Domain)
+	path: [dynamic; PATH_MAX_LEN][2]f32
+	cost: [dynamic; PATH_MAX_LEN]f32
+	if !pathfind_trace(subject.pos, domain, destination, {}, &path, &cost) {
+		fmt.eprintfln("No way from %v to %v", subject.pos, destination)
+		return false
 	}
+	price: f32
+	from := subject.pos
+	for point, i in path {
+		price += linalg.distance(from, point) * cost[i]
+		from = point
+	}
+	if price > subject.movement_budget {
+		fmt.eprintfln(
+			"The way from %v to %v costs %.1f, over the movement budget of %.1f",
+			subject.pos,
+			destination,
+			price,
+			subject.movement_budget,
+		)
+		return false
+	}
+	plan.seq_num += 1
+	plan.subject = subject_id
+	plan.target = target
+	plan.path = path
+	plan.cost = cost
+	return true
 }
 
-move_plan_to :: proc(subject: Piece_Id, target_id: Piece_Id, plan: ^Move_Plan) {
+move_plan_to :: proc(subject: Piece_Id, target_id: Piece_Id, plan: ^Move_Plan) -> bool {
 	target := piece_get(target_id)
-	if target != nil {
-		move_plan_raw(subject, target.pos, target_id, plan)
-	}
+	if target == nil do return false
+	return move_plan_raw(subject, target.pos, target_id, plan)
 }
 
-move_plan_to_point :: proc(subject: Piece_Id, destination: [2]f32, plan: ^Move_Plan) {
-	move_plan_raw(subject, destination, {}, plan)
+move_plan_to_point :: proc(subject: Piece_Id, destination: [2]f32, plan: ^Move_Plan) -> bool {
+	return move_plan_raw(subject, destination, {}, plan)
 }
 
 // A piece walking to a place along the cheapest way there
@@ -79,8 +104,8 @@ Movement :: struct {
 	next:    int,
 }
 
-// How much cost a walking piece spends a second: the cells it covers on ground of cost 1
-MOVEMENT_SPEED :: 4
+// The cells a walking piece covers a second, whatever the ground
+MOVEMENT_SPEED :: 10
 
 #assert(gfx.RENDER_TERRAIN_WIDTH == WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == WORLD_HEIGHT)
 #assert(POLYLINE_SMOOTHED_MAX <= gfx.RENDER_LINE_SEGMENTS_MAX)
@@ -203,6 +228,7 @@ world_load :: proc(scenario: string) -> bool {
 	}
 	WORLD.atlas.revision += 1
 	world_load_test_pieces()
+	turn_start(1)
 	return ok
 }
 
@@ -264,11 +290,34 @@ Input :: struct {
 	wheel:         f32,
 }
 
+// Starts a turn, the game starting on turn 1: every piece that moves has its movement budget recharged.
+@(private = "file")
+turn_start :: proc(turn: int) {
+	WORLD.turn = turn
+	WORLD.turn_ending = false
+	for &piece in WORLD.pieces {
+		if piece_alive(piece) && piece.movement_domain != nil {
+			piece.movement_budget = piece.movement_per_turn
+		}
+	}
+}
+
+// The turn can end: no piece is moving
+turn_can_end :: proc() -> bool {
+	return WORLD.movement.plan.subject == {}
+}
+
 // Called every frame
 world_tick :: proc(input: Input, dt: f32) {
 
-	// Handle movement: the subject spends a steady cost a second walking the way, from where it stands towards the next
-	// point, and stops moving at its end
+	// Handle the end of the turn, rejected while it cannot end
+	if WORLD.turn_ending {
+		WORLD.turn_ending = false
+		if turn_can_end() do turn_start(WORLD.turn + 1)
+	}
+
+	// Handle movement: the subject walks the way at a steady speed, from where it stands towards the next point, and
+	// stops moving at its end
 	{
 		mov := &WORLD.movement
 		if mov.plan.subject != {} {
@@ -283,15 +332,18 @@ world_tick :: proc(input: Input, dt: f32) {
 					mov.seq_num = mov.plan.seq_num
 				}
 
-				budget := MOVEMENT_SPEED * dt
-				for budget > 0 && mov.next < len(mov.plan.path) {
+				// The cost of the ground walked comes out of the subject's movement budget
+				step := MOVEMENT_SPEED * dt
+				for step > 0 && mov.next < len(mov.plan.path) {
 					target, cost := mov.plan.path[mov.next], mov.plan.cost[mov.next]
-					price := linalg.distance(subject.pos, target) * cost
-					if budget < price {
-						subject.pos += linalg.normalize(target - subject.pos) * budget / cost
+					distance := linalg.distance(subject.pos, target)
+					if step < distance {
+						subject.pos += linalg.normalize(target - subject.pos) * step
+						subject.movement_budget = max(0, subject.movement_budget - step * cost)
 						break
 					}
-					budget -= price
+					step -= distance
+					subject.movement_budget = max(0, subject.movement_budget - distance * cost)
 					subject.pos = target
 					mov.next += 1
 				}
@@ -355,32 +407,33 @@ world_load_test_pieces :: proc() {
 		name:     string,
 		culture:  Culture,
 		movement: Maybe(Pathfind_Domain),
+		per_turn: f32,
 	}
 	@(static, rodata)
 	TEST_PIECES := [?]Test_Piece {
-		{{342, 432}, .Large_City, "Roma", .Roman, nil},
-		{{296, 374}, .Large_City, "Mediolanum", .Roman, nil},
-		{{351, 400}, .City, "Ravenna", .Roman, nil},
-		{{412, 462}, .City, "Tarentum", .Roman, nil},
-		{{367, 369}, .Town, "Aquileia", .Roman, nil},
-		{{367, 449}, .Town, "Neapolis", .Roman, nil},
-		{{330, 401}, .Town, "Florentia", .Roman, nil},
-		{{296, 391}, .Town, "Genua", .Roman, nil},
-		{{327, 374}, .Town, "Verona", .Roman, nil},
-		{{260, 379}, .Town, "Segusio", .Roman, nil},
-		{{394, 506}, .Town, "Rhegium", .Roman, nil},
-		{{385, 527}, .Town, "Syracusae", .Roman, nil},
-		{{334, 419}, .Army, "", .Roman, .Land},
-		{{353, 455}, .Fleet, "", .Roman, .Sea},
-		{{355, 393}, .Fleet, "", .Roman, .Sea},
-		{{350, 430}, .Priest, "", .Roman, .Land},
-		{{306, 382}, .Envoy, "", .Roman, .Land},
-		{{300, 300}, .Large_City, "Alamannia", .Germanic, nil},
-		{{332, 318}, .City, "Castra Regina", .Germanic, nil},
-		{{270, 322}, .Town, "Brisiacum", .Germanic, nil},
-		{{285, 285}, .Village, "", .Germanic, nil},
-		{{316, 342}, .Army, "", .Germanic, .Land},
-		{{292, 340}, .Envoy, "", .Germanic, .Land},
+		{{342, 432}, .Large_City, "Roma", .Roman, nil, 0},
+		{{296, 374}, .Large_City, "Mediolanum", .Roman, nil, 0},
+		{{351, 400}, .City, "Ravenna", .Roman, nil, 0},
+		{{412, 462}, .City, "Tarentum", .Roman, nil, 0},
+		{{367, 369}, .Town, "Aquileia", .Roman, nil, 0},
+		{{367, 449}, .Town, "Neapolis", .Roman, nil, 0},
+		{{330, 401}, .Town, "Florentia", .Roman, nil, 0},
+		{{296, 391}, .Town, "Genua", .Roman, nil, 0},
+		{{327, 374}, .Town, "Verona", .Roman, nil, 0},
+		{{260, 379}, .Town, "Segusio", .Roman, nil, 0},
+		{{394, 506}, .Town, "Rhegium", .Roman, nil, 0},
+		{{385, 527}, .Town, "Syracusae", .Roman, nil, 0},
+		{{334, 419}, .Army, "", .Roman, .Land, 30},
+		{{353, 455}, .Fleet, "", .Roman, .Sea, 80},
+		{{355, 393}, .Fleet, "", .Roman, .Sea, 80},
+		{{350, 430}, .Priest, "", .Roman, .Land, 40},
+		{{306, 382}, .Envoy, "", .Roman, .Land, 50},
+		{{300, 300}, .Large_City, "Alamannia", .Germanic, nil, 0},
+		{{332, 318}, .City, "Castra Regina", .Germanic, nil, 0},
+		{{270, 322}, .Town, "Brisiacum", .Germanic, nil, 0},
+		{{285, 285}, .Village, "", .Germanic, nil, 0},
+		{{316, 342}, .Army, "", .Germanic, .Land, 30},
+		{{292, 340}, .Envoy, "", .Germanic, .Land, 50},
 	}
 	// What each test piece is, by its icon
 	@(static, rodata)
@@ -405,6 +458,7 @@ world_load_test_pieces :: proc() {
 				name = piece.name,
 				title = TEST_TITLES[piece.icon],
 				movement_domain = piece.movement,
+				movement_per_turn = piece.per_turn,
 			},
 		)
 	}
@@ -421,16 +475,18 @@ world_next_map_view :: proc() {
 	map_draw_next_view()
 }
 
-// The selected piece's card: the ink its property names are written in, and its space from the edges of the view
+// The cards' space from the edges of the view
+CARD_MARGIN :: [2]f32{20, 20}
+// The ink the selected piece's property names are written in
 PIECE_CARD_FADED_INK :: [4]f32{MAP_INK.r, MAP_INK.g, MAP_INK.b, 0.6}
-PIECE_CARD_MARGIN :: [2]f32{20, 20}
+// The paper of a button on a card while hovered, and while held
+CARD_BUTTON_HOT_PAPER :: [4]f32{0.760, 0.690, 0.545, 1}
+CARD_BUTTON_ACTIVE_PAPER :: [4]f32{0.680, 0.610, 0.475, 1}
 
-// Called between ui.begin() and ui.end(). The selected piece is described on a card of the map's paper at the bottom
-// left of the view: its medallion and name, or what it is when it has none, over what it is.
+// Called between ui.begin() and ui.end(). Cards of the map's paper float over the map: at the top right, the turn
+// being played, with a button to end it; at the bottom left, when a piece is selected, its medallion and name, or what
+// it is when it has none, over what it is.
 world_ui :: proc() {
-	piece := piece_get(WORLD.selected)
-	if piece == nil do return
-
 	ui.style_push(
 		{
 			font = font_id(.Text),
@@ -440,30 +496,53 @@ world_ui :: proc() {
 		},
 	)
 	defer ui.style_pop()
-	if ui.column({width = ui.grow(), height = ui.grow(), padding = PIECE_CARD_MARGIN}) {
-		ui.spacer(ui.grow())
-		card := ui.Style {
-			width      = ui.fit(),
-			height     = ui.fit(),
-			padding    = [2]f32{16, 12},
-			gap        = 6,
-			background = MAP_PAPER,
-			border     = MAP_INK,
-			thickness  = 1.5,
-			radius     = 3,
-		}
-		if ui.panel("selected piece", card) {
-			title := [?]ui.Text {
-				{
-					image = icon_image(piece.icon, .Medallion, piece.culture),
-					color = [4]f32{1, 1, 1, 1},
-				},
-				{text = " "},
-				{text = piece.name != "" ? piece.name : piece.title},
+	card := ui.Style {
+		width      = ui.fit(),
+		height     = ui.fit(),
+		padding    = [2]f32{16, 12},
+		gap        = 6,
+		background = MAP_PAPER,
+		border     = MAP_INK,
+		thickness  = 1.5,
+		radius     = 3,
+	}
+	if ui.column({width = ui.grow(), height = ui.grow(), padding = CARD_MARGIN}) {
+		if ui.row({width = ui.grow(), height = ui.fit()}) {
+			ui.spacer(ui.grow())
+			if ui.panel("turn", card) {
+				ui.label(fmt.tprintf("Turn %d", WORLD.turn), {font = font_id(.Title)})
+				end_turn := ui.Style {
+					padding           = [2]f32{12, 4},
+					background        = MAP_PAPER,
+					hot_background    = CARD_BUTTON_HOT_PAPER,
+					active_background = CARD_BUTTON_ACTIVE_PAPER,
+					border            = MAP_INK,
+					focus_border      = MAP_INK,
+					hot_text_color    = MAP_INK,
+				}
+				end_turn.disabled = !turn_can_end()
+				if ui.button("End turn", end_turn).pressed do WORLD.turn_ending = true
 			}
-			ui.label_text(title[:], {font = font_id(.Title)})
-			piece_card_row("Type", piece.title)
-			piece_card_row("Culture", fmt.tprintf("%v", piece.culture))
+		}
+		ui.spacer(ui.grow())
+		if piece := piece_get(WORLD.selected); piece != nil {
+			if ui.panel("selected piece", card) {
+				title := [?]ui.Text {
+					{
+						image = icon_image(piece.icon, .Medallion, piece.culture),
+						color = [4]f32{1, 1, 1, 1},
+					},
+					{text = " "},
+					{text = piece.name != "" ? piece.name : piece.title},
+				}
+				ui.label_text(title[:], {font = font_id(.Title)})
+				piece_card_row("Type", piece.title)
+				piece_card_row("Culture", fmt.tprintf("%v", piece.culture))
+				if piece.movement_domain != nil {
+					budget := fmt.tprintf("%.0f of %.0f", piece.movement_budget, piece.movement_per_turn)
+					piece_card_row("Movement", budget)
+				}
+			}
 		}
 	}
 
@@ -492,8 +571,12 @@ Piece :: struct {
 	icon:            Icon,
 	culture:         Culture,
 	name:            string,
-	title:           string,
-	movement_domain: Maybe(Pathfind_Domain),
+	title:             string,
+	movement_domain:   Maybe(Pathfind_Domain),
+	// The cost it can still spend walking this turn
+	movement_budget:   f32,
+	// What its movement budget is recharged to at the start of each turn
+	movement_per_turn: f32,
 }
 
 // Which piece: its slot, and the slot's generation while the piece is in it. An id with an even generation, like the
