@@ -45,6 +45,10 @@ map_draw_init :: proc() {
 		road_width         = 12,
 		road_halo          = 1.5,
 		road_fill          = {0.780, 0.540, 0.250, 1},
+		arrow_width        = 5,
+		arrow_fill         = {0.700, 0.250, 0.160, 1},
+		head_length        = 7.5,
+		head_width         = 6.25,
 	}
 	MAP_DRAW.render_terrain.cover.jitter = 0.8
 
@@ -87,28 +91,22 @@ map_derive :: proc(terrain: []Terrain) {
 		rt.cells[i] = {u8(cell.surface) * 127, cell.elevation, cell.trees, cell.moisture}
 	}
 
-	// Each kind of way, traced into smoothed lines, then drawn from their segments, and stamped around themselves so each
+	// Each kind of way, traced into smoothed lines, then drawn as its kind of line, and stamped around themselves so each
 	// cell near one learns the offset from its middle to its nearest point: from which it preclaims the ground along it.
 	claimed := make([]u8, FOOTPRINT_SIZE.x * FOOTPRINT_SIZE.y, context.temp_allocator)
 	to_way := make([][2]f32, CELLS_MAX, context.temp_allocator)
+	for trace in WAY_TRACE {
+		lines := &rt.lines[trace.line]
+		clear(&lines.segments)
+		lines.revision += 1
+	}
 	for kind in Way_Kind {
 		for &offset in to_way do offset = WAY_REACH
 		polylines_clear()
 		ways_trace(terrain, kind)
-		segments := &rt.way_segments[int(kind)]
-		clear(segments)
 		for r in 0 ..< polylines_count() {
 			line := polylines_get(r)
-			points := len(line.points)
-			for s in 0 ..< (line.closed ? points : points - 1) {
-				append(
-					segments,
-					gfx.Render_Segment {
-						start = line.points[s],
-						end = line.points[(s + 1) % points],
-					},
-				)
-			}
+			lines_add(&rt.lines[WAY_TRACE[kind].line], line, false)
 			polyline_stamp(line, WAY_REACH, to_way, nil)
 		}
 		ways_claim_ground(claimed, to_way, WAY_TRACE[kind].band)
@@ -155,6 +153,52 @@ map_derive :: proc(terrain: []Terrain) {
 	cover := make([]Cover_Cell, CELLS_MAX, context.temp_allocator)
 	classify_cover(&rt.cover, cover, terrain, &land)
 	marks_place(&MAP_DRAW.marks, terrain, rt.coast[:], cover, claimed)
+}
+
+// Adds a line to be drawn among lines, as its segments, ending in a head if head
+@(private = "file")
+lines_add :: proc(lines: ^gfx.Render_Lines, line: Polyline, head: bool) {
+	points := len(line.points)
+	segments := line.closed ? points : points - 1
+	for s in 0 ..< segments {
+		append(
+			&lines.segments,
+			gfx.Render_Segment {
+				start = line.points[s],
+				end = line.points[(s + 1) % points],
+				head = b32(head && s == segments - 1),
+			},
+		)
+	}
+}
+
+// Arrows --------------------------------------------------------------------------------------------------------------
+// Arrows: lines over the map along the way something is going, ending in a head where it is going to
+
+// Arrows follow ways found from cell to cell, so they are smoothed fully.
+@(private = "file")
+ARROW_SMOOTHING :: Polyline_Smoothing {
+	softness  = 1,
+	cut_iter  = 2,
+	cut_ratio = 0.25,
+}
+
+// Clears the arrows over the map
+map_arrows_clear :: proc() {
+	arrows := &MAP_DRAW.render_terrain.lines[.Arrow]
+	clear(&arrows.segments)
+	arrows.revision += 1
+}
+
+// Adds an arrow over the map, from start through points, in cells, its head at the last point
+map_arrows_add :: proc(start: [2]f32, points: [][2]f32) {
+	polylines_clear()
+	polylines_add(start)
+	for point in points do polylines_add(point)
+	polylines_end(false, ARROW_SMOOTHING)
+	arrows := &MAP_DRAW.render_terrain.lines[.Arrow]
+	for r in 0 ..< polylines_count() do lines_add(arrows, polylines_get(r), true)
+	arrows.revision += 1
 }
 
 // Cover ---------------------------------------------------------------------------------------------------------------
@@ -309,13 +353,14 @@ cover_of :: proc(terrain: []Terrain, land: ^Land, i: int) -> (best: Cover_Cell) 
 WAY_REACH :: f32(4)
 
 // How each kind of way is traced: how its lines are smoothed, whether an end by the water is carried on to the shore,
-// and how far either side of its lines, in cells, it claims ground that no mark's drawing may cover. Rivers are
-// smoothed fully; roads keep more of their course.
+// how far either side of its lines, in cells, it claims ground that no mark's drawing may cover, and the kind of line
+// it is drawn as. Rivers are smoothed fully; roads keep more of their course.
 @(private = "file")
 Way_Trace :: struct {
 	smoothing: Polyline_Smoothing,
 	to_shore:  bool,
 	band:      f32,
+	line:      gfx.Render_Line_Kind,
 }
 
 @(private = "file", rodata)
@@ -324,8 +369,13 @@ WAY_TRACE := [Way_Kind]Way_Trace {
 		smoothing = {softness = 1, cut_iter = 2, cut_ratio = 0.25},
 		to_shore = true,
 		band = 1.0,
+		line = .River,
 	},
-	.Road = {smoothing = {softness = 0.5, cut_iter = 2, cut_ratio = 0.25}, band = 1.2},
+	.Road = {
+		smoothing = {softness = 0.5, cut_iter = 2, cut_ratio = 0.25},
+		band = 1.2,
+		line = .Road,
+	},
 }
 
 // Preclaims the ground within band of the ways: each square of claimed ground whose middle lies within band of the

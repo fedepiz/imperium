@@ -83,8 +83,7 @@ Movement :: struct {
 MOVEMENT_SPEED :: 4
 
 #assert(gfx.RENDER_TERRAIN_WIDTH == WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == WORLD_HEIGHT)
-#assert(len(Way_Kind) == gfx.RENDER_WAY_KINDS)
-#assert(POLYLINE_SMOOTHED_MAX <= gfx.RENDER_WAY_SEGMENTS_MAX)
+#assert(POLYLINE_SMOOTHED_MAX <= gfx.RENDER_LINE_SEGMENTS_MAX)
 
 Atlas :: struct {
 	// Bumped whenever the terrain changes, so what is derived from it can be rebuilt
@@ -310,6 +309,12 @@ world_tick :: proc(input: Input, dt: f32) {
 
 	camera_tick(input, dt)
 	map_draw_tick(&WORLD.atlas, WORLD.camera, input.viewport, input.pixel_density)
+
+	// The way the walking piece has still to go, drawn as an arrow from where it stands
+	map_arrows_clear()
+	if mov := &WORLD.movement; mov.plan.subject != {} {
+		map_arrows_add(piece_get(mov.plan.subject).pos, mov.plan.path[mov.next:])
+	}
 
 	if input.left_click do WORLD.selected = pawns_pick(WORLD.camera, input.viewport, input.cursor)
 

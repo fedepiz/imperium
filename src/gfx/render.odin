@@ -79,6 +79,14 @@ Render_Terrain_Style :: struct {
 	road_width:         f32,
 	road_halo:          f32,
 	road_fill:          [4]f32,
+	// Arrow width in logical pixels, edges included: a band of arrow_fill between two ink edges, the same width however
+	// far the map zooms
+	arrow_width:        f32,
+	arrow_fill:         [4]f32,
+	// The triangle a line's head is drawn from, in logical pixels: how long it is from its back to its tip, and how wide
+	// at its back. Its kind's width is drawn around it, as around the rest of the line.
+	head_length:        f32,
+	head_width:         f32,
 }
 
 // How many categories a layer can have, category 0 included
@@ -113,34 +121,48 @@ Render_Layer :: struct {
 	jitter:   f32,
 }
 
-// The kinds of way the map draws as lines: rivers, then roads
-RENDER_WAY_KINDS :: 2
-// A straight piece of a way's line, its ends in cells
+// The kinds of line the map draws, each in its own look, each over the ones before it
+Render_Line_Kind :: enum u8 {
+	River,
+	Road,
+	Arrow,
+}
+
+// A straight piece of a line, its ends in cells
 Render_Segment :: struct {
 	start: [2]f32,
 	end:   [2]f32,
+	// A head ends the line here: a triangle with its tip at end, pointing on from start. See Render_Terrain_Style.
+	head:  b32,
 }
 
-// The most segments a kind of way can have
-RENDER_WAY_SEGMENTS_MAX :: 1 << 19
+// The most segments a kind of line can have
+RENDER_LINE_SEGMENTS_MAX :: 1 << 19
+
+// The lines of one kind, as the segments they are drawn from
+Render_Lines :: struct {
+	// Bumped whenever the segments change; the renderer uploads them again only then.
+	revision: u32,
+	segments: [dynamic; RENDER_LINE_SEGMENTS_MAX]Render_Segment,
+}
 
 // Everything the map pass draws from. Cells are indexed y * RENDER_TERRAIN_WIDTH + x, with cell (0, 0) at the top left.
 Render_Terrain :: struct {
-	// Bumped whenever cells, coast or ways change; the renderer uploads them again only then.
-	revision:     u32,
+	// Bumped whenever cells or coast change; the renderer uploads them again only then.
+	revision:   u32,
 	// The terrain as the rules see it, one texel per cell: surface (land, lake, sea as 0, 127, 254), elevation, trees,
 	// moisture.
-	cells:        [RENDER_TERRAIN_CELLS][4]u8,
+	cells:      [RENDER_TERRAIN_CELLS][4]u8,
 	// Derived from the cells: signed distance to the coast, in cells, positive on land.
-	coast:        [RENDER_TERRAIN_CELLS]f32,
-	// Derived from the cells: the lines of each kind of way, as segments
-	way_segments: [RENDER_WAY_KINDS][dynamic; RENDER_WAY_SEGMENTS_MAX]Render_Segment,
+	coast:      [RENDER_TERRAIN_CELLS]f32,
+	// The lines drawn over the map, of each kind
+	lines:      [Render_Line_Kind]Render_Lines,
 	// What covers the land, drawn onto it: forest, desert and so on. Water is drawn over it.
-	cover:        Render_Layer,
+	cover:      Render_Layer,
 	// The cell at the middle of the view, and logical pixels per cell
-	center:       [2]f32,
-	zoom:         f32,
-	debug_mode:   Render_Terrain_Debug,
-	style:        Render_Terrain_Style,
+	center:     [2]f32,
+	zoom:       f32,
+	debug_mode: Render_Terrain_Debug,
+	style:      Render_Terrain_Style,
 }
 
