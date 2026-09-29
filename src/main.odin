@@ -73,8 +73,8 @@ main :: proc() {
 	}
 	MIDNIGHT_HEADING.font = GLOBAL.fonts[.Heading]
 	GLOBAL.images[.Logo] = gfx.sprites_image_add("logo")
-	game.world_init()
-	if !game.world_load("assets/scenarios/roman") {
+	game.game_init()
+	if !game.game_load("assets/scenarios/roman") {
 		fmt.eprintln("The scenario did not load; the world is all water.")
 	}
 	gfx.sprites_load(renderer, pixel_density)
@@ -181,15 +181,15 @@ main :: proc() {
 		}
 		demo.enabled = tweak.toggle("Demo.UI", "Shown", demo.enabled)
 
-		// Texts last one frame; the world writes names before the ui builds its texts.
+		// Texts last one frame; the game writes names before the ui builds its texts.
 		gfx.text_begin()
 		{
 			viewport: [2]f32 = {f32(logical_width), f32(logical_height)}
-			game.world_tick(game_input(GLOBAL.input, viewport, pixel_density), dt)
+			game.game_tick(game_input(GLOBAL.input, viewport, pixel_density), dt)
 		}
 		// Tab steps through the map and the raw terrain properties.
 		if key_is_pressed(GLOBAL.input, .TAB) && !ui.keyboard_captured() {
-			game.world_next_map_view()
+			game.game_next_map_view()
 		}
 
 		{
@@ -205,7 +205,7 @@ main :: proc() {
 			ui.begin({f32(logical_width), f32(logical_height)})
 			if demo.enabled do demo_build(&demo)
 			palette_build(&palette, GLOBAL.input)
-			game.world_ui()
+			game.game_ui()
 			ui.end(ui_input(GLOBAL.input), &draw, dt)
 		}
 
@@ -214,7 +214,7 @@ main :: proc() {
 			renderer,
 			{MIDNIGHT_BACKGROUND.r, MIDNIGHT_BACKGROUND.g, MIDNIGHT_BACKGROUND.b, 1},
 		) {
-			game.world_render(renderer)
+			game.game_render(renderer)
 			gfx.render_list(renderer, &GLOBAL.render_list)
 			gfx.render_frame_end(renderer)
 		}

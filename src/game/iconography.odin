@@ -5,18 +5,7 @@ import "core:fmt"
 import "core:os"
 
 import "../gfx"
-
-// What a drawing shows
-Icon :: enum u8 {
-	Village,
-	Town,
-	City,
-	Large_City,
-	Army,
-	Fleet,
-	Priest,
-	Envoy,
-}
+import "../sim"
 
 // The two sets of drawings an icon comes in: its picture, seen up close, and its medallion, seen from afar
 Icon_Set :: enum u8 {
@@ -33,7 +22,7 @@ Font :: enum u8 {
 // Each icon's drawings are made from art/<set> by tools/pawnify, as <culture>_<tag> under assets/gfx/<set>. Each has
 // a silhouette, <culture>_<tag>_fill, to draw in paper under it.
 @(private = "file", rodata)
-ICON_TAGS := [Icon]string {
+ICON_TAGS := [sim.Icon]string {
 	.Village    = "town_0",
 	.Town       = "town_1",
 	.City       = "town_2",
@@ -52,7 +41,7 @@ ICON_SET_NAMES := [Icon_Set]string {
 }
 
 @(private = "file", rodata)
-CULTURE_NAMES := [Culture]string {
+CULTURE_NAMES := [sim.Culture]string {
 	.Roman    = "roman",
 	.Germanic = "germanic",
 }
@@ -61,8 +50,8 @@ CULTURE_NAMES := [Culture]string {
 ICONOGRAPHY: struct {
 	// Each icon's drawing in each set and each culture's style, and its silhouette. A drawing not there yet is the
 	// blank image.
-	image: [Icon][Icon_Set][Culture]gfx.Image_Id,
-	fill:  [Icon][Icon_Set][Culture]gfx.Image_Id,
+	image: [sim.Icon][Icon_Set][sim.Culture]gfx.Image_Id,
+	fill:  [sim.Icon][Icon_Set][sim.Culture]gfx.Image_Id,
 	// Stands in for a drawing that is not there yet: fully clear
 	blank: gfx.Image_Id,
 	fonts: [Font]gfx.Font_Id,
@@ -92,12 +81,12 @@ iconography_init :: proc() {
 }
 
 // An icon's drawing in a set, in a culture's style
-icon_image :: proc(icon: Icon, set: Icon_Set, culture: Culture) -> gfx.Image_Id {
+icon_image :: proc(icon: sim.Icon, set: Icon_Set, culture: sim.Culture) -> gfx.Image_Id {
 	return ICONOGRAPHY.image[icon][set][culture]
 }
 
 // The silhouette of an icon's drawing in a set, in a culture's style
-icon_fill :: proc(icon: Icon, set: Icon_Set, culture: Culture) -> gfx.Image_Id {
+icon_fill :: proc(icon: sim.Icon, set: Icon_Set, culture: sim.Culture) -> gfx.Image_Id {
 	return ICONOGRAPHY.fill[icon][set][culture]
 }
 

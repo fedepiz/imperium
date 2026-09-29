@@ -3,6 +3,7 @@ package game
 
 import "core:math/linalg"
 
+import "../sim"
 import "../span"
 
 // Lines through the world, in cells: ways and coasts, and later borders. They are traced from the cells into runs of
@@ -140,14 +141,14 @@ polyline_stamp :: proc(line: Polyline, reach: f32, nearest: [][2]f32, side: []f3
 		length2 := max(linalg.dot(ab, ab), 1e-6)
 		x0 := max(int(min(a.x, b.x) - reach), 0)
 		y0 := max(int(min(a.y, b.y) - reach), 0)
-		x1 := min(int(max(a.x, b.x) + reach), WORLD_WIDTH - 1)
-		y1 := min(int(max(a.y, b.y) + reach), WORLD_HEIGHT - 1)
+		x1 := min(int(max(a.x, b.x) + reach), sim.WORLD_WIDTH - 1)
+		y1 := min(int(max(a.y, b.y) + reach), sim.WORLD_HEIGHT - 1)
 		for y in y0 ..= y1 {
 			for x in x0 ..= x1 {
 				middle := [2]f32{f32(x), f32(y)} + 0.5
 				t := clamp(linalg.dot(middle - a, ab) / length2, 0, 1)
 				offset := a + ab * t - middle
-				i := y * WORLD_WIDTH + x
+				i := y * sim.WORLD_WIDTH + x
 				if linalg.dot(offset, offset) >= linalg.dot(nearest[i], nearest[i]) do continue
 				nearest[i] = offset
 				// With y down the map, the left of a direction (dx, dy) is (dy, -dx).

@@ -4,31 +4,24 @@ package game
 import "core:math"
 
 import "../gfx"
+import "../sim"
 import "../span"
 
-// A pawn: how a piece is drawn on the map, in the slot of its piece's id. Its name must last until pawns_end.
+// A pawn: how a token is drawn on the map, in the slot of its handle's index. Its label must last until pawns_end.
 Pawn :: struct {
-	// The piece the slot's pawn was last added for; a piece of a new generation starts the pawn over
-	piece:         Piece_Id,
+	// The token the slot's pawn was last added for; a token of another handle starts the pawn over. A focused token is
+	// drawn with a pulsing tint.
+	token:        sim.Token,
 	// The frame the pawn was last added in; only pawns added this frame are drawn and picked
-	frame:         u32,
-	// Where the drawing is centred, in cells
-	pos:           [2]f32,
-	icon:          Icon,
-	// Whose style the drawing is in
-	culture:       Culture,
-	// Written under the pawn, unless empty
-	name:          string,
-	// Drawn with a pulsing tint
-	selected:      bool,
-	// Seconds the pawn has been selected for, which its tint pulses by
-	selected_time: f32,
+	frame:        u32,
+	// Seconds the pawn has been focused for, which its tint pulses by
+	focused_time: f32,
 }
 
 @(private = "file")
 PAWNS: struct {
-	// Each piece slot's pawn, kept from frame to frame
-	entries:       [PIECE_MAX]Pawn,
+	// Each handle slot's pawn, kept from frame to frame
+	entries:       [sim.TOKENS_MAX]Pawn,
 	// Counts pawns_begin calls
 	frame:         u32,
 	// Seconds since the frame before
@@ -44,7 +37,7 @@ PAWNS: struct {
 
 // How large each icon is drawn, times its drawing's natural size: see PAWN_CELLS_PER_PIXEL.
 @(private = "file", rodata)
-PAWN_SIZES := [Icon]f32 {
+PAWN_SIZES := [sim.Icon]f32 {
 	.Village    = 1.1,
 	.Town       = 1.3,
 	.City       = 1.4,
@@ -55,12 +48,12 @@ PAWN_SIZES := [Icon]f32 {
 	.Envoy      = 1.1,
 }
 
-// The tint a selected pawn pulses towards, over its drawing and its paper, and how many seconds it takes to pulse
+// The tint a focused pawn pulses towards, over its drawing and its paper, and how many seconds it takes to pulse
 // there and back
 @(private = "file")
-PAWN_SELECTED_TINT :: [4]f32{1.000, 0.700, 0.350, 1}
+PAWN_FOCUSED_TINT :: [4]f32{1.000, 0.700, 0.350, 1}
 @(private = "file")
-PAWN_SELECTED_PULSE :: 1.2
+PAWN_FOCUSED_PULSE :: 1.2
 
 // Every drawing in a set is made at the same scale, so drawing each at its set's cells per pixel of its image, times
 // its icon's size, keeps the pen line the same weight across the set.
@@ -95,44 +88,35 @@ pawns_begin :: proc(camera: Camera, viewport: [2]f32, pixel_density: f32, dt: f3
 	PAWNS.dt = dt
 }
 
-// Draws a piece this frame
-pawns_add :: proc(
-	piece: Piece_Id,
-	pos: [2]f32,
-	icon: Icon,
-	culture: Culture,
-	name: string,
-	selected: bool,
-) {
-	pawn := &PAWNS.entries[piece.index]
-	if pawn.piece != piece do pawn^ = {
-		piece = piece,
-	}
+// Draws a token this frame
+pawns_add :: proc(token: sim.Token) {
+	pawn := &PAWNS.entries[token.handle.index]
+	if pawn.token.handle != token.handle do pawn^ = {}
+	pawn.token = token
 	pawn.frame = PAWNS.frame
-	pawn.pos, pawn.icon, pawn.culture, pawn.name, pawn.selected =
-		pos, icon, culture, name, selected
-	pawn.selected_time = selected ? pawn.selected_time + PAWNS.dt : 0
+	pawn.focused_time = .Focused in token.flags ? pawn.focused_time + PAWNS.dt : 0
 }
 
 // The rect a pawn's drawing in a set covers, in cells
 @(private = "file")
 pawn_bounds :: proc(pawn: Pawn, set: Icon_Set) -> [4]f32 {
+	picture := pawn.token.picture
 	source :=
-		gfx.sprite_region(gfx.sprite_of_image(icon_image(pawn.icon, set, pawn.culture))).source
-	size := source.zw * PAWN_CELLS_PER_PIXEL[set] * PAWN_SIZES[pawn.icon]
-	corner := pawn.pos - size / 2
+		gfx.sprite_region(gfx.sprite_of_image(icon_image(picture.icon, set, picture.culture))).source
+	size := source.zw * PAWN_CELLS_PER_PIXEL[set] * PAWN_SIZES[picture.icon]
+	corner := pawn.token.pos - size / 2
 	return {corner.x, corner.y, size.x, size.y}
 }
 
-// The piece of the first of the latest frame's pawns whose drawing, in the set that shows more, covers the point on
+// The handle of the first of the latest frame's pawns whose drawing, in the set that shows more, covers the point on
 // screen, or nil for none
-pawns_pick :: proc(camera: Camera, viewport: [2]f32, point: [2]f32) -> Piece_Id {
-	found: Piece_Id
+pawns_pick :: proc(camera: Camera, viewport: [2]f32, point: [2]f32) -> sim.Piece_Id {
+	found: sim.Piece_Id
 	set: Icon_Set = PAWNS.medallion_t < 0.5 ? .Picture : .Medallion
 	for pawn in PAWNS.entries {
 		if pawn.frame != PAWNS.frame do continue
 		rect, _ := camera_world_to_screen(camera, viewport, pawn_bounds(pawn, set))
-		if gfx.rect_contains(rect, point) do found = pawn.piece
+		if gfx.rect_contains(rect, point) do found = pawn.token.handle
 	}
 	return found
 }
@@ -155,14 +139,15 @@ pawns_end :: proc() {
 		.Picture   = 1 - PAWNS.medallion_t,
 		.Medallion = PAWNS.medallion_t,
 	}
-	name_at: [PIECE_MAX][2]f32
-	name_weight: [PIECE_MAX]f32
+	name_at: [sim.TOKENS_MAX][2]f32
+	name_weight: [sim.TOKENS_MAX]f32
 	for pawn, index in PAWNS.entries {
 		if pawn.frame != PAWNS.frame do continue
 		tint := [4]f32{1, 1, 1, 1}
-		if pawn.selected {
-			pulse := 0.5 - 0.5 * math.cos(2 * math.PI * pawn.selected_time / PAWN_SELECTED_PULSE)
-			tint = math.lerp(tint, PAWN_SELECTED_TINT, pulse)
+		picture := pawn.token.picture
+		if .Focused in pawn.token.flags {
+			pulse := 0.5 - 0.5 * math.cos(2 * math.PI * pawn.focused_time / PAWN_FOCUSED_PULSE)
+			tint = math.lerp(tint, PAWN_FOCUSED_TINT, pulse)
 		}
 		for weight, set in weights {
 			if weight <= 0 do continue
@@ -175,10 +160,10 @@ pawns_end :: proc() {
 			if !visible do continue
 			paper := MAP_PAPER * tint
 			paper.a *= weight
-			gfx.draw_image(&draw, icon_fill(pawn.icon, set, pawn.culture), rect, paper)
+			gfx.draw_image(&draw, icon_fill(picture.icon, set, picture.culture), rect, paper)
 			gfx.draw_image(
 				&draw,
-				icon_image(pawn.icon, set, pawn.culture),
+				icon_image(picture.icon, set, picture.culture),
 				rect,
 				tint * {1, 1, 1, weight},
 			)
@@ -192,9 +177,10 @@ pawns_end :: proc() {
 	HALO :: 1.5
 	font := font_id(.Text)
 	for pawn, index in PAWNS.entries {
-		if pawn.frame != PAWNS.frame || pawn.name == "" || name_weight[index] <= 0 do continue
-		text := gfx.text_from_string(pawn.name, font, MAP_INK)
-		halo := gfx.text_from_string(pawn.name, font, MAP_PAPER)
+		label := pawn.token.label
+		if pawn.frame != PAWNS.frame || label == "" || name_weight[index] <= 0 do continue
+		text := gfx.text_from_string(label, font, MAP_INK)
+		halo := gfx.text_from_string(label, font, MAP_PAPER)
 		at := name_at[index] / name_weight[index] - [2]f32{gfx.text_measure(text).x / 2, 0}
 		for dy in -1 ..= 1 {
 			for dx in -1 ..= 1 {

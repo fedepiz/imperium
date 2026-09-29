@@ -1,5 +1,5 @@
 #+private
-package game
+package sim
 
 import "core:math"
 import "core:slice"

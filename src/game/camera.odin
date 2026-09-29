@@ -1,6 +1,7 @@
 #+private
 package game
 
+import "../sim"
 import "../tweak"
 import "core:math"
 import "core:math/linalg"
@@ -27,15 +28,15 @@ CAMERA_ZOOM_MIN :: 2
 
 // The camera starts over the middle of the world, at its farthest zoom.
 camera_init :: proc() {
-	WORLD.camera.center = {WORLD_WIDTH, WORLD_HEIGHT} / 2
-	WORLD.camera.zoom = CAMERA_ZOOM_MIN
+	GAME.camera.center = {sim.WORLD_WIDTH, sim.WORLD_HEIGHT} / 2
+	GAME.camera.zoom = CAMERA_ZOOM_MIN
 }
 
 // Moves the camera by the input: the wheel zooms about the cursor, a drag on the map pulls it along, and the keyboard
 // pans it.
 camera_tick :: proc(input: Input, dt: f32) {
-	camera := &WORLD.camera
-	world_size := [2]f32{WORLD_WIDTH, WORLD_HEIGHT}
+	camera := &GAME.camera
+	world_size := [2]f32{sim.WORLD_WIDTH, sim.WORLD_HEIGHT}
 	// Never so far out that the world is smaller than the view
 	zoom_min := min(input.viewport.x / world_size.x, input.viewport.y / world_size.y)
 

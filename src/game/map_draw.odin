@@ -6,6 +6,7 @@ import "core:math/linalg"
 import "core:slice"
 
 import "../gfx"
+import "../sim"
 import "../span"
 
 // Map -----------------------------------------------------------------------------------------------------------------
@@ -15,16 +16,16 @@ import "../span"
 MAP_PAPER :: [4]f32{0.840, 0.772, 0.620, 1}
 MAP_INK :: [4]f32{0.150, 0.105, 0.070, 1}
 
-// What the map is drawn from: everything worked out from the world's terrain for the map pass and the marks over it
+// What the map is drawn from: everything worked out from the scene's ground for the map pass and the marks over it
 @(private = "file")
 MAP_DRAW: struct {
 	// The drawings scattered over the terrain
 	marks:          Map_Marks,
 	// What the map pass draws
-	render_terrain:    gfx.Render_Terrain,
-	render_list:       gfx.Render_List,
-	// The revision of the walkable area the movement highlight was last taken from
-	movement_revision: u32,
+	render_terrain: gfx.Render_Terrain,
+	render_list:    gfx.Render_List,
+	// The revision of each of the scene's areas its highlight was last taken from
+	area_revisions: [sim.Area_Role]u32,
 }
 
 // Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
@@ -53,28 +54,26 @@ map_draw_init :: proc() {
 		head_width         = 6.25,
 	}
 	MAP_DRAW.render_terrain.cover.jitter = 0.8
-	MAP_DRAW.render_terrain.highlights.areas[MOVEMENT_AREA] = {
-		color     = {0.300, 0.450, 0.650, 1},
-		border    = 0.6,
-		thickness = 2,
-		inside    = 0.2,
+	for look, role in AREA_LOOKS {
+		MAP_DRAW.render_terrain.highlights.areas[AREA_HIGHLIGHTS[role]] = look
 	}
-
 }
 
 // Named in the order of gfx.Render_Terrain_Debug
 @(private = "file")
 TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture", "Cover"}
 
-// Keeps the map's drawing in step with the world: the camera every frame, everything drawn from the terrain when it
-// changes, and the marks in view every frame.
-map_draw_tick :: proc(atlas: ^Atlas, camera: Camera, viewport: [2]f32, pixel_density: f32) {
+// Keeps the map's drawing in step with the scene: the camera every frame, everything drawn from the ground when it
+// changes, the arrows every frame, the areas when they change, and the marks in view every frame.
+map_draw_tick :: proc(scene: ^sim.Scene, camera: Camera, viewport: [2]f32, pixel_density: f32) {
 	rt := &MAP_DRAW.render_terrain
 	rt.center, rt.zoom = camera.center, camera.zoom
-	if rt.revision != atlas.revision {
-		rt.revision = atlas.revision
-		map_derive(atlas.terrain[:])
+	if rt.revision != scene.ground_revision {
+		rt.revision = scene.ground_revision
+		map_derive(scene.ground[:])
 	}
+	map_arrows(scene)
+	map_areas(scene)
 	marks_draw(&MAP_DRAW.marks, &MAP_DRAW.render_list, camera, viewport, pixel_density)
 }
 
@@ -93,7 +92,7 @@ map_draw_next_view :: proc() {
 // Works out everything the map draws from the terrain, stage by stage: its cells, its ways, its coast, the land's
 // covers, and the marks over it.
 @(private = "file")
-map_derive :: proc(terrain: []Terrain) {
+map_derive :: proc(terrain: []sim.Ground) {
 	rt := &MAP_DRAW.render_terrain
 	for cell, i in terrain {
 		rt.cells[i] = {u8(cell.surface) * 127, cell.elevation, cell.trees, cell.moisture}
@@ -102,13 +101,13 @@ map_derive :: proc(terrain: []Terrain) {
 	// Each kind of way, traced into smoothed lines, then drawn as its kind of line, and stamped around themselves so each
 	// cell near one learns the offset from its middle to its nearest point: from which it preclaims the ground along it.
 	claimed := make([]u8, FOOTPRINT_SIZE.x * FOOTPRINT_SIZE.y, context.temp_allocator)
-	to_way := make([][2]f32, CELLS_MAX, context.temp_allocator)
+	to_way := make([][2]f32, sim.CELLS_MAX, context.temp_allocator)
 	for trace in WAY_TRACE {
 		lines := &rt.lines[trace.line]
 		clear(&lines.segments)
 		lines.revision += 1
 	}
-	for kind in Way_Kind {
+	for kind in sim.Way_Kind {
 		for &offset in to_way do offset = WAY_REACH
 		polylines_clear()
 		ways_trace(terrain, kind)
@@ -122,11 +121,11 @@ map_derive :: proc(terrain: []Terrain) {
 
 	// The coasts, the boundaries of the land, traced into smoothed lines, then stamped around themselves: each cell near
 	// the coast learns the offset to it, and which side of it it lies on.
-	to_coast := make([][2]f32, CELLS_MAX, context.temp_allocator)
-	coast_side := make([]f32, CELLS_MAX, context.temp_allocator)
+	to_coast := make([][2]f32, sim.CELLS_MAX, context.temp_allocator)
+	coast_side := make([]f32, sim.CELLS_MAX, context.temp_allocator)
 	for &offset in to_coast do offset = COAST_REACH
-	is_land := make([]bool, CELLS_MAX, context.temp_allocator)
-	for cell, i in terrain do is_land[i] = cell.surface not_in WATER
+	is_land := make([]bool, sim.CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain do is_land[i] = cell.surface not_in sim.WATER
 	polylines_clear()
 	trace_boundaries(is_land, COAST_SMOOTHING)
 	for r in 0 ..< polylines_count() {
@@ -136,12 +135,12 @@ map_derive :: proc(terrain: []Terrain) {
 
 	// Signed distance to the coast, in cells, positive on land: to the smoothed coast near it, and farther out from
 	// cell to cell, half a cell at the cells either side of the coast, the two blending over the last cell of reach.
-	to_water := make([]f32, CELLS_MAX, context.temp_allocator)
-	to_land := make([]f32, CELLS_MAX, context.temp_allocator)
+	to_water := make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	to_land := make([]f32, sim.CELLS_MAX, context.temp_allocator)
 	distance_to(to_water, terrain, true)
 	distance_to(to_land, terrain, false)
 	for cell, i in terrain {
-		water := cell.surface in WATER
+		water := cell.surface in sim.WATER
 		far := water ? -(to_land[i] - 0.5) : to_water[i] - 0.5
 		near := linalg.length(to_coast[i])
 		// Away from the line, the cell itself says which side it is on.
@@ -158,7 +157,7 @@ map_derive :: proc(terrain: []Terrain) {
 
 	// What covers each cell, drawn as the cover layer, and the marks over the land
 	land := measure_land(terrain)
-	cover := make([]Cover_Cell, CELLS_MAX, context.temp_allocator)
+	cover := make([]Cover_Cell, sim.CELLS_MAX, context.temp_allocator)
 	classify_cover(&rt.cover, cover, terrain, &land)
 	marks_place(&MAP_DRAW.marks, terrain, rt.coast[:], cover, claimed)
 }
@@ -191,44 +190,49 @@ ARROW_SMOOTHING :: Polyline_Smoothing {
 	cut_ratio = 0.25,
 }
 
-// Clears the arrows over the map
-map_arrows_clear :: proc() {
+// Draws the scene's arrows over the map, each through its points, in cells, its head at the last
+@(private = "file")
+map_arrows :: proc(scene: ^sim.Scene) {
 	arrows := &MAP_DRAW.render_terrain.lines[.Arrow]
 	clear(&arrows.segments)
 	arrows.revision += 1
-}
-
-// Adds an arrow over the map, from start through points, in cells, its head at the last point
-map_arrows_add :: proc(start: [2]f32, points: [][2]f32) {
-	polylines_clear()
-	polylines_add(start)
-	for point in points do polylines_add(point)
-	polylines_end(false, ARROW_SMOOTHING)
-	arrows := &MAP_DRAW.render_terrain.lines[.Arrow]
-	for r in 0 ..< polylines_count() do lines_add(arrows, polylines_get(r), true)
-	arrows.revision += 1
+	for arrow in scene.arrows {
+		polylines_clear()
+		for point in scene.arrow_points[arrow.begin:][:arrow.len] do polylines_add(point)
+		polylines_end(false, ARROW_SMOOTHING)
+		for r in 0 ..< polylines_count() do lines_add(arrows, polylines_get(r), true)
+	}
 }
 
 // Highlights ----------------------------------------------------------------------------------------------------------
 // Highlights: areas of cells washed in color over the map
 
-// The highlight area where the selected piece can walk
-@(private = "file")
-MOVEMENT_AREA :: 1
+// The highlight area each of the scene's areas is drawn as, and how each looks
+@(private = "file", rodata)
+AREA_HIGHLIGHTS := [sim.Area_Role]u8 {
+	.Reach = 1,
+}
 
-// Highlights where a piece can walk, the cells a flood reaches, or nothing for a nil flood. Taken up again only when the
-// revision is not the one last taken up.
-map_movement_area :: proc(flood: ^Pathfind_Flood, revision: u32) {
-	if MAP_DRAW.movement_revision == revision do return
-	MAP_DRAW.movement_revision = revision
+@(private = "file")
+AREA_LOOKS := [sim.Area_Role]gfx.Render_Highlight_Area {
+	.Reach = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2},
+}
+
+// Highlights the scene's areas, each taken up again only when its revision is not the one last taken up
+@(private = "file")
+map_areas :: proc(scene: ^sim.Scene) {
 	highlights := &MAP_DRAW.render_terrain.highlights
-	gfx.render_highlight_clear(highlights, MOVEMENT_AREA)
-	if flood == nil do return
-	highlights.areas[MOVEMENT_AREA].surface = flood.domain == .Land ? .Land : .Water
-	for cost, i in flood.cost {
-		if cost == math.INF_F32 do continue
-		cell := flood.corner + {i % PATHFIND_FLOOD_SIZE, i / PATHFIND_FLOOD_SIZE}
-		gfx.render_highlight_add(highlights, MOVEMENT_AREA, cell)
+	for &area, role in scene.areas {
+		if MAP_DRAW.area_revisions[role] == area.revision do continue
+		MAP_DRAW.area_revisions[role] = area.revision
+		highlight := AREA_HIGHLIGHTS[role]
+		gfx.render_highlight_clear(highlights, highlight)
+		highlights.areas[highlight].surface = area.on_water ? .Water : .Land
+		for inside, i in area.cells {
+			if !inside do continue
+			cell := area.corner + {i % sim.AREA_SIZE, i / sim.AREA_SIZE}
+			gfx.render_highlight_add(highlights, highlight, cell)
+		}
 	}
 }
 
@@ -292,31 +296,31 @@ Land :: struct {
 BASIN_REACH :: 24
 
 @(private = "file")
-measure_land :: proc(terrain: []Terrain) -> (land: Land) {
-	is_river := make([]bool, CELLS_MAX, context.temp_allocator)
-	is_sea := make([]bool, CELLS_MAX, context.temp_allocator)
+measure_land :: proc(terrain: []sim.Ground) -> (land: Land) {
+	is_river := make([]bool, sim.CELLS_MAX, context.temp_allocator)
+	is_sea := make([]bool, sim.CELLS_MAX, context.temp_allocator)
 	for cell, i in terrain {
-		is_river[i] = cell.way[.River] != 0
+		is_river[i] = .River in cell.ways
 		is_sea[i] = cell.surface == .Sea
 	}
-	land.to_river = make([]f32, CELLS_MAX, context.temp_allocator)
-	land.to_sea = make([]f32, CELLS_MAX, context.temp_allocator)
-	distance_from(land.to_river, is_river, WORLD_SIZE)
-	distance_from(land.to_sea, is_sea, WORLD_SIZE)
+	land.to_river = make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	land.to_sea = make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	distance_from(land.to_river, is_river, sim.WORLD_SIZE)
+	distance_from(land.to_sea, is_sea, sim.WORLD_SIZE)
 
-	elevation := make([]f32, CELLS_MAX, context.temp_allocator)
-	is_land := make([]f32, CELLS_MAX, context.temp_allocator)
+	elevation := make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	is_land := make([]f32, sim.CELLS_MAX, context.temp_allocator)
 	for cell, i in terrain {
-		if cell.surface in WATER do continue
+		if cell.surface in sim.WATER do continue
 		elevation[i] = normalized(cell.elevation)
 		is_land[i] = 1
 	}
-	around := make([]f32, CELLS_MAX, context.temp_allocator)
-	count := make([]f32, CELLS_MAX, context.temp_allocator)
-	box_sum(around, elevation, WORLD_SIZE, BASIN_REACH)
-	box_sum(count, is_land, WORLD_SIZE, BASIN_REACH)
-	land.basin = make([]f32, CELLS_MAX, context.temp_allocator)
-	for i in 0 ..< CELLS_MAX {
+	around := make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	count := make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	box_sum(around, elevation, sim.WORLD_SIZE, BASIN_REACH)
+	box_sum(count, is_land, sim.WORLD_SIZE, BASIN_REACH)
+	land.basin = make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	for i in 0 ..< sim.CELLS_MAX {
 		if is_land[i] > 0 do land.basin[i] = around[i] / count[i] - elevation[i]
 	}
 	return
@@ -327,7 +331,7 @@ measure_land :: proc(terrain: []Terrain) -> (land: Land) {
 classify_cover :: proc(
 	layer: ^gfx.Render_Layer,
 	cover: []Cover_Cell,
-	terrain: []Terrain,
+	terrain: []sim.Ground,
 	land: ^Land,
 ) {
 	for &cell, i in cover {
@@ -345,8 +349,8 @@ classify_cover :: proc(
 // mountains, so it lies where they stand, and wins over forest, desert and steppe where they are at their
 // fullest.
 @(private = "file")
-cover_of :: proc(terrain: []Terrain, land: ^Land, i: int) -> (best: Cover_Cell) {
-	if terrain[i].surface in WATER do return
+cover_of :: proc(terrain: []sim.Ground, land: ^Land, i: int) -> (best: Cover_Cell) {
+	if terrain[i].surface in sim.WATER do return
 	cell := terrain[i]
 	elevation := normalized(cell.elevation)
 	trees := normalized(cell.trees)
@@ -395,7 +399,7 @@ Way_Trace :: struct {
 }
 
 @(private = "file", rodata)
-WAY_TRACE := [Way_Kind]Way_Trace {
+WAY_TRACE := [sim.Way_Kind]Way_Trace {
 	.River = {
 		smoothing = {softness = 1, cut_iter = 2, cut_ratio = 0.25},
 		to_shore = true,
@@ -415,7 +419,7 @@ WAY_TRACE := [Way_Kind]Way_Trace {
 ways_claim_ground :: proc(claimed: []u8, to_way: [][2]f32, band: f32) {
 	for offset, i in to_way {
 		if linalg.length(offset) > band + 1 do continue
-		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
+		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
 		way := [2]f32{f32(cell.x), f32(cell.y)} + 0.5 + offset
 		for y in 0 ..< FOOTPRINT_RES {
 			for x in 0 ..< FOOTPRINT_RES {
@@ -431,25 +435,25 @@ ways_claim_ground :: proc(claimed: []u8, to_way: [][2]f32, band: f32) {
 // Traces the cells of a kind of way into lines through the middles of their cells. Lines run between ends and forks,
 // so ways meet where they join; what is left over are closed loops.
 @(private = "file")
-ways_trace :: proc(terrain: []Terrain, kind: Way_Kind) {
-	visited := make([]bool, CELLS_MAX, context.temp_allocator)
-	for i in 0 ..< CELLS_MAX {
-		if terrain[i].way[kind] == 0 do continue
-		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
+ways_trace :: proc(terrain: []sim.Ground, kind: sim.Way_Kind) {
+	visited := make([]bool, sim.CELLS_MAX, context.temp_allocator)
+	for i in 0 ..< sim.CELLS_MAX {
+		if kind not_in terrain[i].ways do continue
+		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
 		next: [8][2]int
 		count := way_next(terrain, kind, cell, &next)
 		if count == 2 do continue
 		// Every line from this end or fork, unless it has been traced from its other end
 		for n in next[:count] {
-			j := n.y * WORLD_WIDTH + n.x
+			j := n.y * sim.WORLD_WIDTH + n.x
 			if visited[j] do continue
 			if way_next(terrain, kind, n, &{}) != 2 && j < i do continue
 			way_follow(terrain, kind, visited, cell, n)
 		}
 	}
-	for i in 0 ..< CELLS_MAX {
-		if terrain[i].way[kind] == 0 || visited[i] do continue
-		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
+	for i in 0 ..< sim.CELLS_MAX {
+		if kind not_in terrain[i].ways || visited[i] do continue
+		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
 		next: [8][2]int
 		if way_next(terrain, kind, cell, &next) != 2 do continue
 		visited[i] = true
@@ -462,16 +466,16 @@ ways_trace :: proc(terrain: []Terrain, kind: Way_Kind) {
 // they meet.
 @(private = "file")
 way_next :: proc(
-	terrain: []Terrain,
-	kind: Way_Kind,
+	terrain: []sim.Ground,
+	kind: sim.Way_Kind,
 	cell: [2]int,
 	out: ^[8][2]int,
 ) -> (
 	count: int,
 ) {
-	is_way :: proc(terrain: []Terrain, kind: Way_Kind, x, y: int) -> bool {
-		if x < 0 || y < 0 || x >= WORLD_WIDTH || y >= WORLD_HEIGHT do return false
-		return terrain[y * WORLD_WIDTH + x].way[kind] != 0
+	is_way :: proc(terrain: []sim.Ground, kind: sim.Way_Kind, x, y: int) -> bool {
+		if x < 0 || y < 0 || x >= sim.WORLD_WIDTH || y >= sim.WORLD_HEIGHT do return false
+		return kind in terrain[y * sim.WORLD_WIDTH + x].ways
 	}
 	for dy in -1 ..= 1 {
 		for dx in -1 ..= 1 {
@@ -488,14 +492,14 @@ way_next :: proc(
 // Walks a way from cell through next until it reaches an end, a fork, or a cell already walked, through the middle of
 // every cell on the way.
 @(private = "file")
-way_follow :: proc(terrain: []Terrain, kind: Way_Kind, visited: []bool, cell, next: [2]int) {
+way_follow :: proc(terrain: []sim.Ground, kind: sim.Way_Kind, visited: []bool, cell, next: [2]int) {
 	middle :: proc(cell: [2]int) -> [2]f32 {return {f32(cell.x), f32(cell.y)} + 0.5}
 	way_shore(terrain, kind, cell)
 	polylines_add(middle(cell))
 	prev, cur := cell, next
 	for {
 		polylines_add(middle(cur))
-		i := cur.y * WORLD_WIDTH + cur.x
+		i := cur.y * sim.WORLD_WIDTH + cur.x
 		ahead: [8][2]int
 		if way_next(terrain, kind, cur, &ahead) != 2 || visited[i] do break
 		visited[i] = true
@@ -508,13 +512,13 @@ way_follow :: proc(terrain: []Terrain, kind: Way_Kind, visited: []bool, cell, ne
 // If ways of the kind are carried to the shore, the way ends at cell, and cell touches water: a point most of the way
 // into the water.
 @(private = "file")
-way_shore :: proc(terrain: []Terrain, kind: Way_Kind, cell: [2]int) {
+way_shore :: proc(terrain: []sim.Ground, kind: sim.Way_Kind, cell: [2]int) {
 	if !WAY_TRACE[kind].to_shore || way_next(terrain, kind, cell, &{}) != 1 do return
 	for dy in -1 ..= 1 {
 		for dx in -1 ..= 1 {
 			x, y := cell.x + dx, cell.y + dy
-			if x < 0 || y < 0 || x >= WORLD_WIDTH || y >= WORLD_HEIGHT do continue
-			if terrain[y * WORLD_WIDTH + x].surface in WATER {
+			if x < 0 || y < 0 || x >= sim.WORLD_WIDTH || y >= sim.WORLD_HEIGHT do continue
+			if terrain[y * sim.WORLD_WIDTH + x].surface in sim.WATER {
 				polylines_add(
 					[2]f32{f32(cell.x), f32(cell.y)} + 0.5 + [2]f32{f32(dx), f32(dy)} * 0.75,
 				)
@@ -545,16 +549,16 @@ COAST_SMOOTHING :: Polyline_Smoothing {
 trace_boundaries :: proc(inside: []bool, smoothing: Polyline_Smoothing) {
 	// Corners are numbered y * ACROSS + x. Each holds the steps its edges leave it by: two only where inside and outside
 	// meet across it.
-	ACROSS :: WORLD_WIDTH + 1
-	out := make([]bit_set[Step], ACROSS * (WORLD_HEIGHT + 1), context.temp_allocator)
-	for y in 0 ..< WORLD_HEIGHT {
-		for x in 0 ..< WORLD_WIDTH {
-			i := y * WORLD_WIDTH + x
+	ACROSS :: sim.WORLD_WIDTH + 1
+	out := make([]bit_set[Step], ACROSS * (sim.WORLD_HEIGHT + 1), context.temp_allocator)
+	for y in 0 ..< sim.WORLD_HEIGHT {
+		for x in 0 ..< sim.WORLD_WIDTH {
+			i := y * sim.WORLD_WIDTH + x
 			if !inside[i] do continue
-			if y > 0 && !inside[i - WORLD_WIDTH] do out[y * ACROSS + x + 1] += {.West}
-			if y < WORLD_HEIGHT - 1 && !inside[i + WORLD_WIDTH] do out[(y + 1) * ACROSS + x] += {.East}
+			if y > 0 && !inside[i - sim.WORLD_WIDTH] do out[y * ACROSS + x + 1] += {.West}
+			if y < sim.WORLD_HEIGHT - 1 && !inside[i + sim.WORLD_WIDTH] do out[(y + 1) * ACROSS + x] += {.East}
 			if x > 0 && !inside[i - 1] do out[y * ACROSS + x] += {.South}
-			if x < WORLD_WIDTH - 1 && !inside[i + 1] do out[(y + 1) * ACROSS + x + 1] += {.North}
+			if x < sim.WORLD_WIDTH - 1 && !inside[i + 1] do out[(y + 1) * ACROSS + x + 1] += {.North}
 		}
 	}
 
@@ -582,11 +586,11 @@ trace_boundaries :: proc(inside: []bool, smoothing: Polyline_Smoothing) {
 		}
 	}
 	// Boundaries that run off the map first, from where they leave its edge, then the closed ones
-	for x in 0 ..= WORLD_WIDTH {
-		for y in ([2]int{0, WORLD_HEIGHT}) do if out[y * ACROSS + x] != {} do walk(out, {x, y}, smoothing)
+	for x in 0 ..= sim.WORLD_WIDTH {
+		for y in ([2]int{0, sim.WORLD_HEIGHT}) do if out[y * ACROSS + x] != {} do walk(out, {x, y}, smoothing)
 	}
-	for y in 0 ..= WORLD_HEIGHT {
-		for x in ([2]int{0, WORLD_WIDTH}) do if out[y * ACROSS + x] != {} do walk(out, {x, y}, smoothing)
+	for y in 0 ..= sim.WORLD_HEIGHT {
+		for x in ([2]int{0, sim.WORLD_WIDTH}) do if out[y * ACROSS + x] != {} do walk(out, {x, y}, smoothing)
 	}
 	for c in 0 ..< len(out) {
 		for out[c] != {} do walk(out, {c % ACROSS, c / ACROSS}, smoothing)
@@ -612,10 +616,10 @@ STEPS := [Step][2]int {
 
 // Euclidean distance from every cell to the nearest cell whose water matches.
 @(private = "file")
-distance_to :: proc(out: []f32, terrain: []Terrain, water: bool) {
-	source := make([]bool, CELLS_MAX, context.temp_allocator)
-	for cell, i in terrain do source[i] = (cell.surface in WATER) == water
-	distance_from(out, source, WORLD_SIZE)
+distance_to :: proc(out: []f32, terrain: []sim.Ground, water: bool) {
+	source := make([]bool, sim.CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain do source[i] = (cell.surface in sim.WATER) == water
+	distance_from(out, source, sim.WORLD_SIZE)
 }
 
 // How far out from the shore, in cells, the water is preclaimed
@@ -629,13 +633,13 @@ preclaim_coast_water :: proc(claimed: []u8, coast: []f32, reach: f32) {
 	for distance, i in coast {
 		// A distance changes by at most as far as its point moves, so only cells this near the strip have squares in it.
 		if distance >= 1 || distance <= -reach - 1 do continue
-		cell := [2]int{i % WORLD_WIDTH, i / WORLD_WIDTH}
+		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
 		for y in 0 ..< FOOTPRINT_RES {
 			for x in 0 ..< FOOTPRINT_RES {
 				square := cell * FOOTPRINT_RES + {x, y}
 				at := bilinear(
 					coast,
-					WORLD_SIZE,
+					sim.WORLD_SIZE,
 					([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES,
 				)
 				if at < 0 && at > -reach do claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
@@ -656,7 +660,7 @@ preclaim_coast_water :: proc(claimed: []u8, coast: []f32, reach: f32) {
 @(private = "file")
 FOOTPRINT_RES :: 4
 @(private = "file")
-FOOTPRINT_SIZE :: [2]int{WORLD_WIDTH * FOOTPRINT_RES, WORLD_HEIGHT * FOOTPRINT_RES}
+FOOTPRINT_SIZE :: [2]int{sim.WORLD_WIDTH * FOOTPRINT_RES, sim.WORLD_HEIGHT * FOOTPRINT_RES}
 @(private = "file")
 PRECLAIMED :: 1
 
@@ -917,7 +921,7 @@ marks_init :: proc(mm: ^Map_Marks) {
 @(private = "file")
 marks_place :: proc(
 	mm: ^Map_Marks,
-	terrain: []Terrain,
+	terrain: []sim.Ground,
 	coast: []f32,
 	cover: []Cover_Cell,
 	claimed: []u8,
@@ -940,7 +944,7 @@ marks_place :: proc(
 	points := make([dynamic]Point, context.temp_allocator)
 	for def, layer in LAYERS {
 		step := [2]f32{def.spacing, def.spacing * def.row_squash}
-		cols, rows := int(WORLD_WIDTH / step.x), int(WORLD_HEIGHT / step.y)
+		cols, rows := int(sim.WORLD_WIDTH / step.x), int(sim.WORLD_HEIGHT / step.y)
 		for row in 0 ..< rows {
 			for col in 0 ..< cols {
 				// The middle of its step, every other row shifted half a step across, wandering within its step
@@ -952,18 +956,18 @@ marks_place :: proc(
 					0.5
 				shift := [2]f32{f32(row % 2) * 0.5, 0}
 				pos := ([2]f32{f32(col), f32(row)} + shift + 0.5 + wander * def.jitter) * step
-				if pos.x < 0 || pos.y < 0 || pos.x >= WORLD_WIDTH || pos.y >= WORLD_HEIGHT do continue
+				if pos.x < 0 || pos.y < 0 || pos.x >= sim.WORLD_WIDTH || pos.y >= sim.WORLD_HEIGHT do continue
 				point := Point {
 					layer = layer,
 					col   = col,
 					row   = row,
 					pos   = pos,
-					cell  = int(pos.y) * WORLD_WIDTH + int(pos.x),
+					cell  = int(pos.y) * sim.WORLD_WIDTH + int(pos.x),
 				}
 				cell := terrain[point.cell]
 				elevation := normalized(cell.elevation)
 				moisture := normalized(cell.moisture)
-				north := 1 - (f32(point.cell / WORLD_WIDTH) + 0.5) / f32(WORLD_HEIGHT)
+				north := 1 - (f32(point.cell / sim.WORLD_WIDTH) + 0.5) / f32(sim.WORLD_HEIGHT)
 				temperature := 1 - north - 0.47 * elevation + 0.5 * (0.6 - moisture)
 				values := [3]f32{coast[point.cell], elevation, temperature}
 				values += (random_xy(col, row, stream(layer, 2)) - 0.5) * 2 * BLUR
