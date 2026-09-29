@@ -21,8 +21,10 @@ MAP_DRAW: struct {
 	// The drawings scattered over the terrain
 	marks:          Map_Marks,
 	// What the map pass draws
-	render_terrain: gfx.Render_Terrain,
-	render_list:    gfx.Render_List,
+	render_terrain:    gfx.Render_Terrain,
+	render_list:       gfx.Render_List,
+	// The revision of the walkable area the movement highlight was last taken from
+	movement_revision: u32,
 }
 
 // Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
@@ -51,6 +53,12 @@ map_draw_init :: proc() {
 		head_width         = 6.25,
 	}
 	MAP_DRAW.render_terrain.cover.jitter = 0.8
+	MAP_DRAW.render_terrain.highlights.areas[MOVEMENT_AREA] = {
+		color     = {0.300, 0.450, 0.650, 1},
+		border    = 0.6,
+		thickness = 2,
+		inside    = 0.2,
+	}
 
 }
 
@@ -199,6 +207,28 @@ map_arrows_add :: proc(start: [2]f32, points: [][2]f32) {
 	arrows := &MAP_DRAW.render_terrain.lines[.Arrow]
 	for r in 0 ..< polylines_count() do lines_add(arrows, polylines_get(r), true)
 	arrows.revision += 1
+}
+
+// Highlights ----------------------------------------------------------------------------------------------------------
+// Highlights: areas of cells washed in color over the map
+
+// The highlight area where the selected piece can walk
+@(private = "file")
+MOVEMENT_AREA :: 1
+
+// Highlights where a piece can walk, the cells a flood reaches, or nothing for a nil flood. Taken up again only when the
+// revision is not the one last taken up.
+map_movement_area :: proc(flood: ^Pathfind_Flood, revision: u32) {
+	if MAP_DRAW.movement_revision == revision do return
+	MAP_DRAW.movement_revision = revision
+	highlights := &MAP_DRAW.render_terrain.highlights
+	gfx.render_highlight_clear(highlights, MOVEMENT_AREA)
+	if flood == nil do return
+	for cost, i in flood.cost {
+		if cost == math.INF_F32 do continue
+		cell := flood.corner + {i % PATHFIND_FLOOD_SIZE, i / PATHFIND_FLOOD_SIZE}
+		gfx.render_highlight_add(highlights, MOVEMENT_AREA, cell)
+	}
 }
 
 // Cover ---------------------------------------------------------------------------------------------------------------

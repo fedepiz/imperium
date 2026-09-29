@@ -240,12 +240,9 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 			if !grid_contains(next, size) do continue
 			next_index := grid_index(next, size)
 			when level == .Fine {
-				move := table.grid[next_index] * DIR_LENGTH[dir]
+				move := step_cost(table, at, dir)
 				if move == 0 do continue
 				if SCRATCH.corridor[grid_index(next / BLOCKING_FACTOR, BLOCKS_SIZE)] != SCRATCH.corridor_stamp do continue
-				if DIR_OFFSET[dir].x != 0 && DIR_OFFSET[dir].y != 0 {
-					if table.grid[grid_index({next.x, at.y}, size)] == 0 || table.grid[grid_index({at.x, next.y}, size)] == 0 do continue
-				}
 			} else {
 				move := table.coarse.move[index][dir]
 				if move == 0 do continue
@@ -262,6 +259,19 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 		}
 	}
 	return 0, false
+}
+
+// The cost of the step from a cell in a direction: the cost of the cell entered, per cell walked. 0 when the step leaves
+// the world, enters a cell of cost 0, or cuts diagonally past one.
+@(private = "file")
+step_cost :: proc(table: ^Pathfind_Table, at: [2]int, dir: Dir) -> f32 {
+	next := at + DIR_OFFSET[dir]
+	if !grid_contains(next, WORLD_SIZE) do return 0
+	if DIR_OFFSET[dir].x != 0 && DIR_OFFSET[dir].y != 0 {
+		if table.grid[grid_index({next.x, at.y}, WORLD_SIZE)] == 0 do return 0
+		if table.grid[grid_index({at.x, next.y}, WORLD_SIZE)] == 0 do return 0
+	}
+	return table.grid[grid_index(next, WORLD_SIZE)] * DIR_LENGTH[dir]
 }
 
 // The length of the shortest way between two cells moving in the eight directions, in cells
@@ -488,3 +498,101 @@ pathfind_trace :: proc(
 	return true
 }
 
+
+// The side of the square of cells a flood covers, with the cell it starts from at its middle
+PATHFIND_FLOOD_SIZE :: 256
+PATHFIND_FLOOD_CELLS :: PATHFIND_FLOOD_SIZE * PATHFIND_FLOOD_SIZE
+
+@(private = "file")
+FLOOD_SQUARE :: [2]int{PATHFIND_FLOOD_SIZE, PATHFIND_FLOOD_SIZE}
+
+#assert(PATHFIND_FLOOD_CELLS <= CELLS_COARSE_MAX, "a flood queues each cell up to once per direction on the heap")
+
+// Every cell reachable from a place within a budget, and the cheapest way to each, over the square of cells around it
+Pathfind_Flood :: struct {
+	// What it was flooded from: the place, its domain, and the budget
+	src:    [2]f32,
+	domain: Pathfind_Domain,
+	budget: f32,
+	// The cell src is in, and the cell at the square's top left
+	start:  [2]int,
+	corner: [2]int,
+	// Per cell of the square, the cost of the cheapest way there from start; infinite where the budget does not reach
+	cost:   [PATHFIND_FLOOD_CELLS]f32,
+	// Per cell reached, the direction back to the cell before it on that way
+	back:   [PATHFIND_FLOOD_CELLS]Dir,
+}
+
+// Floods from src over a domain: every cell of the square around it whose cheapest way from src's cell costs no more
+// than budget is reached. Moves as pathfind_trace does, cell to cell. Nothing is reached if src's cell is outside the
+// world or of cost 0.
+pathfind_flood :: proc(src: [2]f32, domain: Pathfind_Domain, budget: f32, flood: ^Pathfind_Flood) {
+	table := &TABLE[domain]
+	flood.src, flood.domain, flood.budget = src, domain, budget
+	flood.start = {int(math.floor(src.x)), int(math.floor(src.y))}
+	flood.corner = flood.start - PATHFIND_FLOOD_SIZE / 2
+	slice.fill(flood.cost[:], math.INF_F32)
+	if !grid_contains(flood.start, WORLD_SIZE) || table.grid[grid_index(flood.start, WORLD_SIZE)] == 0 do return
+
+	scratch := &SCRATCH.search[.Fine]
+	clear(&scratch.heap)
+	start := grid_index(flood.start - flood.corner, FLOOD_SQUARE)
+	flood.cost[start] = 0
+	heap_push(scratch, {0, u32(start)})
+	for len(scratch.heap) > 0 {
+		entry := heap_pop(scratch)
+		// A cell is queued again whenever its cost improves, so its older entries come up after it is settled
+		if entry.priority > flood.cost[entry.index] do continue
+		at := grid_pos(int(entry.index), FLOOD_SQUARE)
+		for dir in Dir {
+			next := at + DIR_OFFSET[dir]
+			if !grid_contains(next, FLOOD_SQUARE) do continue
+			move := step_cost(table, flood.corner + at, dir)
+			if move == 0 do continue
+			cost := entry.priority + move
+			next_index := grid_index(next, FLOOD_SQUARE)
+			if cost > budget || cost >= flood.cost[next_index] do continue
+			flood.cost[next_index] = cost
+			flood.back[next_index] = DIR_OPPOSITE[dir]
+			heap_push(scratch, {cost, u32(next_index)})
+		}
+	}
+}
+
+// The flood reaches the cell
+@(private = "file")
+flood_reaches :: proc(flood: ^Pathfind_Flood, cell: [2]int) -> bool {
+	local := cell - flood.corner
+	return grid_contains(local, FLOOD_SQUARE) && flood.cost[grid_index(local, FLOOD_SQUARE)] < math.INF_F32
+}
+
+// The cheapest way from the flood's src to dst, given as pathfind_trace gives it. False, with both empty, if the flood
+// does not reach dst's cell.
+pathfind_flood_trace :: proc(
+	flood: ^Pathfind_Flood,
+	dst: [2]f32,
+	out: ^[dynamic; PATH_MAX_LEN][2]f32,
+	costs: ^[dynamic; PATH_MAX_LEN]f32,
+) -> (
+	ok: bool,
+) {
+	clear(out)
+	clear(costs)
+	to := [2]int{int(math.floor(dst.x)), int(math.floor(dst.y))}
+	if !flood_reaches(flood, to) do return false
+	table := &TABLE[flood.domain]
+	// The way back from dst, then turned around
+	for cell := to; cell != flood.start; {
+		if len(out) == PATH_MAX_LEN {
+			clear(out)
+			clear(costs)
+			return false
+		}
+		append(out, [2]f32{f32(cell.x), f32(cell.y)} + 0.5)
+		append(costs, table.grid[grid_index(cell, WORLD_SIZE)])
+		cell += DIR_OFFSET[flood.back[grid_index(cell - flood.corner, FLOOD_SQUARE)]]
+	}
+	slice.reverse(out[:])
+	slice.reverse(costs[:])
+	return true
+}

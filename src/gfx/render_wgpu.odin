@@ -2,6 +2,7 @@ package gfx
 
 import "base:runtime"
 import "core:fmt"
+import "core:math"
 import sdl "vendor:sdl3"
 import "vendor:wgpu"
 import "vendor:wgpu/sdl3glue"
@@ -92,6 +93,16 @@ Renderer :: struct {
 	terrain_uploaded, cover_uploaded:    bool,
 	// The coast converted to half floats for upload, as its texture holds it
 	coast_half:                          [RENDER_TERRAIN_CELLS]f16,
+	// The highlights: per cell, the area it is in and the area whose field it holds, and that field; and each area's look
+	highlight_cells:                     Texture,
+	highlight_field:                     Texture,
+	highlight_palette:                   Texture,
+	// Per area, the revision the textures hold, and the bounds its cells were taken up within
+	highlight_revisions:                 [RENDER_HIGHLIGHT_AREAS]u32,
+	highlight_bounds:                    [RENDER_HIGHLIGHT_AREAS]Render_Cell_Rect,
+	// What the highlight textures hold, kept here to be uploaded a rectangle at a time
+	highlight_owners:                    [RENDER_TERRAIN_CELLS][2]u8,
+	highlight_fields:                    [RENDER_TERRAIN_CELLS]f16,
 	// The lines pass: a pipeline for each kind of line, drawing into its own channel of the field, and each kind's
 	// segments, with the revisions they hold once anything has been uploaded
 	line_pipelines:                      [Render_Line_Kind]wgpu.RenderPipeline,
@@ -296,6 +307,9 @@ render_destroy :: proc(renderer: ^Renderer) {
 	texture_release(renderer.line_field)
 	texture_release(renderer.cover_cells)
 	texture_release(renderer.cover_palette)
+	texture_release(renderer.highlight_cells)
+	texture_release(renderer.highlight_field)
+	texture_release(renderer.highlight_palette)
 	if renderer.terrain_group != nil do wgpu.BindGroupRelease(renderer.terrain_group)
 	if renderer.terrain_layout != nil do wgpu.BindGroupLayoutRelease(renderer.terrain_layout)
 	if renderer.terrain_uniforms != nil do wgpu.BufferRelease(renderer.terrain_uniforms)
@@ -440,7 +454,7 @@ line_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
 	)
 	renderer.line_field.view = wgpu.TextureCreateView(renderer.line_field.texture, nil)
 
-	group_entries := [7]wgpu.BindGroupEntry {
+	group_entries := [10]wgpu.BindGroupEntry {
 		{binding = 0, buffer = renderer.terrain_uniforms, size = size_of(Terrain_Uniforms)},
 		{binding = 1, textureView = renderer.terrain_cells.view},
 		{binding = 2, textureView = renderer.terrain_coast.view},
@@ -448,6 +462,9 @@ line_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
 		{binding = 4, textureView = renderer.cover_cells.view},
 		{binding = 5, textureView = renderer.cover_palette.view},
 		{binding = 6, sampler = renderer.linear_sampler},
+		{binding = 7, textureView = renderer.highlight_cells.view},
+		{binding = 8, textureView = renderer.highlight_field.view},
+		{binding = 9, textureView = renderer.highlight_palette.view},
 	}
 	renderer.terrain_group = wgpu.DeviceCreateBindGroup(
 		renderer.device,
@@ -517,6 +534,31 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		renderer.cover_revision = cover.revision
 		renderer.cover_uploaded = true
 	}
+
+	// Each highlight area whose cells changed, taken up again around where it was and is
+	highlights := &terrain.highlights
+	for &area, index in highlights.areas {
+		if renderer.highlight_revisions[index] == area.revision do continue
+		rect := highlight_take_up(renderer, highlights, u8(index))
+		texture_write_rect(renderer, renderer.highlight_cells.texture, raw_data(renderer.highlight_owners[:]), 2, rect)
+		texture_write_rect(renderer, renderer.highlight_field.texture, raw_data(renderer.highlight_fields[:]), 2, rect)
+		renderer.highlight_revisions[index] = area.revision
+		renderer.highlight_bounds[index] = area.bounds
+	}
+	// The looks, every frame, as they are small: color and border in row 0, thickness and inside in row 1
+	highlight_palette: [2][RENDER_HIGHLIGHT_AREAS][4]f32
+	for area, i in highlights.areas {
+		highlight_palette[0][i] = {area.color.r, area.color.g, area.color.b, area.border}
+		highlight_palette[1][i] = {area.thickness, area.inside, 0, 0}
+	}
+	wgpu.QueueWriteTexture(
+		renderer.queue,
+		&{texture = renderer.highlight_palette.texture, aspect = .All},
+		&highlight_palette,
+		size_of(highlight_palette),
+		&{bytesPerRow = RENDER_HIGHLIGHT_AREAS * size_of([4]f32), rowsPerImage = 2},
+		&{RENDER_HIGHLIGHT_AREAS, 2, 1},
+	)
 
 	style := &terrain.style
 	uniforms := Terrain_Uniforms {
@@ -714,6 +756,190 @@ texture_write :: proc(renderer: ^Renderer, texture: wgpu.Texture, data: rawptr, 
 	)
 }
 
+// Uploads a rectangle of a terrain-sized texture from terrain-sized data, texel_size bytes per cell. An empty rectangle
+// uploads nothing.
+@(private = "file")
+texture_write_rect :: proc(
+	renderer: ^Renderer,
+	texture: wgpu.Texture,
+	data: rawptr,
+	texel_size: u32,
+	rect: Render_Cell_Rect,
+) {
+	if cell_rect_empty(rect) do return
+	size := rect.max - rect.min
+	wgpu.QueueWriteTexture(
+		renderer.queue,
+		&{texture = texture, origin = {u32(rect.min.x), u32(rect.min.y), 0}, aspect = .All},
+		data,
+		uint(RENDER_TERRAIN_CELLS * texel_size),
+		&{
+			offset = u64((int(rect.min.y) * RENDER_TERRAIN_WIDTH + int(rect.min.x)) * int(texel_size)),
+			bytesPerRow = RENDER_TERRAIN_WIDTH * texel_size,
+			rowsPerImage = u32(size.y),
+		},
+		&{u32(size.x), u32(size.y), 1},
+	)
+}
+
+// How far, in cells, an area's field is smoothed over, as the standard deviation of the blur
+@(private = "file")
+HIGHLIGHT_SMOOTHING :: 1.5
+// The blur's reach either side, in cells
+@(private = "file")
+HIGHLIGHT_BLUR_REACH :: 4
+// How far around an area's cells its field is taken up, in cells: past the blur's reach, and the cell beyond
+@(private = "file")
+HIGHLIGHT_MARGIN :: HIGHLIGHT_BLUR_REACH + 2
+
+// Takes up a highlight area's cells, around where they were and where they are, returning the rectangle of the terrain
+// gone over. The area's field is its signed distance, in cells, from the middles of its cells, less half a cell:
+// positive inside, negative outside; then blurred, so its edge runs smooth across the steps of the cells. Each cell of
+// the area holds the area's field; each cell in no area holds the field of whichever area it is least outside. Cells off
+// the terrain count as outside.
+@(private = "file")
+highlight_take_up :: proc(
+	renderer: ^Renderer,
+	highlights: ^Render_Highlights,
+	area: u8,
+) -> Render_Cell_Rect {
+	bounds := highlights.areas[area].bounds
+	around := cell_rect_union(renderer.highlight_bounds[area], bounds)
+	if area == 0 || cell_rect_empty(around) do return {}
+	around = {around.min - HIGHLIGHT_MARGIN, around.max + HIGHLIGHT_MARGIN}
+	clipped := cell_rect_clip(around)
+	origin := around.min
+	size := [2]int{int(around.max.x - around.min.x), int(around.max.y - around.min.y)}
+	in_area :: proc(highlights: ^Render_Highlights, area: u8, cell: [2]i32) -> bool {
+		if cell.x < 0 || cell.y < 0 || cell.x >= RENDER_TERRAIN_WIDTH || cell.y >= RENDER_TERRAIN_HEIGHT do return false
+		return highlights.cells[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)] == area
+	}
+
+	field := make([]f32, size.x * size.y, context.temp_allocator)
+	if cell_rect_empty(bounds) {
+		// Nothing is in it: it is far outside everywhere
+		for &value in field do value = -HIGHLIGHT_MARGIN
+	} else {
+		// Squared distances from each cell of the area to the nearest outside it, and from each outside to the nearest
+		// in it, exactly
+		FAR :: 1e12
+		to_outside := make([]f64, size.x * size.y, context.temp_allocator)
+		to_inside := make([]f64, size.x * size.y, context.temp_allocator)
+		for y in 0 ..< size.y do for x in 0 ..< size.x {
+			inside := in_area(highlights, area, origin + {i32(x), i32(y)})
+			to_outside[y * size.x + x] = inside ? FAR : 0
+			to_inside[y * size.x + x] = inside ? 0 : FAR
+		}
+		distance_transform_2d(to_outside, size)
+		distance_transform_2d(to_inside, size)
+		for &value, i in field {
+			inside := to_inside[i] == 0
+			value = inside ? f32(math.sqrt(to_outside[i])) - 0.5 : 0.5 - f32(math.sqrt(to_inside[i]))
+		}
+		blur(field, size)
+	}
+
+	for y in clipped.min.y ..< clipped.max.y do for x in clipped.min.x ..< clipped.max.x {
+		index := int(y) * RENDER_TERRAIN_WIDTH + int(x)
+		value := field[int(y - origin.y) * size.x + int(x - origin.x)]
+		owners := &renderer.highlight_owners[index]
+		member := highlights.cells[index]
+		owners[0] = member
+		// Another area's cell holds that area's field, which its own take up writes
+		if member != 0 && member != area do continue
+		if member == area || owners[1] == area || owners[1] == 0 || value > f32(renderer.highlight_fields[index]) {
+			owners[1] = area
+			renderer.highlight_fields[index] = f16(value)
+		}
+	}
+	return clipped
+}
+
+// Replaces squared distances over a grid of a size, 0 at the cells measured to, with the squared distance from each
+// cell to the nearest of those, a line at a time along each axis
+@(private = "file")
+distance_transform_2d :: proc(squared: []f64, size: [2]int) {
+	longest := max(size.x, size.y)
+	line := make([]f64, longest, context.temp_allocator)
+	parabolas := make([]int, longest, context.temp_allocator)
+	bounds := make([]f64, longest + 1, context.temp_allocator)
+	for x in 0 ..< size.x {
+		for y in 0 ..< size.y do line[y] = squared[y * size.x + x]
+		distance_transform(line[:size.y], parabolas, bounds)
+		for y in 0 ..< size.y do squared[y * size.x + x] = line[y]
+	}
+	for y in 0 ..< size.y {
+		distance_transform(squared[y * size.x:][:size.x], parabolas, bounds)
+	}
+}
+
+// Blurs values over a grid of a size, by HIGHLIGHT_SMOOTHING, a line at a time along each axis. Past the grid's edges
+// the edge values go on.
+@(private = "file")
+blur :: proc(values: []f32, size: [2]int) {
+	weights: [2 * HIGHLIGHT_BLUR_REACH + 1]f32
+	total: f32
+	for &weight, i in weights {
+		offset := f32(i - HIGHLIGHT_BLUR_REACH)
+		weight = math.exp(-offset * offset / (2 * HIGHLIGHT_SMOOTHING * HIGHLIGHT_SMOOTHING))
+		total += weight
+	}
+	for &weight in weights do weight /= total
+	// Where in values the value at a place along a line of an axis is, the line being across others of it
+	at :: proc(axis, along, across: int, size: [2]int) -> int {
+		return axis == 0 ? across * size.x + along : along * size.x + across
+	}
+	line := make([]f32, max(size.x, size.y), context.temp_allocator)
+	for axis in 0 ..< 2 {
+		length, lines := size[axis], size[1 - axis]
+		for across in 0 ..< lines {
+			for along in 0 ..< length do line[along] = values[at(axis, along, across, size)]
+			for along in 0 ..< length {
+				sum: f32
+				for weight, i in weights {
+					sum += weight * line[clamp(along + i - HIGHLIGHT_BLUR_REACH, 0, length - 1)]
+				}
+				values[at(axis, along, across, size)] = sum
+			}
+		}
+	}
+}
+
+// Replaces each squared distance f[q] along a line with the least of f[p] + (q - p)^2 over the line: the squared
+// distance to the nearest point, with f the squared distance already along the other axis. The lower envelope of
+// parabolas, as Felzenszwalb and Huttenlocher give it; parabolas and bounds are scratch, the length of f and one more.
+@(private = "file")
+distance_transform :: proc(f: []f64, parabolas: []int, bounds: []f64) {
+	n := len(f)
+	if n == 0 do return
+	result := make([]f64, n, context.temp_allocator)
+	k := 0
+	parabolas[0] = 0
+	bounds[0], bounds[1] = math.inf_f64(-1), math.inf_f64(1)
+	// Where the parabola from q overtakes the one from p
+	crossing :: proc(f: []f64, q, p: int) -> f64 {
+		return ((f[q] + f64(q * q)) - (f[p] + f64(p * p))) / f64(2 * q - 2 * p)
+	}
+	for q in 1 ..< n {
+		s := crossing(f, q, parabolas[k])
+		// bounds[0] is -infinity, so this stops at the first parabola at the latest
+		for s <= bounds[k] {
+			k -= 1
+			s = crossing(f, q, parabolas[k])
+		}
+		k += 1
+		parabolas[k] = q
+		bounds[k], bounds[k + 1] = s, math.inf_f64(1)
+	}
+	k = 0
+	for q in 0 ..< n {
+		for bounds[k + 1] < f64(q) do k += 1
+		p := parabolas[k]
+		result[q] = f64((q - p) * (q - p)) + f[p]
+	}
+	copy(f, result)
+}
+
 @(private = "file")
 shader_create :: proc(renderer: ^Renderer, source: string) -> wgpu.ShaderModule {
 	return wgpu.DeviceCreateShaderModule(
@@ -867,6 +1093,21 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 		{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
 	)
 	renderer.cover_palette = texture_create(renderer, .RGBA8Unorm, {RENDER_LAYER_CATEGORIES, 2})
+	renderer.highlight_cells = texture_create(
+		renderer,
+		.RG8Unorm,
+		{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
+	)
+	renderer.highlight_field = texture_create(
+		renderer,
+		.R16Float,
+		{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
+	)
+	renderer.highlight_palette = texture_create(
+		renderer,
+		.RGBA32Float,
+		{RENDER_HIGHLIGHT_AREAS, 2},
+	)
 	renderer.terrain_uniforms = wgpu.DeviceCreateBuffer(
 		device,
 		&{usage = {.Uniform, .CopyDst}, size = size_of(Terrain_Uniforms)},
@@ -882,7 +1123,7 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 			texture = {sampleType = sample, viewDimension = ._2D},
 		}
 	}
-	layout_entries := [7]wgpu.BindGroupLayoutEntry {
+	layout_entries := [10]wgpu.BindGroupLayoutEntry {
 		{
 			binding = 0,
 			visibility = {.Fragment},
@@ -894,6 +1135,9 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 		texture_entry(4, .Float),
 		texture_entry(5, .Float),
 		{binding = 6, visibility = {.Fragment}, sampler = {type = .Filtering}},
+		texture_entry(7, .Float),
+		texture_entry(8, .Float),
+		texture_entry(9, .UnfilterableFloat),
 	}
 	renderer.terrain_layout = wgpu.DeviceCreateBindGroupLayout(
 		device,
@@ -1230,6 +1474,7 @@ fn fs_main(in: Varyings) -> @location(0) vec4f {
 // lines is the line field: for each pixel of the view, the distance to the nearest line of each kind, in cells, in a
 // channel for each kind.
 // cover_cells and cover_palette are the cover layer: see layer_at.
+// highlight_cells, highlight_field and highlight_palette are the highlights: see highlight_at.
 @(private = "file")
 MAP_SOURCE ::
 	TERRAIN_UNIFORMS_SOURCE +
@@ -1241,6 +1486,9 @@ MAP_SOURCE ::
 @group(0) @binding(4) var cover_cells: texture_2d<f32>;
 @group(0) @binding(5) var cover_palette: texture_2d<f32>;
 @group(0) @binding(6) var linear_sampler: sampler;
+@group(0) @binding(7) var highlight_cells: texture_2d<f32>;
+@group(0) @binding(8) var highlight_field: texture_2d<f32>;
+@group(0) @binding(9) var highlight_palette: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4f {
@@ -1361,6 +1609,44 @@ fn layer_at(layer_cells: texture_2d<f32>, palette: texture_2d<f32>, p: vec2f, ji
     return look;
 }
 
+// How far a cell's middle is in from the edge of a highlight area, in cells, negative outside it. highlight_cells holds,
+// per cell, the area it is in, 0 for none, and the area whose field it holds; highlight_field holds that field. A cell of
+// another area is as far outside this one as it is inside its own; a cell in none is at least as far outside this one as
+// it is outside the area whose field it holds.
+fn highlight_field_at(cell: vec2i, area: i32) -> f32 {
+    let at = clamp(cell, vec2i(0), vec2i(u.grid) - 1);
+    let owners = vec2i(textureLoad(highlight_cells, at, 0).rg * 255.0 + 0.5);
+    let value = textureLoad(highlight_field, at, 0).r;
+    if (owners.y == area) { return value; }
+    if (owners.x != 0) { return -value; }
+    return -abs(value);
+}
+
+// The highlight area p is in, 0 for none, and how far in from its edge, in cells: from the fields of the areas the four
+// cells around p hold, blended. Of any two areas, at most one is ever positive at p, so areas never overlap; where two
+// areas meet, one is as far in as the other is out, so they share one edge. highlight_palette holds each area's color
+// and border in row 0, and its thickness and inside in row 1.
+fn highlight_at(p: vec2f) -> vec2f {
+    let q = p - 0.5;
+    let base = vec2i(floor(q));
+    let f = q - floor(q);
+    var seen = vec4i(0);
+    for (var k = 0; k < 4; k++) {
+        let at = clamp(base + vec2i(k & 1, k >> 1u), vec2i(0), vec2i(u.grid) - 1);
+        let area = i32(textureLoad(highlight_cells, at, 0).g * 255.0 + 0.5);
+        if (area == 0 || any(seen == vec4i(area))) { continue; }
+        seen[k] = area;
+        var field = 0.0;
+        for (var j = 0; j < 4; j++) {
+            let corner = vec2i(j & 1, j >> 1u);
+            let weight = mix(1.0 - f.x, f.x, f32(corner.x)) * mix(1.0 - f.y, f.y, f32(corner.y));
+            field += weight * highlight_field_at(base + corner, area);
+        }
+        if (field > 0.0) { return vec2f(f32(area), field); }
+    }
+    return vec2f(0.0);
+}
+
 fn debug_color(cell: vec4f, p: vec2f) -> vec3f {
     // Land, lake, sea
     let surface = i32(cell.r * 2.0 + 0.5);
@@ -1444,6 +1730,19 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
 
         let width = u.coast_width * 0.5 * u.pixel_density * (0.8 + 0.4 * value_noise(p * 0.8));
         col = mix(col, u.ink.rgb, line_aa(abs(d) * px, width));
+
+        // Highlights: the map multiplied toward an area's color, as strongly as its border at its edge, easing to its
+        // inside at its thickness in from it. The edge wanders as the coast does, and fades in over a device pixel, inside
+        // the area.
+        let highlight = highlight_at(wander(p, u.wobble * 1.6, 5.7));
+        let area = i32(highlight.x + 0.5);
+        if (area > 0) {
+            let look = textureLoad(highlight_palette, vec2i(area, 0), 0);
+            let fade = textureLoad(highlight_palette, vec2i(area, 1), 0);
+            let depth = highlight.y;
+            let strength = mix(look.a, fade.y, smoothstep(0.0, max(fade.x, 1e-3), depth)) * clamp(depth * px, 0.0, 1.0);
+            col *= mix(vec3f(1.0), look.rgb, strength);
+        }
 
         // Arrows, over everything else on land and sea: their fill between two ink edges, the same width however far
         // the map zooms, and their heads as wide again as the triangles they are drawn from

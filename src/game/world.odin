@@ -34,74 +34,66 @@ WORLD: struct {
 	turn_ending: bool,
 }
 
-Move_Plan :: struct {
-	// The plan's sequence number, bumped every time the plan is updated.
-	seq_num: u32,
-	subject: Piece_Id,
-	target:  Piece_Id,
-	path:    [dynamic; PATH_MAX_LEN][2]f32,
-	cost:    [dynamic; PATH_MAX_LEN]f32,
-}
-
-// Plans the subject's walk to the destination. Rejected, returning false and leaving the plan as it was, when the
-// subject cannot move, there is no way there, or the way costs more than the subject's movement budget.
-@(private = "file")
-move_plan_raw :: proc(
-	subject_id: Piece_Id,
-	destination: [2]f32,
-	target: Piece_Id,
-	plan: ^Move_Plan,
-) -> bool {
-	subject := piece_get(subject_id)
-	if subject == nil || subject.movement_domain == nil do return false
-	domain := subject.movement_domain.(Pathfind_Domain)
+// Orders the subject to walk to the destination, along the cheapest way there. Rejected, returning false and leaving
+// what is walking as it was, when the subject cannot move or cannot walk there within its movement budget.
+move_order_to_point :: proc(mov: ^Movement, subject_id: Piece_Id, destination: [2]f32) -> bool {
+	movement_flood(mov, subject_id)
+	if mov.flood_subject != subject_id do return false
 	path: [dynamic; PATH_MAX_LEN][2]f32
 	cost: [dynamic; PATH_MAX_LEN]f32
-	if !pathfind_trace(subject.pos, domain, destination, {}, &path, &cost) {
-		fmt.eprintfln("No way from %v to %v", subject.pos, destination)
-		return false
-	}
-	price: f32
-	from := subject.pos
-	for point, i in path {
-		price += linalg.distance(from, point) * cost[i]
-		from = point
-	}
-	if price > subject.movement_budget {
+	if !pathfind_flood_trace(&mov.flood, destination, &path, &cost) {
 		fmt.eprintfln(
-			"The way from %v to %v costs %.1f, over the movement budget of %.1f",
-			subject.pos,
+			"No way from %v to %v within the movement budget of %.1f",
+			mov.flood.src,
 			destination,
-			price,
-			subject.movement_budget,
+			mov.flood.budget,
 		)
 		return false
 	}
-	plan.seq_num += 1
-	plan.subject = subject_id
-	plan.target = target
-	plan.path = path
-	plan.cost = cost
+	mov.subject = subject_id
+	mov.path = path
+	mov.cost = cost
+	mov.next = 0
 	return true
 }
 
-move_plan_to :: proc(subject: Piece_Id, target_id: Piece_Id, plan: ^Move_Plan) -> bool {
+move_order_to :: proc(mov: ^Movement, subject: Piece_Id, target_id: Piece_Id) -> bool {
 	target := piece_get(target_id)
 	if target == nil do return false
-	return move_plan_raw(subject, target.pos, target_id, plan)
+	return move_order_to_point(mov, subject, target.pos)
 }
 
-move_plan_to_point :: proc(subject: Piece_Id, destination: [2]f32, plan: ^Move_Plan) -> bool {
-	return move_plan_raw(subject, destination, {}, plan)
+// Floods where a piece can walk, from where it stands within its movement budget, unless the flood already is of it as
+// it stands. A nil id, or a piece that cannot move, drops the flood.
+movement_flood :: proc(mov: ^Movement, subject_id: Piece_Id) {
+	subject := piece_get(subject_id)
+	if subject == nil || subject.movement_domain == nil {
+		if mov.flood_subject != {} {
+			mov.flood_subject = {}
+			mov.flood_revision += 1
+		}
+		return
+	}
+	flood := &mov.flood
+	if mov.flood_subject == subject_id && flood.src == subject.pos && flood.budget == subject.movement_budget do return
+	pathfind_flood(subject.pos, subject.movement_domain.(Pathfind_Domain), subject.movement_budget, flood)
+	mov.flood_subject = subject_id
+	mov.flood_revision += 1
 }
 
-// A piece walking to a place along the cheapest way there
+// A piece walking to a place along the cheapest way there, and where a piece can walk
 Movement :: struct {
-	plan:    Move_Plan,
-	// The sequence number of the movement advance state
-	seq_num: u32,
-	// The point of the way being walked towards
-	next:    int,
+	// The piece walking, nil when none is
+	subject:        Piece_Id,
+	// The way it walks, as pathfind_flood_trace gives it, and the point of it being walked towards
+	path:           [dynamic; PATH_MAX_LEN][2]f32,
+	cost:           [dynamic; PATH_MAX_LEN]f32,
+	next:           int,
+	// Where the piece flooded from can walk: nil subject when there is no flood
+	flood:          Pathfind_Flood,
+	flood_subject:  Piece_Id,
+	// Bumped whenever the flood is made again or dropped
+	flood_revision: u32,
 }
 
 // The cells a walking piece covers a second, whatever the ground
@@ -304,7 +296,7 @@ turn_start :: proc(turn: int) {
 
 // The turn can end: no piece is moving
 turn_can_end :: proc() -> bool {
-	return WORLD.movement.plan.subject == {}
+	return WORLD.movement.subject == {}
 }
 
 // Called every frame
@@ -320,22 +312,16 @@ world_tick :: proc(input: Input, dt: f32) {
 	// stops moving at its end
 	{
 		mov := &WORLD.movement
-		if mov.plan.subject != {} {
-			subject := piece_get(mov.plan.subject)
+		if mov.subject != {} {
+			subject := piece_get(mov.subject)
 			is_over: bool
 			if subject == nil {
 				is_over = true
 			} else {
-				// This is a fresh plan
-				if mov.plan.seq_num != mov.seq_num {
-					mov.next = 0
-					mov.seq_num = mov.plan.seq_num
-				}
-
 				// The cost of the ground walked comes out of the subject's movement budget
 				step := MOVEMENT_SPEED * dt
-				for step > 0 && mov.next < len(mov.plan.path) {
-					target, cost := mov.plan.path[mov.next], mov.plan.cost[mov.next]
+				for step > 0 && mov.next < len(mov.path) {
+					target, cost := mov.path[mov.next], mov.cost[mov.next]
 					distance := linalg.distance(subject.pos, target)
 					if step < distance {
 						subject.pos += linalg.normalize(target - subject.pos) * step
@@ -348,12 +334,11 @@ world_tick :: proc(input: Input, dt: f32) {
 					mov.next += 1
 				}
 
-				is_over = mov.next >= len(mov.plan.path)
+				is_over = mov.next >= len(mov.path)
 			}
 
 			if is_over {
-				mov.plan.subject = {}
-				mov.plan.target = {}
+				mov.subject = {}
 				mov.next = 0
 			}
 		}
@@ -364,8 +349,8 @@ world_tick :: proc(input: Input, dt: f32) {
 
 	// The way the walking piece has still to go, drawn as an arrow from where it stands
 	map_arrows_clear()
-	if mov := &WORLD.movement; mov.plan.subject != {} {
-		map_arrows_add(piece_get(mov.plan.subject).pos, mov.plan.path[mov.next:])
+	if mov := &WORLD.movement; mov.subject != {} {
+		map_arrows_add(piece_get(mov.subject).pos, mov.path[mov.next:])
 	}
 
 	if input.left_click do WORLD.selected = pawns_pick(WORLD.camera, input.viewport, input.cursor)
@@ -376,17 +361,24 @@ world_tick :: proc(input: Input, dt: f32) {
 			if selected.movement_domain != nil {
 				target := pawns_pick(WORLD.camera, input.viewport, input.cursor)
 				if target != {} {
-					move_plan_to(WORLD.selected, target, &WORLD.movement.plan)
+					move_order_to(&WORLD.movement, WORLD.selected, target)
 				} else {
 					destination := camera_screen_to_world_point(
 						WORLD.camera,
 						input.viewport,
 						input.cursor,
 					)
-					move_plan_to_point(WORLD.selected, destination, &WORLD.movement.plan)
+					move_order_to_point(&WORLD.movement, WORLD.selected, destination)
 				}
 			}
 		}
+	}
+
+	// Where the selected piece can walk, highlighted while it is not walking
+	{
+		mov := &WORLD.movement
+		movement_flood(mov, WORLD.selected != mov.subject ? WORLD.selected : {})
+		map_movement_area(mov.flood_subject != {} ? &mov.flood : nil, mov.flood_revision)
 	}
 
 	pawns_begin(WORLD.camera, input.viewport, input.pixel_density, dt)

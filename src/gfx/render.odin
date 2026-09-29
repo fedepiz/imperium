@@ -146,6 +146,84 @@ Render_Lines :: struct {
 	segments: [dynamic; RENDER_LINE_SEGMENTS_MAX]Render_Segment,
 }
 
+// How many areas the highlights can have, area 0, which is none, included
+RENDER_HIGHLIGHT_AREAS :: 256
+
+// A rectangle of cells, from min up to but not including max; empty when max is not past min on both axes
+Render_Cell_Rect :: struct {
+	min, max: [2]i32,
+}
+
+// How an area is highlighted: the map is multiplied toward color, as strongly as border at the area's edge, easing to
+// inside at thickness cells in from it and beyond. Only the color's RGB is used.
+Render_Highlight_Area :: struct {
+	// Bumped whenever which cells are in the area changes; the renderer takes them up again only then.
+	revision:  u32,
+	// Every cell in the area is within these
+	bounds:    Render_Cell_Rect,
+	color:     [4]f32,
+	border:    f32,
+	thickness: f32,
+	inside:    f32,
+}
+
+// Areas of cells highlighted over the map, each in its own look. A cell is in at most one area. Each area is drawn with
+// a smooth edge that follows its cells as the coast follows the land; where two areas meet they share one edge, and
+// neither draws past it. Cells are indexed y * RENDER_TERRAIN_WIDTH + x.
+Render_Highlights :: struct {
+	// Which area each cell is in, 0 for none
+	cells: [RENDER_TERRAIN_CELLS]u8,
+	areas: [RENDER_HIGHLIGHT_AREAS]Render_Highlight_Area,
+}
+
+// Takes every cell out of a highlight area
+render_highlight_clear :: proc(highlights: ^Render_Highlights, area: u8) {
+	bounds := &highlights.areas[area].bounds
+	for y in bounds.min.y ..< bounds.max.y do for x in bounds.min.x ..< bounds.max.x {
+		cell := &highlights.cells[int(y) * RENDER_TERRAIN_WIDTH + int(x)]
+		if cell^ == area do cell^ = 0
+	}
+	bounds^ = {}
+	highlights.areas[area].revision += 1
+}
+
+// Puts a cell in a highlight area, taking it out of any other it was in
+render_highlight_add :: proc(highlights: ^Render_Highlights, area: u8, cell: [2]int) {
+	assert(area != 0, "Highlight area 0 is none")
+	index := cell.y * RENDER_TERRAIN_WIDTH + cell.x
+	if was := highlights.cells[index]; was != area {
+		if was != 0 do highlights.areas[was].revision += 1
+		highlights.cells[index] = area
+	}
+	at := [2]i32{i32(cell.x), i32(cell.y)}
+	bounds := &highlights.areas[area].bounds
+	bounds^ = cell_rect_union(bounds^, {at, at + 1})
+	highlights.areas[area].revision += 1
+}
+
+@(private)
+cell_rect_empty :: proc(rect: Render_Cell_Rect) -> bool {
+	return rect.max.x <= rect.min.x || rect.max.y <= rect.min.y
+}
+
+// The smallest rectangle holding both
+@(private)
+cell_rect_union :: proc(a, b: Render_Cell_Rect) -> Render_Cell_Rect {
+	if cell_rect_empty(a) do return b
+	if cell_rect_empty(b) do return a
+	return {{min(a.min.x, b.min.x), min(a.min.y, b.min.y)}, {max(a.max.x, b.max.x), max(a.max.y, b.max.y)}}
+}
+
+// The part of a rectangle on the terrain
+@(private)
+cell_rect_clip :: proc(rect: Render_Cell_Rect) -> Render_Cell_Rect {
+	grid := [2]i32{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}
+	return {
+		{clamp(rect.min.x, 0, grid.x), clamp(rect.min.y, 0, grid.y)},
+		{clamp(rect.max.x, 0, grid.x), clamp(rect.max.y, 0, grid.y)},
+	}
+}
+
 // Everything the map pass draws from. Cells are indexed y * RENDER_TERRAIN_WIDTH + x, with cell (0, 0) at the top left.
 Render_Terrain :: struct {
 	// Bumped whenever cells or coast change; the renderer uploads them again only then.
@@ -159,6 +237,8 @@ Render_Terrain :: struct {
 	lines:      [Render_Line_Kind]Render_Lines,
 	// What covers the land, drawn onto it: forest, desert and so on. Water is drawn over it.
 	cover:      Render_Layer,
+	// Areas drawn over the map, under the arrows
+	highlights: Render_Highlights,
 	// The cell at the middle of the view, and logical pixels per cell
 	center:     [2]f32,
 	zoom:       f32,
