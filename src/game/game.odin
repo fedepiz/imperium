@@ -63,10 +63,10 @@ Input :: struct {
 game_tick :: proc(input: Input, dt: f32) {
 	camera_tick(input, dt)
 
-	// The left click focuses the token under it, or nothing; the right one sends the focus to the token under it, or
-	// else to the place under it.
+	// The left click focuses the token under it, or nothing; the right one sends the focus, if it is controlled, to the
+	// token under it, or else to the place under it.
 	if input.left_click do GAME.focus = pawns_pick(GAME.camera, input.viewport, input.cursor)
-	if input.right_click && GAME.focus != {} {
+	if focus, ok := scene_token(GAME.focus); ok && input.right_click && .Controlled in focus.flags {
 		target := pawns_pick(GAME.camera, input.viewport, input.cursor)
 		if target != {} {
 			command_send(sim.Move_To_Piece{piece = GAME.focus, target = target})
@@ -84,6 +84,13 @@ game_tick :: proc(input: Input, dt: f32) {
 	pawns_begin(GAME.camera, input.viewport, input.pixel_density, dt)
 	for token in GAME.scene.tokens do pawns_add(token)
 	pawns_end()
+}
+
+// The token of the latest scene with the handle, if it has one
+@(private = "file")
+scene_token :: proc(handle: sim.Piece_Id) -> (sim.Token, bool) {
+	for token in GAME.scene.tokens do if token.handle == handle do return token, true
+	return {}, false
 }
 
 // Sends a command to the world at its next step

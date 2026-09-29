@@ -85,7 +85,7 @@ Move_To_Piece :: struct {
 	target: Piece_Id,
 }
 
-// The turn ends and the next begins. Rejected while a piece is walking.
+// The player's faction ends its part of the turn, and the next faction plays. Rejected while a piece is walking.
 End_Turn :: struct {}
 
 // Out -----------------------------------------------------------------------------------------------------------------
@@ -148,13 +148,15 @@ Token :: struct {
 Token_Flag :: enum u8 {
 	// It is the focus given to present
 	Focused,
+	// The player can give it orders
+	Controlled,
 }
 
 // A set of cells within the AREA_SIZE square whose top left cell is corner, drawn in its look. An area with no cells in
 // it shows nothing.
 Area :: struct {
-	// Bumped whenever its cells, its look or where it lies change
-	revision: u32,
+	// Changes whenever anything else does; 0 while empty
+	revision: u64,
 	look:     u8,
 	// It lies on water, rather than on land
 	on_water: bool,

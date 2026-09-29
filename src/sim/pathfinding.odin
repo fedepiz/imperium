@@ -2,11 +2,13 @@
 package sim
 
 import "core:math"
+import "core:math/linalg"
 import "core:slice"
 import "core:slice/heap"
 
 PATH_MAX_LEN :: 1_000
 
+// The cells whose middles lie within radius of center, in cells
 Disc :: struct {
 	center: [2]f32,
 	radius: f32,
@@ -521,17 +523,38 @@ Pathfind_Flood :: struct {
 	cost:   [PATHFIND_FLOOD_CELLS]f32,
 	// Per cell reached, the direction back to the cell before it on that way
 	back:   [PATHFIND_FLOOD_CELLS]Dir,
+	// Per cell of the square, whether it lies in one of the zones flooded with
+	zone:   [PATHFIND_FLOOD_CELLS]bool,
 }
 
 // Floods from src over a domain: every cell of the square around it whose cheapest way from src's cell costs no more
-// than budget is reached. Moves as pathfind_trace does, cell to cell. Nothing is reached if src's cell is outside the
-// world or of cost 0.
-pathfind_flood :: proc(src: [2]f32, domain: Pathfind_Domain, budget: f32, flood: ^Pathfind_Flood) {
+// than budget is reached. Moves as pathfind_trace does, cell to cell, and never from a cell in one of the zones to a
+// cell in none. Nothing is reached if src's cell is outside the world or of cost 0.
+pathfind_flood :: proc(
+	src: [2]f32,
+	domain: Pathfind_Domain,
+	budget: f32,
+	zones: []Disc,
+	flood: ^Pathfind_Flood,
+) {
 	table := &TABLE[domain]
 	flood.src, flood.domain, flood.budget = src, domain, budget
 	flood.start = {int(math.floor(src.x)), int(math.floor(src.y))}
 	flood.corner = flood.start - PATHFIND_FLOOD_SIZE / 2
 	slice.fill(flood.cost[:], math.INF_F32)
+	slice.fill(flood.zone[:], false)
+	for zone in zones {
+		// The square of cells around the zone, within the flood's
+		lo, hi := linalg.floor(zone.center - zone.radius), linalg.floor(zone.center + zone.radius)
+		first := linalg.max([2]int{int(lo.x), int(lo.y)} - flood.corner, 0)
+		last := linalg.min([2]int{int(hi.x), int(hi.y)} - flood.corner, PATHFIND_FLOOD_SIZE - 1)
+		for y in first.y ..= last.y do for x in first.x ..= last.x {
+			middle := [2]f32{f32(flood.corner.x + x), f32(flood.corner.y + y)} + 0.5
+			if linalg.distance(middle, zone.center) <= zone.radius {
+				flood.zone[grid_index({x, y}, FLOOD_SQUARE)] = true
+			}
+		}
+	}
 	if !grid_contains(flood.start, WORLD_SIZE) || table.grid[grid_index(flood.start, WORLD_SIZE)] == 0 do return
 
 	scratch := &SCRATCH.search[.Fine]
@@ -551,6 +574,7 @@ pathfind_flood :: proc(src: [2]f32, domain: Pathfind_Domain, budget: f32, flood:
 			if move == 0 do continue
 			cost := entry.priority + move
 			next_index := grid_index(next, FLOOD_SQUARE)
+			if flood.zone[entry.index] && !flood.zone[next_index] do continue
 			if cost > budget || cost >= flood.cost[next_index] do continue
 			flood.cost[next_index] = cost
 			flood.back[next_index] = DIR_OPPOSITE[dir]

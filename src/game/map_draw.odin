@@ -25,7 +25,7 @@ MAP_DRAW: struct {
 	render_terrain: gfx.Render_Terrain,
 	render_list:    gfx.Render_List,
 	// The revision of each of the scene's areas its highlight was last taken from
-	area_revisions: [sim.AREAS_MAX]u32,
+	area_revisions: [sim.AREAS_MAX]u64,
 }
 
 // Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
@@ -209,6 +209,8 @@ map_arrows :: proc(scene: ^sim.Scene) {
 @(private = "file")
 AREA_LOOKS := [256]gfx.Render_Highlight_Area {
 	1 = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2},
+	2 = {color = {0.700, 0.250, 0.160, 1}, border = 0.6, thickness = 2, inside = 0.2},
+	3 = {color = {0.450, 0.420, 0.380, 1}, border = 0.6, thickness = 2, inside = 0.2},
 }
 
 // Highlights the scene's areas, each slot as the highlight area after it, in its look. Each is taken up again only
