@@ -10,12 +10,17 @@ import "../span"
 // Area slots, and looks for game's area palette
 REACH_AREA :: 0
 ZONE_AREA :: 1
+CONTACT_AREA :: 2
 REACH_LOOK :: 1
 ZONE_LOOK :: 2
 // Reach of a piece the player does not control
 OTHER_REACH_LOOK :: 3
+CONTACT_LOOK :: 4
 
 world_present :: proc(focus: Piece_Id, out: ^Scene) {
+	mov := &WORLD.movement
+	movement_flood(mov, focus)
+
 	// The ground, taken up again only when it changed
 	if out.ground_revision != WORLD.atlas.revision {
 		out.ground_revision = WORLD.atlas.revision
@@ -50,7 +55,6 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	// The way the walking piece has still to go, from where it stands
 	clear(&out.arrows)
 	clear(&out.arrow_points)
-	mov := &WORLD.movement
 	if walker := piece_get(mov.subject); walker != nil {
 		begin := len(out.arrow_points)
 		append(&out.arrow_points, walker.pos)
@@ -59,11 +63,12 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	}
 
 	// Reach and zones of the focus, unless it is walking
-	movement_flood(mov, focus != mov.subject ? focus : {})
+	shown := mov.flood_subject != mov.subject
 	reach_look: u8 = OTHER_REACH_LOOK
 	if piece := piece_get(focus); piece != nil && piece_controlled(piece^) do reach_look = REACH_LOOK
-	area_from_flood(&out.areas[REACH_AREA], mov, reach_look, false)
-	area_from_flood(&out.areas[ZONE_AREA], mov, ZONE_LOOK, true)
+	area_from_flood(&out.areas[REACH_AREA], mov, shown, reach_look, .Reach)
+	area_from_flood(&out.areas[ZONE_AREA], mov, shown, ZONE_LOOK, .Zone)
+	area_from_flood(&out.areas[CONTACT_AREA], mov, shown, CONTACT_LOOK, .Contact)
 
 	// The turn being played, and the faction playing it, with ending its part; and, when there is a focus, its picture
 	// and name, or what it is when it has none, over what it is
@@ -94,12 +99,19 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	}
 }
 
-// Fills the area from the flood, in the look: its zone cells, or else its reached cells outside zones. Rebuilt only when
-// its key changes.
+// Which of the flood's cells an area shows: stoppable ones outside zones, zones, or friendly bodies outside zones
 @(private = "file")
-area_from_flood :: proc(area: ^Area, mov: ^Movement, look: u8, zone: bool) {
+Flood_Cells :: enum {
+	Reach,
+	Zone,
+	Contact,
+}
+
+// Fills the area with the flood's cells, in the look. Empty unless shown; rebuilt only when its key changes.
+@(private = "file")
+area_from_flood :: proc(area: ^Area, mov: ^Movement, shown: bool, look: u8, cells: Flood_Cells) {
 	key: u64
-	if mov.flood_subject != {} do key = hash.fnv64a({look}, mov.flood_key)
+	if shown && mov.flood_subject != {} do key = hash.fnv64a({look}, mov.flood_key)
 	if area.revision == key do return
 	area^ = {revision = key, look = look}
 	if key == 0 do return
@@ -107,7 +119,14 @@ area_from_flood :: proc(area: ^Area, mov: ^Movement, look: u8, zone: bool) {
 	area.on_water = flood.domain != .Land
 	area.corner = flood.corner
 	for cost, i in flood.cost {
-		area.cells[i] = zone ? flood.zone[i] : cost != math.INF_F32 && !flood.zone[i]
+		switch cells {
+		case .Reach:
+			area.cells[i] = cost != math.INF_F32 && !flood.zone[i] && !flood.no_stop[i]
+		case .Zone:
+			area.cells[i] = flood.zone[i]
+		case .Contact:
+			area.cells[i] = flood.no_stop[i] && !flood.zone[i]
+		}
 	}
 }
 

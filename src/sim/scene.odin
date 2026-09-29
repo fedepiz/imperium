@@ -218,3 +218,4 @@ step :: proc(commands: []Command, walk_distance: f32) {
 present :: proc(focus: Piece_Id, out: ^Scene) {
 	world_present(focus, out)
 }
+

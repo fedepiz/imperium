@@ -25,68 +25,69 @@ WORLD: struct {
 	turn:          int,
 }
 
-// Orders the subject to walk to the destination, along the cheapest way there. Rejected, returning false and leaving
-// what is walking as it was, when the subject cannot move or cannot walk there within its movement budget.
-move_order_to_point :: proc(mov: ^Movement, subject_id: Piece_Id, destination: [2]f32) -> bool {
-	movement_flood(mov, subject_id)
-	if mov.flood_subject != subject_id do return false
-	path: [dynamic; PATH_MAX_LEN][2]f32
-	cost: [dynamic; PATH_MAX_LEN]f32
-	if !pathfind_flood_trace(&mov.flood, destination, &path, &cost) {
-		fmt.eprintfln(
-			"No way from %v to %v within the movement budget of %.1f",
-			mov.flood.src,
-			destination,
-			mov.flood.budget,
-		)
-		return false
-	}
-	mov.subject = subject_id
-	mov.path = path
-	mov.cost = cost
-	mov.next = 0
-	return true
+// How far past touching, in cells, a walk to meet a piece may stop
+TOUCH_SLACK :: 1
+
+// The piece walking, and where the focus can walk
+Movement :: struct {
+	// The piece walking, nil when none
+	subject:       Piece_Id,
+	// Its path, as cell middles, the cost of entering each, and the next point it walks to
+	path:          [dynamic; PATH_MAX_LEN][2]f32,
+	cost:          [dynamic; PATH_MAX_LEN]f32,
+	next:          int,
+	// The piece it walks to meet, or nil
+	target:        Piece_Id,
+	// Where the focus can walk: nil subject and 0 key when none. The key hashes the flood's inputs.
+	flood:         Pathfind_Flood,
+	flood_subject: Piece_Id,
+	flood_key:     u64,
 }
 
-move_order_to :: proc(mov: ^Movement, subject: Piece_Id, target_id: Piece_Id) -> bool {
-	target := piece_get(target_id)
-	if target == nil do return false
-	return move_order_to_point(mov, subject, target.pos)
-}
-
-// Floods where the piece can walk, within its budget and enemy zones; redone only when its key changes. Nil, or a
-// piece that cannot move, drops the flood.
-movement_flood :: proc(mov: ^Movement, subject_id: Piece_Id) {
-	subject := piece_get(subject_id)
+// Floods where the focus can walk. Runs once per tick, first in present; the next step's orders use it.
+movement_flood :: proc(mov: ^Movement, focus: Piece_Id) {
+	subject := piece_get(focus)
 	if subject == nil || subject.movement_domain == nil {
 		mov.flood_subject, mov.flood_key = {}, 0
 		return
 	}
 	domain := subject.movement_domain.(Pathfind_Domain)
 
-	// Enemy zones stopping it that overlap the flood
-	zones: [dynamic; PIECE_MAX]Disc
-	for other in WORLD.pieces {
-		if !piece_alive(other) || other.zone.radius <= 0 || domain not_in other.zone.domains do continue
-		if faction_get(other.owner) == nil || other.owner == subject.owner do continue
-		reach := PATHFIND_FLOOD_SIZE / 2 + other.zone.radius + 1
-		if abs(other.pos.x - subject.pos.x) > reach || abs(other.pos.y - subject.pos.y) > reach do continue
-		append(&zones, Disc{other.pos, other.zone.radius})
+	// Enemy zones stop it and enemy bodies block it; it may pass friendly bodies but not stop on them. Only discs
+	// near the flood count.
+	zones, blocked, no_stop: [dynamic; PIECE_MAX]Disc
+	for other, index in WORLD.pieces {
+		if !piece_alive(other) || piece_id(index) == focus do continue
+		near := PATHFIND_FLOOD_SIZE / 2 + max(other.zone.radius, subject.body + other.body) + 1
+		if abs(other.pos.x - subject.pos.x) > near || abs(other.pos.y - subject.pos.y) > near do continue
+		body := Disc{other.pos, subject.body + other.body}
+		if faction_get(other.owner) != nil && other.owner == subject.owner {
+			append(&no_stop, body)
+			continue
+		}
+		append(&blocked, body)
+		if faction_get(other.owner) != nil && other.zone.radius > 0 && domain in other.zone.domains {
+			append(&zones, Disc{other.pos, other.zone.radius})
+		}
 	}
 
-	subject_id, pos, budget := subject_id, subject.pos, subject.movement_budget
-	key := hash.fnv64a(mem.ptr_to_bytes(&subject_id))
+	focus, pos, budget := focus, subject.pos, subject.movement_budget
+	counts := [3]int{len(zones), len(blocked), len(no_stop)}
+	key := hash.fnv64a(mem.ptr_to_bytes(&focus))
 	key = hash.fnv64a(mem.ptr_to_bytes(&pos), key)
 	key = hash.fnv64a(mem.ptr_to_bytes(&budget), key)
 	key = hash.fnv64a(mem.ptr_to_bytes(&domain), key)
+	key = hash.fnv64a(mem.ptr_to_bytes(&counts), key)
 	key = hash.fnv64a(mem.slice_to_bytes(zones[:]), key)
+	key = hash.fnv64a(mem.slice_to_bytes(blocked[:]), key)
+	key = hash.fnv64a(mem.slice_to_bytes(no_stop[:]), key)
 	if key == mov.flood_key do return
-	pathfind_flood(pos, domain, budget, zones[:], &mov.flood)
-	mov.flood_subject, mov.flood_key = subject_id, key
+	pathfind_flood(pos, domain, budget, zones[:], blocked[:], no_stop[:], &mov.flood)
+	mov.flood_subject, mov.flood_key = focus, key
 }
 
-// Moves the subject on by walk_distance, in cells: it walks the way from where it stands towards the next point, the
-// cost of the ground walked coming out of its movement budget, and stops moving at the way's end.
+// Walks the subject walk_distance cells along its path, paying from its budget. At the end it meets its target, which
+// does nothing yet.
 movement_advance :: proc(mov: ^Movement, walk_distance: f32) {
 	if mov.subject == {} do return
 	subject := piece_get(mov.subject)
@@ -113,23 +114,8 @@ movement_advance :: proc(mov: ^Movement, walk_distance: f32) {
 	}
 
 	if is_over {
-		mov.subject = {}
-		mov.next = 0
+		mov.subject, mov.target, mov.next = {}, {}, 0
 	}
-}
-
-// A piece walking to a place along the cheapest way there, and where a piece can walk
-Movement :: struct {
-	// The piece walking, nil when none is
-	subject:        Piece_Id,
-	// The way it walks, as pathfind_flood_trace gives it, and the point of it being walked towards
-	path:           [dynamic; PATH_MAX_LEN][2]f32,
-	cost:           [dynamic; PATH_MAX_LEN]f32,
-	next:           int,
-	// Where a piece can walk; nil subject and 0 key when there is none. The key hashes all its inputs.
-	flood:          Pathfind_Flood,
-	flood_subject:  Piece_Id,
-	flood_key:      u64,
 }
 
 Atlas :: struct {
@@ -208,17 +194,36 @@ world_load :: proc(scenario: Scenario) -> bool {
 }
 
 world_step :: proc(commands: []Command, walk_distance: f32) {
+	mov := &WORLD.movement
 	for command in commands {
+		// A walk: where it stops, and whom it meets there. Only the focus walks, from the flood the last present made.
+		walker, target: Piece_Id
+		stop: [2]int
+		ok: bool
 		switch c in command {
 		case Move_To_Point:
-			move_order_to_point(&WORLD.movement, c.piece, c.destination)
+			walker = c.piece
+			if walker == mov.flood_subject do stop, ok = pathfind_flood_stop(&mov.flood, c.destination)
 		case Move_To_Piece:
-			move_order_to(&WORLD.movement, c.piece, c.target)
+			walker, target = c.piece, c.target
+			other, piece := piece_get(target), piece_get(walker)
+			if walker == mov.flood_subject && other != nil && piece != nil {
+				stop, ok = pathfind_flood_stop_within(&mov.flood, other.pos, piece.body + other.body + TOUCH_SLACK)
+			}
 		case End_Turn:
 			if turn_can_end() do turn_end()
+			continue
 		}
+		path: [dynamic; PATH_MAX_LEN][2]f32
+		cost: [dynamic; PATH_MAX_LEN]f32
+		if !ok || !pathfind_flood_trace(&mov.flood, [2]f32{f32(stop.x), f32(stop.y)} + 0.5, &path, &cost) {
+			fmt.eprintfln("No way for %v to %v", walker, command)
+			continue
+		}
+		mov.subject, mov.target = walker, target
+		mov.path, mov.cost, mov.next = path, cost, 0
 	}
-	movement_advance(&WORLD.movement, walk_distance)
+	movement_advance(mov, walk_distance)
 }
 
 // Starts turn 1, played first by the faction in the first slot with one
@@ -316,18 +321,28 @@ world_load_test_pieces :: proc() {
 		{{292, 340}, .Envoy, "", .Alamanni, .Germanic, .Land, 50},
 	}
 	// What each test piece is, by its icon
-	// The zone each test piece has, by its icon: armies' stop land movement, fleets' sea movement, and settlements'
-	// land movement, the larger the wider
+	// Each test piece's zone and body, by icon
 	@(static, rodata)
 	TEST_ZONES := [Icon]Zone {
-		.Village    = {3, {.Land}},
-		.Town       = {4, {.Land}},
-		.City       = {5, {.Land}},
-		.Large_City = {6, {.Land}},
-		.Army       = {5, {.Land}},
-		.Fleet      = {5, {.Sea}},
+		.Village    = {6, {.Land}},
+		.Town       = {7, {.Land}},
+		.City       = {8, {.Land}},
+		.Large_City = {9, {.Land}},
+		.Army       = {8, {.Land}},
+		.Fleet      = {8, {.Sea}},
 		.Priest     = {},
 		.Envoy      = {},
+	}
+	@(static, rodata)
+	TEST_BODIES := [Icon]f32 {
+		.Village    = 2,
+		.Town       = 2.5,
+		.City       = 3,
+		.Large_City = 3.5,
+		.Army       = 2,
+		.Fleet      = 2,
+		.Priest     = 2,
+		.Envoy      = 2,
 	}
 	@(static, rodata)
 	TEST_TITLES := [Icon]string {
@@ -357,6 +372,7 @@ world_load_test_pieces :: proc() {
 				movement_domain = piece.movement,
 				movement_per_turn = piece.per_turn,
 				zone = TEST_ZONES[piece.icon],
+				body = TEST_BODIES[piece.icon],
 			},
 		)
 	}
@@ -382,6 +398,8 @@ Piece :: struct {
 	movement_per_turn: f32,
 	// Where pieces of other factions stop: once within it they cannot walk out
 	zone:              Zone,
+	// Radius in cells; no other piece stops overlapping it, and enemies cannot pass it
+	body:              f32,
 }
 
 // A disc of cells around a piece, radius cells across from its middle, and the movement it stops. A radius of 0 is no
