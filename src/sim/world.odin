@@ -126,6 +126,107 @@ Terrain :: struct {
 	moisture:  u8,
 	// For each way kind, which way is this cell assigned to. (Way_Id = 0 is nil)
 	way:       [Way_Kind]Way_Id,
+	// Worked out from the land around it at load
+	type:          Terrain_Type,
+	type_strength: u8,
+}
+
+// Land movement cost per cell walked, by terrain type, 0 for impassable; a road costs ROAD_COST whatever its type
+TERRAIN_COSTS := [Terrain_Type]f32 {
+	.Open      = 1,
+	.Forest    = 2,
+	.Desert    = 1.5,
+	.Steppe    = 1,
+	.Fertile   = 1,
+	.Marsh     = 2.5,
+	.Highland  = 3,
+	.Mountains = 0,
+	.Fields    = 1,
+}
+ROAD_COST :: 0.4
+
+// Over elevation: mountain country, and from where it is too high to cross
+HIGHLAND_ELEVATION :: Ramp{0.55, 1.0}
+MOUNTAINS_ELEVATION :: 0.85
+
+// How far around a cell, in cells either way, the land it is compared with to find basins reaches
+BASIN_REACH :: 24
+
+// What the terrain types need beyond the cells, in the temp allocator: cells to the nearest river and to the sea, and
+// how far each land cell lies below the land around it.
+Land :: struct {
+	to_river, to_sea: []f32,
+	// The mean elevation of the land within BASIN_REACH cells, less the cell's own: above 0 in basins and valleys.
+	// Elevation has no fixed sea level, so this, not elevation, tells lowland.
+	basin:            []f32,
+}
+
+measure_land :: proc(terrain: []Terrain) -> (land: Land) {
+	is_river := make([]bool, CELLS_MAX, context.temp_allocator)
+	is_sea := make([]bool, CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain {
+		is_river[i] = cell.way[.River] != 0
+		is_sea[i] = cell.surface == .Sea
+	}
+	land.to_river = make([]f32, CELLS_MAX, context.temp_allocator)
+	land.to_sea = make([]f32, CELLS_MAX, context.temp_allocator)
+	distance_from(land.to_river, is_river, WORLD_SIZE)
+	distance_from(land.to_sea, is_sea, WORLD_SIZE)
+
+	elevation := make([]f32, CELLS_MAX, context.temp_allocator)
+	is_land := make([]f32, CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain {
+		if cell.surface in WATER do continue
+		elevation[i] = normalized(cell.elevation)
+		is_land[i] = 1
+	}
+	around := make([]f32, CELLS_MAX, context.temp_allocator)
+	count := make([]f32, CELLS_MAX, context.temp_allocator)
+	box_sum(around, elevation, WORLD_SIZE, BASIN_REACH)
+	box_sum(count, is_land, WORLD_SIZE, BASIN_REACH)
+	land.basin = make([]f32, CELLS_MAX, context.temp_allocator)
+	for i in 0 ..< CELLS_MAX {
+		if is_land[i] > 0 do land.basin[i] = around[i] / count[i] - elevation[i]
+	}
+	return
+}
+
+// Cell i's terrain type: whichever suits it best, how well being its strength, unless none suits it by at least a
+// sixth; mountains above MOUNTAINS_ELEVATION, fully. Desert, steppe and fields follow the moisture, forest the trees. Land along a river is fertile: close along it
+// in dry country, and farther out where a wet river valley or basin lies below the land around it. Low, level ground is
+// marsh where it is very wet or where a river meets the sea; fertile land and marsh win over the rest. Highland follows
+// the mountains, and wins over forest, desert and steppe where they are at their fullest.
+terrain_type_of :: proc(terrain: []Terrain, land: ^Land, i: int) -> (best: Terrain_Type, strength: u8) {
+	if terrain[i].surface in WATER do return
+	cell := terrain[i]
+	elevation := normalized(cell.elevation)
+	if elevation >= MOUNTAINS_ELEVATION do return .Mountains, max(u8)
+	trees := normalized(cell.trees)
+	moisture := normalized(cell.moisture)
+	low := ramp(0.22, 0.12, elevation)
+	delta := ramp(6, 2, land.to_river[i]) * ramp(16, 6, land.to_sea[i])
+	dry_river := ramp(0.62, 0.52, moisture) * ramp(5, 1.5, land.to_river[i])
+	valley :=
+		ramp(0.55, 0.65, moisture) *
+		ramp(12, 4, land.to_river[i]) *
+		ramp(0.02, 0.07, land.basin[i])
+	suits := [Terrain_Type]f32 {
+		.Open      = 1.0 / 6,
+		.Forest    = ramp(0.05, 0.75, trees),
+		.Desert    = ramp(0.47, 0.35, moisture),
+		.Steppe    = ramp(0.40, 0.47, moisture) * ramp(0.58, 0.48, moisture),
+		.Fertile   = 1.3 * max(dry_river, valley),
+		.Marsh     = 1.5 * low * max(delta, ramp(0.80, 0.88, moisture)),
+		.Highland  = 1.2 * ramp(HIGHLAND_ELEVATION, elevation),
+		.Mountains = 0,
+		.Fields    = 0.6 * ramp(0.52, 0.62, moisture) * ramp(0.3, 0.1, trees),
+	}
+	most: f32
+	for s, type in suits {
+		if s > most do best, strength, most = type, u8(min(s, 1) * f32(max(u8)) + 0.5), s
+	}
+	if best == .Open do strength = 0
+	return
 }
 
 // Which way of its kind runs through a cell. Id 0 is none.
@@ -163,14 +264,32 @@ world_load :: proc(scenario: Scenario) -> bool {
 	for &cell in terrain do if cell.surface in WATER do cell = {
 		surface = cell.surface,
 	}
-	// Land
+	// Roads step only across cell sides: where one steps diagonally, the lower of the corners beside the step joins it
+	for y in 0 ..< WORLD_HEIGHT - 1 {
+		for x in 0 ..< WORLD_WIDTH {
+			at := &terrain[y * WORLD_WIDTH + x]
+			if at.way[.Road] == 0 do continue
+			for dx in ([2]int{-1, 1}) {
+				if x + dx < 0 || x + dx >= WORLD_WIDTH do continue
+				if terrain[(y + 1) * WORLD_WIDTH + x + dx].way[.Road] == 0 do continue
+				a, b := &terrain[y * WORLD_WIDTH + x + dx], &terrain[(y + 1) * WORLD_WIDTH + x]
+				if a.way[.Road] != 0 || b.way[.Road] != 0 do continue
+				corner := a.elevation <= b.elevation ? a : b
+				if corner.surface in WATER do corner = corner == a ? b : a
+				if corner.surface not_in WATER do corner.way[.Road] = at.way[.Road]
+			}
+		}
+	}
+	// Each land cell's type
 	{
-		OFF_ROAD_COST :: 1
-		ROAD_COST :: 0.4
-
+		land := measure_land(terrain[:])
+		for &cell, i in terrain do cell.type, cell.type_strength = terrain_type_of(terrain[:], &land, i)
+	}
+	// Land, by terrain type, roads whatever their type
+	{
 		grid := pathfind_build_begin(.Land)
 		for cell, i in WORLD.atlas.terrain {
-			grid[i] = cell.way[.Road] != 0 ? ROAD_COST : cell.surface == .Land ? OFF_ROAD_COST : 0
+			grid[i] = cell.surface != .Land ? 0 : cell.way[.Road] != 0 ? ROAD_COST : TERRAIN_COSTS[cell.type]
 		}
 		pathfind_build_end(.Land)
 	}
@@ -221,45 +340,42 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 	movement_advance(mov, walk_distance)
 }
 
-// Starts turn 1, played first by the faction in the first slot with one
+// Starts turn 1, played first by the faction in the first slot with one, every piece's movement budget full
 @(private = "file")
 turns_begin :: proc() {
 	WORLD.turn = 1
 	WORLD.player = {}
+	for &piece in WORLD.pieces {
+		if piece_alive(piece) && piece.movement_domain != nil do piece.movement_budget = piece.movement_per_turn
+	}
 	for faction, index in WORLD.factions {
 		if faction_alive(faction) {
-			faction_play(faction_id(index))
+			WORLD.player = faction_id(index)
 			return
 		}
 	}
 }
 
-// Ends the player's faction's part of the turn: the faction in the next slot with one plays, and once past the last
-// slot, the next turn begins. Nil when there is no faction.
+// Ends the player's faction's part of the turn, refilling its pieces' movement budgets: the faction in the next slot
+// with one plays, and once past the last slot, the next turn begins. Nil when there is no faction.
 @(private = "file")
 turn_end :: proc() {
+	for &piece in WORLD.pieces {
+		if piece_alive(piece) && piece.owner == WORLD.player && piece.movement_domain != nil {
+			piece.movement_budget = piece.movement_per_turn
+		}
+	}
 	from := int(WORLD.player.index)
 	for step in 1 ..= FACTION_MAX {
 		index := from + step
 		if index == FACTION_MAX do WORLD.turn += 1
 		index %= FACTION_MAX
 		if faction_alive(WORLD.factions[index]) {
-			faction_play(faction_id(index))
+			WORLD.player = faction_id(index)
 			return
 		}
 	}
 	WORLD.player = {}
-}
-
-// The faction plays: the player plays it, and every piece of it that moves has its movement budget recharged.
-@(private = "file")
-faction_play :: proc(id: Faction_Id) {
-	WORLD.player = id
-	for &piece in WORLD.pieces {
-		if piece_alive(piece) && piece.owner == id && piece.movement_domain != nil {
-			piece.movement_budget = piece.movement_per_turn
-		}
-	}
 }
 
 // The turn can end: no piece is moving
@@ -301,17 +417,21 @@ world_load_test_pieces :: proc() {
 		{{296, 391}, .Town, "Genua", .Rome, .Roman, nil, 0},
 		{{327, 374}, .Town, "Verona", .Rome, .Roman, nil, 0},
 		{{260, 379}, .Town, "Segusio", .Rome, .Roman, nil, 0},
-		{{394, 506}, .Town, "Rhegium", .Rome, .Roman, nil, 0},
+		{{393, 506}, .Town, "Rhegium", .Rome, .Roman, nil, 0},
 		{{385, 527}, .Town, "Syracusae", .Rome, .Roman, nil, 0},
+		{{419, 374}, .Town, "Siscia", .Rome, .Roman, nil, 0},
+		{{470, 396}, .Town, "Domavia", .Rome, .Roman, nil, 0},
+		{{421, 405}, .City, "Salona", .Rome, .Roman, nil, 0},
 		{{334, 419}, .Army, "", .Rome, .Roman, .Land, 30},
 		{{353, 455}, .Fleet, "", .Rome, .Roman, .Sea, 80},
 		{{355, 393}, .Fleet, "", .Rome, .Roman, .Sea, 80},
 		{{350, 430}, .Priest, "", .Rome, .Roman, .Land, 40},
 		{{306, 382}, .Envoy, "", .Rome, .Roman, .Land, 50},
-		{{300, 300}, .Large_City, "Alamannia", .Alamanni, .Germanic, nil, 0},
-		{{332, 318}, .City, "Castra Regina", .Alamanni, .Germanic, nil, 0},
-		{{270, 322}, .Town, "Brisiacum", .Alamanni, .Germanic, nil, 0},
-		{{285, 285}, .Village, "", .Alamanni, .Germanic, nil, 0},
+		{{325, 327}, .Large_City, "Augusta Vindelicorum", .Alamanni, .Germanic, nil, 0},
+		{{242, 345}, .City, "Vesontio", .Alamanni, .Germanic, nil, 0},
+		{{385, 354}, .City, "Virunum", .Alamanni, .Germanic, nil, 0},
+		{{253, 367}, .Town, "Octodurum", .Alamanni, .Germanic, nil, 0},
+		{{362, 336}, .Town, "Iuvavum", .Alamanni, .Germanic, nil, 0},
 		{{316, 342}, .Army, "", .Alamanni, .Germanic, .Land, 30},
 		{{292, 340}, .Envoy, "", .Alamanni, .Germanic, .Land, 50},
 	}

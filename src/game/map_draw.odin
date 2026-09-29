@@ -87,7 +87,7 @@ map_draw_next_view :: proc() {
 }
 
 // Works out everything the map draws from the terrain, stage by stage: its cells, its ways, its coast, the land's
-// covers, and the marks over it.
+// terrain types, and the marks over it.
 @(private = "file")
 map_derive :: proc(terrain: []sim.Ground) {
 	rt := &MAP_DRAW.render_terrain
@@ -152,11 +152,9 @@ map_derive :: proc(terrain: []sim.Ground) {
 	// The water near the shore, preclaimed so no mark's drawing spills into it
 	preclaim_coast_water(claimed, rt.coast[:], COAST_WATER_BAND)
 
-	// What covers each cell, drawn as the cover layer, and the marks over the land
-	land := measure_land(terrain)
-	cover := make([]Cover_Cell, sim.CELLS_MAX, context.temp_allocator)
-	classify_cover(&rt.cover, cover, terrain, &land)
-	marks_place(&MAP_DRAW.marks, terrain, rt.coast[:], cover, claimed)
+	// The terrain types, drawn as the cover layer, and the marks over the land
+	cover_draw(&rt.cover, terrain)
+	marks_place(&MAP_DRAW.marks, terrain, rt.coast[:], claimed)
 }
 
 // Adds a line to be drawn among lines, as its segments, ending in a head if head
@@ -247,40 +245,14 @@ map_areas :: proc(scene: ^sim.Scene) {
 }
 
 // Cover ---------------------------------------------------------------------------------------------------------------
-// Cover: what covers each cell of land, drawn as the cover layer and read by the marks
-
-// What covers a cell. Each land cell has one cover, and how strongly it has it; Open land has none.
-@(private = "file")
-Cover :: enum u8 {
-	Open,
-	Forest,
-	Desert,
-	Steppe,
-	Fertile,
-	Marsh,
-	// Mountain country, where the mountains stand
-	Highland,
-	// Open, well-watered land: fields and pasture
-	Fields,
-}
-
-// Over elevation: mountain country, where the mountains stand
-@(private = "file")
-HIGHLAND_ELEVATION :: Ramp{0.55, 1.0}
-
-@(private = "file")
-Cover_Cell :: struct {
-	cover:    Cover,
-	// From 0 to max(u8)
-	strength: u8,
-}
+// Cover: each land cell's terrain type, drawn as the cover layer and read by the marks
 
 @(private = "file", rodata)
 COVER_SAND := [4]f32{0.900, 0.800, 0.600, 1}
 
-// How each cover is drawn
+// How each terrain type is drawn
 @(private = "file")
-COVER_LOOKS := [Cover]gfx.Render_Layer_Palette {
+COVER_LOOKS := [sim.Terrain_Type]gfx.Render_Layer_Palette {
 	.Open = {},
 	.Forest = {color = {0.600, 0.640, 0.470, 1}, wash = 0.45},
 	.Desert = {color = COVER_SAND, wash = 0.55, pattern = .Stipple, pattern_ink = 0.45},
@@ -288,106 +260,16 @@ COVER_LOOKS := [Cover]gfx.Render_Layer_Palette {
 	.Fertile = {color = {0.720, 0.740, 0.540, 1}, wash = 0.7},
 	.Marsh = {color = {0.580, 0.640, 0.640, 1}, wash = 0.5},
 	.Highland = {color = {0.740, 0.620, 0.460, 1}, wash = 0.35},
+	.Mountains = {color = {0.700, 0.580, 0.420, 1}, wash = 0.45},
 	.Fields = {color = {0.790, 0.770, 0.600, 1}, wash = 0.35},
 }
 
-// What the terrain does not hold but covers and marks need, worked out whenever it changes, in the temp allocator:
-// cells to the nearest river and to the sea, and how far each land cell lies below the land around it.
+// Hands the terrain types to layer to draw.
 @(private = "file")
-Land :: struct {
-	to_river, to_sea: []f32,
-	// The mean elevation of the land within BASIN_REACH cells, less the cell's own: above 0 in basins and valleys.
-	// Elevation has no fixed sea level, so this, not elevation, tells lowland.
-	basin:            []f32,
-}
-
-// How far around a cell, in cells either way, the land it is compared with to find basins reaches
-@(private = "file")
-BASIN_REACH :: 24
-
-@(private = "file")
-measure_land :: proc(terrain: []sim.Ground) -> (land: Land) {
-	is_river := make([]bool, sim.CELLS_MAX, context.temp_allocator)
-	is_sea := make([]bool, sim.CELLS_MAX, context.temp_allocator)
-	for cell, i in terrain {
-		is_river[i] = .River in cell.ways
-		is_sea[i] = cell.surface == .Sea
-	}
-	land.to_river = make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	land.to_sea = make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	distance_from(land.to_river, is_river, sim.WORLD_SIZE)
-	distance_from(land.to_sea, is_sea, sim.WORLD_SIZE)
-
-	elevation := make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	is_land := make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	for cell, i in terrain {
-		if cell.surface in sim.WATER do continue
-		elevation[i] = normalized(cell.elevation)
-		is_land[i] = 1
-	}
-	around := make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	count := make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	box_sum(around, elevation, sim.WORLD_SIZE, BASIN_REACH)
-	box_sum(count, is_land, sim.WORLD_SIZE, BASIN_REACH)
-	land.basin = make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	for i in 0 ..< sim.CELLS_MAX {
-		if is_land[i] > 0 do land.basin[i] = around[i] / count[i] - elevation[i]
-	}
-	return
-}
-
-// Gives every cell its cover, and hands the covers to layer to draw.
-@(private = "file")
-classify_cover :: proc(
-	layer: ^gfx.Render_Layer,
-	cover: []Cover_Cell,
-	terrain: []sim.Ground,
-	land: ^Land,
-) {
-	for &cell, i in cover {
-		cell = cover_of(terrain, land, i)
-		layer.cells[i] = {u8(cell.cover), cell.strength}
-	}
-	for look, kind in COVER_LOOKS do layer.palette[kind] = look
+cover_draw :: proc(layer: ^gfx.Render_Layer, terrain: []sim.Ground) {
+	for cell, i in terrain do layer.cells[i] = {u8(cell.type), cell.type_strength}
+	for look, type in COVER_LOOKS do layer.palette[type] = look
 	layer.revision += 1
-}
-
-// Cell i's cover: whichever suits it best, how well being its strength, unless none suits it by at least a sixth.
-// Desert, steppe and fields follow the moisture, forest the trees. Land along a river is fertile: close along it in dry
-// country, and farther out where a wet river valley or basin lies below the land around it. Low, level ground is marsh
-// where it is very wet or where a river meets the sea; fertile land and marsh win over the rest. Highland follows the
-// mountains, so it lies where they stand, and wins over forest, desert and steppe where they are at their
-// fullest.
-@(private = "file")
-cover_of :: proc(terrain: []sim.Ground, land: ^Land, i: int) -> (best: Cover_Cell) {
-	if terrain[i].surface in sim.WATER do return
-	cell := terrain[i]
-	elevation := normalized(cell.elevation)
-	trees := normalized(cell.trees)
-	moisture := normalized(cell.moisture)
-	low := ramp(0.22, 0.12, elevation)
-	delta := ramp(6, 2, land.to_river[i]) * ramp(16, 6, land.to_sea[i])
-	dry_river := ramp(0.62, 0.52, moisture) * ramp(5, 1.5, land.to_river[i])
-	valley :=
-		ramp(0.55, 0.65, moisture) *
-		ramp(12, 4, land.to_river[i]) *
-		ramp(0.02, 0.07, land.basin[i])
-	suits := [Cover]f32 {
-		.Open     = 1.0 / 6,
-		.Forest   = ramp(0.05, 0.75, trees),
-		.Desert   = ramp(0.47, 0.35, moisture),
-		.Steppe   = ramp(0.40, 0.47, moisture) * ramp(0.58, 0.48, moisture),
-		.Fertile  = 1.3 * max(dry_river, valley),
-		.Marsh    = 1.5 * low * max(delta, ramp(0.80, 0.88, moisture)),
-		.Highland = 1.2 * ramp(HIGHLAND_ELEVATION, elevation),
-		.Fields   = 0.6 * ramp(0.52, 0.62, moisture) * ramp(0.3, 0.1, trees),
-	}
-	most: f32
-	for s, cover in suits {
-		if s > most do best, most = {cover, u8(min(s, 1) * f32(max(u8)) + 0.5)}, s
-	}
-	if best.cover == .Open do best.strength = 0
-	return
 }
 
 // Ways ----------------------------------------------------------------------------------------------------------------
@@ -666,8 +548,8 @@ preclaim_coast_water :: proc(claimed: []u8, coast: []f32, reach: f32) {
 // Marks ---------------------------------------------------------------------------------------------------------------
 // The marks: drawings scattered over the map, laid layer by layer, each layer on a jittered grid of points over the
 // world. At a point, every marking of the layer scores how densely it grows there, by whether the cell's distance to
-// the coast, elevation and temperature are in its ranges, and by its cover; the point keeps a mark with the sum of the
-// scores as its chance, and the mark is one of the markings, picked in proportion to its score.
+// the coast, elevation and temperature are in its ranges, and by its terrain type; the point keeps a mark with the sum
+// of the scores as its chance, and the mark is one of the markings, picked in proportion to its score.
 
 // Ground where no mark may stand, kept FOOTPRINT_RES squares to a cell each way, row by row. Each square holds who
 // claimed it first: 0 for none, PRECLAIMED for what claims it before any mark is placed, such as the ways, and a
@@ -783,8 +665,8 @@ LAYERS := [Layer]Layer_Def {
 
 // A kind of mark: its images, under assets/gfx, the layer it is laid in, and where it grows. Each mark is one of the
 // images, the named ones first; an empty name is an image it does not have. It grows where the cell's signed distance
-// to the coast, elevation and temperature are in its ranges, as densely as its cover says of the cell's cover times the
-// cover's strength, or fully if it names no cover. Its width grows by grow times how far up its elevation range the
+// to the coast, elevation and temperature are in its ranges, as densely as its cover says of the cell's terrain type
+// times the type's strength, or fully if it names none. Its width grows by grow times how far up its elevation range the
 // cell is, and its opacity follows fade over the signed distance to the coast; an unset fade is opaque.
 @(private = "file")
 Marking :: struct {
@@ -793,7 +675,7 @@ Marking :: struct {
 	coast:       Range,
 	elevation:   Range,
 	temperature: Range,
-	cover:       [Cover]f32,
+	cover:       [sim.Terrain_Type]f32,
 	grow:        f32,
 	fade:        Ramp,
 }
@@ -822,7 +704,7 @@ VARIANTS_MAX :: 4
 
 // The trees' covers: forests, and fertile land more thinly
 @(private = "file")
-TREE_COVER :: #partial [Cover]f32 {
+TREE_COVER :: #partial [sim.Terrain_Type]f32 {
 	.Forest  = 1,
 	.Fertile = 0.45,
 }
@@ -839,6 +721,7 @@ MARKINGS := [?]Marking {
 		layer = .Mountain,
 		coast = ON_LAND,
 		elevation = {0.7, 1.1},
+		cover = #partial{.Mountains = 1},
 		grow = 0.55,
 	},
 	{
@@ -931,14 +814,13 @@ marks_init :: proc(mm: ^Map_Marks) {
 }
 
 // Lays the marks over the terrain, in three passes: every layer's grid points, scored; a candidate mark at each point
-// that keeps one; and, in order, each candidate that fits, stamping its footprint. coast and cover are for every cell:
-// the signed distance to the coast, and the cover. claimed holds the preclaimed ground: see FOOTPRINT_RES.
+// that keeps one; and, in order, each candidate that fits, stamping its footprint. coast is for every cell: the signed
+// distance to the coast. claimed holds the preclaimed ground: see FOOTPRINT_RES.
 @(private = "file")
 marks_place :: proc(
 	mm: ^Map_Marks,
 	terrain: []sim.Ground,
 	coast: []f32,
-	cover: []Cover_Cell,
 	claimed: []u8,
 ) {
 	// Each layer has sixteen random streams, one for each use at a point.
@@ -987,15 +869,15 @@ marks_place :: proc(
 				values := [3]f32{coast[point.cell], elevation, temperature}
 				values += (random_xy(col, row, stream(layer, 2)) - 0.5) * 2 * BLUR
 				// Each marking of the layer grows where the values are in its ranges: as densely as its cover says of the
-				// cell's cover, times the cover's strength, or fully if it names no cover.
-				here := cover[point.cell]
+				// cell's terrain type, times the type's strength, or fully if it names none.
+				here := terrain[point.cell]
 				marking: for m, k in MARKINGS {
 					if m.layer != layer do continue
 					ranges := [3]Range{m.coast, m.elevation, m.temperature}
 					for r, q in ranges do if r.lo != r.hi && (values[q] < r.lo || values[q] >= r.hi) do continue marking
 					point.scores[k] = 1
 					for density in m.cover do if density != 0 {
-						point.scores[k] = m.cover[here.cover] * normalized(here.strength)
+						point.scores[k] = m.cover[here.type] * normalized(here.type_strength)
 						break
 					}
 				}

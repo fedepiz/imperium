@@ -25,10 +25,12 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 		out.ground_revision = WORLD.atlas.revision
 		for cell, i in WORLD.atlas.terrain {
 			ground := Ground {
-				surface   = cell.surface,
-				elevation = cell.elevation,
-				trees     = cell.trees,
-				moisture  = cell.moisture,
+				surface       = cell.surface,
+				elevation     = cell.elevation,
+				trees         = cell.trees,
+				moisture      = cell.moisture,
+				type          = cell.type,
+				type_strength = cell.type_strength,
 			}
 			for id, kind in cell.way do if id != 0 do ground.ways += {kind}
 			out.ground[i] = ground

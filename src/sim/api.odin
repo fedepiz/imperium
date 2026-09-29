@@ -26,6 +26,23 @@ Way_Kind :: enum u8 {
 	Road,
 }
 
+// What a land cell mostly is, which sets how hard it is to cross. Each land cell has one, and how strongly it has it;
+// open land has none.
+Terrain_Type :: enum u8 {
+	Open,
+	Forest,
+	Desert,
+	Steppe,
+	Fertile,
+	Marsh,
+	// Mountain country
+	Highland,
+	// Too high to cross but by road
+	Mountains,
+	// Open, well-watered land: fields and pasture
+	Fields,
+}
+
 // The peoples, each with its own style of drawings
 Culture :: enum u8 {
 	Roman,
@@ -123,11 +140,14 @@ Scene :: struct {
 // A cell as it lies: what covers it, how high, wooded and wet it is, from 0 to 255, and the kinds of way running
 // through it
 Ground :: struct {
-	surface:   Surface,
-	elevation: u8,
-	trees:     u8,
-	moisture:  u8,
-	ways:      bit_set[Way_Kind;u8],
+	surface:       Surface,
+	elevation:     u8,
+	trees:         u8,
+	moisture:      u8,
+	ways:          bit_set[Way_Kind;u8],
+	type:          Terrain_Type,
+	// From 0 to 255
+	type_strength: u8,
 }
 
 // A drawing: what it shows, in whose style
