@@ -523,21 +523,19 @@ Pathfind_Flood :: struct {
 	cost:   [PATHFIND_FLOOD_CELLS]f32,
 	// Per cell reached, the direction back to the cell before it on that way
 	back:   [PATHFIND_FLOOD_CELLS]Dir,
-	// Per cell of the square: in a zone, cannot be left for a cell in none; blocked, cannot be entered; no stop,
-	// can be passed but not stopped on
+	// Per cell of the square: in a zone, entered but never left; no stop, passed but not stopped on
 	zone:    [PATHFIND_FLOOD_CELLS]bool,
-	blocked: [PATHFIND_FLOOD_CELLS]bool,
 	no_stop: [PATHFIND_FLOOD_CELLS]bool,
 }
 
 // Floods from src over a domain: every cell of the square around it whose cheapest way from src's cell costs no more
-// than budget is reached. Moves as pathfind_trace does, never out of the zones, nor into the blocked discs. Nothing is
-// reached if src's cell is outside the world or of cost 0.
+// than budget is reached. Moves as pathfind_trace does, never out of a zone cell, src's included. Nothing is reached if
+// src's cell is outside the world or of cost 0.
 pathfind_flood :: proc(
 	src: [2]f32,
 	domain: Pathfind_Domain,
 	budget: f32,
-	zones, blocked, no_stop: []Disc,
+	zones, no_stop: []Disc,
 	flood: ^Pathfind_Flood,
 ) {
 	table := &TABLE[domain]
@@ -546,7 +544,6 @@ pathfind_flood :: proc(
 	flood.corner = flood.start - PATHFIND_FLOOD_SIZE / 2
 	slice.fill(flood.cost[:], math.INF_F32)
 	stamp(flood, flood.zone[:], zones)
-	stamp(flood, flood.blocked[:], blocked)
 	stamp(flood, flood.no_stop[:], no_stop)
 	if !grid_contains(flood.start, WORLD_SIZE) || table.grid[grid_index(flood.start, WORLD_SIZE)] == 0 do return
 
@@ -559,6 +556,7 @@ pathfind_flood :: proc(
 		entry := heap_pop(scratch)
 		// A cell is queued again whenever its cost improves, so its older entries come up after it is settled
 		if entry.priority > flood.cost[entry.index] do continue
+		if flood.zone[entry.index] do continue
 		at := grid_pos(int(entry.index), FLOOD_SQUARE)
 		for dir in Dir {
 			next := at + DIR_OFFSET[dir]
@@ -567,8 +565,6 @@ pathfind_flood :: proc(
 			if move == 0 do continue
 			cost := entry.priority + move
 			next_index := grid_index(next, FLOOD_SQUARE)
-			if flood.zone[entry.index] && !flood.zone[next_index] do continue
-			if flood.blocked[next_index] do continue
 			if cost > budget || cost >= flood.cost[next_index] do continue
 			flood.cost[next_index] = cost
 			flood.back[next_index] = DIR_OPPOSITE[dir]
@@ -614,13 +610,13 @@ pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32) -> (cell: [2]in
 	return
 }
 
-// The cheapest cell that can be stopped on whose middle lies within radius of center, if any
+// The cheapest cell that can be stopped on whose middle lies within radius of center, as a disc stamps it, if any
 pathfind_flood_stop_within :: proc(flood: ^Pathfind_Flood, center: [2]f32, radius: f32) -> (cell: [2]int, ok: bool) {
 	cheapest := math.INF_F32
 	for cost, i in flood.cost {
 		if cost >= cheapest || flood.no_stop[i] do continue
 		at := flood.corner + grid_pos(i, FLOOD_SQUARE)
-		if linalg.distance([2]f32{f32(at.x), f32(at.y)} + 0.5, center) > radius do continue
+		if linalg.distance([2]f32{f32(at.x), f32(at.y)} + 0.5, center) >= radius do continue
 		cell, ok, cheapest = at, true, cost
 	}
 	return

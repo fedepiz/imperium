@@ -25,9 +25,6 @@ WORLD: struct {
 	turn:          int,
 }
 
-// How far past touching, in cells, a walk to meet a piece may stop
-TOUCH_SLACK :: 1
-
 // The piece walking, and where the focus can walk
 Movement :: struct {
 	// The piece walking, nil when none
@@ -38,14 +35,19 @@ Movement :: struct {
 	next:          int,
 	// The piece it walks to meet, or nil
 	target:        Piece_Id,
-	// Where the focus can walk: nil subject and 0 key when none. The key hashes the flood's inputs.
+	// Where the focus can walk: nil subject and 0 key when none. The key hashes the flood's inputs, zones and bodies
+	// among them, rebuilt every tick.
 	flood:         Pathfind_Flood,
+	zones, bodies: [dynamic; PIECE_MAX]Disc,
 	flood_subject: Piece_Id,
 	flood_key:     u64,
 }
 
 // Floods where the focus can walk. Runs once per tick, first in present; the next step's orders use it.
 movement_flood :: proc(mov: ^Movement, focus: Piece_Id) {
+	zones, bodies := &mov.zones, &mov.bodies
+	clear(zones)
+	clear(bodies)
 	subject := piece_get(focus)
 	if subject == nil || subject.movement_domain == nil {
 		mov.flood_subject, mov.flood_key = {}, 0
@@ -53,36 +55,29 @@ movement_flood :: proc(mov: ^Movement, focus: Piece_Id) {
 	}
 	domain := subject.movement_domain.(Pathfind_Domain)
 
-	// Enemy zones stop it and enemy bodies block it; it may pass friendly bodies but not stop on them. Only discs
-	// near the flood count.
-	zones, blocked, no_stop: [dynamic; PIECE_MAX]Disc
+	// No stopping on bodies; enemy contacts are zones, stopping it once entered. Only discs near the flood count.
 	for other, index in WORLD.pieces {
 		if !piece_alive(other) || piece_id(index) == focus do continue
-		near := PATHFIND_FLOOD_SIZE / 2 + max(other.zone.radius, subject.body + other.body) + 1
+		near := PATHFIND_FLOOD_SIZE / 2 + max(other.contact.radius, subject.body + other.body) + 1
 		if abs(other.pos.x - subject.pos.x) > near || abs(other.pos.y - subject.pos.y) > near do continue
-		body := Disc{other.pos, subject.body + other.body}
-		if faction_get(other.owner) != nil && other.owner == subject.owner {
-			append(&no_stop, body)
-			continue
-		}
-		append(&blocked, body)
-		if faction_get(other.owner) != nil && other.zone.radius > 0 && domain in other.zone.domains {
-			append(&zones, Disc{other.pos, other.zone.radius})
+		append(bodies, Disc{other.pos, subject.body + other.body})
+		friend := faction_get(other.owner) != nil && other.owner == subject.owner
+		if !friend && other.contact.radius > 0 && domain in other.contact.domains {
+			append(zones, Disc{other.pos, other.contact.radius})
 		}
 	}
 
 	focus, pos, budget := focus, subject.pos, subject.movement_budget
-	counts := [3]int{len(zones), len(blocked), len(no_stop)}
+	counts := [2]int{len(zones), len(bodies)}
 	key := hash.fnv64a(mem.ptr_to_bytes(&focus))
 	key = hash.fnv64a(mem.ptr_to_bytes(&pos), key)
 	key = hash.fnv64a(mem.ptr_to_bytes(&budget), key)
 	key = hash.fnv64a(mem.ptr_to_bytes(&domain), key)
 	key = hash.fnv64a(mem.ptr_to_bytes(&counts), key)
 	key = hash.fnv64a(mem.slice_to_bytes(zones[:]), key)
-	key = hash.fnv64a(mem.slice_to_bytes(blocked[:]), key)
-	key = hash.fnv64a(mem.slice_to_bytes(no_stop[:]), key)
+	key = hash.fnv64a(mem.slice_to_bytes(bodies[:]), key)
 	if key == mov.flood_key do return
-	pathfind_flood(pos, domain, budget, zones[:], blocked[:], no_stop[:], &mov.flood)
+	pathfind_flood(pos, domain, budget, zones[:], bodies[:], &mov.flood)
 	mov.flood_subject, mov.flood_key = focus, key
 }
 
@@ -206,9 +201,9 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 			if walker == mov.flood_subject do stop, ok = pathfind_flood_stop(&mov.flood, c.destination)
 		case Move_To_Piece:
 			walker, target = c.piece, c.target
-			other, piece := piece_get(target), piece_get(walker)
-			if walker == mov.flood_subject && other != nil && piece != nil {
-				stop, ok = pathfind_flood_stop_within(&mov.flood, other.pos, piece.body + other.body + TOUCH_SLACK)
+			other := piece_get(target)
+			if walker == mov.flood_subject && other != nil && mov.flood.domain in other.contact.domains {
+				stop, ok = pathfind_flood_stop_within(&mov.flood, other.pos, other.contact.radius)
 			}
 		case End_Turn:
 			if turn_can_end() do turn_end()
@@ -321,17 +316,17 @@ world_load_test_pieces :: proc() {
 		{{292, 340}, .Envoy, "", .Alamanni, .Germanic, .Land, 50},
 	}
 	// What each test piece is, by its icon
-	// Each test piece's zone and body, by icon
+	// Each test piece's contact and body, by icon
 	@(static, rodata)
-	TEST_ZONES := [Icon]Zone {
+	TEST_CONTACTS := [Icon]Contact {
 		.Village    = {6, {.Land}},
 		.Town       = {7, {.Land}},
 		.City       = {8, {.Land}},
 		.Large_City = {9, {.Land}},
 		.Army       = {8, {.Land}},
 		.Fleet      = {8, {.Sea}},
-		.Priest     = {},
-		.Envoy      = {},
+		.Priest     = {4, {.Land}},
+		.Envoy      = {4, {.Land}},
 	}
 	@(static, rodata)
 	TEST_BODIES := [Icon]f32 {
@@ -371,7 +366,7 @@ world_load_test_pieces :: proc() {
 				title = TEST_TITLES[piece.icon],
 				movement_domain = piece.movement,
 				movement_per_turn = piece.per_turn,
-				zone = TEST_ZONES[piece.icon],
+				contact = TEST_CONTACTS[piece.icon],
 				body = TEST_BODIES[piece.icon],
 			},
 		)
@@ -396,15 +391,14 @@ Piece :: struct {
 	movement_budget:   f32,
 	// What its movement budget is recharged to at the start of each turn
 	movement_per_turn: f32,
-	// Where pieces of other factions stop: once within it they cannot walk out
-	zone:              Zone,
-	// Radius in cells; no other piece stops overlapping it, and enemies cannot pass it
+	// Where others touch it; for enemies, a zone they stop in once entered
+	contact:           Contact,
+	// Radius in cells; no other piece stops overlapping it
 	body:              f32,
 }
 
-// A disc of cells around a piece, radius cells across from its middle, and the movement it stops. A radius of 0 is no
-// zone.
-Zone :: struct {
+// Radius in cells, 0 for none, and the movement domains it reaches
+Contact :: struct {
 	radius:  f32,
 	domains: bit_set[Pathfind_Domain],
 }

@@ -96,6 +96,7 @@ TOKENS_MAX :: PIECE_MAX
 ARROWS_MAX :: 64
 ARROW_POINTS_MAX :: 4096
 AREAS_MAX :: 16
+CIRCLES_MAX :: 512
 CARDS_MAX :: 8
 // How many fields and actions a card holds
 CARD_FIELDS_MAX :: 16
@@ -114,6 +115,8 @@ Scene :: struct {
 	arrows:          [dynamic; ARROWS_MAX]span.Span,
 	arrow_points:    [dynamic; ARROW_POINTS_MAX][2]f32,
 	areas:           [AREAS_MAX]Area,
+	// The areas' circles; each area's are a run of them
+	circles:         [dynamic; CIRCLES_MAX]Circle,
 	cards:           [dynamic; CARDS_MAX]Card,
 }
 
@@ -152,10 +155,10 @@ Token_Flag :: enum u8 {
 	Controlled,
 }
 
-// A set of cells within the AREA_SIZE square whose top left cell is corner, drawn in its look. An area with no cells in
-// it shows nothing.
+// Cells within the AREA_SIZE square whose top left cell is corner, and circles, drawn in its look. Circles are drawn
+// exactly, over every area's cells, in slot order.
 Area :: struct {
-	// Changes whenever anything else does; 0 while empty
+	// Changes whenever its cells, corner or surface change; 0 while it has no cells
 	revision: u64,
 	look:     u8,
 	// It lies on water, rather than on land
@@ -163,6 +166,14 @@ Area :: struct {
 	corner:   [2]int,
 	// Per cell of the square, row by row, whether it is in the area
 	cells:    [AREA_SIZE * AREA_SIZE]bool,
+	// Its run of the scene's circles
+	circles:  span.Span,
+}
+
+// In cells
+Circle :: struct {
+	center: [2]f32,
+	radius: f32,
 }
 
 // Where a card sits beside the map

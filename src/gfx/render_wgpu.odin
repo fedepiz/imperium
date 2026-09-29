@@ -40,7 +40,8 @@ Terrain_Uniforms :: struct {
 	road_halo, arrow_width:                         f32,
 	road_fill, arrow_fill:                          [4]f32,
 	head_length, head_width:                        f32,
-	_:                                              [2]f32,
+	circle_count:                                   i32,
+	_:                                              f32,
 }
 #assert(size_of(Terrain_Uniforms) == 208)
 
@@ -98,6 +99,8 @@ Renderer :: struct {
 	highlight_cells:                     Texture,
 	highlight_field:                     Texture,
 	highlight_palette:                   Texture,
+	// The frame's highlight circles, one texel each: center, radius, area
+	highlight_circles:                   Texture,
 	// Per area, the revision the textures hold, and the bounds and surface its cells were taken up with
 	highlight_revisions:                 [RENDER_HIGHLIGHT_AREAS]u32,
 	highlight_bounds:                    [RENDER_HIGHLIGHT_AREAS]Render_Cell_Rect,
@@ -312,6 +315,7 @@ render_destroy :: proc(renderer: ^Renderer) {
 	texture_release(renderer.highlight_cells)
 	texture_release(renderer.highlight_field)
 	texture_release(renderer.highlight_palette)
+	texture_release(renderer.highlight_circles)
 	if renderer.terrain_group != nil do wgpu.BindGroupRelease(renderer.terrain_group)
 	if renderer.terrain_layout != nil do wgpu.BindGroupLayoutRelease(renderer.terrain_layout)
 	if renderer.terrain_uniforms != nil do wgpu.BufferRelease(renderer.terrain_uniforms)
@@ -456,7 +460,7 @@ line_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
 	)
 	renderer.line_field.view = wgpu.TextureCreateView(renderer.line_field.texture, nil)
 
-	group_entries := [10]wgpu.BindGroupEntry {
+	group_entries := [11]wgpu.BindGroupEntry {
 		{binding = 0, buffer = renderer.terrain_uniforms, size = size_of(Terrain_Uniforms)},
 		{binding = 1, textureView = renderer.terrain_cells.view},
 		{binding = 2, textureView = renderer.terrain_coast.view},
@@ -467,6 +471,7 @@ line_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
 		{binding = 7, textureView = renderer.highlight_cells.view},
 		{binding = 8, textureView = renderer.highlight_field.view},
 		{binding = 9, textureView = renderer.highlight_palette.view},
+		{binding = 10, textureView = renderer.highlight_circles.view},
 	}
 	renderer.terrain_group = wgpu.DeviceCreateBindGroup(
 		renderer.device,
@@ -547,11 +552,11 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		renderer.highlight_revisions[index] = area.revision
 		renderer.highlight_bounds[index] = area.bounds
 	}
-	// The looks, every frame, as they are small: color and border in row 0, thickness and inside in row 1
+	// The looks, every frame, as they are small: color and border in row 0, thickness, inside and surface in row 1
 	highlight_palette: [2][RENDER_HIGHLIGHT_AREAS][4]f32
 	for area, i in highlights.areas {
 		highlight_palette[0][i] = {area.color.r, area.color.g, area.color.b, area.border}
-		highlight_palette[1][i] = {area.thickness, area.inside, 0, 0}
+		highlight_palette[1][i] = {area.thickness, area.inside, f32(area.surface), 0}
 	}
 	wgpu.QueueWriteTexture(
 		renderer.queue,
@@ -561,6 +566,22 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		&{bytesPerRow = RENDER_HIGHLIGHT_AREAS * size_of([4]f32), rowsPerImage = 2},
 		&{RENDER_HIGHLIGHT_AREAS, 2, 1},
 	)
+
+	// The circles, every frame
+	if len(highlights.circles) > 0 {
+		circles: [RENDER_HIGHLIGHT_CIRCLES_MAX][4]f32
+		for circle, i in highlights.circles {
+			circles[i] = {circle.center.x, circle.center.y, circle.radius, f32(circle.area)}
+		}
+		wgpu.QueueWriteTexture(
+			renderer.queue,
+			&{texture = renderer.highlight_circles.texture, aspect = .All},
+			&circles,
+			uint(len(highlights.circles) * size_of([4]f32)),
+			&{bytesPerRow = RENDER_HIGHLIGHT_CIRCLES_MAX * size_of([4]f32), rowsPerImage = 1},
+			&{u32(len(highlights.circles)), 1, 1},
+		)
+	}
 
 	style := &terrain.style
 	uniforms := Terrain_Uniforms {
@@ -590,6 +611,7 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		paper_stain_amount = style.paper_stain_amount,
 		sea_depth_from     = style.sea_depth_from,
 		sea_depth_full     = style.sea_depth_full,
+		circle_count       = i32(len(highlights.circles)),
 	}
 	wgpu.QueueWriteBuffer(
 		renderer.queue,
@@ -796,6 +818,9 @@ HIGHLIGHT_MARGIN :: HIGHLIGHT_BLUR_REACH + 2
 // The farthest in or out an area's field goes, in cells
 @(private = "file")
 HIGHLIGHT_FIELD_MAX :: 64
+// The least an area's field is on its own cells after blurring, so each of its cells stays covered
+@(private = "file")
+HIGHLIGHT_OWN_MIN :: 0.1
 
 // Takes up a highlight area's cells, around where they were and where they are, for its surface, and for the surface it
 // was taken up for before if that was the other. Returns the rectangle of the terrain gone over.
@@ -816,9 +841,10 @@ highlight_take_up :: proc(renderer: ^Renderer, terrain: ^Render_Terrain, area: u
 // Takes up a highlight area over a rectangle for the areas of a surface, or takes it away from them unless present. The
 // area's field is its signed distance, in cells, from the middles of its cells, less half a cell, positive inside; cells
 // of the other surface are neither in it nor out of it, and are as far in as they are nearer its cells than the cells
-// out of it, halved. The field is then blurred, so its edge runs smooth across the steps of the cells. Each cell of the
-// area holds the area's field; each other cell holds the field of whichever area of the surface it is least outside,
-// unless it is in another area of the surface. Cells off the terrain count as out.
+// out of it, halved. The field is then blurred, so its edge runs smooth across the steps of the cells, and kept at
+// least HIGHLIGHT_OWN_MIN on the area's own cells. Each cell of the area holds the area's field; each other cell holds
+// the field of whichever area of the surface it is least outside, unless it is in another area of the surface. Cells
+// off the terrain count as out.
 @(private = "file")
 highlight_take_up_on :: proc(
 	renderer: ^Renderer,
@@ -888,6 +914,7 @@ highlight_take_up_on :: proc(
 	for y in clipped.min.y ..< clipped.max.y do for x in clipped.min.x ..< clipped.max.x {
 		index := int(y) * RENDER_TERRAIN_WIDTH + int(x)
 		value := field[int(y - origin.y) * size.x + int(x - origin.x)]
+		if in_area(terrain, area, surface, {x, y}) do value = max(value, HIGHLIGHT_OWN_MIN)
 		// Another area's cell holds that area's field, which its own take up writes
 		member := highlights.cells[index]
 		if member != 0 && member != area && highlights.areas[member].surface == surface {
@@ -1155,6 +1182,11 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 		.RGBA32Float,
 		{RENDER_HIGHLIGHT_AREAS, 2},
 	)
+	renderer.highlight_circles = texture_create(
+		renderer,
+		.RGBA32Float,
+		{RENDER_HIGHLIGHT_CIRCLES_MAX, 1},
+	)
 	renderer.terrain_uniforms = wgpu.DeviceCreateBuffer(
 		device,
 		&{usage = {.Uniform, .CopyDst}, size = size_of(Terrain_Uniforms)},
@@ -1170,7 +1202,7 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 			texture = {sampleType = sample, viewDimension = ._2D},
 		}
 	}
-	layout_entries := [10]wgpu.BindGroupLayoutEntry {
+	layout_entries := [11]wgpu.BindGroupLayoutEntry {
 		{
 			binding = 0,
 			visibility = {.Fragment},
@@ -1185,6 +1217,7 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 		texture_entry(7, .Float),
 		texture_entry(8, .Float),
 		texture_entry(9, .UnfilterableFloat),
+		texture_entry(10, .UnfilterableFloat),
 	}
 	renderer.terrain_layout = wgpu.DeviceCreateBindGroupLayout(
 		device,
@@ -1434,6 +1467,7 @@ struct Terrain {
     arrow_fill: vec4f,
     head_length: f32,
     head_width: f32,
+    circle_count: i32,
 }
 `
 
@@ -1521,7 +1555,7 @@ fn fs_main(in: Varyings) -> @location(0) vec4f {
 // lines is the line field: for each pixel of the view, the distance to the nearest line of each kind, in cells, in a
 // channel for each kind.
 // cover_cells and cover_palette are the cover layer: see layer_at.
-// highlight_cells, highlight_field and highlight_palette are the highlights: see highlights_over.
+// highlight_cells, highlight_field, highlight_palette and highlight_circles are the highlights: see highlights_over.
 @(private = "file")
 MAP_SOURCE ::
 	TERRAIN_UNIFORMS_SOURCE +
@@ -1536,6 +1570,7 @@ MAP_SOURCE ::
 @group(0) @binding(7) var highlight_cells: texture_2d<f32>;
 @group(0) @binding(8) var highlight_field: texture_2d<f32>;
 @group(0) @binding(9) var highlight_palette: texture_2d<f32>;
+@group(0) @binding(10) var highlight_circles: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4f {
@@ -1673,8 +1708,10 @@ fn highlight_field_at(cell: vec2i, area: i32, surface: i32) -> f32 {
 // area's is never past the coast, nor a water area's short of it. Each area is washed over as far as its depth reaches,
 // fading in over a device pixel across its edge: the map multiplied toward its color, as strongly as its border at its
 // edge, easing to its inside at its thickness in from it. Of any two areas, one's depth is never more than the other's
-// is short of the edge, so where they meet one fades in as the other fades out, and they never overlap.
-// highlight_palette holds each area's color and border in row 0, and its thickness and inside in row 1.
+// is short of the edge, so where they meet one fades in as the other fades out, and they never overlap. Then each area's
+// circles are washed over that, as one shape: see circles_over. highlight_palette holds each area's color and border in
+// row 0, and its thickness, inside and surface in row 1; highlight_circles holds circle_count circles, each its center,
+// radius and area.
 fn highlights_over(col: vec3f, p: vec2f, d: f32, px: f32) -> vec3f {
     let q = p - 0.5;
     let base = vec2i(floor(q));
@@ -1710,7 +1747,34 @@ fn highlights_over(col: vec3f, p: vec2f, d: f32, px: f32) -> vec3f {
         tint /= covered;
         covered = 1.0;
     }
-    return col * (tint + (1.0 - covered));
+
+    // Each area's circles, as one shape, over the areas' cells: its depth is the farthest in of its circles
+    var shown = col * (tint + (1.0 - covered));
+    var area = -1;
+    var depth = -1e9;
+    for (var i = 0; i <= u.circle_count; i++) {
+        var circle = vec4f(0.0, 0.0, 0.0, -1.0);
+        if (i < u.circle_count) { circle = textureLoad(highlight_circles, vec2i(i, 0), 0); }
+        let next = i32(round(circle.w));
+        if (next != area && area >= 0) {
+            shown = circles_over(shown, col, area, depth, d, px);
+            depth = -1e9;
+        }
+        area = next;
+        if (area >= 0) { depth = max(depth, circle.z - distance(p, circle.xy)); }
+    }
+    return shown;
+}
+
+// An area's circles over shown, depth being how far in p is from their edge, in cells: washed over col as far as the
+// depth reaches, stopping at the coast as the area's cells do, and replacing what is under them.
+fn circles_over(shown: vec3f, col: vec3f, area: i32, field: f32, d: f32, px: f32) -> vec3f {
+    let look = textureLoad(highlight_palette, vec2i(area, 0), 0);
+    let fade = textureLoad(highlight_palette, vec2i(area, 1), 0);
+    let depth = min(field, select(-d, d, fade.z < 0.5));
+    let coverage = smoothstep(-0.5, 0.5, depth * px);
+    let strength = mix(look.a, fade.y, smoothstep(0.0, max(fade.x, 1e-3), depth));
+    return mix(shown, col * mix(vec3f(1.0), look.rgb, strength), coverage);
 }
 
 fn debug_color(cell: vec4f, p: vec2f) -> vec3f {

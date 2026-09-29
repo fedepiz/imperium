@@ -174,13 +174,26 @@ Render_Highlight_Area :: struct {
 	inside:    f32,
 }
 
-// Areas of cells highlighted over the map, each in its own look. A cell is in at most one area. Each area is drawn with
-// a smooth edge that follows its cells, and is the coast along the coast; where two areas meet they share one edge, and
-// neither draws past it. Cells are indexed y * RENDER_TERRAIN_WIDTH + x.
+// Areas highlighted over the map, each in its own look, made of cells and of circles. A cell is in at most one area.
+// Each area's cells are drawn with a smooth edge that follows them, and is the coast along the coast; where two areas
+// meet they share one edge, and neither draws past it. Circles are drawn exactly, over all areas' cells, each area's
+// as one shape, in the order of the circles; they too stop at the coast. Cells are indexed y * RENDER_TERRAIN_WIDTH + x.
 Render_Highlights :: struct {
 	// Which area each cell is in, 0 for none
-	cells: [RENDER_TERRAIN_CELLS]u8,
-	areas: [RENDER_HIGHLIGHT_AREAS]Render_Highlight_Area,
+	cells:   [RENDER_TERRAIN_CELLS]u8,
+	areas:   [RENDER_HIGHLIGHT_AREAS]Render_Highlight_Area,
+	// Refilled every frame; an area's circles are next to each other
+	circles: [dynamic; RENDER_HIGHLIGHT_CIRCLES_MAX]Render_Highlight_Circle,
+}
+
+// The most circles the highlights draw in a frame
+RENDER_HIGHLIGHT_CIRCLES_MAX :: 512
+
+// A circle of an area, in cells
+Render_Highlight_Circle :: struct {
+	center: [2]f32,
+	radius: f32,
+	area:   u8,
 }
 
 // Takes every cell out of a highlight area

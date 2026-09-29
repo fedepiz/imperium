@@ -214,22 +214,30 @@ AREA_LOOKS := [256]gfx.Render_Highlight_Area {
 	4 = {color = {0.850, 0.700, 0.200, 1}, border = 0.6, thickness = 2, inside = 0.2},
 }
 
-// Highlights the scene's areas, each slot as the highlight area after it, in its look. Each is taken up again only
-// when its revision is not the one last taken up.
+// Highlights the scene's areas, each slot as the highlight area after it: its look and circles every tick, its cells
+// taken up again only when its revision is not the one last taken up
 @(private = "file")
 map_areas :: proc(scene: ^sim.Scene) {
 	#assert(sim.AREAS_MAX < gfx.RENDER_HIGHLIGHT_AREAS)
+	#assert(sim.CIRCLES_MAX <= gfx.RENDER_HIGHLIGHT_CIRCLES_MAX)
 	highlights := &MAP_DRAW.render_terrain.highlights
+	clear(&highlights.circles)
 	for &area, slot in scene.areas {
-		if MAP_DRAW.area_revisions[slot] == area.revision do continue
-		MAP_DRAW.area_revisions[slot] = area.revision
 		highlight := u8(slot + 1)
-		gfx.render_highlight_clear(highlights, highlight)
 		look := AREA_LOOKS[area.look]
 		drawn := &highlights.areas[highlight]
 		drawn.color, drawn.border, drawn.thickness, drawn.inside =
 			look.color, look.border, look.thickness, look.inside
 		drawn.surface = area.on_water ? .Water : .Land
+		for circle in scene.circles[area.circles.begin:][:area.circles.len] {
+			append(
+				&highlights.circles,
+				gfx.Render_Highlight_Circle{circle.center, circle.radius, highlight},
+			)
+		}
+		if MAP_DRAW.area_revisions[slot] == area.revision do continue
+		MAP_DRAW.area_revisions[slot] = area.revision
+		gfx.render_highlight_clear(highlights, highlight)
 		for inside, i in area.cells {
 			if !inside do continue
 			cell := area.corner + {i % sim.AREA_SIZE, i / sim.AREA_SIZE}
@@ -494,7 +502,12 @@ way_next :: proc(
 // Walks a way from cell through next until it reaches an end, a fork, or a cell already walked, through the middle of
 // every cell on the way.
 @(private = "file")
-way_follow :: proc(terrain: []sim.Ground, kind: sim.Way_Kind, visited: []bool, cell, next: [2]int) {
+way_follow :: proc(
+	terrain: []sim.Ground,
+	kind: sim.Way_Kind,
+	visited: []bool,
+	cell, next: [2]int,
+) {
 	middle :: proc(cell: [2]int) -> [2]f32 {return {f32(cell.x), f32(cell.y)} + 0.5}
 	way_shore(terrain, kind, cell)
 	polylines_add(middle(cell))

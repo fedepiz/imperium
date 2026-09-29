@@ -2,20 +2,19 @@
 package sim
 
 import "core:fmt"
-import "core:hash"
 import "core:math"
 
 import "../span"
 
-// Area slots, and looks for game's area palette
+// Area slots, in drawing order, and looks for game's area palette
 REACH_AREA :: 0
-ZONE_AREA :: 1
-CONTACT_AREA :: 2
+BODY_AREA :: 1
+ZONE_AREA :: 2
 REACH_LOOK :: 1
 ZONE_LOOK :: 2
 // Reach of a piece the player does not control
 OTHER_REACH_LOOK :: 3
-CONTACT_LOOK :: 4
+BODY_LOOK :: 4
 
 world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	mov := &WORLD.movement
@@ -62,13 +61,29 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 		append(&out.arrows, span.from_range(begin, len(out.arrow_points)))
 	}
 
-	// Reach and zones of the focus, unless it is walking
-	shown := mov.flood_subject != mov.subject
-	reach_look: u8 = OTHER_REACH_LOOK
-	if piece := piece_get(focus); piece != nil && piece_controlled(piece^) do reach_look = REACH_LOOK
-	area_from_flood(&out.areas[REACH_AREA], mov, shown, reach_look, .Reach)
-	area_from_flood(&out.areas[ZONE_AREA], mov, shown, ZONE_LOOK, .Zone)
-	area_from_flood(&out.areas[CONTACT_AREA], mov, shown, CONTACT_LOOK, .Contact)
+	// Where the focus can walk, unless it is walking: the reach as cells, rebuilt when the flood changes, and the
+	// bodies and zones as circles over it
+	flood := &mov.flood
+	shown := mov.flood_subject != {} && mov.flood_subject != mov.subject
+	reach := &out.areas[REACH_AREA]
+	if key := shown ? mov.flood_key : 0; reach.revision != key {
+		reach.revision, reach.cells = key, {}
+		reach.on_water, reach.corner = flood.domain != .Land, flood.corner
+		if shown do for cost, i in flood.cost do reach.cells[i] = cost != math.INF_F32
+	}
+	reach.look = OTHER_REACH_LOOK
+	if piece := piece_get(focus); piece != nil && piece_controlled(piece^) do reach.look = REACH_LOOK
+	clear(&out.circles)
+	for discs, slot in ([2][]Disc{mov.bodies[:], mov.zones[:]}) {
+		area := &out.areas[BODY_AREA + slot]
+		area.look = slot == 0 ? BODY_LOOK : ZONE_LOOK
+		area.on_water = flood.domain != .Land
+		begin := len(out.circles)
+		for disc in discs {
+			if shown && len(out.circles) < CIRCLES_MAX do append(&out.circles, Circle{disc.center, disc.radius})
+		}
+		area.circles = span.from_range(begin, len(out.circles))
+	}
 
 	// The turn being played, and the faction playing it, with ending its part; and, when there is a focus, its picture
 	// and name, or what it is when it has none, over what it is
@@ -96,37 +111,6 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 			append(&card.fields, Field{"Movement", budget})
 		}
 		append(&out.cards, card)
-	}
-}
-
-// Which of the flood's cells an area shows: stoppable ones outside zones, zones, or friendly bodies outside zones
-@(private = "file")
-Flood_Cells :: enum {
-	Reach,
-	Zone,
-	Contact,
-}
-
-// Fills the area with the flood's cells, in the look. Empty unless shown; rebuilt only when its key changes.
-@(private = "file")
-area_from_flood :: proc(area: ^Area, mov: ^Movement, shown: bool, look: u8, cells: Flood_Cells) {
-	key: u64
-	if shown && mov.flood_subject != {} do key = hash.fnv64a({look}, mov.flood_key)
-	if area.revision == key do return
-	area^ = {revision = key, look = look}
-	if key == 0 do return
-	flood := &mov.flood
-	area.on_water = flood.domain != .Land
-	area.corner = flood.corner
-	for cost, i in flood.cost {
-		switch cells {
-		case .Reach:
-			area.cells[i] = cost != math.INF_F32 && !flood.zone[i] && !flood.no_stop[i]
-		case .Zone:
-			area.cells[i] = flood.zone[i]
-		case .Contact:
-			area.cells[i] = flood.no_stop[i] && !flood.zone[i]
-		}
 	}
 }
 
