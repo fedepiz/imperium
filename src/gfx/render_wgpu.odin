@@ -93,16 +93,18 @@ Renderer :: struct {
 	terrain_uploaded, cover_uploaded:    bool,
 	// The coast converted to half floats for upload, as its texture holds it
 	coast_half:                          [RENDER_TERRAIN_CELLS]f16,
-	// The highlights: per cell, the area it is in and the area whose field it holds, and that field; and each area's look
+	// The highlights: per cell and surface, the area of that surface whose field the cell holds, and that field; and each
+	// area's look
 	highlight_cells:                     Texture,
 	highlight_field:                     Texture,
 	highlight_palette:                   Texture,
-	// Per area, the revision the textures hold, and the bounds its cells were taken up within
+	// Per area, the revision the textures hold, and the bounds and surface its cells were taken up with
 	highlight_revisions:                 [RENDER_HIGHLIGHT_AREAS]u32,
 	highlight_bounds:                    [RENDER_HIGHLIGHT_AREAS]Render_Cell_Rect,
+	highlight_surfaces:                  [RENDER_HIGHLIGHT_AREAS]Render_Highlight_Surface,
 	// What the highlight textures hold, kept here to be uploaded a rectangle at a time
-	highlight_owners:                    [RENDER_TERRAIN_CELLS][2]u8,
-	highlight_fields:                    [RENDER_TERRAIN_CELLS]f16,
+	highlight_owners:                    [RENDER_TERRAIN_CELLS][Render_Highlight_Surface]u8,
+	highlight_fields:                    [RENDER_TERRAIN_CELLS][Render_Highlight_Surface]f16,
 	// The lines pass: a pipeline for each kind of line, drawing into its own channel of the field, and each kind's
 	// segments, with the revisions they hold once anything has been uploaded
 	line_pipelines:                      [Render_Line_Kind]wgpu.RenderPipeline,
@@ -539,9 +541,9 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	highlights := &terrain.highlights
 	for &area, index in highlights.areas {
 		if renderer.highlight_revisions[index] == area.revision do continue
-		rect := highlight_take_up(renderer, highlights, u8(index))
+		rect := highlight_take_up(renderer, terrain, u8(index))
 		texture_write_rect(renderer, renderer.highlight_cells.texture, raw_data(renderer.highlight_owners[:]), 2, rect)
-		texture_write_rect(renderer, renderer.highlight_field.texture, raw_data(renderer.highlight_fields[:]), 2, rect)
+		texture_write_rect(renderer, renderer.highlight_field.texture, raw_data(renderer.highlight_fields[:]), 4, rect)
 		renderer.highlight_revisions[index] = area.revision
 		renderer.highlight_bounds[index] = area.bounds
 	}
@@ -791,68 +793,113 @@ HIGHLIGHT_BLUR_REACH :: 4
 // How far around an area's cells its field is taken up, in cells: past the blur's reach, and the cell beyond
 @(private = "file")
 HIGHLIGHT_MARGIN :: HIGHLIGHT_BLUR_REACH + 2
-
-// Takes up a highlight area's cells, around where they were and where they are, returning the rectangle of the terrain
-// gone over. The area's field is its signed distance, in cells, from the middles of its cells, less half a cell:
-// positive inside, negative outside; then blurred, so its edge runs smooth across the steps of the cells. Each cell of
-// the area holds the area's field; each cell in no area holds the field of whichever area it is least outside. Cells off
-// the terrain count as outside.
+// The farthest in or out an area's field goes, in cells
 @(private = "file")
-highlight_take_up :: proc(
-	renderer: ^Renderer,
-	highlights: ^Render_Highlights,
-	area: u8,
-) -> Render_Cell_Rect {
-	bounds := highlights.areas[area].bounds
-	around := cell_rect_union(renderer.highlight_bounds[area], bounds)
+HIGHLIGHT_FIELD_MAX :: 64
+
+// Takes up a highlight area's cells, around where they were and where they are, for its surface, and for the surface it
+// was taken up for before if that was the other. Returns the rectangle of the terrain gone over.
+@(private = "file")
+highlight_take_up :: proc(renderer: ^Renderer, terrain: ^Render_Terrain, area: u8) -> Render_Cell_Rect {
+	look := &terrain.highlights.areas[area]
+	around := cell_rect_union(renderer.highlight_bounds[area], look.bounds)
 	if area == 0 || cell_rect_empty(around) do return {}
 	around = {around.min - HIGHLIGHT_MARGIN, around.max + HIGHLIGHT_MARGIN}
+	if before := renderer.highlight_surfaces[area]; before != look.surface {
+		highlight_take_up_on(renderer, terrain, area, before, around, false)
+	}
+	highlight_take_up_on(renderer, terrain, area, look.surface, around, true)
+	renderer.highlight_surfaces[area] = look.surface
+	return cell_rect_clip(around)
+}
+
+// Takes up a highlight area over a rectangle for the areas of a surface, or takes it away from them unless present. The
+// area's field is its signed distance, in cells, from the middles of its cells, less half a cell, positive inside; cells
+// of the other surface are neither in it nor out of it, and are as far in as they are nearer its cells than the cells
+// out of it, halved. The field is then blurred, so its edge runs smooth across the steps of the cells. Each cell of the
+// area holds the area's field; each other cell holds the field of whichever area of the surface it is least outside,
+// unless it is in another area of the surface. Cells off the terrain count as out.
+@(private = "file")
+highlight_take_up_on :: proc(
+	renderer: ^Renderer,
+	terrain: ^Render_Terrain,
+	area: u8,
+	surface: Render_Highlight_Surface,
+	around: Render_Cell_Rect,
+	present: bool,
+) {
+	highlights := &terrain.highlights
 	clipped := cell_rect_clip(around)
-	origin := around.min
-	size := [2]int{int(around.max.x - around.min.x), int(around.max.y - around.min.y)}
-	in_area :: proc(highlights: ^Render_Highlights, area: u8, cell: [2]i32) -> bool {
-		if cell.x < 0 || cell.y < 0 || cell.x >= RENDER_TERRAIN_WIDTH || cell.y >= RENDER_TERRAIN_HEIGHT do return false
-		return highlights.cells[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)] == area
+	if !present || cell_rect_empty(highlights.areas[area].bounds) {
+		for y in clipped.min.y ..< clipped.max.y do for x in clipped.min.x ..< clipped.max.x {
+			index := int(y) * RENDER_TERRAIN_WIDTH + int(x)
+			if renderer.highlight_owners[index][surface] == area {
+				renderer.highlight_owners[index][surface] = 0
+				renderer.highlight_fields[index][surface] = 0
+			}
+		}
+		return
 	}
 
-	field := make([]f32, size.x * size.y, context.temp_allocator)
-	if cell_rect_empty(bounds) {
-		// Nothing is in it: it is far outside everywhere
-		for &value in field do value = -HIGHLIGHT_MARGIN
-	} else {
-		// Squared distances from each cell of the area to the nearest outside it, and from each outside to the nearest
-		// in it, exactly
-		FAR :: 1e12
-		to_outside := make([]f64, size.x * size.y, context.temp_allocator)
-		to_inside := make([]f64, size.x * size.y, context.temp_allocator)
-		for y in 0 ..< size.y do for x in 0 ..< size.x {
-			inside := in_area(highlights, area, origin + {i32(x), i32(y)})
-			to_outside[y * size.x + x] = inside ? FAR : 0
-			to_inside[y * size.x + x] = inside ? 0 : FAR
-		}
-		distance_transform_2d(to_outside, size)
-		distance_transform_2d(to_inside, size)
-		for &value, i in field {
-			inside := to_inside[i] == 0
-			value = inside ? f32(math.sqrt(to_outside[i])) - 0.5 : 0.5 - f32(math.sqrt(to_inside[i]))
-		}
-		blur(field, size)
+	// The cell is on the terrain and of the surface; land is surface 0 in the terrain's cells
+	on_surface :: proc(terrain: ^Render_Terrain, surface: Render_Highlight_Surface, cell: [2]i32) -> bool {
+		if cell.x < 0 || cell.y < 0 || cell.x >= RENDER_TERRAIN_WIDTH || cell.y >= RENDER_TERRAIN_HEIGHT do return false
+		land := terrain.cells[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)].r == 0
+		return land == (surface == .Land)
 	}
+	on_terrain :: proc(cell: [2]i32) -> bool {
+		return cell.x >= 0 && cell.y >= 0 && cell.x < RENDER_TERRAIN_WIDTH && cell.y < RENDER_TERRAIN_HEIGHT
+	}
+	in_area :: proc(terrain: ^Render_Terrain, area: u8, surface: Render_Highlight_Surface, cell: [2]i32) -> bool {
+		if !on_surface(terrain, surface, cell) do return false
+		return terrain.highlights.cells[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)] == area
+	}
+
+	// Squared distances from each cell to the nearest out of the area, and to the nearest in it, exactly
+	FAR :: 1e12
+	origin := around.min
+	size := [2]int{int(around.max.x - around.min.x), int(around.max.y - around.min.y)}
+	to_out := make([]f64, size.x * size.y, context.temp_allocator)
+	to_in := make([]f64, size.x * size.y, context.temp_allocator)
+	for y in 0 ..< size.y do for x in 0 ..< size.x {
+		cell := origin + {i32(x), i32(y)}
+		inside := in_area(terrain, area, surface, cell)
+		out := !inside && (on_surface(terrain, surface, cell) || !on_terrain(cell))
+		to_out[y * size.x + x] = out ? 0 : FAR
+		to_in[y * size.x + x] = inside ? 0 : FAR
+	}
+	distance_transform_2d(to_out, size)
+	distance_transform_2d(to_in, size)
+	field := make([]f32, size.x * size.y, context.temp_allocator)
+	for &value, i in field {
+		out_by, in_by := f32(math.sqrt(to_out[i])), f32(math.sqrt(to_in[i]))
+		switch {
+		case in_by == 0:
+			value = out_by - 0.5
+		case out_by == 0:
+			value = 0.5 - in_by
+		case:
+			value = (out_by - in_by) / 2
+		}
+		value = clamp(value, -HIGHLIGHT_FIELD_MAX, HIGHLIGHT_FIELD_MAX)
+	}
+	blur(field, size)
 
 	for y in clipped.min.y ..< clipped.max.y do for x in clipped.min.x ..< clipped.max.x {
 		index := int(y) * RENDER_TERRAIN_WIDTH + int(x)
 		value := field[int(y - origin.y) * size.x + int(x - origin.x)]
-		owners := &renderer.highlight_owners[index]
-		member := highlights.cells[index]
-		owners[0] = member
 		// Another area's cell holds that area's field, which its own take up writes
-		if member != 0 && member != area do continue
-		if member == area || owners[1] == area || owners[1] == 0 || value > f32(renderer.highlight_fields[index]) {
-			owners[1] = area
-			renderer.highlight_fields[index] = f16(value)
+		member := highlights.cells[index]
+		if member != 0 && member != area && highlights.areas[member].surface == surface {
+			if on_surface(terrain, surface, {x, y}) do continue
+		}
+		owner := &renderer.highlight_owners[index][surface]
+		held := &renderer.highlight_fields[index][surface]
+		if member == area || owner^ == area || owner^ == 0 || value > f32(held^) {
+			owner^ = area
+			held^ = f16(value)
 		}
 	}
-	return clipped
 }
 
 // Replaces squared distances over a grid of a size, 0 at the cells measured to, with the squared distance from each
@@ -1100,7 +1147,7 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 	)
 	renderer.highlight_field = texture_create(
 		renderer,
-		.R16Float,
+		.RG16Float,
 		{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
 	)
 	renderer.highlight_palette = texture_create(
@@ -1474,7 +1521,7 @@ fn fs_main(in: Varyings) -> @location(0) vec4f {
 // lines is the line field: for each pixel of the view, the distance to the nearest line of each kind, in cells, in a
 // channel for each kind.
 // cover_cells and cover_palette are the cover layer: see layer_at.
-// highlight_cells, highlight_field and highlight_palette are the highlights: see highlight_at.
+// highlight_cells, highlight_field and highlight_palette are the highlights: see highlights_over.
 @(private = "file")
 MAP_SOURCE ::
 	TERRAIN_UNIFORMS_SOURCE +
@@ -1609,42 +1656,61 @@ fn layer_at(layer_cells: texture_2d<f32>, palette: texture_2d<f32>, p: vec2f, ji
     return look;
 }
 
-// How far a cell's middle is in from the edge of a highlight area, in cells, negative outside it. highlight_cells holds,
-// per cell, the area it is in, 0 for none, and the area whose field it holds; highlight_field holds that field. A cell of
-// another area is as far outside this one as it is inside its own; a cell in none is at least as far outside this one as
-// it is outside the area whose field it holds.
-fn highlight_field_at(cell: vec2i, area: i32) -> f32 {
+// How far a cell's middle is in from the edge of a highlight area of a surface (0 land, 1 water), in cells, negative
+// outside it. highlight_cells holds, per cell and surface, the area of that surface whose field the cell holds, 0 for
+// none; highlight_field holds that field. A cell is at least as far outside any other area as it is from the edge of
+// the one whose field it holds.
+fn highlight_field_at(cell: vec2i, area: i32, surface: i32) -> f32 {
     let at = clamp(cell, vec2i(0), vec2i(u.grid) - 1);
-    let owners = vec2i(textureLoad(highlight_cells, at, 0).rg * 255.0 + 0.5);
-    let value = textureLoad(highlight_field, at, 0).r;
-    if (owners.y == area) { return value; }
-    if (owners.x != 0) { return -value; }
+    let owner = i32(textureLoad(highlight_cells, at, 0)[surface] * 255.0 + 0.5);
+    let value = textureLoad(highlight_field, at, 0)[surface];
+    if (owner == area) { return value; }
     return -abs(value);
 }
 
-// The highlight area p is in, 0 for none, and how far in from its edge, in cells: from the fields of the areas the four
-// cells around p hold, blended. Of any two areas, at most one is ever positive at p, so areas never overlap; where two
-// areas meet, one is as far in as the other is out, so they share one edge. highlight_palette holds each area's color
-// and border in row 0, and its thickness and inside in row 1.
-fn highlight_at(p: vec2f) -> vec2f {
+// The highlights over col at p, d being the signed distance to the coast there, positive on land, and px device pixels
+// per cell. Each area's depth is its field, from the fields of the areas the four cells around p hold, blended; a land
+// area's is never past the coast, nor a water area's short of it. Each area is washed over as far as its depth reaches,
+// fading in over a device pixel across its edge: the map multiplied toward its color, as strongly as its border at its
+// edge, easing to its inside at its thickness in from it. Of any two areas, one's depth is never more than the other's
+// is short of the edge, so where they meet one fades in as the other fades out, and they never overlap.
+// highlight_palette holds each area's color and border in row 0, and its thickness and inside in row 1.
+fn highlights_over(col: vec3f, p: vec2f, d: f32, px: f32) -> vec3f {
     let q = p - 0.5;
     let base = vec2i(floor(q));
     let f = q - floor(q);
-    var seen = vec4i(0);
-    for (var k = 0; k < 4; k++) {
-        let at = clamp(base + vec2i(k & 1, k >> 1u), vec2i(0), vec2i(u.grid) - 1);
-        let area = i32(textureLoad(highlight_cells, at, 0).g * 255.0 + 0.5);
-        if (area == 0 || any(seen == vec4i(area))) { continue; }
-        seen[k] = area;
-        var field = 0.0;
-        for (var j = 0; j < 4; j++) {
-            let corner = vec2i(j & 1, j >> 1u);
-            let weight = mix(1.0 - f.x, f.x, f32(corner.x)) * mix(1.0 - f.y, f.y, f32(corner.y));
-            field += weight * highlight_field_at(base + corner, area);
+    var tint = vec3f(0.0);
+    var covered = 0.0;
+    for (var surface = 0; surface < 2; surface++) {
+        let shore = select(-d, d, surface == 0);
+        var seen = vec4i(0);
+        for (var k = 0; k < 4; k++) {
+            let at = clamp(base + vec2i(k & 1, k >> 1u), vec2i(0), vec2i(u.grid) - 1);
+            let area = i32(textureLoad(highlight_cells, at, 0)[surface] * 255.0 + 0.5);
+            if (area == 0 || any(seen == vec4i(area))) { continue; }
+            seen[k] = area;
+            var field = 0.0;
+            for (var j = 0; j < 4; j++) {
+                let corner = vec2i(j & 1, j >> 1u);
+                let weight = mix(1.0 - f.x, f.x, f32(corner.x)) * mix(1.0 - f.y, f.y, f32(corner.y));
+                field += weight * highlight_field_at(base + corner, area, surface);
+            }
+            let depth = min(field, shore);
+            let coverage = smoothstep(-0.5, 0.5, depth * px);
+            if (coverage <= 0.0) { continue; }
+            let look = textureLoad(highlight_palette, vec2i(area, 0), 0);
+            let fade = textureLoad(highlight_palette, vec2i(area, 1), 0);
+            let strength = mix(look.a, fade.y, smoothstep(0.0, max(fade.x, 1e-3), depth));
+            tint += coverage * mix(vec3f(1.0), look.rgb, strength);
+            covered += coverage;
         }
-        if (field > 0.0) { return vec2f(f32(area), field); }
     }
-    return vec2f(0.0);
+    // Where three areas meet, their fades can add up to more than the whole
+    if (covered > 1.0) {
+        tint /= covered;
+        covered = 1.0;
+    }
+    return col * (tint + (1.0 - covered));
 }
 
 fn debug_color(cell: vec4f, p: vec2f) -> vec3f {
@@ -1731,18 +1797,8 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         let width = u.coast_width * 0.5 * u.pixel_density * (0.8 + 0.4 * value_noise(p * 0.8));
         col = mix(col, u.ink.rgb, line_aa(abs(d) * px, width));
 
-        // Highlights: the map multiplied toward an area's color, as strongly as its border at its edge, easing to its
-        // inside at its thickness in from it. The edge wanders as the coast does, and fades in over a device pixel, inside
-        // the area.
-        let highlight = highlight_at(wander(p, u.wobble * 1.6, 5.7));
-        let area = i32(highlight.x + 0.5);
-        if (area > 0) {
-            let look = textureLoad(highlight_palette, vec2i(area, 0), 0);
-            let fade = textureLoad(highlight_palette, vec2i(area, 1), 0);
-            let depth = highlight.y;
-            let strength = mix(look.a, fade.y, smoothstep(0.0, max(fade.x, 1e-3), depth)) * clamp(depth * px, 0.0, 1.0);
-            col *= mix(vec3f(1.0), look.rgb, strength);
-        }
+        // Highlights, their edges wandering as the coast does
+        col = highlights_over(col, wander(p, u.wobble * 1.6, 5.7), d, px);
 
         // Arrows, over everything else on land and sea: their fill between two ink edges, the same width however far
         // the map zooms, and their heads as wide again as the triangles they are drawn from

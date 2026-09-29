@@ -224,6 +224,7 @@ map_movement_area :: proc(flood: ^Pathfind_Flood, revision: u32) {
 	highlights := &MAP_DRAW.render_terrain.highlights
 	gfx.render_highlight_clear(highlights, MOVEMENT_AREA)
 	if flood == nil do return
+	highlights.areas[MOVEMENT_AREA].surface = flood.domain == .Land ? .Land : .Water
 	for cost, i in flood.cost {
 		if cost == math.INF_F32 do continue
 		cell := flood.corner + {i % PATHFIND_FLOOD_SIZE, i / PATHFIND_FLOOD_SIZE}

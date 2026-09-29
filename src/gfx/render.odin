@@ -154,13 +154,20 @@ Render_Cell_Rect :: struct {
 	min, max: [2]i32,
 }
 
+// What a highlight area lies on: its edge along the coast is the coast, and its cells of the other surface are not drawn
+Render_Highlight_Surface :: enum u8 {
+	Land,
+	Water,
+}
+
 // How an area is highlighted: the map is multiplied toward color, as strongly as border at the area's edge, easing to
 // inside at thickness cells in from it and beyond. Only the color's RGB is used.
 Render_Highlight_Area :: struct {
-	// Bumped whenever which cells are in the area changes; the renderer takes them up again only then.
+	// Bumped whenever which cells are in the area, or its surface, changes; the renderer takes them up again only then.
 	revision:  u32,
 	// Every cell in the area is within these
 	bounds:    Render_Cell_Rect,
+	surface:   Render_Highlight_Surface,
 	color:     [4]f32,
 	border:    f32,
 	thickness: f32,
@@ -168,7 +175,7 @@ Render_Highlight_Area :: struct {
 }
 
 // Areas of cells highlighted over the map, each in its own look. A cell is in at most one area. Each area is drawn with
-// a smooth edge that follows its cells as the coast follows the land; where two areas meet they share one edge, and
+// a smooth edge that follows its cells, and is the coast along the coast; where two areas meet they share one edge, and
 // neither draws past it. Cells are indexed y * RENDER_TERRAIN_WIDTH + x.
 Render_Highlights :: struct {
 	// Which area each cell is in, 0 for none
