@@ -25,7 +25,7 @@ MAP_DRAW: struct {
 	render_terrain: gfx.Render_Terrain,
 	render_list:    gfx.Render_List,
 	// The revision of each of the scene's areas its highlight was last taken from
-	area_revisions: [sim.Area_Role]u32,
+	area_revisions: [sim.AREAS_MAX]u32,
 }
 
 // Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
@@ -54,9 +54,6 @@ map_draw_init :: proc() {
 		head_width         = 6.25,
 	}
 	MAP_DRAW.render_terrain.cover.jitter = 0.8
-	for look, role in AREA_LOOKS {
-		MAP_DRAW.render_terrain.highlights.areas[AREA_HIGHLIGHTS[role]] = look
-	}
 }
 
 // Named in the order of gfx.Render_Terrain_Debug
@@ -207,27 +204,29 @@ map_arrows :: proc(scene: ^sim.Scene) {
 // Highlights ----------------------------------------------------------------------------------------------------------
 // Highlights: areas of cells washed in color over the map
 
-// The highlight area each of the scene's areas is drawn as, and how each looks
-@(private = "file", rodata)
-AREA_HIGHLIGHTS := [sim.Area_Role]u8 {
-	.Reach = 1,
-}
-
+// How each look of the scene's areas is drawn: the numbers are the ones sim's present hands out. Only the colour,
+// border, thickness and inside are taken; a look not set here is not seen.
 @(private = "file")
-AREA_LOOKS := [sim.Area_Role]gfx.Render_Highlight_Area {
-	.Reach = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2},
+AREA_LOOKS := [256]gfx.Render_Highlight_Area {
+	1 = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2},
 }
 
-// Highlights the scene's areas, each taken up again only when its revision is not the one last taken up
+// Highlights the scene's areas, each slot as the highlight area after it, in its look. Each is taken up again only
+// when its revision is not the one last taken up.
 @(private = "file")
 map_areas :: proc(scene: ^sim.Scene) {
+	#assert(sim.AREAS_MAX < gfx.RENDER_HIGHLIGHT_AREAS)
 	highlights := &MAP_DRAW.render_terrain.highlights
-	for &area, role in scene.areas {
-		if MAP_DRAW.area_revisions[role] == area.revision do continue
-		MAP_DRAW.area_revisions[role] = area.revision
-		highlight := AREA_HIGHLIGHTS[role]
+	for &area, slot in scene.areas {
+		if MAP_DRAW.area_revisions[slot] == area.revision do continue
+		MAP_DRAW.area_revisions[slot] = area.revision
+		highlight := u8(slot + 1)
 		gfx.render_highlight_clear(highlights, highlight)
-		highlights.areas[highlight].surface = area.on_water ? .Water : .Land
+		look := AREA_LOOKS[area.look]
+		drawn := &highlights.areas[highlight]
+		drawn.color, drawn.border, drawn.thickness, drawn.inside =
+			look.color, look.border, look.thickness, look.inside
+		drawn.surface = area.on_water ? .Water : .Land
 		for inside, i in area.cells {
 			if !inside do continue
 			cell := area.corner + {i % sim.AREA_SIZE, i / sim.AREA_SIZE}

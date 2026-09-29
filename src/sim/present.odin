@@ -6,6 +6,10 @@ import "core:math"
 
 import "../span"
 
+// The scene's area slot showing where the focus can walk, and its look: a number game's area palette draws
+REACH_AREA :: 0
+REACH_LOOK :: 1
+
 world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	// The ground, taken up again only when it changed
 	if out.ground_revision != WORLD.atlas.revision {
@@ -50,9 +54,10 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 
 	// Where the focus can walk, while it is not walking, taken up again only when it changed
 	movement_flood(mov, focus != mov.subject ? focus : {})
-	reach := &out.areas[.Reach]
+	reach := &out.areas[REACH_AREA]
 	if reach.revision != mov.flood_revision {
 		reach.revision = mov.flood_revision
+		reach.look = REACH_LOOK
 		reach.cells = {}
 		if mov.flood_subject != {} {
 			flood := &mov.flood

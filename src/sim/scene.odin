@@ -91,10 +91,11 @@ End_Turn :: struct {}
 // Out -----------------------------------------------------------------------------------------------------------------
 // Out: what the world shows, laid out for what draws it
 
-// How many tokens, arrows, points along arrows and cards a scene holds
+// How many tokens, arrows, points along arrows, areas and cards a scene holds
 TOKENS_MAX :: PIECE_MAX
 ARROWS_MAX :: 64
 ARROW_POINTS_MAX :: 4096
+AREAS_MAX :: 16
 CARDS_MAX :: 8
 // How many fields and actions a card holds
 CARD_FIELDS_MAX :: 16
@@ -112,7 +113,7 @@ Scene :: struct {
 	// Each arrow is a run of arrow_points, from its tail to its head
 	arrows:          [dynamic; ARROWS_MAX]span.Span,
 	arrow_points:    [dynamic; ARROW_POINTS_MAX][2]f32,
-	areas:           [Area_Role]Area,
+	areas:           [AREAS_MAX]Area,
 	cards:           [dynamic; CARDS_MAX]Card,
 }
 
@@ -149,16 +150,12 @@ Token_Flag :: enum u8 {
 	Focused,
 }
 
-// What an area of cells marks
-Area_Role :: enum u8 {
-	// Where the focus can walk
-	Reach,
-}
-
-// A set of cells within the AREA_SIZE square whose top left cell is corner. An area with no cells in it shows nothing.
+// A set of cells within the AREA_SIZE square whose top left cell is corner, drawn in its look. An area with no cells in
+// it shows nothing.
 Area :: struct {
-	// Bumped whenever its cells or where it lies change
+	// Bumped whenever its cells, its look or where it lies change
 	revision: u32,
+	look:     u8,
 	// It lies on water, rather than on land
 	on_water: bool,
 	corner:   [2]int,
