@@ -8,12 +8,14 @@ import "../ui"
 
 GAME: struct {
 	camera:        Camera,
-	// The piece the view is about: its token focused, where it can reach shown, and its card
+	// The piece the view is about: its pawn focused, where it can reach shown, and its card
 	focus:         sim.Piece_Id,
 	// The commands sent to the world at its next step
 	commands:      [dynamic; COMMANDS_MAX]sim.Command,
 	// What the world showed at its last step
 	scene:         sim.Scene,
+	// How each piece looks beyond what its pawn says, in the slot of its handle's index
+	visuals:       [sim.PAWNS_MAX]Piece_Visual,
 	// The folder of the scenario loaded, which keeps its caches, and the fingerprint of each cache as it is there
 	folder:        string,
 	saved:         [sim.Cached_File_Id]u64,
@@ -72,12 +74,14 @@ Input :: struct {
 game_tick :: proc(input: Input, dt: f32) {
 	camera_tick(input, dt)
 
-	// The left click focuses the token under it, or nothing; the right one sends the focus, if it is controlled, to the
-	// token under it, or else to the place under it.
-	if input.left_click do GAME.focus = pawns_pick(GAME.camera, input.viewport, input.cursor)
-	if focus, ok := scene_token(GAME.focus);
+	// The left click focuses the pawn under it, or nothing; the right one sends the focus, if it is controlled, to the
+	// pawn under it, or else to the place under it.
+	// Picked from the pawns last drawn, which the scene holds until it is presented again
+	pawns := GAME.scene.pawns[:]
+	if input.left_click do GAME.focus = pawns_pick(pawns, GAME.camera, input.viewport, input.cursor)
+	if focus, ok := scene_pawn(GAME.focus);
 	   ok && input.right_click && .Controlled in focus.flags {
-		target := pawns_pick(GAME.camera, input.viewport, input.cursor)
+		target := pawns_pick(pawns, GAME.camera, input.viewport, input.cursor)
 		if target != {} {
 			command_send(sim.Move_To_Piece{piece = GAME.focus, target = target})
 		} else {
@@ -97,15 +101,21 @@ game_tick :: proc(input: Input, dt: f32) {
 	}
 
 	map_draw_tick(&GAME.scene, GAME.camera, input.viewport, input.pixel_density)
-	pawns_begin(GAME.camera, input.viewport, input.pixel_density, dt)
-	for token in GAME.scene.tokens do pawns_add(token)
-	pawns_end()
+	visuals_tick(GAME.visuals[:], GAME.scene.pawns[:], dt)
+	pawns_draw(
+		GAME.scene.pawns[:],
+		GAME.visuals[:],
+		GAME.camera,
+		input.viewport,
+		input.pixel_density,
+		dt,
+	)
 }
 
-// The token of the latest scene with the handle, if it has one
+// The pawn of the latest scene with the handle, if it has one
 @(private = "file")
-scene_token :: proc(handle: sim.Piece_Id) -> (sim.Token, bool) {
-	for token in GAME.scene.tokens do if token.handle == handle do return token, true
+scene_pawn :: proc(handle: sim.Piece_Id) -> (sim.Pawn, bool) {
+	for pawn in GAME.scene.pawns do if pawn.handle == handle do return pawn, true
 	return {}, false
 }
 

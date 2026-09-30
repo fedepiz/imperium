@@ -38,19 +38,19 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	}
 
 	// Every piece, the focus focused, and the player's controlled
-	clear(&out.tokens)
+	clear(&out.pawns)
 	for piece, index in WORLD.pieces {
 		if !piece_alive(piece) do continue
 		id := piece_id(index)
-		token := Token {
+		pawn := Pawn {
 			handle  = id,
 			pos     = piece.pos,
 			picture = {piece.icon, piece.culture},
-			label   = piece.name,
+			label   = string(WORLD.piece_names[index][:]),
 		}
-		if id == focus do token.flags += {.Focused}
-		if piece_controlled(piece) do token.flags += {.Controlled}
-		append(&out.tokens, token)
+		if id == focus do pawn.flags += {.Focused}
+		if piece_controlled(piece) do pawn.flags += {.Controlled}
+		append(&out.pawns, pawn)
 	}
 
 	// The way the walking piece has still to go, from where it stands
@@ -95,7 +95,7 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 		title = fmt.tprintf("Turn %d", WORLD.turn),
 	}
 	player := faction_get(WORLD.player)
-	append(&status.fields, Field{"Playing", player != nil ? player.name : "None"})
+	append(&status.fields, Field{"Playing", player != nil ? faction_name(WORLD.player) : "None"})
 	append(
 		&status.actions,
 		Action{label = "End turn", command = End_Turn{}, enabled = turn_can_end()},
@@ -104,12 +104,12 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	if piece := piece_get(focus); piece != nil {
 		card := Card {
 			place   = .Focus,
-			title   = piece.name != "" ? piece.name : piece.title,
+			title   = len(WORLD.piece_names[focus.index]) > 0 ? string(WORLD.piece_names[focus.index][:]) : ICON_TITLES[piece.icon],
 			picture = Picture{piece.icon, piece.culture},
 		}
-		append(&card.fields, Field{"Type", piece.title})
+		append(&card.fields, Field{"Type", ICON_TITLES[piece.icon]})
 		faction := faction_get(piece.owner)
-		append(&card.fields, Field{"Faction", faction != nil ? faction.name : "None"})
+		append(&card.fields, Field{"Faction", faction != nil ? faction_name(piece.owner) : "None"})
 		append(&card.fields, Field{"Culture", fmt.tprintf("%v", piece.culture)})
 		if piece.movement_domain != nil {
 			budget := fmt.tprintf("%.0f of %.0f", piece.movement_budget, piece.movement_per_turn)
@@ -128,4 +128,24 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 @(private = "file")
 piece_controlled :: proc(piece: Piece) -> bool {
 	return faction_get(piece.owner) != nil && piece.owner == WORLD.player
+}
+
+// What each icon shows, as the cards call it. Words for the player, so they belong with the cards' other words; they
+// leave with them once the game writes the cards.
+@(private = "file", rodata)
+ICON_TITLES := [Icon]string {
+	.Village    = "Village",
+	.Town       = "Town",
+	.City       = "City",
+	.Large_City = "Large City",
+	.Army       = "Army",
+	.Fleet      = "Fleet",
+	.Priest     = "Priest",
+	.Envoy      = "Envoy",
+}
+
+// The name of a living faction, as a view into the world
+@(private = "file")
+faction_name :: proc(id: Faction_Id) -> string {
+	return string(WORLD.faction_names[id.index][:])
 }

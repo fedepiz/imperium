@@ -124,8 +124,8 @@ End_Turn :: struct {}
 // Out -----------------------------------------------------------------------------------------------------------------
 // Out: what the world shows, laid out for what draws it
 
-// How many tokens, arrows, points along arrows, areas and cards a scene holds
-TOKENS_MAX :: PIECE_MAX
+// How many pawns, arrows, points along arrows, areas and cards a scene holds
+PAWNS_MAX :: PIECE_MAX
 ARROWS_MAX :: 64
 ARROW_POINTS_MAX :: 4096
 AREAS_MAX :: 16
@@ -137,13 +137,13 @@ CARD_ACTIONS_MAX :: 4
 // The side of the square of cells an area lies within
 AREA_SIZE :: PATHFIND_FLOOD_SIZE
 
-// What the world shows: the ground, the tokens standing on it, the arrows and areas over it, and the cards beside it.
+// What the world shows: the ground, the pawns standing on it, the arrows and areas over it, and the cards beside it.
 // Filled by present; what it holds lasts until the next present.
 Scene :: struct {
 	// Every cell's ground. Rewritten only when the world's ground changes, which bumps ground_revision.
 	ground:          [CELLS_MAX]Ground,
 	ground_revision: u32,
-	tokens:          [dynamic; TOKENS_MAX]Token,
+	pawns:           [dynamic; PAWNS_MAX]Pawn,
 	// Each arrow is a run of arrow_points, from its tail to its head
 	arrows:          [dynamic; ARROWS_MAX]span.Span,
 	arrow_points:    [dynamic; ARROW_POINTS_MAX][2]f32,
@@ -176,7 +176,7 @@ Picture :: struct {
 }
 
 // Something standing on the map
-Token :: struct {
+Pawn :: struct {
 	// What names it in commands
 	handle:  Piece_Id,
 	// Where its middle stands, in cells
@@ -184,10 +184,10 @@ Token :: struct {
 	picture: Picture,
 	// Written under it, unless empty
 	label:   string,
-	flags:   bit_set[Token_Flag;u8],
+	flags:   bit_set[Pawn_Flag;u8],
 }
 
-Token_Flag :: enum u8 {
+Pawn_Flag :: enum u8 {
 	// It is the focus given to present
 	Focused,
 	// The player can give it orders
@@ -263,7 +263,7 @@ step :: proc(commands: []Command, walk_distance: f32) {
 	world_step(commands, walk_distance)
 }
 
-// Fills out with what the world shows, around the focus: its token focused, where it can reach while it is not
+// Fills out with what the world shows, around the focus: its pawn focused, where it can reach while it is not
 // walking, and its card. A nil focus is none.
 present :: proc(focus: Piece_Id, out: ^Scene) {
 	world_present(focus, out)

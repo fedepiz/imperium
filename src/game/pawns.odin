@@ -7,32 +7,33 @@ import "../gfx"
 import "../sim"
 import "../span"
 
-// A pawn: how a token is drawn on the map, in the slot of its handle's index. Its label must last until pawns_end.
-Pawn :: struct {
-	// The token the slot's pawn was last added for; a token of another handle starts the pawn over. A focused token is
-	// drawn with a pulsing tint.
-	token:        sim.Token,
-	// The frame the pawn was last added in; only pawns added this frame are drawn and picked
-	frame:        u32,
-	// Seconds the pawn has been focused for, which its tint pulses by
+// Pawns: how the scene's pawns are drawn on the map, each as its icon's drawing with its name hanging below. What a
+// pawn shows comes from the scene; what it keeps from frame to frame is in its piece's visual state.
+
+// How a piece looks beyond what its pawn says, kept from frame to frame in the slot of its handle's index
+Piece_Visual :: struct {
+	// The piece the state is for; a pawn of another handle in the slot starts it over
+	handle:       sim.Piece_Id,
+	// Seconds the piece has been focused for, which its tint pulses by
 	focused_time: f32,
+}
+
+// Keeps the pieces' visual state in step with the frame's pawns, dt seconds after the last frame
+visuals_tick :: proc(visuals: []Piece_Visual, pawns: []sim.Pawn, dt: f32) {
+	for pawn in pawns {
+		visual := &visuals[pawn.handle.index]
+		if visual.handle != pawn.handle do visual^ = {
+			handle = pawn.handle,
+		}
+		visual.focused_time = .Focused in pawn.flags ? visual.focused_time + dt : 0
+	}
 }
 
 @(private = "file")
 PAWNS: struct {
-	// Each handle slot's pawn, kept from frame to frame
-	entries:       [sim.TOKENS_MAX]Pawn,
-	// Counts pawns_begin calls
-	frame:         u32,
-	// Seconds since the frame before
-	dt:            f32,
 	// How far pawns have faded from pictures to medallions, from 0 to 1
-	medallion_t:   f32,
-	// The view this frame's pawns are drawn in
-	camera:        Camera,
-	viewport:      [2]f32,
-	pixel_density: f32,
-	render_list:   gfx.Render_List,
+	medallion_t: f32,
+	render_list: gfx.Render_List,
 }
 
 // How large each icon is drawn, times its drawing's natural size: see PAWN_CELLS_PER_PIXEL.
@@ -78,59 +79,50 @@ pawns_init :: proc(camera: Camera) {
 	PAWNS.medallion_t = camera.zoom < PAWN_MEDALLION_ZOOM ? 1 : 0
 }
 
-// Starts a frame's pawns, drawn in the view of the camera: add them with pawns_add, then draw them with pawns_end.
-pawns_begin :: proc(camera: Camera, viewport: [2]f32, pixel_density: f32, dt: f32) {
-	target: f32 = camera.zoom < PAWN_MEDALLION_ZOOM ? 1 : 0
-	step := dt / PAWN_MEDALLION_FADE
-	PAWNS.medallion_t += clamp(target - PAWNS.medallion_t, -step, step)
-	PAWNS.camera, PAWNS.viewport, PAWNS.pixel_density = camera, viewport, pixel_density
-	PAWNS.frame += 1
-	PAWNS.dt = dt
-}
-
-// Draws a token this frame
-pawns_add :: proc(token: sim.Token) {
-	pawn := &PAWNS.entries[token.handle.index]
-	if pawn.token.handle != token.handle do pawn^ = {}
-	pawn.token = token
-	pawn.frame = PAWNS.frame
-	pawn.focused_time = .Focused in token.flags ? pawn.focused_time + PAWNS.dt : 0
-}
-
 // The rect a pawn's drawing in a set covers, in cells
 @(private = "file")
-pawn_bounds :: proc(pawn: Pawn, set: Icon_Set) -> [4]f32 {
-	picture := pawn.token.picture
+pawn_bounds :: proc(pawn: sim.Pawn, set: Icon_Set) -> [4]f32 {
+	picture := pawn.picture
 	source :=
 		gfx.sprite_region(gfx.sprite_of_image(icon_image(picture.icon, set, picture.culture))).source
 	size := source.zw * PAWN_CELLS_PER_PIXEL[set] * PAWN_SIZES[picture.icon]
-	corner := pawn.token.pos - size / 2
+	corner := pawn.pos - size / 2
 	return {corner.x, corner.y, size.x, size.y}
 }
 
-// The handle of the first of the latest frame's pawns whose drawing, in the set that shows more, covers the point on
-// screen, or nil for none
-pawns_pick :: proc(camera: Camera, viewport: [2]f32, point: [2]f32) -> sim.Piece_Id {
+// The handle of the last of the pawns whose drawing, in the set that shows more, covers the point on screen, or nil
+// for none. Pass the pawns last drawn, so what is picked is what is on screen.
+pawns_pick :: proc(pawns: []sim.Pawn, camera: Camera, viewport: [2]f32, point: [2]f32) -> sim.Piece_Id {
 	found: sim.Piece_Id
 	set: Icon_Set = PAWNS.medallion_t < 0.5 ? .Picture : .Medallion
-	for pawn in PAWNS.entries {
-		if pawn.frame != PAWNS.frame do continue
+	for pawn in pawns {
 		rect, _ := camera_world_to_screen(camera, viewport, pawn_bounds(pawn, set))
-		if gfx.rect_contains(rect, point) do found = pawn.token.handle
+		if gfx.rect_contains(rect, point) do found = pawn.handle
 	}
 	return found
 }
 
-// Draws the frame's pawns in two passes: their drawings, then their names, so every name shows over every drawing.
-pawns_end :: proc() {
-	camera, viewport := PAWNS.camera, PAWNS.viewport
+// Draws the pawns in the view of the camera, fading between pictures and medallions by the zoom, dt seconds
+// after the last frame, in two passes: their drawings, then their names, so every name shows over every drawing.
+pawns_draw :: proc(
+	pawns: []sim.Pawn,
+	visuals: []Piece_Visual,
+	camera: Camera,
+	viewport: [2]f32,
+	pixel_density: f32,
+	dt: f32,
+) {
+	target: f32 = camera.zoom < PAWN_MEDALLION_ZOOM ? 1 : 0
+	step := dt / PAWN_MEDALLION_FADE
+	PAWNS.medallion_t += clamp(target - PAWNS.medallion_t, -step, step)
+
 	draw: gfx.Draw_Ctx
 	gfx.draw_begin(
 		&draw,
 		&PAWNS.render_list,
 		span.from_array(&PAWNS.render_list.instances),
 		{0, 0, viewport.x, viewport.y},
-		PAWNS.pixel_density,
+		pixel_density,
 	)
 
 	// While the fade is under way, each pawn is drawn in both sets, the one fading in over the one fading out. Its name
@@ -139,14 +131,14 @@ pawns_end :: proc() {
 		.Picture   = 1 - PAWNS.medallion_t,
 		.Medallion = PAWNS.medallion_t,
 	}
-	name_at: [sim.TOKENS_MAX][2]f32
-	name_weight: [sim.TOKENS_MAX]f32
-	for pawn, index in PAWNS.entries {
-		if pawn.frame != PAWNS.frame do continue
+	name_at: [sim.PAWNS_MAX][2]f32
+	name_weight: [sim.PAWNS_MAX]f32
+	for pawn, index in pawns {
 		tint := [4]f32{1, 1, 1, 1}
-		picture := pawn.token.picture
-		if .Focused in pawn.token.flags {
-			pulse := 0.5 - 0.5 * math.cos(2 * math.PI * pawn.focused_time / PAWN_FOCUSED_PULSE)
+		picture := pawn.picture
+		if .Focused in pawn.flags {
+			focused_time := visuals[pawn.handle.index].focused_time
+			pulse := 0.5 - 0.5 * math.cos(2 * math.PI * focused_time / PAWN_FOCUSED_PULSE)
 			tint = math.lerp(tint, PAWN_FOCUSED_TINT, pulse)
 		}
 		for weight, set in weights {
@@ -176,9 +168,9 @@ pawns_end :: proc() {
 	// colour a little way off all round.
 	HALO :: 1.5
 	font := font_id(.Text)
-	for pawn, index in PAWNS.entries {
-		label := pawn.token.label
-		if pawn.frame != PAWNS.frame || label == "" || name_weight[index] <= 0 do continue
+	for pawn, index in pawns {
+		label := pawn.label
+		if label == "" || name_weight[index] <= 0 do continue
 		text := gfx.text_from_string(label, font, MAP_INK)
 		halo := gfx.text_from_string(label, font, MAP_PAPER)
 		at := name_at[index] / name_weight[index] - [2]f32{gfx.text_measure(text).x / 2, 0}

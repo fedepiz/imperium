@@ -11,12 +11,15 @@ FACTION_MAX :: 256
 
 WORLD: struct {
 	atlas:         Atlas,
-	// Every slot a piece can be in
+	// Every slot a piece can be in, and each slot's name, set by piece_spawn
 	pieces:        [PIECE_MAX]Piece,
+	piece_names:   [PIECE_MAX]Name,
 	// The slots with no piece in them, the next to be used last
 	pieces_free:   [dynamic; PIECE_MAX]u16,
-	// Every slot a faction can be in, and those with no faction in them, the next to be used last
+	// Every slot a faction can be in, each slot's name, set by faction_spawn, and the slots with no faction in them,
+	// the next to be used last
 	factions:      [FACTION_MAX]Faction,
+	faction_names: [FACTION_MAX]Name,
 	factions_free: [dynamic; FACTION_MAX]u16,
 	// The faction whose turn it is, which the player plays, or nil for none
 	player:        Faction_Id,
@@ -351,7 +354,9 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 			continue
 		}
 		mov.subject, mov.target = walker, target
-		mov.path, mov.cost, mov.next = path, cost, 0
+		mov.path = path
+		mov.cost = cost
+		mov.next = 0
 	}
 	movement_advance(mov, walk_distance)
 }
@@ -407,10 +412,14 @@ world_load_test_pieces :: proc() {
 		Rome,
 		Alamanni,
 	}
+	Test_Faction_Def :: struct {
+		name:    string,
+		culture: Culture,
+	}
 	@(static, rodata)
-	TEST_FACTIONS := [Test_Faction]Faction {
-		.Rome = {name = "Rome", culture = .Roman},
-		.Alamanni = {name = "Alamanni", culture = .Germanic},
+	TEST_FACTIONS := [Test_Faction]Test_Faction_Def {
+		.Rome     = {"Rome", .Roman},
+		.Alamanni = {"Alamanni", .Germanic},
 	}
 	Test_Piece :: struct {
 		pos:      [2]f32,
@@ -475,21 +484,10 @@ world_load_test_pieces :: proc() {
 		.Priest     = 2,
 		.Envoy      = 2,
 	}
-	@(static, rodata)
-	TEST_TITLES := [Icon]string {
-		.Village    = "Village",
-		.Town       = "Town",
-		.City       = "City",
-		.Large_City = "Large City",
-		.Army       = "Army",
-		.Fleet      = "Fleet",
-		.Priest     = "Priest",
-		.Envoy      = "Envoy",
-	}
 	for piece, index in WORLD.pieces do if piece_alive(piece) do piece_despawn(piece_id(index))
 	for faction, index in WORLD.factions do if faction_alive(faction) do faction_despawn(faction_id(index))
 	factions: [Test_Faction]Faction_Id
-	for faction, test in TEST_FACTIONS do factions[test] = faction_spawn(faction)
+	for faction, test in TEST_FACTIONS do factions[test] = faction_spawn({culture = faction.culture}, faction.name)
 	// The Roman army walks to Neapolis.
 	for piece in TEST_PIECES {
 		piece_spawn(
@@ -498,13 +496,12 @@ world_load_test_pieces :: proc() {
 				icon = piece.icon,
 				owner = factions[piece.owner],
 				culture = piece.culture,
-				name = piece.name,
-				title = TEST_TITLES[piece.icon],
 				movement_domain = piece.movement,
 				movement_per_turn = piece.per_turn,
 				contact = TEST_CONTACTS[piece.icon],
 				body = TEST_BODIES[piece.icon],
 			},
+			piece.name,
 		)
 	}
 }
@@ -520,8 +517,6 @@ Piece :: struct {
 	// The faction it belongs to
 	owner:             Faction_Id,
 	culture:           Culture,
-	name:              string,
-	title:             string,
 	movement_domain:   Maybe(Pathfind_Domain),
 	// The cost it can still spend walking this turn
 	movement_budget:   f32,
@@ -539,14 +534,15 @@ Contact :: struct {
 	domains: bit_set[Pathfind_Domain],
 }
 
-// Puts a piece in a free slot, returning its id, or nil when every slot is full
-piece_spawn :: proc(piece: Piece) -> Piece_Id {
+// Puts a piece in a free slot under a name, which may be empty, returning its id, or nil when every slot is full
+piece_spawn :: proc(piece: Piece, name: string) -> Piece_Id {
 	index, ok := pop_safe(&WORLD.pieces_free)
 	if !ok do return {}
 	slot := &WORLD.pieces[index]
 	generation := slot.generation + 1
 	slot^ = piece
 	slot.generation = generation
+	name_set(&WORLD.piece_names[index], name)
 	return {index, generation}
 }
 
@@ -555,6 +551,7 @@ piece_despawn :: proc(id: Piece_Id) {
 	piece := piece_get(id)
 	if piece == nil do return
 	piece.generation += 1
+	clear(&WORLD.piece_names[id.index])
 	append(&WORLD.pieces_free, id.index)
 }
 
@@ -580,9 +577,27 @@ Faction :: struct {
 	// Bumped as the slot takes a faction and as it frees it: odd while there is a faction in the slot, even while it is
 	// free. Ids to earlier factions go stale. Set by faction_spawn.
 	generation: u16,
-	name:       string,
 	// Its people's culture
 	culture:    Culture,
+}
+
+// A proper name, held by value: up to 56 bytes of UTF-8, 64 in all. Its text is string(name[:]), a view that lasts as
+// long as the name is not set again.
+Name :: [dynamic; 56]u8
+
+// Sets a name to text, cut to fit on a character boundary
+name_set :: proc(name: ^Name, text: string) {
+	clear(name)
+	if append(name, ..transmute([]u8)text) == len(text) do return
+	// Cut short: if the cut went through a character, drop what was kept of it, from its first byte on
+	first := len(name) - 1
+	for first > 0 && name[first] & 0xC0 == 0x80 do first -= 1
+	if name[first] >= 0xC0 && first + utf8_length(name[first]) > len(name) do resize(name, first)
+
+	// How many bytes the character a UTF-8 first byte begins takes
+	utf8_length :: proc(first: u8) -> int {
+		return first >= 0xF0 ? 4 : first >= 0xE0 ? 3 : 2
+	}
 }
 
 // Which faction: its slot, and the slot's generation while the faction is in it. An id with an even generation, like
@@ -592,14 +607,15 @@ Faction_Id :: struct {
 	generation: u16,
 }
 
-// Puts a faction in a free slot, returning its id, or nil when every slot is full
-faction_spawn :: proc(faction: Faction) -> Faction_Id {
+// Puts a faction in a free slot under a name, returning its id, or nil when every slot is full
+faction_spawn :: proc(faction: Faction, name: string) -> Faction_Id {
 	index, ok := pop_safe(&WORLD.factions_free)
 	if !ok do return {}
 	slot := &WORLD.factions[index]
 	generation := slot.generation + 1
 	slot^ = faction
 	slot.generation = generation
+	name_set(&WORLD.faction_names[index], name)
 	return {index, generation}
 }
 
@@ -608,6 +624,7 @@ faction_despawn :: proc(id: Faction_Id) {
 	faction := faction_get(id)
 	if faction == nil do return
 	faction.generation += 1
+	clear(&WORLD.faction_names[id.index])
 	append(&WORLD.factions_free, id.index)
 }
 
