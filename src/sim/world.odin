@@ -120,12 +120,12 @@ Atlas :: struct {
 }
 
 Terrain :: struct {
-	surface:   Surface,
-	elevation: u8,
-	trees:     u8,
-	moisture:  u8,
+	surface:       Surface,
+	elevation:     u8,
+	trees:         u8,
+	moisture:      u8,
 	// For each way kind, which way is this cell assigned to. (Way_Id = 0 is nil)
-	way:       [Way_Kind]Way_Id,
+	way:           [Way_Kind]Way_Id,
 	// Worked out from the land around it at load
 	type:          Terrain_Type,
 	type_strength: u8,
@@ -196,7 +196,14 @@ measure_land :: proc(terrain: []Terrain) -> (land: Land) {
 // in dry country, and farther out where a wet river valley or basin lies below the land around it. Low, level ground is
 // marsh where it is very wet or where a river meets the sea; fertile land and marsh win over the rest. Highland follows
 // the mountains, and wins over forest, desert and steppe where they are at their fullest.
-terrain_type_of :: proc(terrain: []Terrain, land: ^Land, i: int) -> (best: Terrain_Type, strength: u8) {
+terrain_type_of :: proc(
+	terrain: []Terrain,
+	land: ^Land,
+	i: int,
+) -> (
+	best: Terrain_Type,
+	strength: u8,
+) {
 	if terrain[i].surface in WATER do return
 	cell := terrain[i]
 	elevation := normalized(cell.elevation)
@@ -289,9 +296,10 @@ world_load :: proc(scenario: Scenario) -> bool {
 	{
 		grid := pathfind_build_begin(.Land)
 		for cell, i in WORLD.atlas.terrain {
-			grid[i] = cell.surface != .Land ? 0 : cell.way[.Road] != 0 ? ROAD_COST : TERRAIN_COSTS[cell.type]
+			grid[i] =
+				cell.surface != .Land ? 0 : cell.way[.Road] != 0 ? ROAD_COST : TERRAIN_COSTS[cell.type]
 		}
-		pathfind_build_end(.Land)
+		pathfind_build_end(.Land, scenario.cached_files[.Pathfind_Land])
 	}
 	// Sea
 	{
@@ -299,7 +307,7 @@ world_load :: proc(scenario: Scenario) -> bool {
 		for cell, i in WORLD.atlas.terrain {
 			grid[i] = cell.surface == .Land ? 0 : 1
 		}
-		pathfind_build_end(.Sea)
+		pathfind_build_end(.Sea, scenario.cached_files[.Pathfind_Sea])
 	}
 	WORLD.atlas.revision += 1
 	world_load_test_pieces()
@@ -321,7 +329,9 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 		case Move_To_Piece:
 			walker, target = c.piece, c.target
 			other := piece_get(target)
-			if walker == mov.flood_subject && other != nil && mov.flood.domain in other.contact.domains {
+			if walker == mov.flood_subject &&
+			   other != nil &&
+			   mov.flood.domain in other.contact.domains {
 				stop, ok = pathfind_flood_stop_within(&mov.flood, other.pos, other.contact.radius)
 			}
 		case End_Turn:
@@ -330,7 +340,13 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 		}
 		path: [dynamic; PATH_MAX_LEN][2]f32
 		cost: [dynamic; PATH_MAX_LEN]f32
-		if !ok || !pathfind_flood_trace(&mov.flood, [2]f32{f32(stop.x), f32(stop.y)} + 0.5, &path, &cost) {
+		if !ok ||
+		   !pathfind_flood_trace(
+				   &mov.flood,
+				   [2]f32{f32(stop.x), f32(stop.y)} + 0.5,
+				   &path,
+				   &cost,
+			   ) {
 			fmt.eprintfln("No way for %v to %v", walker, command)
 			continue
 		}
@@ -393,7 +409,7 @@ world_load_test_pieces :: proc() {
 	}
 	@(static, rodata)
 	TEST_FACTIONS := [Test_Faction]Faction {
-		.Rome     = {name = "Rome", culture = .Roman},
+		.Rome = {name = "Rome", culture = .Roman},
 		.Alamanni = {name = "Alamanni", culture = .Germanic},
 	}
 	Test_Piece :: struct {

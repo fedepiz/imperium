@@ -74,12 +74,28 @@ Piece_Id :: struct {
 
 // A world to start from, cell by cell. A layer that is not CELLS_MAX long is missing.
 Scenario :: struct {
-	surface:   []Surface,
-	elevation: []u8,
-	trees:     []u8,
-	moisture:  []u8,
+	surface:      []Surface,
+	elevation:    []u8,
+	trees:        []u8,
+	moisture:     []u8,
 	// For each way kind, the id of the way through each cell, 0 for none
-	ways:      [Way_Kind][]u16,
+	ways:         [Way_Kind][]u16,
+	// What a scene's caches held in an earlier run, or empty. Each is taken only if its fingerprint matches what the
+	// world would derive it from now; otherwise it is derived again.
+	cached_files: [Cached_File_Id]Cached_File,
+}
+
+// What the world can save between runs, to spare deriving it at load
+Cached_File_Id :: enum {
+	Pathfind_Land,
+	Pathfind_Sea,
+}
+
+// Bytes the world derived, stamped with a fingerprint of what they were derived from. Where they are kept is up to the
+// caller; the world only reads them from a scenario and shows them in a scene.
+Cached_File :: struct {
+	fingerprint: u64,
+	data:        []byte,
 }
 
 // What is asked of the world, applied in order by step
@@ -135,6 +151,9 @@ Scene :: struct {
 	// The areas' circles; each area's are a run of them
 	circles:         [dynamic; CIRCLES_MAX]Circle,
 	cards:           [dynamic; CARDS_MAX]Card,
+	// What the world holds that can be saved, to hand back in a later scenario. Worth saving when the fingerprint is not
+	// that of the saved one.
+	caches:          [Cached_File_Id]Cached_File,
 }
 
 // A cell as it lies: what covers it, how high, wooded and wet it is, from 0 to 255, and the kinds of way running
@@ -249,4 +268,3 @@ step :: proc(commands: []Command, walk_distance: f32) {
 present :: proc(focus: Piece_Id, out: ^Scene) {
 	world_present(focus, out)
 }
-

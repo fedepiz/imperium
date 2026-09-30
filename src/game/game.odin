@@ -7,13 +7,16 @@ import "../sim"
 import "../ui"
 
 GAME: struct {
-	camera:   Camera,
+	camera:        Camera,
 	// The piece the view is about: its token focused, where it can reach shown, and its card
-	focus:    sim.Piece_Id,
+	focus:         sim.Piece_Id,
 	// The commands sent to the world at its next step
-	commands: [dynamic; COMMANDS_MAX]sim.Command,
+	commands:      [dynamic; COMMANDS_MAX]sim.Command,
 	// What the world showed at its last step
-	scene:    sim.Scene,
+	scene:         sim.Scene,
+	// The folder of the scenario loaded, which keeps its caches, and the fingerprint of each cache as it is there
+	folder:        string,
+	saved:         [sim.Cached_File_Id]u64,
 }
 
 // How many commands wait for the world's next step; the rest are dropped
@@ -22,7 +25,9 @@ COMMANDS_MAX :: 64
 // The cells a walking piece covers a second, whatever the ground
 MOVEMENT_SPEED :: 10
 
-#assert(gfx.RENDER_TERRAIN_WIDTH == sim.WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == sim.WORLD_HEIGHT)
+#assert(
+	gfx.RENDER_TERRAIN_WIDTH == sim.WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == sim.WORLD_HEIGHT,
+)
 #assert(POLYLINE_SMOOTHED_MAX <= gfx.RENDER_LINE_SEGMENTS_MAX)
 
 // Defines the game's images, so call this before sprites_load. The world comes from a scenario, with game_load.
@@ -35,9 +40,13 @@ game_init :: proc() {
 }
 
 // Loads the world from a scenario's folder: see scenario_read. If it does not load, the world is left all water, so
-// the failure shows, and false is returned.
-game_load :: proc(scenario: string) -> bool {
-	return sim.load(scenario_read(scenario))
+// the failure shows, and false is returned. The folder's caches are rewritten whenever the world holds newer ones, so
+// the folder must outlast the game.
+game_load :: proc(folder: string) -> bool {
+	scenario := scenario_read(folder)
+	GAME.folder = folder
+	for file, id in scenario.cached_files do GAME.saved[id] = file.fingerprint
+	return sim.load(scenario)
 }
 
 // Inputs used by the game module, in logical pixels unless stated
@@ -66,7 +75,8 @@ game_tick :: proc(input: Input, dt: f32) {
 	// The left click focuses the token under it, or nothing; the right one sends the focus, if it is controlled, to the
 	// token under it, or else to the place under it.
 	if input.left_click do GAME.focus = pawns_pick(GAME.camera, input.viewport, input.cursor)
-	if focus, ok := scene_token(GAME.focus); ok && input.right_click && .Controlled in focus.flags {
+	if focus, ok := scene_token(GAME.focus);
+	   ok && input.right_click && .Controlled in focus.flags {
 		target := pawns_pick(GAME.camera, input.viewport, input.cursor)
 		if target != {} {
 			command_send(sim.Move_To_Piece{piece = GAME.focus, target = target})
@@ -79,6 +89,12 @@ game_tick :: proc(input: Input, dt: f32) {
 	sim.step(GAME.commands[:], MOVEMENT_SPEED * dt)
 	clear(&GAME.commands)
 	sim.present(GAME.focus, &GAME.scene)
+	for file, id in GAME.scene.caches {
+		if file.fingerprint == GAME.saved[id] do continue
+		// Tried once per fingerprint, so a folder that cannot be written is not retried every frame
+		GAME.saved[id] = file.fingerprint
+		cache_write(cache_path(GAME.folder, id), file)
+	}
 
 	map_draw_tick(&GAME.scene, GAME.camera, input.viewport, input.pixel_density)
 	pawns_begin(GAME.camera, input.viewport, input.pixel_density, dt)

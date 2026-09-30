@@ -96,7 +96,10 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	}
 	player := faction_get(WORLD.player)
 	append(&status.fields, Field{"Playing", player != nil ? player.name : "None"})
-	append(&status.actions, Action{label = "End turn", command = End_Turn{}, enabled = turn_can_end()})
+	append(
+		&status.actions,
+		Action{label = "End turn", command = End_Turn{}, enabled = turn_can_end()},
+	)
 	append(&out.cards, status)
 	if piece := piece_get(focus); piece != nil {
 		card := Card {
@@ -114,6 +117,11 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 		}
 		append(&out.cards, card)
 	}
+
+	// Take cached slices
+	out.caches = {}
+	pathfind_cache_get(&out.caches[.Pathfind_Land], .Land)
+	pathfind_cache_get(&out.caches[.Pathfind_Sea], .Sea)
 }
 
 // The player controls the piece

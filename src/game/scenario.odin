@@ -3,6 +3,7 @@ package game
 
 import "core:c"
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import stbi "vendor:stb/image"
 
@@ -49,7 +50,40 @@ scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 	}
 	scenario.ways[.River] = pixels[.Rivers]
 	scenario.ways[.Road] = pixels[.Roads]
+	for &file, id in scenario.cached_files do file = cache_read(cache_path(folder, id))
 	return
+}
+
+// Where a scenario's folder keeps a cache. Each file is its fingerprint, then its data.
+cache_path :: proc(folder: string, id: sim.Cached_File_Id) -> string {
+	return fmt.tprintf("%s/%v.cache", folder, id)
+}
+
+// A cache as last written, in the temp allocator, or empty if there is none or it is cut short
+cache_read :: proc(path: string) -> (file: sim.Cached_File) {
+	data, err := os.read_entire_file(path, context.temp_allocator)
+	if err != nil || len(data) < size_of(file.fingerprint) do return
+	copy(mem.ptr_to_bytes(&file.fingerprint), data)
+	file.data = data[size_of(file.fingerprint):]
+	return
+}
+
+// Writes a cache, to be read back by cache_read; true if it was written whole
+cache_write :: proc(path: string, file: sim.Cached_File) -> bool {
+	f, err := os.create(path)
+	if err != nil {
+		fmt.eprintfln("Could not write cache %q: %v", path, err)
+		return false
+	}
+	defer os.close(f)
+	fingerprint := file.fingerprint
+	_, err = os.write(f, mem.ptr_to_bytes(&fingerprint))
+	if err == nil do _, err = os.write(f, file.data)
+	if err != nil {
+		fmt.eprintfln("Could not write cache %q: %v", path, err)
+		return false
+	}
+	return true
 }
 
 // One greyscale layer, WORLD_WIDTH by WORLD_HEIGHT, in 16 bits: an 8-bit image's values are widened, so their high
