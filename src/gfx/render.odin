@@ -74,10 +74,11 @@ Render_Terrain_Style :: struct {
 	wobble:             f32,
 	// River line width in logical pixels, where a river reaches the lowlands; it thins toward its sources.
 	river_width:        f32,
-	// Road width in logical pixels, edges included, and the band of bare paper either side of it. Roads are ochre
-	// between two ink edges; zoomed out too far for the edges to read, they narrow to a single line.
+	// Road width in logical pixels, strokes included, and the width of each of its two ink strokes. Between them lies
+	// a wash of road_fill over the paper, as strong as its alpha; zoomed out too far for the strokes to part, a road
+	// closes into a single line.
 	road_width:         f32,
-	road_halo:          f32,
+	road_stroke:        f32,
 	road_fill:          [4]f32,
 	// Arrow width in logical pixels, edges included: a band of arrow_fill between two ink edges, the same width however
 	// far the map zooms

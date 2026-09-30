@@ -8,7 +8,6 @@ import "core:slice"
 import "../gfx"
 import "../sim"
 import "../span"
-import "../tweak"
 
 // Map -----------------------------------------------------------------------------------------------------------------
 // Map: what the map is drawn from, and how it keeps in step with the world
@@ -46,9 +45,9 @@ map_draw_init :: proc() {
 		coast_width        = 1.6,
 		wobble             = 0.3,
 		river_width        = 12.,
-		road_width         = 12,
-		road_halo          = 1.5,
-		road_fill          = {0.780, 0.540, 0.250, 1},
+		road_width         = 8,
+		road_stroke        = 1.1,
+		road_fill          = {0.950, 0.840, 0.660, 0.55},
 		arrow_width        = 5,
 		arrow_fill         = {0.700, 0.250, 0.160, 1},
 		head_length        = 7.5,
@@ -66,12 +65,7 @@ TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture
 map_draw_tick :: proc(scene: ^sim.Scene, camera: Camera, viewport: [2]f32, pixel_density: f32) {
 	rt := &MAP_DRAW.render_terrain
 	rt.center, rt.zoom = camera.center, camera.zoom
-	// How the roads are straightened, tuned live: a change works everything out again
-	road := &WAY_TRACE[.Road].smoothing
-	road_before := road^
-	tweak.slider_in_place("Roads/Simplify", &road.simplify, 0, 2)
-	tweak.slider_in_place("Roads/Cut max", &road.cut_max, 0, 5)
-	if rt.revision != scene.ground_revision || road^ != road_before {
+	if rt.revision != scene.ground_revision {
 		rt.revision = scene.ground_revision
 		map_derive(scene.ground[:])
 	}
@@ -101,25 +95,24 @@ map_derive :: proc(terrain: []sim.Ground) {
 		rt.cells[i] = {u8(cell.surface) * 127, cell.elevation, cell.trees, cell.moisture}
 	}
 
-	// Each kind of way, traced into smoothed lines, then drawn as its kind of line, and stamped around themselves so each
-	// cell near one learns the offset from its middle to its nearest point: from which it preclaims the ground along it.
+	// Each kind of way, drawn as its kind of line, and stamped around its lines so each cell near one learns the offset
+	// from its middle to its nearest point: from which it preclaims the ground along it.
 	claimed := make([]u8, FOOTPRINT_SIZE.x * FOOTPRINT_SIZE.y, context.temp_allocator)
 	to_way := make([][2]f32, sim.CELLS_MAX, context.temp_allocator)
-	for trace in WAY_TRACE {
-		lines := &rt.lines[trace.line]
+	for look in WAY_LOOKS {
+		lines := &rt.lines[look.line]
 		clear(&lines.segments)
 		lines.revision += 1
 	}
 	for kind in sim.Way_Kind {
 		for &offset in to_way do offset = WAY_REACH
-		polylines_clear()
-		ways_trace(terrain, kind)
-		for r in 0 ..< polylines_count() {
-			line := polylines_get(r)
-			lines_add(&rt.lines[WAY_TRACE[kind].line], line, false)
+		for way in WAYS.ways {
+			if way.kind != kind do continue
+			line := way_line(way)
+			lines_add(&rt.lines[WAY_LOOKS[kind].line], line, false)
 			polyline_stamp(line, WAY_REACH, to_way, nil)
 		}
-		ways_claim_ground(claimed, to_way, WAY_TRACE[kind].band)
+		ways_claim_ground(claimed, to_way, WAY_LOOKS[kind].band)
 	}
 
 	// The coasts, the boundaries of the land, traced into smoothed lines, then stamped around themselves: each cell near
@@ -279,37 +272,24 @@ cover_draw :: proc(layer: ^gfx.Render_Layer, terrain: []sim.Ground) {
 }
 
 // Ways ----------------------------------------------------------------------------------------------------------------
-// Ways: rivers and roads, traced from their cells into lines
+// Ways: rivers and roads, drawn from their lines: see Way
 
 // How far around the ways the offset to them is kept, in cells: enough for the ground they claim
 @(private = "file")
 WAY_REACH :: f32(4)
 
-// How each kind of way is traced: how its lines are smoothed, whether an end by the water is carried on to the shore,
-// how far either side of its lines, in cells, it claims ground that no mark's drawing may cover, and the kind of line
-// it is drawn as. Rivers are smoothed fully, meandering; roads are straightened into long runs, their bends kept
-// tight.
+// How each kind of way is drawn: how far either side of its lines, in cells, it claims ground that no mark's drawing
+// may cover, and the kind of line it is drawn as
 @(private = "file")
-Way_Trace :: struct {
-	smoothing: Polyline_Smoothing,
-	to_shore:  bool,
-	band:      f32,
-	line:      gfx.Render_Line_Kind,
+Way_Look :: struct {
+	band: f32,
+	line: gfx.Render_Line_Kind,
 }
 
-@(private = "file")
-WAY_TRACE := [sim.Way_Kind]Way_Trace {
-	.River = {
-		smoothing = {softness = 1, cut_iter = 2, cut_ratio = 0.25},
-		to_shore = true,
-		band = 1.0,
-		line = .River,
-	},
-	.Road = {
-		smoothing = {simplify = 1.1, cut_iter = 2, cut_ratio = 0.25, cut_max = 1.5},
-		band = 1.2,
-		line = .Road,
-	},
+@(private = "file", rodata)
+WAY_LOOKS := [sim.Way_Kind]Way_Look {
+	.River = {band = 1.0, line = .River},
+	.Road = {band = 1.2, line = .Road},
 }
 
 // Preclaims the ground within band of the ways: each square of claimed ground whose middle lies within band of the
@@ -326,107 +306,6 @@ ways_claim_ground :: proc(claimed: []u8, to_way: [][2]f32, band: f32) {
 				middle := ([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES
 				if linalg.length(middle - way) >= band do continue
 				claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
-			}
-		}
-	}
-}
-
-// Traces the cells of a kind of way into lines through the middles of their cells. Lines run between ends and forks,
-// so ways meet where they join; what is left over are closed loops.
-@(private = "file")
-ways_trace :: proc(terrain: []sim.Ground, kind: sim.Way_Kind) {
-	visited := make([]bool, sim.CELLS_MAX, context.temp_allocator)
-	for i in 0 ..< sim.CELLS_MAX {
-		if kind not_in terrain[i].ways do continue
-		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
-		next: [8][2]int
-		count := way_next(terrain, kind, cell, &next)
-		if count == 2 do continue
-		// Every line from this end or fork, unless it has been traced from its other end
-		for n in next[:count] {
-			j := n.y * sim.WORLD_WIDTH + n.x
-			if visited[j] do continue
-			if way_next(terrain, kind, n, &{}) != 2 && j < i do continue
-			way_follow(terrain, kind, visited, cell, n)
-		}
-	}
-	for i in 0 ..< sim.CELLS_MAX {
-		if kind not_in terrain[i].ways || visited[i] do continue
-		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
-		next: [8][2]int
-		if way_next(terrain, kind, cell, &next) != 2 do continue
-		visited[i] = true
-		way_follow(terrain, kind, visited, cell, next[0])
-	}
-}
-
-// The cells of a kind of way that a cell of it leads to: those beside it, and those diagonal to it that are not
-// already reached through one beside it, so a way one cell wide has two. Ways of a kind lead into each other where
-// they meet.
-@(private = "file")
-way_next :: proc(
-	terrain: []sim.Ground,
-	kind: sim.Way_Kind,
-	cell: [2]int,
-	out: ^[8][2]int,
-) -> (
-	count: int,
-) {
-	is_way :: proc(terrain: []sim.Ground, kind: sim.Way_Kind, x, y: int) -> bool {
-		if x < 0 || y < 0 || x >= sim.WORLD_WIDTH || y >= sim.WORLD_HEIGHT do return false
-		return kind in terrain[y * sim.WORLD_WIDTH + x].ways
-	}
-	for dy in -1 ..= 1 {
-		for dx in -1 ..= 1 {
-			if dx == 0 && dy == 0 do continue
-			if !is_way(terrain, kind, cell.x + dx, cell.y + dy) do continue
-			if dx != 0 && dy != 0 && (is_way(terrain, kind, cell.x + dx, cell.y) || is_way(terrain, kind, cell.x, cell.y + dy)) do continue
-			out[count] = cell + {dx, dy}
-			count += 1
-		}
-	}
-	return
-}
-
-// Walks a way from cell through next until it reaches an end, a fork, or a cell already walked, through the middle of
-// every cell on the way.
-@(private = "file")
-way_follow :: proc(
-	terrain: []sim.Ground,
-	kind: sim.Way_Kind,
-	visited: []bool,
-	cell, next: [2]int,
-) {
-	middle :: proc(cell: [2]int) -> [2]f32 {return {f32(cell.x), f32(cell.y)} + 0.5}
-	way_shore(terrain, kind, cell)
-	polylines_add(middle(cell))
-	prev, cur := cell, next
-	for {
-		polylines_add(middle(cur))
-		i := cur.y * sim.WORLD_WIDTH + cur.x
-		ahead: [8][2]int
-		if way_next(terrain, kind, cur, &ahead) != 2 || visited[i] do break
-		visited[i] = true
-		prev, cur = cur, ahead[0] == prev ? ahead[1] : ahead[0]
-	}
-	way_shore(terrain, kind, cur)
-	polylines_end(false, WAY_TRACE[kind].smoothing)
-}
-
-// If ways of the kind are carried to the shore, the way ends at cell, and cell touches water: a point most of the way
-// into the water.
-@(private = "file")
-way_shore :: proc(terrain: []sim.Ground, kind: sim.Way_Kind, cell: [2]int) {
-	if !WAY_TRACE[kind].to_shore || way_next(terrain, kind, cell, &{}) != 1 do return
-	for dy in -1 ..= 1 {
-		for dx in -1 ..= 1 {
-			x, y := cell.x + dx, cell.y + dy
-			if x < 0 || y < 0 || x >= sim.WORLD_WIDTH || y >= sim.WORLD_HEIGHT do continue
-			if terrain[y * sim.WORLD_WIDTH + x].surface in sim.WATER {
-				polylines_add(
-					[2]f32{f32(cell.x), f32(cell.y)} + 0.5 + [2]f32{f32(dx), f32(dy)} * 0.75,
-				)
-				return
 			}
 		}
 	}

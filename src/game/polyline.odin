@@ -6,8 +6,8 @@ import "core:math/linalg"
 import "../sim"
 import "../span"
 
-// Lines through the world, in cells: ways and coasts, and later borders. They are traced from the cells into runs of
-// points, stepping from cell to cell; each run is smoothed as it ends, then read out run by run.
+// Lines through the world, in cells: ways, coasts and arrows, and later borders. Each is added as a run of points,
+// read from a scenario or traced from cell to cell; each run is smoothed as it ends, then read out run by run.
 
 // The most points a run is traced with, and the most runs
 POLYLINE_POINTS_MAX :: 1 << 16
@@ -19,15 +19,12 @@ POLYLINE_SMOOTHED_MAX :: POLYLINE_POINTS_MAX << POLYLINE_CORNER_ITER_MAX
 // Runs of up to this many points are not softened, which would shrink them to specks.
 POLYLINE_SHORT :: 8
 
-// How a run is smoothed. First, if simplify is above 0, every point within simplify cells of the line between the
-// points kept either side of it is dropped: steps from cell to cell straighten into long runs at any angle, bending
-// only where the cells really turn. Softening then moves each point toward the average of its neighbours, twice, by
-// softness from 0 to 1: it rounds whole stretches of line, drawing in capes and filling bays. Then every corner is cut
-// cut_iter times, Chaikin's way: each segment becomes two points cut_ratio of the way in from its ends, but never more
-// than cut_max cells in if cut_max is above 0, which rounds only the corners. A ratio near 0 cuts little, keeping
-// corners crisp; 0.5 cuts the most.
+// How a run is smoothed. Softening moves each point toward the average of its neighbours, twice, by softness from 0
+// to 1: it rounds whole stretches of line, drawing in capes and filling bays. Then every corner is cut cut_iter times,
+// Chaikin's way: each segment becomes two points cut_ratio of the way in from its ends, but never more than cut_max
+// cells in if cut_max is above 0, which rounds only the corners. A ratio near 0 cuts little, keeping corners crisp; 0.5
+// cuts the most.
 Polyline_Smoothing :: struct {
-	simplify:  f32,
 	softness:  f32,
 	cut_iter:  int,
 	cut_ratio: f32,
@@ -86,7 +83,6 @@ polylines_end :: proc(closed: bool, smoothing: Polyline_Smoothing) {
 	resize(&lines.points, begin + size)
 	p := lines.points[begin:]
 	copy(p, lines.tracing[:])
-	if smoothing.simplify > 0 do n = polyline_simplify(p, n, smoothing.simplify)
 	for _ in 0 ..< (n > POLYLINE_SHORT ? 2 : 0) {
 		first, prev := p[0], closed ? p[n - 1] : p[0]
 		for i in 0 ..< n {
@@ -112,44 +108,6 @@ polylines_get :: proc(run: int) -> Polyline {
 	lines := &POLYLINES
 	r := lines.runs[run]
 	return {points = lines.points[r.points.begin:][:r.points.len], closed = r.closed}
-}
-
-// Drops, in place, those of the first n points of p that lie within tolerance cells of the line between the points
-// kept either side of them, Douglas and Peucker's way, and returns how many are left. The first and last are kept.
-@(private = "file")
-polyline_simplify :: proc(p: [][2]f32, n: int, tolerance: f32) -> int {
-	if n < 3 do return n
-	keep := make([]bool, n, context.temp_allocator)
-	keep[0] = true
-	keep[n - 1] = true
-	// Stretches between two kept points, still to be split at their farthest point from the line between them
-	stretches := make([dynamic][2]int, 0, n, context.temp_allocator)
-	append(&stretches, [2]int{0, n - 1})
-	for len(stretches) > 0 {
-		s := pop(&stretches)
-		a := p[s[0]]
-		ab := p[s[1]] - a
-		length2 := max(linalg.dot(ab, ab), 1e-6)
-		farthest := -1
-		far := tolerance
-		for i in s[0] + 1 ..< s[1] {
-			t := clamp(linalg.dot(p[i] - a, ab) / length2, 0, 1)
-			d := linalg.length(a + ab * t - p[i])
-			if d <= far do continue
-			farthest = i
-			far = d
-		}
-		if farthest < 0 do continue
-		keep[farthest] = true
-		append(&stretches, [2]int{s[0], farthest}, [2]int{farthest, s[1]})
-	}
-	count := 0
-	for i in 0 ..< n {
-		if !keep[i] do continue
-		p[count] = p[i]
-		count += 1
-	}
-	return count
 }
 
 // Cuts every corner of the first n points of p, in place, and returns how many points there are now: twice as many.

@@ -9,26 +9,22 @@ import stbi "vendor:stb/image"
 
 import "../sim"
 
-// Reads a scenario from its folder: one greyscale PNG per layer, WORLD_WIDTH by WORLD_HEIGHT. surface.png is black for
-// land, grey for lake and white for sea; elevation.png, trees.png and moisture.png run from 0 to 255 on land. rivers.png
-// and roads.png hold, in 16 bits, the id of the way through each land cell. The layers live in the temp allocator. If a
-// layer is missing or the wrong size, every layer is left empty.
+// Reads a scenario from its folder: one greyscale PNG per layer, WORLD_WIDTH by WORLD_HEIGHT, and the ways, from
+// rivers.txt and roads.txt: see ways_load. surface.png is black for land, grey for lake and white for sea;
+// elevation.png, trees.png and moisture.png run from 0 to 255 on land. The layers live in the temp allocator. If a
+// layer is missing or the wrong size, or the ways cannot be read, every layer is left empty.
 scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 	Layer :: enum {
 		Surface,
 		Elevation,
 		Trees,
 		Moisture,
-		Rivers,
-		Roads,
 	}
 	names := [Layer]string {
 		.Surface   = "surface",
 		.Elevation = "elevation",
 		.Trees     = "trees",
 		.Moisture  = "moisture",
-		.Rivers    = "rivers",
-		.Roads     = "roads",
 	}
 	pixels: [Layer][]u16
 	for name, layer in names {
@@ -48,8 +44,9 @@ scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 		scenario.trees[i] = u8(pixels[.Trees][i] >> 8)
 		scenario.moisture[i] = u8(pixels[.Moisture][i] >> 8)
 	}
-	scenario.ways[.River] = pixels[.Rivers]
-	scenario.ways[.Road] = pixels[.Roads]
+	ways, ways_ok := ways_load(folder)
+	if !ways_ok do return {}
+	scenario.ways = ways
 	for &file, id in scenario.cached_files do file = cache_read(cache_path(folder, id))
 	return
 }

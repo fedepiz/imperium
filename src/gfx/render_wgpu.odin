@@ -37,7 +37,7 @@ Terrain_Uniforms :: struct {
 	river_width, cover_jitter:                      f32,
 	paper_stain_amount, sea_depth_from:             f32,
 	sea_depth_full, road_width:                     f32,
-	road_halo, arrow_width:                         f32,
+	road_stroke, arrow_width:                       f32,
 	road_fill, arrow_fill:                          [4]f32,
 	head_length, head_width:                        f32,
 	circle_count:                                   i32,
@@ -601,7 +601,7 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		wobble             = style.wobble,
 		river_width        = style.river_width,
 		road_width         = style.road_width,
-		road_halo          = style.road_halo,
+		road_stroke        = style.road_stroke,
 		road_fill          = style.road_fill,
 		arrow_width        = style.arrow_width,
 		arrow_fill         = style.arrow_fill,
@@ -1461,7 +1461,7 @@ struct Terrain {
     sea_depth_from: f32,
     sea_depth_full: f32,
     road_width: f32,
-    road_halo: f32,
+    road_stroke: f32,
     arrow_width: f32,
     road_fill: vec4f,
     arrow_fill: vec4f,
@@ -1846,17 +1846,19 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         let river_half = min(u.river_width * 0.5 * u.pixel_density * mix(1.0, 0.4, smoothstep(0.2, 0.8, cell.g)), px / 6.0);
         col = mix(col, mix(u.ink.rgb, u.sea_shallow.rgb, 0.3), line_aa(r * px, river_half) * land);
 
-        // Roads: ochre between two ink edges, on a band of bare paper that hides what is drawn under it, stopping at the
-        // shore. They keep the course they were traced along, without wandering. A road never grows past a fifth of a
-        // cell; zoomed out too far for its edges to read, it narrows to a single darker line that stays in view.
-        let road = line_distance(p, ROAD) * px;
-        let road_half = min(u.road_width * 0.5 * u.pixel_density, px / 5.0);
-        let cased = smoothstep(2.0, 4.0, road_half / u.pixel_density);
-        let road_edge = 0.5 * u.pixel_density;
-        col = mix(col, paper, line_aa(road, road_half + u.road_halo * u.pixel_density) * land * cased);
-        let road_color = mix(mix(u.road_fill.rgb, u.ink.rgb, 0.4), u.road_fill.rgb, cased);
-        col = mix(col, road_color, line_aa(road, max(road_half, 0.75 * u.pixel_density)) * land);
-        col = mix(col, u.ink.rgb, line_aa(abs(road - (road_half - road_edge)), road_edge) * land * cased);
+        // Roads: two ink strokes on a faint wash of trodden earth, stopping at the shore, drawn by a hand that trembles
+        // a little across them and presses unevenly along them. They keep the course they were traced along, their
+        // tremble a pixel or so however far the map zooms. A road keeps its width on screen, never past a quarter of a
+        // cell; zoomed out too far for its strokes to part, it closes into a single line of sepia.
+        let tremble = (vec2f(value_noise(p * 3.1 + 9.1), value_noise(p * 3.1 + 14.3)) - 0.5) * u.pixel_density / px;
+        let road = line_distance(p + tremble, ROAD) * px;
+        let road_half = min(u.road_width * 0.5 * u.pixel_density, px / 4.0);
+        let parted = smoothstep(1.5, 3.0, road_half / u.pixel_density);
+        let sepia = mix(u.ink.rgb, u.road_fill.rgb * paper, 0.35);
+        col = mix(col, sepia, line_aa(road, max(road_half, 0.6 * u.pixel_density)) * land * (1.0 - parted));
+        col = mix(col, u.road_fill.rgb * paper, u.road_fill.a * line_aa(road, road_half) * land * parted);
+        let stroke = u.road_stroke * 0.5 * u.pixel_density * (0.6 + 0.8 * value_noise(p * 1.7 + 2.9));
+        col = mix(col, u.ink.rgb, line_aa(abs(road - (road_half - stroke)), stroke) * land * parted);
 
         let width = u.coast_width * 0.5 * u.pixel_density * (0.8 + 0.4 * value_noise(p * 0.8));
         col = mix(col, u.ink.rgb, line_aa(abs(d) * px, width));
