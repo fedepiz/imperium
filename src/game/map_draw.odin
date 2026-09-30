@@ -575,7 +575,8 @@ footprint_square :: proc(p: [2]f32) -> [2]int {
 Map_Marks :: struct {
 	// The marks laid, by where they stand, top to bottom, so nearer marks overlap farther ones
 	marks:    [dynamic; MARKS_MAX]Mark,
-	// Each marking's images, defined by marks_init: the first variants[marking] of them
+	// Each marking's images, by variant, defined by marks_init: the first variants[marking] of them. Marks name their
+	// image by marking and variant, so what ids the images were given does not matter to them.
 	images:   [len(MARKINGS)][VARIANTS_MAX]gfx.Image_Id,
 	variants: [len(MARKINGS)]u8,
 }
@@ -588,15 +589,22 @@ MARKS_MAX :: 1 << 17
 // cells.
 @(private = "file")
 Mark :: struct {
-	pos:    [2]f32,
-	layer:  Layer,
-	width:  f32,
+	pos:     [2]f32,
+	layer:   Layer,
+	width:   f32,
 	// Given by its image's proportions once its width is set
-	height: f32,
-	image:  gfx.Image_Id,
+	height:  f32,
+	// Its drawing: the marking's variant-th image
+	marking: u8,
+	variant: u8,
 	// Opacity, up to max(u8)
-	alpha:  u8,
+	alpha:   u8,
 }
+
+#assert(
+	len(MARKINGS) <= 256 && VARIANTS_MAX <= 256,
+	"a mark names its marking and variant in a byte each",
+)
 
 // The layers of marks, in the order they are laid: each claims its ground from those after it
 @(private = "file")
@@ -815,14 +823,10 @@ marks_init :: proc(mm: ^Map_Marks) {
 
 // Lays the marks over the terrain, in three passes: every layer's grid points, scored; a candidate mark at each point
 // that keeps one; and, in order, each candidate that fits, stamping its footprint. coast is for every cell: the signed
-// distance to the coast. claimed holds the preclaimed ground: see FOOTPRINT_RES.
+// distance to the coast. claimed holds the preclaimed ground: see FOOTPRINT_RES. Call after sprites_load: marks take
+// their images' proportions.
 @(private = "file")
-marks_place :: proc(
-	mm: ^Map_Marks,
-	terrain: []sim.Ground,
-	coast: []f32,
-	claimed: []u8,
-) {
+marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed: []u8) {
 	// Each layer has sixteen random streams, one for each use at a point.
 	stream :: proc(layer: Layer, use: u32) -> u32 {return u32(layer) * 16 + use}
 	// Where a mark stands, in cells down the map: its drawing's bottom edge
@@ -835,6 +839,16 @@ marks_place :: proc(
 		pos:      [2]f32,
 		cell:     int,
 		scores:   [len(MARKINGS)]f32,
+	}
+
+	// Each marking's variants' height over width, as their images were loaded; 0 where an image is missing. The marks
+	// read their images only through this, so they depend on the images' proportions, not on their ids.
+	aspects := make([][VARIANTS_MAX]f32, len(MARKINGS), context.temp_allocator)
+	for &variants, m in aspects {
+		for &aspect, v in variants[:mm.variants[m]] {
+			source := gfx.sprite_region(gfx.sprite_of_image(mm.images[m][v])).source
+			if source.z > 0 do aspect = source.w / source.z
+		}
 	}
 
 	// Every layer's grid points that lie in the world, each with every marking's score there
@@ -908,19 +922,20 @@ marks_place :: proc(
 			width *= 1 + marking.grow * up
 		}
 		mark := Mark {
-			pos   = point.pos,
-			layer = layer,
-			width = width,
-			image = mm.images[k][int(random_xy(col, row, stream(layer, 6)) * f32(mm.variants[k]))],
-			alpha = max(u8),
+			pos     = point.pos,
+			layer   = layer,
+			width   = width,
+			marking = u8(k),
+			variant = u8(random_xy(col, row, stream(layer, 6)) * f32(mm.variants[k])),
+			alpha   = max(u8),
 		}
 		if marking.fade.from != marking.fade.full {
 			mark.alpha = u8(ramp(marking.fade, coast[point.cell]) * f32(max(u8)))
 		}
 		// A mark whose image is missing is never drawn, so it is not kept.
-		source := gfx.sprite_region(gfx.sprite_of_image(mark.image)).source
-		if source.z <= 0 do continue
-		mark.height = width * source.w / source.z
+		aspect := aspects[mark.marking][mark.variant]
+		if aspect <= 0 do continue
+		mark.height = width * aspect
 		append(&candidates, mark)
 	}
 
@@ -984,7 +999,7 @@ marks_draw :: proc(
 		rect: [4]f32 = {corner.x, corner.y, size.x, size.y}
 		proj, visible := camera_world_to_screen(camera, viewport, rect)
 		if !visible do continue
-		gfx.draw_image(&draw, mark.image, proj, {1, 1, 1, normalized(mark.alpha)})
+		image := mm.images[mark.marking][mark.variant]
+		gfx.draw_image(&draw, image, proj, {1, 1, 1, normalized(mark.alpha)})
 	}
 }
-
