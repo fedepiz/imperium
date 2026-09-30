@@ -58,8 +58,6 @@ Icon :: enum u8 {
 	Large_City,
 	Army,
 	Fleet,
-	Priest,
-	Envoy,
 }
 
 // Where a piece can walk, each with its own ways across the world

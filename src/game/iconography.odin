@@ -29,8 +29,6 @@ ICON_TAGS := [sim.Icon]string {
 	.Large_City = "town_3",
 	.Army       = "army",
 	.Fleet      = "fleet",
-	.Priest     = "bishop",
-	.Envoy      = "envoy",
 }
 
 // The folder under assets/gfx each set's drawings are in, and each culture's part of their names

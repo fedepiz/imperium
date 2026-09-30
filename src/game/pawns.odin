@@ -45,8 +45,6 @@ PAWN_SIZES := [sim.Icon]f32 {
 	.Large_City = 1.7,
 	.Army       = 1.1,
 	.Fleet      = 1.0,
-	.Priest     = 1.1,
-	.Envoy      = 1.1,
 }
 
 // The tint a focused pawn pulses towards, over its drawing and its paper, and how many seconds it takes to pulse

@@ -16,8 +16,6 @@ kind = { name = city        icon = City                                  contact
 kind = { name = large_city  icon = Large_City                            contact = 9  contact_on = [Land]  body = 3.5  traits = [Capturable] }
 kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 8  contact_on = [Land]  body = 2    traits = [Captures] }
 kind = { name = fleet       icon = Fleet       moves = Sea   per_turn = 80  contact = 8  contact_on = [Sea]   body = 2 }
-kind = { name = priest      icon = Priest      moves = Land  per_turn = 40  contact = 4  contact_on = [Land]  body = 2 }
-kind = { name = envoy       icon = Envoy       moves = Land  per_turn = 50  contact = 4  contact_on = [Land]  body = 2 }
 
 faction = {
 	name = "Rome"
@@ -41,8 +39,6 @@ faction = {
 	piece = { kind = army    at = [334, 419] }
 	piece = { kind = fleet   at = [353, 455] }
 	piece = { kind = fleet   at = [355, 393] }
-	piece = { kind = priest  at = [350, 430] }
-	piece = { kind = envoy   at = [306, 382] }
 }
 
 faction = {
@@ -55,5 +51,4 @@ faction = {
 	piece = { kind = town        name = "Octodurum"             at = [253, 367]  capital_of = octodurum }
 	piece = { kind = town        name = "Iuvavum"               at = [362, 336]  capital_of = iuvavum }
 	piece = { kind = army   at = [316, 342] }
-	piece = { kind = envoy  at = [292, 340] }
 }

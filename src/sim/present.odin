@@ -227,8 +227,6 @@ ICON_TITLES := [Icon]string {
 	.Large_City = "Large City",
 	.Army       = "Army",
 	.Fleet      = "Fleet",
-	.Priest     = "Priest",
-	.Envoy      = "Envoy",
 }
 
 // The name of a living faction, as a view into the world
