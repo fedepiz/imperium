@@ -201,13 +201,25 @@ map_arrows :: proc(scene: ^sim.Scene) {
 // Highlights ----------------------------------------------------------------------------------------------------------
 // Highlights: areas of cells washed in color over the map
 
-// How each look of the scene's areas is drawn: the numbers are the ones sim's present hands out. Only the colour,
-// border, thickness and inside are taken; a look not set here is not seen.
+// How a look of the scene's areas is drawn: its highlight's colour, border, thickness and inside, and how far, in
+// cells, the thin parts of its cells are widened: see area_widen. Widening draws cells the area does not hold, so
+// areas that must meet others edge to edge, such as provinces, keep it 0 and are drawn as their cells are.
 @(private = "file")
-AREA_LOOKS := [256]gfx.Render_Highlight_Area {
-	1 = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2},
+Area_Look :: struct {
+	color:     [4]f32,
+	border:    f32,
+	thickness: f32,
+	inside:    f32,
+	widen:     int,
+}
+
+// How each look of the scene's areas is drawn: the numbers are the ones sim's present hands out. A look not set here
+// is not seen. Reaches are widened, so a reach along a road reads as a band rather than a thread.
+@(private = "file")
+AREA_LOOKS := [256]Area_Look {
+	1 = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2, widen = 2},
 	2 = {color = {0.700, 0.250, 0.160, 1}, border = 0.6, thickness = 2, inside = 0.2},
-	3 = {color = {0.450, 0.420, 0.380, 1}, border = 0.6, thickness = 2, inside = 0.2},
+	3 = {color = {0.450, 0.420, 0.380, 1}, border = 0.6, thickness = 2, inside = 0.2, widen = 2},
 	4 = {color = {0.850, 0.700, 0.200, 1}, border = 0.6, thickness = 2, inside = 0.2},
 }
 
@@ -223,8 +235,10 @@ map_areas :: proc(scene: ^sim.Scene) {
 		highlight := u8(slot + 1)
 		look := AREA_LOOKS[area.look]
 		drawn := &highlights.areas[highlight]
-		drawn.color, drawn.border, drawn.thickness, drawn.inside =
-			look.color, look.border, look.thickness, look.inside
+		drawn.color = look.color
+		drawn.border = look.border
+		drawn.thickness = look.thickness
+		drawn.inside = look.inside
 		drawn.surface = area.on_water ? .Water : .Land
 		for circle in scene.circles[area.circles.begin:][:area.circles.len] {
 			append(
@@ -235,12 +249,63 @@ map_areas :: proc(scene: ^sim.Scene) {
 		if MAP_DRAW.area_revisions[slot] == area.revision do continue
 		MAP_DRAW.area_revisions[slot] = area.revision
 		gfx.render_highlight_clear(highlights, highlight)
-		for inside, i in area.cells {
+		cells := area.cells[:]
+		if look.widen > 0 do cells = area_widen(cells, look.widen)
+		for inside, i in cells {
 			if !inside do continue
 			cell := area.corner + {i % sim.AREA_SIZE, i / sim.AREA_SIZE}
+			if cell.x < 0 || cell.y < 0 || cell.x >= sim.WORLD_WIDTH || cell.y >= sim.WORLD_HEIGHT do continue
+			// A cell only the widening adds is left to any other area it is in.
+			owner := highlights.cells[cell.y * sim.WORLD_WIDTH + cell.x]
+			if !area.cells[i] && owner != 0 && owner != highlight do continue
 			gfx.render_highlight_add(highlights, highlight, cell)
 		}
 	}
+}
+
+// An area's cells, AREA_SIZE square, with its thin parts widened, in the temp allocator. Its thin parts are what an
+// opening by a disc of radius widen takes away: whatever is narrower than about twice widen plus one cell. Those
+// grow by the same disc, so a thread of cells becomes a band. Off the square counts as out of the area.
+@(private = "file")
+area_widen :: proc(cells: []bool, widen: int) -> []bool {
+	// The cells covered by the disc, as offsets from its middle cell
+	disc := make([dynamic][2]int, context.temp_allocator)
+	for dy in -widen ..= widen {
+		for dx in -widen ..= widen {
+			if dx * dx + dy * dy <= widen * widen + widen do append(&disc, [2]int{dx, dy})
+		}
+	}
+	// Each cell is in if the disc around it touches any cell of from, when growing, or lies wholly in from, when
+	// shrinking.
+	morph :: proc(from: []bool, disc: [][2]int, grow: bool) -> []bool {
+		to := make([]bool, len(from), context.temp_allocator)
+		for y in 0 ..< sim.AREA_SIZE {
+			for x in 0 ..< sim.AREA_SIZE {
+				hit := !grow
+				for offset in disc {
+					at := [2]int{x, y} + offset
+					inside :=
+						at.x >= 0 &&
+						at.y >= 0 &&
+						at.x < sim.AREA_SIZE &&
+						at.y < sim.AREA_SIZE &&
+						from[at.y * sim.AREA_SIZE + at.x]
+					if inside != hit {
+						hit = inside
+						break
+					}
+				}
+				to[y * sim.AREA_SIZE + x] = hit
+			}
+		}
+		return to
+	}
+	opened := morph(morph(cells, disc[:], false), disc[:], true)
+	thin := make([]bool, len(cells), context.temp_allocator)
+	for inside, i in cells do thin[i] = inside && !opened[i]
+	widened := morph(thin, disc[:], true)
+	for &inside, i in widened do inside ||= cells[i]
+	return widened
 }
 
 // Cover ---------------------------------------------------------------------------------------------------------------

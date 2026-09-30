@@ -152,6 +152,11 @@ ROAD_COST :: 0.4
 HIGHLAND_ELEVATION :: Ramp{0.55, 1.0}
 MOUNTAINS_ELEVATION :: 0.85
 
+// How far from a road, in cells either way, mountains open into a pass, and the fewest cells a patch of mountains
+// holds: smaller patches are highland.
+PASS_REACH :: 1
+MOUNTAINS_PATCH_MIN :: 12
+
 // How far around a cell, in cells either way, the land it is compared with to find basins reaches
 BASIN_REACH :: 24
 
@@ -227,7 +232,7 @@ terrain_type_of :: proc(
 		.Steppe    = ramp(0.40, 0.47, moisture) * ramp(0.58, 0.48, moisture),
 		.Fertile   = 1.3 * max(dry_river, valley),
 		.Marsh     = 1.5 * low * max(delta, ramp(0.80, 0.88, moisture)),
-		.Highland  = 1.2 * ramp(HIGHLAND_ELEVATION, elevation),
+		.Highland  = highland_suit(elevation),
 		.Mountains = 0,
 		.Fields    = 0.6 * ramp(0.52, 0.62, moisture) * ramp(0.3, 0.1, trees),
 	}
@@ -237,6 +242,68 @@ terrain_type_of :: proc(
 	}
 	if best == .Open do strength = 0
 	return
+}
+
+// How well highland suits a cell of an elevation, normalized
+highland_suit :: proc(elevation: f32) -> f32 {
+	return 1.2 * ramp(HIGHLAND_ELEVATION, elevation)
+}
+
+// Makes a cell highland, as strongly as its elevation suits it
+terrain_to_highland :: proc(cell: ^Terrain) {
+	cell.type = .Highland
+	cell.type_strength = u8(min(highland_suit(normalized(cell.elevation)), 1) * f32(max(u8)) + 0.5)
+}
+
+// Mountains within PASS_REACH cells of a road are highland: a road through the mountains runs along a pass, which can
+// be crossed off the road too.
+terrain_open_passes :: proc(terrain: []Terrain) {
+	for y in 0 ..< WORLD_HEIGHT {
+		for x in 0 ..< WORLD_WIDTH {
+			if terrain[y * WORLD_WIDTH + x].way[.Road] == 0 do continue
+			for dy in -PASS_REACH ..= PASS_REACH {
+				for dx in -PASS_REACH ..= PASS_REACH {
+					at := [2]int{x + dx, y + dy}
+					if at.x < 0 || at.y < 0 || at.x >= WORLD_WIDTH || at.y >= WORLD_HEIGHT do continue
+					cell := &terrain[at.y * WORLD_WIDTH + at.x]
+					if cell.type == .Mountains do terrain_to_highland(cell)
+				}
+			}
+		}
+	}
+}
+
+// Patches of mountains too small to stand as a range are highland: cells that cannot be crossed, touching at a side
+// or a corner, fewer than MOUNTAINS_PATCH_MIN. A road's cells can be crossed, so they are in no patch.
+terrain_drop_specks :: proc(terrain: []Terrain) {
+	impassable :: proc(cell: Terrain) -> bool {
+		return cell.type == .Mountains && cell.way[.Road] == 0
+	}
+	seen := make([]bool, CELLS_MAX, context.temp_allocator)
+	// The cells of the patch being found, which are also the queue of cells to look around
+	patch := make([dynamic]int, 0, 64, context.temp_allocator)
+	for start in 0 ..< CELLS_MAX {
+		if seen[start] || !impassable(terrain[start]) do continue
+		clear(&patch)
+		append(&patch, start)
+		seen[start] = true
+		for next := 0; next < len(patch); next += 1 {
+			x := patch[next] % WORLD_WIDTH
+			y := patch[next] / WORLD_WIDTH
+			for dy in -1 ..= 1 {
+				for dx in -1 ..= 1 {
+					at := [2]int{x + dx, y + dy}
+					if at.x < 0 || at.y < 0 || at.x >= WORLD_WIDTH || at.y >= WORLD_HEIGHT do continue
+					i := at.y * WORLD_WIDTH + at.x
+					if seen[i] || !impassable(terrain[i]) do continue
+					seen[i] = true
+					append(&patch, i)
+				}
+			}
+		}
+		if len(patch) >= MOUNTAINS_PATCH_MIN do continue
+		for i in patch do terrain_to_highland(&terrain[i])
+	}
 }
 
 // Which way of its kind runs through a cell. Id 0 is none.
@@ -294,6 +361,8 @@ world_load :: proc(scenario: Scenario) -> bool {
 	{
 		land := measure_land(terrain[:])
 		for &cell, i in terrain do cell.type, cell.type_strength = terrain_type_of(terrain[:], &land, i)
+		terrain_open_passes(terrain[:])
+		terrain_drop_specks(terrain[:])
 	}
 	// Land, by terrain type, roads whatever their type
 	{
