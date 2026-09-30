@@ -28,13 +28,25 @@ WORLD: struct {
 	turn:          int,
 }
 
+// How a walk's path is smoothed: passes of softening, then corner cuts, each cut_ratio of the way in from a segment's
+// ends. See walk_smooth.
+WALK_SOFTEN_PASSES :: 2
+WALK_CUTS :: 2
+WALK_CUT_RATIO :: 0.25
+// The most points a walk's path holds: where it starts and up to PATH_MAX_LEN cells, doubled by each cut
+WALK_POINTS_MAX :: (PATH_MAX_LEN + 1) << WALK_CUTS
+
+// A scene's arrow holds where the walker stands and the rest of its path.
+#assert(WALK_POINTS_MAX + 1 <= ARROW_POINTS_MAX)
+
 // The piece walking, and where the focus can walk
 Movement :: struct {
 	// The piece walking, nil when none
 	subject:       Piece_Id,
-	// Its path, as cell middles, the cost of entering each, and the next point it walks to
-	path:          [dynamic; PATH_MAX_LEN][2]f32,
-	cost:          [dynamic; PATH_MAX_LEN]f32,
+	// Its path, from where it stood, smoothed from the cell middles it crosses: see walk_smooth. The cost of walking
+	// to each point from the one before, and the next point it walks to.
+	path:          [dynamic; WALK_POINTS_MAX][2]f32,
+	cost:          [dynamic; WALK_POINTS_MAX]f32,
 	next:          int,
 	// The piece it walks to meet, or nil
 	target:        Piece_Id,
@@ -412,7 +424,9 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 		}
 		path: [dynamic; PATH_MAX_LEN][2]f32
 		cost: [dynamic; PATH_MAX_LEN]f32
+		mover := piece_get(walker)
 		if !ok ||
+		   mover == nil ||
 		   !pathfind_flood_trace(
 				   &mov.flood,
 				   [2]f32{f32(stop.x), f32(stop.y)} + 0.5,
@@ -423,11 +437,50 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 			continue
 		}
 		mov.subject, mov.target = walker, target
-		mov.path = path
-		mov.cost = cost
-		mov.next = 0
+		clear(&mov.path)
+		clear(&mov.cost)
+		append(&mov.path, mover.pos)
+		append(&mov.cost, 0)
+		append(&mov.path, ..path[:])
+		append(&mov.cost, ..cost[:])
+		walk_smooth(&mov.path, &mov.cost)
+		mov.next = 1
 	}
 	movement_advance(mov, walk_distance)
+}
+
+// Smooths a walk's path in place, keeping its ends where they are. Softening moves each point toward the average of its
+// neighbours, which straightens the steps from cell to cell; then each cut rounds every corner, Chaikin's way, making
+// each segment the two points WALK_CUT_RATIO of the way in from its ends. A point's cost is that of walking to it from
+// the one before, so both points cut from a segment take its cost, and the walk costs what its cells do.
+@(private = "file")
+walk_smooth :: proc(path: ^[dynamic; WALK_POINTS_MAX][2]f32, cost: ^[dynamic; WALK_POINTS_MAX]f32) {
+	n := len(path)
+	if n < 3 do return
+	for _ in 0 ..< WALK_SOFTEN_PASSES {
+		prev := path[0]
+		for i in 1 ..< n - 1 {
+			here := path[i]
+			path[i] = (prev + 2 * here + path[i + 1]) / 4
+			prev = here
+		}
+	}
+	// Written from the last back, so each point is read before anything is written over it
+	for _ in 0 ..< WALK_CUTS {
+		resize(path, 2 * n)
+		resize(cost, 2 * n)
+		path[2 * n - 1] = path[n - 1]
+		cost[2 * n - 1] = cost[n - 1]
+		for i := n - 2; i >= 0; i -= 1 {
+			a, b := path[i], path[i + 1]
+			segment := cost[i + 1]
+			path[2 * i + 1] = a + (b - a) * WALK_CUT_RATIO
+			path[2 * i + 2] = b + (a - b) * WALK_CUT_RATIO
+			cost[2 * i + 1] = segment
+			cost[2 * i + 2] = segment
+		}
+		n *= 2
+	}
 }
 
 // Starts turn 1, played first by the faction in the first slot with one, every piece's movement budget full

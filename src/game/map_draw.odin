@@ -176,25 +176,14 @@ lines_add :: proc(lines: ^gfx.Render_Lines, line: Polyline, head: bool) {
 // Arrows --------------------------------------------------------------------------------------------------------------
 // Arrows: lines over the map along the way something is going, ending in a head where it is going to
 
-// Arrows follow ways found from cell to cell, so they are smoothed fully.
-@(private = "file")
-ARROW_SMOOTHING :: Polyline_Smoothing {
-	softness  = 1,
-	cut_iter  = 2,
-	cut_ratio = 0.25,
-}
-
-// Draws the scene's arrows over the map, each through its points, in cells, its head at the last
+// Draws the scene's arrows over the map, each through its points as given, in cells, its head at the last
 @(private = "file")
 map_arrows :: proc(scene: ^sim.Scene) {
 	arrows := &MAP_DRAW.render_terrain.lines[.Arrow]
 	clear(&arrows.segments)
 	arrows.revision += 1
 	for arrow in scene.arrows {
-		polylines_clear()
-		for point in scene.arrow_points[arrow.begin:][:arrow.len] do polylines_add(point)
-		polylines_end(false, ARROW_SMOOTHING)
-		for r in 0 ..< polylines_count() do lines_add(arrows, polylines_get(r), true)
+		lines_add(arrows, {points = scene.arrow_points[arrow.begin:][:arrow.len]}, true)
 	}
 }
 
