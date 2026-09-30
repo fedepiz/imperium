@@ -217,9 +217,9 @@ Area_Look :: struct {
 // is not seen. Reaches are widened, so a reach along a road reads as a band rather than a thread.
 @(private = "file")
 AREA_LOOKS := [256]Area_Look {
-	1 = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2, widen = 2},
+	1 = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2, widen = 1},
 	2 = {color = {0.700, 0.250, 0.160, 1}, border = 0.6, thickness = 2, inside = 0.2},
-	3 = {color = {0.450, 0.420, 0.380, 1}, border = 0.6, thickness = 2, inside = 0.2, widen = 2},
+	3 = {color = {0.450, 0.420, 0.380, 1}, border = 0.6, thickness = 2, inside = 0.2, widen = 1},
 	4 = {color = {0.850, 0.700, 0.200, 1}, border = 0.6, thickness = 2, inside = 0.2},
 }
 
