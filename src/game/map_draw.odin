@@ -26,6 +26,8 @@ MAP_DRAW: struct {
 	render_list:    gfx.Render_List,
 	// The revision of each of the scene's areas its highlight was last taken from
 	area_revisions: [sim.AREAS_MAX]u64,
+	// How far each region's look has eased toward its hovered look, from 0 to 1, by its id
+	region_hover:   [gfx.RENDER_HIGHLIGHT_AREAS]f32,
 }
 
 // Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
@@ -52,8 +54,8 @@ map_draw_init :: proc() {
 		arrow_fill         = {0.700, 0.250, 0.160, 1},
 		head_length        = 7.5,
 		head_width         = 6.25,
-		border_width       = 2.5,
-		border_ink         = {0.400, 0.180, 0.120, 0.45},
+		border_width       = 1,
+		border_ink         = {0.400, 0.180, 0.120, 0.3},
 	}
 	MAP_DRAW.render_terrain.cover.jitter = 0.8
 }
@@ -63,8 +65,16 @@ map_draw_init :: proc() {
 TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture", "Cover"}
 
 // Keeps the map's drawing in step with the scene: the camera every frame, everything drawn from the ground when it
-// changes, the arrows every frame, the areas when they change, and the marks in view every frame.
-map_draw_tick :: proc(scene: ^sim.Scene, camera: Camera, viewport: [2]f32, pixel_density: f32) {
+// changes, the arrows every frame, the areas when they change, the regions' looks every frame, eased toward the hovered
+// region's over dt seconds, and the marks in view every frame. A nil hovered region is none.
+map_draw_tick :: proc(
+	scene: ^sim.Scene,
+	hovered: sim.Region_Id,
+	camera: Camera,
+	viewport: [2]f32,
+	pixel_density: f32,
+	dt: f32,
+) {
 	rt := &MAP_DRAW.render_terrain
 	rt.center, rt.zoom = camera.center, camera.zoom
 	if rt.revision != scene.ground_revision {
@@ -73,6 +83,7 @@ map_draw_tick :: proc(scene: ^sim.Scene, camera: Camera, viewport: [2]f32, pixel
 	}
 	map_arrows(scene)
 	map_areas(scene)
+	map_regions(scene, hovered, dt)
 	marks_draw(&MAP_DRAW.marks, &MAP_DRAW.render_list, camera, viewport, pixel_density)
 }
 
@@ -161,6 +172,15 @@ map_derive :: proc(terrain: []sim.Ground) {
 	trace_boundaries(labels, BORDER_SMOOTHING)
 	for r in 0 ..< polylines_count() do lines_add(borders, polylines_get(r), false)
 
+	// Each region's cells, as the area of the regions' highlights its id numbers. Regions past what the highlights
+	// hold are not drawn.
+	regions := &rt.highlights[.Regions]
+	for area in 1 ..< gfx.RENDER_HIGHLIGHT_AREAS do gfx.render_highlight_clear(regions, u8(area))
+	for cell, i in terrain {
+		if cell.surface in sim.WATER || cell.region == 0 || int(cell.region) >= gfx.RENDER_HIGHLIGHT_AREAS do continue
+		gfx.render_highlight_add(regions, u8(cell.region), {i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH})
+	}
+
 	// The water near the shore, preclaimed so no mark's drawing spills into it
 	preclaim_coast_water(claimed, rt.coast[:], COAST_WATER_BAND)
 
@@ -231,7 +251,7 @@ AREA_LOOKS := [256]Area_Look {
 map_areas :: proc(scene: ^sim.Scene) {
 	#assert(sim.AREAS_MAX < gfx.RENDER_HIGHLIGHT_AREAS)
 	#assert(sim.CIRCLES_MAX <= gfx.RENDER_HIGHLIGHT_CIRCLES_MAX)
-	highlights := &MAP_DRAW.render_terrain.highlights
+	highlights := &MAP_DRAW.render_terrain.highlights[.Areas]
 	clear(&highlights.circles)
 	for &area, slot in scene.areas {
 		highlight := u8(slot + 1)
@@ -262,6 +282,50 @@ map_areas :: proc(scene: ^sim.Scene) {
 			if !area.cells[i] && owner != 0 && owner != highlight do continue
 			gfx.render_highlight_add(highlights, highlight, cell)
 		}
+	}
+}
+
+// Regions ------------------------------------------------------------------------------------------------------------
+// Regions: each washed in its colour in from its edge, the hovered one more strongly
+
+// How a region is drawn, resting and hovered: how strongly it is washed in its colour at its edge, how many cells in
+// that fades over, and how strongly it is washed beyond
+@(private = "file")
+Region_Look :: struct {
+	border:    f32,
+	thickness: f32,
+	inside:    f32,
+}
+@(private = "file")
+REGION_RESTING :: Region_Look {
+	border    = 0.35,
+	thickness = 1.5,
+	inside    = 0,
+}
+@(private = "file")
+REGION_HOVERED :: Region_Look {
+	border    = 0.7,
+	thickness = 4,
+	inside    = 0.1,
+}
+// How quickly a region's look eases between the two: the share of the way left it goes each second
+@(private = "file")
+REGION_HOVER_EASE :: 10
+
+// Sets each region's look for the frame, from the scene's colour and how far it has eased toward its hovered look
+@(private = "file")
+map_regions :: proc(scene: ^sim.Scene, hovered: sim.Region_Id, dt: f32) {
+	regions := &MAP_DRAW.render_terrain.highlights[.Regions]
+	step := 1 - math.exp(-REGION_HOVER_EASE * dt)
+	for &drawn, area in regions.areas {
+		if area == 0 || area > len(scene.regions) do continue
+		hover := &MAP_DRAW.region_hover[area]
+		hover^ += ((sim.Region_Id(area) == hovered ? 1 : 0) - hover^) * step
+		drawn.color = scene.regions[area - 1].color
+		drawn.border = math.lerp(REGION_RESTING.border, REGION_HOVERED.border, hover^)
+		drawn.thickness = math.lerp(REGION_RESTING.thickness, REGION_HOVERED.thickness, hover^)
+		drawn.inside = math.lerp(REGION_RESTING.inside, REGION_HOVERED.inside, hover^)
+		drawn.surface = .Land
 	}
 }
 

@@ -200,6 +200,8 @@ Scene :: struct {
 	// The areas' circles; each area's are a run of them
 	circles:         [dynamic; CIRCLES_MAX]Circle,
 	cards:           [dynamic; CARDS_MAX]Card,
+	// Each region, from region 1
+	regions:         [dynamic; REGIONS_MAX]Region,
 	// What the world holds that can be saved, to hand back in a later scenario. Worth saving when the fingerprint is not
 	// that of the saved one.
 	caches:          [Cached_File_Id]Cached_File,
@@ -217,6 +219,12 @@ Ground :: struct {
 	// From 0 to 255
 	type_strength: u8,
 	region:        Region_Id,
+}
+
+// A region of the map: its name, and the colour it is shown in
+Region :: struct {
+	name:  string,
+	color: [4]f32,
 }
 
 // A drawing: what it shows, in whose style

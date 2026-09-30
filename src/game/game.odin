@@ -1,6 +1,7 @@
 package game
 
 import "core:fmt"
+import "core:math"
 
 import "../gfx"
 import "../sim"
@@ -94,6 +95,16 @@ game_tick :: proc(input: Input, dt: f32) {
 		}
 	}
 
+	// The region under the cursor, from the ground last presented
+	hovered: sim.Region_Id
+	if input.on_map {
+		cell := camera_screen_to_world_point(GAME.camera, input.viewport, input.cursor)
+		x, y := int(math.floor(cell.x)), int(math.floor(cell.y))
+		if x >= 0 && y >= 0 && x < sim.WORLD_WIDTH && y < sim.WORLD_HEIGHT {
+			hovered = GAME.scene.ground[y * sim.WORLD_WIDTH + x].region
+		}
+	}
+
 	sim.step(GAME.commands[:], MOVEMENT_SPEED * dt)
 	clear(&GAME.commands)
 	sim.present(GAME.focus, &GAME.scene)
@@ -104,7 +115,7 @@ game_tick :: proc(input: Input, dt: f32) {
 		cache_write(cache_path(GAME.folder, id), file)
 	}
 
-	map_draw_tick(&GAME.scene, GAME.camera, input.viewport, input.pixel_density)
+	map_draw_tick(&GAME.scene, hovered, GAME.camera, input.viewport, input.pixel_density, dt)
 	visuals_tick(GAME.visuals[:], GAME.scene.pawns[:], dt)
 	pawns_draw(
 		GAME.scene.pawns[:],

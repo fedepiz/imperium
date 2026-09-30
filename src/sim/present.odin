@@ -38,6 +38,12 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 		}
 	}
 
+	// Every region, each in its own colour
+	clear(&out.regions)
+	for &name, index in WORLD.region_names {
+		append(&out.regions, Region{name = string(name[:]), color = region_color(Region_Id(index + 1))})
+	}
+
 	// Every piece, the focus focused, and the player's controlled
 	clear(&out.pawns)
 	for piece, index in WORLD.pieces {
@@ -123,6 +129,27 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	out.caches = {}
 	pathfind_cache_get(&out.caches[.Pathfind_Land], .Land)
 	pathfind_cache_get(&out.caches[.Pathfind_Sea], .Sea)
+}
+
+// How much each region's hue turns from the one before: the golden ratio of a turn, so hues of nearby ids stay apart
+@(private = "file")
+REGION_HUE_STEP :: 0.618034
+// How saturated and how light region colours are: muted pigments, light enough to tint the map
+@(private = "file")
+REGION_SATURATION :: 0.55
+@(private = "file")
+REGION_VALUE :: 0.75
+
+// The colour a region is shown in, until regions have owners to take their colours from
+@(private = "file")
+region_color :: proc(id: Region_Id) -> [4]f32 {
+	hue := math.mod(f32(id) * REGION_HUE_STEP, 1) * 6
+	// Each channel's distance round the hue circle from where it is strongest, as HSV has it
+	channel :: proc(hue, offset: f32) -> f32 {
+		k := math.mod(offset + hue, 6)
+		return REGION_VALUE - REGION_VALUE * REGION_SATURATION * max(0, min(k, 4 - k, 1))
+	}
+	return {channel(hue, 5), channel(hue, 3), channel(hue, 1), 1}
 }
 
 // The player controls the piece

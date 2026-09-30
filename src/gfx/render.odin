@@ -180,6 +180,13 @@ Render_Highlight_Area :: struct {
 	inside:    f32,
 }
 
+// The layers of highlights, each drawn apart: the regions over the land's cover and under its rivers and roads, and the
+// areas over everything but the arrows. Only the areas' circles are drawn.
+Render_Highlight_Layer :: enum u8 {
+	Regions,
+	Areas,
+}
+
 // Areas highlighted over the map, each in its own look, made of cells and of circles. A cell is in at most one area.
 // Each area's cells are drawn with a smooth edge that follows them, and is the coast along the coast; where two areas
 // meet they share one edge, and neither draws past it. Circles are drawn exactly, over all areas' cells, each area's
@@ -263,8 +270,8 @@ Render_Terrain :: struct {
 	lines:      [Render_Line_Kind]Render_Lines,
 	// What covers the land, drawn onto it: forest, desert and so on. Water is drawn over it.
 	cover:      Render_Layer,
-	// Areas drawn over the map, under the arrows
-	highlights: Render_Highlights,
+	// Areas drawn over the map, in their layers
+	highlights: [Render_Highlight_Layer]Render_Highlights,
 	// The cell at the middle of the view, and logical pixels per cell
 	center:     [2]f32,
 	zoom:       f32,
