@@ -20,7 +20,7 @@ PIECES_FILE :: "pieces.txt"
 // read, where and why is shown, and false is returned.
 //
 // kind: name, icon, moves (a domain, left out for a piece that stays put), per_turn, contact, contact_on (a list of
-// domains) and body.
+// domains), body and traits (a list of traits, left out for none).
 // faction: name, culture, colour ([r, g, b], each from 0 to 255), and a piece row for each piece: kind, name (may be
 // left out), at ([x, y] in cells), culture (the faction's when left out) and capital_of (the id of the region it is
 // the capital of, among region_ids; left out for none, and no region has two).
@@ -80,6 +80,11 @@ pieces_load :: proc(
 				kind.piece.contact.domains += {domain}
 			}
 			kind.piece.body = tabula.get_num(row, "body")
+			for value in tabula.find(row, "traits").children {
+				trait, is_trait := reflect.enum_from_name(sim.Piece_Trait, value.text)
+				if !is_trait do return nil, nil, fail(path, row.key, n, "traits must list traits")
+				kind.piece.traits += {trait}
+			}
 			append(&kinds, kind)
 		case "faction":
 			faction := sim.Scenario_Faction {

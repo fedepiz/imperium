@@ -26,6 +26,11 @@ WORLD: struct {
 	factions_free:   [dynamic; FACTION_MAX]u16,
 	// The faction whose turn it is, which the player plays, or nil for none
 	player:          Faction_Id,
+	// The faction whose pieces take orders: the player's, nil while an interaction is open
+	ordering:        Faction_Id,
+	// The turn could end as last presented: nothing walked and no interaction was open
+	turn_endable:    bool,
+	interaction:     Interaction,
 	movement:        Movement,
 	// The turn being played, counting from 1: each faction plays once in a turn, in the order of their slots
 	turn:            int,
@@ -42,6 +47,14 @@ WALK_POINTS_MAX :: (PATH_MAX_LEN + 1) << WALK_CUTS
 // A scene's arrow holds where the walker stands and the rest of its path.
 #assert(WALK_POINTS_MAX + 1 <= ARROW_POINTS_MAX)
 
+// A meeting waiting on the player: the piece that walked to meet another, and the one of another faction it met. Nil
+// actor while none is open.
+Interaction :: struct {
+	actor, target: Piece_Id,
+	// The actor can conquer the target, as when it opened
+	conquerable:   bool,
+}
+
 // The piece walking, and where the focus can walk
 Movement :: struct {
 	// The piece walking, nil when none
@@ -56,16 +69,19 @@ Movement :: struct {
 	// Where the focus can walk: nil subject and 0 key when none. The key hashes the flood's inputs, zones and bodies
 	// among them, rebuilt every tick.
 	flood:         Pathfind_Flood,
-	zones, bodies: [dynamic; PIECE_MAX]Disc,
+	enemy_zones:   [dynamic; PIECE_MAX]Disc,
+	friend_zones:  [dynamic; PIECE_MAX]Disc,
+	bodies:        [dynamic; PIECE_MAX]Disc,
 	flood_subject: Piece_Id,
 	flood_key:     u64,
 }
 
 // Floods where the focus can walk. Runs once per tick, first in present; the next step's orders use it.
 movement_flood :: proc(mov: ^Movement, focus: Piece_Id) {
-	zones, bodies := &mov.zones, &mov.bodies
+	zones, bodies := &mov.enemy_zones, &mov.bodies
 	clear(zones)
 	clear(bodies)
+	clear(&mov.friend_zones)
 	subject := piece_get(focus)
 	if subject == nil || subject.movement_domain == nil {
 		mov.flood_subject, mov.flood_key = {}, 0
@@ -73,15 +89,19 @@ movement_flood :: proc(mov: ^Movement, focus: Piece_Id) {
 	}
 	domain := subject.movement_domain.(Pathfind_Domain)
 
-	// No stopping on bodies; enemy contacts are zones, stopping it once entered. Only discs near the flood count.
+	// No stopping on bodies; enemy contacts are zones, stopping it once entered, and friends' are kept apart. Only
+	// discs near the flood count.
 	for other, index in WORLD.pieces {
 		if !piece_alive(other) || piece_id(index) == focus do continue
 		near := PATHFIND_FLOOD_SIZE / 2 + max(other.contact.radius, subject.body + other.body) + 1
 		if abs(other.pos.x - subject.pos.x) > near || abs(other.pos.y - subject.pos.y) > near do continue
 		append(bodies, Disc{other.pos, subject.body + other.body})
-		friend := faction_get(other.owner) != nil && other.owner == subject.owner
-		if !friend && other.contact.radius > 0 && domain in other.contact.domains {
-			append(zones, Disc{other.pos, other.contact.radius})
+		if other.contact.radius == 0 || domain not_in other.contact.domains do continue
+		contact := Disc{other.pos, other.contact.radius}
+		if pieces_friendly(subject^, other) {
+			append(&mov.friend_zones, contact)
+		} else {
+			append(zones, contact)
 		}
 	}
 
@@ -99,9 +119,9 @@ movement_flood :: proc(mov: ^Movement, focus: Piece_Id) {
 	mov.flood_subject, mov.flood_key = focus, key
 }
 
-// Walks the subject walk_distance cells along its path, paying from its budget. At the end it meets its target, which
-// does nothing yet.
-movement_advance :: proc(mov: ^Movement, walk_distance: f32) {
+// Walks the subject walk_distance cells along its path, paying from its budget. At the end it reaches its target: both
+// are returned then, and nil otherwise.
+movement_advance :: proc(mov: ^Movement, walk_distance: f32) -> (walker, met: Piece_Id) {
 	if mov.subject == {} do return
 	subject := piece_get(mov.subject)
 	is_over: bool
@@ -127,8 +147,10 @@ movement_advance :: proc(mov: ^Movement, walk_distance: f32) {
 	}
 
 	if is_over {
+		if subject != nil do walker, met = mov.subject, mov.target
 		mov.subject, mov.target, mov.next = {}, {}, 0
 	}
+	return
 }
 
 Atlas :: struct {
@@ -407,6 +429,7 @@ world_load :: proc(scenario: Scenario) -> bool {
 		append(&WORLD.region_capitals, Piece_Id{})
 	}
 	WORLD.atlas.revision += 1
+	WORLD.interaction = {}
 	world_load_pieces(scenario)
 	turns_begin()
 	return ok
@@ -415,9 +438,13 @@ world_load :: proc(scenario: Scenario) -> bool {
 world_step :: proc(commands: []Command, walk_distance: f32) {
 	mov := &WORLD.movement
 	for command in commands {
-		// A walk of the focus, from the flood the last present made for it, nil when it cannot walk: where it stops,
-		// and whom it meets there
+		// A walk of the focus, from the flood the last present made for it, nil when it cannot walk or does not take
+		// orders: where it stops, and whom it meets there
 		walker := mov.flood_subject
+		if piece := piece_get(walker);
+		   piece == nil || WORLD.ordering == {} || piece.owner != WORLD.ordering {
+			walker = {}
+		}
 		target: Piece_Id
 		stop: [2]int
 		ok: bool
@@ -427,13 +454,26 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 		case Move_Focus_To_Piece:
 			target = c.target
 			other := piece_get(target)
-			if walker != {} &&
-			   other != nil &&
-			   mov.flood.domain in other.contact.domains {
+			if walker != {} && other != nil && mov.flood.domain in other.contact.domains {
 				stop, ok = pathfind_flood_stop_within(&mov.flood, other.pos, other.contact.radius)
 			}
 		case End_Turn:
-			if turn_can_end() do turn_end()
+			if WORLD.turn_endable {
+				turn_end()
+				// What was presented no longer holds, so a second End_Turn in the same step is rejected
+				WORLD.turn_endable = false
+			}
+			continue
+		case Conquer:
+			open := &WORLD.interaction
+			if open.actor != {} && open.conquerable {
+				actor, conquered := piece_get(open.actor), piece_get(open.target)
+				if actor != nil && conquered != nil do conquered.owner = actor.owner
+				interaction_close()
+			}
+			continue
+		case Leave_Interaction:
+			if WORLD.interaction.actor != {} do interaction_close()
 			continue
 		}
 		path: [dynamic; PATH_MAX_LEN][2]f32
@@ -460,7 +500,30 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 		walk_smooth(&mov.path, &mov.cost)
 		mov.next = 1
 	}
-	movement_advance(mov, walk_distance)
+	// A walk that reaches a piece of another faction opens an interaction there, and orders wait on it
+	if walker, met := movement_advance(mov, walk_distance); met != {} {
+		actor, other := piece_get(walker), piece_get(met)
+		if actor != nil && other != nil && !pieces_friendly(actor^, other^) {
+			WORLD.interaction = {
+				actor       = walker,
+				target      = met,
+				conquerable = .Captures in actor.traits && .Capturable in other.traits,
+			}
+			WORLD.ordering = {}
+		}
+	}
+}
+
+// Closes the open interaction, and the player's pieces take orders again
+@(private = "file")
+interaction_close :: proc() {
+	WORLD.interaction = {}
+	WORLD.ordering = WORLD.player
+}
+
+// Both belong to one faction
+pieces_friendly :: proc(a, b: Piece) -> bool {
+	return faction_get(a.owner) != nil && a.owner == b.owner
 }
 
 // Smooths a walk's path in place, keeping its ends where they are. Softening moves each point toward the average of its
@@ -468,7 +531,10 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 // each segment the two points WALK_CUT_RATIO of the way in from its ends. A point's cost is that of walking to it from
 // the one before, so both points cut from a segment take its cost, and the walk costs what its cells do.
 @(private = "file")
-walk_smooth :: proc(path: ^[dynamic; WALK_POINTS_MAX][2]f32, cost: ^[dynamic; WALK_POINTS_MAX]f32) {
+walk_smooth :: proc(
+	path: ^[dynamic; WALK_POINTS_MAX][2]f32,
+	cost: ^[dynamic; WALK_POINTS_MAX]f32,
+) {
 	n := len(path)
 	if n < 3 do return
 	for _ in 0 ..< WALK_SOFTEN_PASSES {
@@ -497,7 +563,8 @@ walk_smooth :: proc(path: ^[dynamic; WALK_POINTS_MAX][2]f32, cost: ^[dynamic; WA
 	}
 }
 
-// Starts turn 1, played first by the faction in the first slot with one, every piece's movement budget full
+// Starts turn 1, played first by the faction in the first slot with one, whose pieces take orders, every piece's
+// movement budget full
 @(private = "file")
 turns_begin :: proc() {
 	WORLD.turn = 1
@@ -508,13 +575,15 @@ turns_begin :: proc() {
 	for faction, index in WORLD.factions {
 		if faction_alive(faction) {
 			WORLD.player = faction_id(index)
-			return
+			break
 		}
 	}
+	WORLD.ordering = WORLD.player
 }
 
 // Ends the player's faction's part of the turn, refilling its pieces' movement budgets: the faction in the next slot
-// with one plays, and once past the last slot, the next turn begins. Nil when there is no faction.
+// with one plays, and its pieces take orders, and once past the last slot, the next turn begins. Nil when there is no
+// faction.
 @(private = "file")
 turn_end :: proc() {
 	for &piece in WORLD.pieces {
@@ -523,21 +592,18 @@ turn_end :: proc() {
 		}
 	}
 	from := int(WORLD.player.index)
+	next: Faction_Id
 	for step in 1 ..= FACTION_MAX {
 		index := from + step
 		if index == FACTION_MAX do WORLD.turn += 1
 		index %= FACTION_MAX
 		if faction_alive(WORLD.factions[index]) {
-			WORLD.player = faction_id(index)
-			return
+			next = faction_id(index)
+			break
 		}
 	}
-	WORLD.player = {}
-}
-
-// The turn can end: no piece is moving
-turn_can_end :: proc() -> bool {
-	return WORLD.movement.subject == {}
+	WORLD.player = next
+	WORLD.ordering = next
 }
 
 // Spawns the scenario's factions, in the order they play, and its pieces, each the capital of its region if it has one
@@ -545,7 +611,10 @@ turn_can_end :: proc() -> bool {
 world_load_pieces :: proc(scenario: Scenario) {
 	factions: [dynamic; FACTION_MAX]Faction_Id
 	for faction in scenario.factions {
-		append(&factions, faction_spawn({culture = faction.culture, color = faction.color}, faction.name))
+		append(
+			&factions,
+			faction_spawn({culture = faction.culture, color = faction.color}, faction.name),
+		)
 	}
 	for piece in scenario.pieces {
 		owner: Faction_Id
@@ -560,6 +629,7 @@ world_load_pieces :: proc(scenario: Scenario) {
 				movement_per_turn = piece.movement_per_turn,
 				contact = piece.contact,
 				body = piece.body,
+				traits = piece.traits,
 			},
 			piece.name,
 		)
@@ -589,6 +659,7 @@ Piece :: struct {
 	contact:           Contact,
 	// Radius in cells; no other piece stops overlapping it
 	body:              f32,
+	traits:            bit_set[Piece_Trait;u8],
 }
 
 // Puts a piece in a free slot under a name, which may be empty, returning its id, or nil when every slot is full
@@ -703,3 +774,4 @@ faction_alive :: proc(faction: Faction) -> bool {
 faction_id :: proc(index: int) -> Faction_Id {
 	return {u16(index), WORLD.factions[index].generation}
 }
+

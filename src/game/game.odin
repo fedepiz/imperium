@@ -167,7 +167,7 @@ CARD_BUTTON_HOT_PAPER :: [4]f32{0.760, 0.690, 0.545, 1}
 CARD_BUTTON_ACTIVE_PAPER :: [4]f32{0.680, 0.610, 0.475, 1}
 
 // Called between ui.begin() and ui.end(). The scene's cards float over the map on the map's paper: its status cards at
-// the top right, its focus cards at the bottom left.
+// the top right, its interaction cards in the middle, its focus cards at the bottom left.
 game_ui :: proc() {
 	ui.style_push(
 		{
@@ -182,6 +182,12 @@ game_ui :: proc() {
 		if ui.row({width = ui.grow(), height = ui.fit()}) {
 			ui.spacer(ui.grow())
 			cards_build(.Status)
+		}
+		ui.spacer(ui.grow())
+		if ui.row({width = ui.grow(), height = ui.fit()}) {
+			ui.spacer(ui.grow())
+			cards_build(.Interaction)
+			ui.spacer(ui.grow())
 		}
 		ui.spacer(ui.grow())
 		cards_build(.Focus)

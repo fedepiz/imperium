@@ -74,6 +74,14 @@ Contact :: struct {
 	domains: bit_set[Pathfind_Domain],
 }
 
+// What a piece can do in an interaction with a piece it walked to, and what can be done to it there
+Piece_Trait :: enum u8 {
+	// It can conquer a piece that can be captured
+	Captures,
+	// A piece that captures can conquer it
+	Capturable,
+}
+
 // Which region of the map a cell lies in: 1 for the scenario's first region, 0 for none
 Region_Id :: distinct u16
 
@@ -133,6 +141,7 @@ Scenario_Piece :: struct {
 	contact:           Contact,
 	// Radius in cells; no other piece stops overlapping it
 	body:              f32,
+	traits:            bit_set[Piece_Trait;u8],
 	// The region it is the capital of, 0 for none. A region has at most one.
 	capital_of:        Region_Id,
 }
@@ -155,24 +164,35 @@ Command :: union {
 	Move_Focus_To_Point,
 	Move_Focus_To_Piece,
 	End_Turn,
+	Conquer,
+	Leave_Interaction,
 }
 
 // The focus, as last presented, walks to the destination, in cells, along the cheapest way there within the reach
 // shown. When it cannot walk there this turn, it walks instead to the nearest cell it can, looked for in the square
 // snap cells on a side around the destination: see pathfind_flood_stop. Rejected, leaving what is walking as it was,
-// if there is none, as always with snap 0, or if the focus cannot walk.
+// if there is none, as always with snap 0, or if the focus cannot walk or does not take orders.
 Move_Focus_To_Point :: struct {
 	destination: [2]f32,
 	snap:        int,
 }
 
-// The focus, as last presented, walks to where the target stands, as Move_Focus_To_Point.
+// The focus, as last presented, walks to where the target stands, as Move_Focus_To_Point. Reaching a target of
+// another faction opens an interaction with it, and no piece takes orders until the interaction is closed.
 Move_Focus_To_Piece :: struct {
 	target: Piece_Id,
 }
 
-// The player's faction ends its part of the turn, and the next faction plays. Rejected while a piece is walking.
+// The player's faction ends its part of the turn, and the next faction plays. Rejected unless the turn could end as
+// last presented: nothing walking and no interaction open.
 End_Turn :: struct {}
+
+// The open interaction's piece takes the one it met for its faction, closing the interaction. Rejected unless an
+// interaction is open and it can conquer: see Piece_Trait.
+Conquer :: struct {}
+
+// Closes the open interaction, doing nothing. Rejected unless an interaction is open.
+Leave_Interaction :: struct {}
 
 // Out -----------------------------------------------------------------------------------------------------------------
 // Out: what the world shows, laid out for what draws it
@@ -264,14 +284,14 @@ Pawn :: struct {
 Pawn_Flag :: enum u8 {
 	// It is the focus given to present
 	Focused,
-	// The player can give it orders
+	// The player can give it orders: it is the player's, and no interaction is open
 	Controlled,
 }
 
 // Cells within the AREA_SIZE square whose top left cell is corner, and circles, drawn in its look. Circles are drawn
 // exactly, over every area's cells, in slot order.
 Area :: struct {
-	// Changes whenever its cells, corner or surface change; 0 while it has no cells
+	// Changes whenever its cells, corner, surface or circles change; 0 while it has neither cells nor circles
 	revision: u64,
 	look:     u8,
 	// It lies on water, rather than on land
@@ -295,6 +315,8 @@ Card_Place :: enum u8 {
 	Status,
 	// The focus
 	Focus,
+	// The open interaction, which orders wait on
+	Interaction,
 }
 
 // A card: its title, headed by its picture if it has one, then its fields, then the actions it offers
@@ -338,8 +360,8 @@ step :: proc(commands: []Command, walk_distance: f32) {
 }
 
 // Fills out with what the world shows, around the focus: its pawn focused, where it can reach while it is not
-// walking, and its card; the regions coloured as the mode has them; and the pointed region highlighted while that reach
-// is not shown, unless the mode is muted. A nil focus or pointed region is none.
+// walking, and its card; the open interaction's card; the regions coloured as the mode has them; and the pointed region
+// highlighted while that reach is not shown, unless the mode is muted. A nil focus or pointed region is none.
 present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Region_Colouring_Mode, out: ^Scene) {
 	world_present(focus, pointed, region_colouring, out)
 }

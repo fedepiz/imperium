@@ -8,17 +8,24 @@ import "../span"
 
 // Area slots, in drawing order, and looks for game's area palette
 REACH_AREA :: 0
-BODY_AREA :: 1
+FRIEND_AREA :: 1
 ZONE_AREA :: 2
 REACH_LOOK :: 1
 ZONE_LOOK :: 2
 // Reach of a piece the player does not control
 OTHER_REACH_LOOK :: 3
-BODY_LOOK :: 4
+FRIEND_LOOK :: 4
 
-world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Region_Colouring_Mode, out: ^Scene) {
+world_present :: proc(
+	focus: Piece_Id,
+	pointed: Region_Id,
+	region_colouring: Region_Colouring_Mode,
+	out: ^Scene,
+) {
 	mov := &WORLD.movement
 	movement_flood(mov, focus)
+	// Whether the turn can end, which the next step's End_Turn goes by
+	WORLD.turn_endable = mov.subject == {} && WORLD.interaction.actor == {}
 
 	// The ground, taken up again only when it changed
 	if out.ground_revision != WORLD.atlas.revision {
@@ -38,7 +45,7 @@ world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Reg
 		}
 	}
 
-	// Every piece, the focus focused, and the player's controlled
+	// Every piece, the focus focused, and those that take orders controlled
 	clear(&out.pawns)
 	for piece, index in WORLD.pieces {
 		if !piece_alive(piece) do continue
@@ -50,7 +57,7 @@ world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Reg
 			label   = string(WORLD.piece_names[index][:]),
 		}
 		if id == focus do pawn.flags += {.Focused}
-		if piece_controlled(piece) do pawn.flags += {.Controlled}
+		if WORLD.ordering != {} && piece.owner == WORLD.ordering do pawn.flags += {.Controlled}
 		append(&out.pawns, pawn)
 	}
 
@@ -64,22 +71,29 @@ world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Reg
 		append(&out.arrows, span.from_range(begin, len(out.arrow_points)))
 	}
 
-	// Where the focus can walk, unless it is walking: the reach as cells, rebuilt when the flood changes, and the
-	// bodies and zones as circles over it
+	// Where the focus can walk, unless it is walking: the reach as cells, rebuilt when the flood changes, and friends'
+	// contacts and enemies' zones as circles over it
 	flood := &mov.flood
 	shown := mov.flood_subject != {} && mov.flood_subject != mov.subject
+	// The flood's key while shown, 0 while not: the revision of the reach and of the circles over it, which the flood
+	// is gathered with
+	revision := shown ? mov.flood_key : 0
 	reach := &out.areas[REACH_AREA]
-	if key := shown ? mov.flood_key : 0; reach.revision != key {
-		reach.revision, reach.cells = key, {}
+	if reach.revision != revision {
+		reach.revision, reach.cells = revision, {}
 		reach.on_water, reach.corner = flood.domain != .Land, flood.corner
 		if shown do for cost, i in flood.cost do reach.cells[i] = cost != math.INF_F32
 	}
 	reach.look = OTHER_REACH_LOOK
-	if piece := piece_get(focus); piece != nil && piece_controlled(piece^) do reach.look = REACH_LOOK
+	if piece := piece_get(focus);
+	   piece != nil && WORLD.ordering != {} && piece.owner == WORLD.ordering {
+		reach.look = REACH_LOOK
+	}
 	clear(&out.circles)
-	for discs, slot in ([2][]Disc{mov.bodies[:], mov.zones[:]}) {
-		area := &out.areas[BODY_AREA + slot]
-		area.look = slot == 0 ? BODY_LOOK : ZONE_LOOK
+	for discs, slot in ([2][]Disc{mov.friend_zones[:], mov.enemy_zones[:]}) {
+		area := &out.areas[FRIEND_AREA + slot]
+		area.revision = revision
+		area.look = slot == 0 ? FRIEND_LOOK : ZONE_LOOK
 		area.on_water = flood.domain != .Land
 		begin := len(out.circles)
 		for disc in discs {
@@ -106,11 +120,15 @@ world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Reg
 			color = REGION_UNHELD_COLOR
 		}
 		highlighted := !shown && id == pointed && region_colouring != .Muted
-		append(&out.regions, Region{name = string(name[:]), color = color, highlighted = highlighted})
+		append(
+			&out.regions,
+			Region{name = string(name[:]), color = color, highlighted = highlighted},
+		)
 	}
 
-	// The turn being played, and the faction playing it, with ending its part; and, when there is a focus, its picture
-	// and name, or what it is when it has none, over what it is
+	// The turn being played, and the faction playing it, with ending its part; when there is a focus, its picture and
+	// title over what it is; and when an interaction is open, the met piece's picture and title over who met it and
+	// whose it is, with what can be done
 	clear(&out.cards)
 	status := Card {
 		place = .Status,
@@ -120,13 +138,13 @@ world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Reg
 	append(&status.fields, Field{"Playing", player != nil ? faction_name(WORLD.player) : "None"})
 	append(
 		&status.actions,
-		Action{label = "End turn", command = End_Turn{}, enabled = turn_can_end()},
+		Action{label = "End turn", command = End_Turn{}, enabled = WORLD.turn_endable},
 	)
 	append(&out.cards, status)
 	if piece := piece_get(focus); piece != nil {
 		card := Card {
 			place   = .Focus,
-			title   = len(WORLD.piece_names[focus.index]) > 0 ? string(WORLD.piece_names[focus.index][:]) : ICON_TITLES[piece.icon],
+			title   = piece_title(focus),
 			picture = Picture{piece.icon, piece.culture},
 		}
 		append(&card.fields, Field{"Type", ICON_TITLES[piece.icon]})
@@ -137,6 +155,26 @@ world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Reg
 			budget := fmt.tprintf("%.0f of %.0f", piece.movement_budget, piece.movement_per_turn)
 			append(&card.fields, Field{"Movement", budget})
 		}
+		append(&out.cards, card)
+	}
+	open := WORLD.interaction
+	if actor, met := piece_get(open.actor), piece_get(open.target); actor != nil && met != nil {
+		card := Card {
+			place   = .Interaction,
+			title   = piece_title(open.target),
+			picture = Picture{met.icon, met.culture},
+		}
+		append(&card.fields, Field{"Met by", piece_title(open.actor)})
+		faction := faction_get(met.owner)
+		append(&card.fields, Field{"Faction", faction != nil ? faction_name(met.owner) : "None"})
+		append(
+			&card.actions,
+			Action{label = "Conquer", command = Conquer{}, enabled = open.conquerable},
+		)
+		append(
+			&card.actions,
+			Action{label = "Back", command = Leave_Interaction{}, enabled = true},
+		)
 		append(&out.cards, card)
 	}
 
@@ -172,10 +210,11 @@ region_identity_color :: proc(id: Region_Id) -> [4]f32 {
 	return {channel(hue, 5), channel(hue, 3), channel(hue, 1), 1}
 }
 
-// The player controls the piece
+// A living piece's title on a card: its name, or what it is when it has none, as a view into the world
 @(private = "file")
-piece_controlled :: proc(piece: Piece) -> bool {
-	return faction_get(piece.owner) != nil && piece.owner == WORLD.player
+piece_title :: proc(id: Piece_Id) -> string {
+	name := WORLD.piece_names[id.index][:]
+	return len(name) > 0 ? string(name) : ICON_TITLES[WORLD.pieces[id.index].icon]
 }
 
 // What each icon shows, as the cards call it. Words for the player, so they belong with the cards' other words; they
@@ -197,3 +236,4 @@ ICON_TITLES := [Icon]string {
 faction_name :: proc(id: Faction_Id) -> string {
 	return string(WORLD.faction_names[id.index][:])
 }
+
