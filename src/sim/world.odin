@@ -10,24 +10,25 @@ PIECE_MAX :: 1024
 FACTION_MAX :: 256
 
 WORLD: struct {
-	atlas:         Atlas,
-	// Each region's name, from region 1
-	region_names:  [dynamic; REGIONS_MAX]Name,
+	atlas:           Atlas,
+	// Each region's name and capital, from region 1
+	region_names:    [dynamic; REGIONS_MAX]Name,
+	region_capitals: [dynamic; REGIONS_MAX]Piece_Id,
 	// Every slot a piece can be in, and each slot's name, set by piece_spawn
-	pieces:        [PIECE_MAX]Piece,
-	piece_names:   [PIECE_MAX]Name,
+	pieces:          [PIECE_MAX]Piece,
+	piece_names:     [PIECE_MAX]Name,
 	// The slots with no piece in them, the next to be used last
-	pieces_free:   [dynamic; PIECE_MAX]u16,
+	pieces_free:     [dynamic; PIECE_MAX]u16,
 	// Every slot a faction can be in, each slot's name, set by faction_spawn, and the slots with no faction in them,
 	// the next to be used last
-	factions:      [FACTION_MAX]Faction,
-	faction_names: [FACTION_MAX]Name,
-	factions_free: [dynamic; FACTION_MAX]u16,
+	factions:        [FACTION_MAX]Faction,
+	faction_names:   [FACTION_MAX]Name,
+	factions_free:   [dynamic; FACTION_MAX]u16,
 	// The faction whose turn it is, which the player plays, or nil for none
-	player:        Faction_Id,
-	movement:      Movement,
+	player:          Faction_Id,
+	movement:        Movement,
 	// The turn being played, counting from 1: each faction plays once in a turn, in the order of their slots
-	turn:          int,
+	turn:            int,
 }
 
 // How a walk's path is smoothed: passes of softening, then corner cuts, each cut_ratio of the way in from a segment's
@@ -399,9 +400,11 @@ world_load :: proc(scenario: Scenario) -> bool {
 		pathfind_build_end(.Sea, scenario.cached_files[.Pathfind_Sea])
 	}
 	clear(&WORLD.region_names)
+	clear(&WORLD.region_capitals)
 	for name in scenario.region_names[:min(len(scenario.region_names), REGIONS_MAX)] {
 		append(&WORLD.region_names, Name{})
 		name_set(&WORLD.region_names[len(WORLD.region_names) - 1], name)
+		append(&WORLD.region_capitals, Piece_Id{})
 	}
 	WORLD.atlas.revision += 1
 	world_load_pieces(scenario)
@@ -537,17 +540,17 @@ turn_can_end :: proc() -> bool {
 	return WORLD.movement.subject == {}
 }
 
-// Spawns the scenario's factions, in the order they play, and its pieces
+// Spawns the scenario's factions, in the order they play, and its pieces, each the capital of its region if it has one
 @(private = "file")
 world_load_pieces :: proc(scenario: Scenario) {
 	factions: [dynamic; FACTION_MAX]Faction_Id
 	for faction in scenario.factions {
-		append(&factions, faction_spawn({culture = faction.culture}, faction.name))
+		append(&factions, faction_spawn({culture = faction.culture, color = faction.color}, faction.name))
 	}
 	for piece in scenario.pieces {
 		owner: Faction_Id
 		if piece.owner >= 0 && piece.owner < len(factions) do owner = factions[piece.owner]
-		piece_spawn(
+		id := piece_spawn(
 			{
 				pos = piece.pos,
 				icon = piece.icon,
@@ -560,6 +563,9 @@ world_load_pieces :: proc(scenario: Scenario) {
 			},
 			piece.name,
 		)
+		if piece.capital_of > 0 && int(piece.capital_of) <= len(WORLD.region_capitals) {
+			WORLD.region_capitals[piece.capital_of - 1] = id
+		}
 	}
 }
 
@@ -630,6 +636,8 @@ Faction :: struct {
 	generation: u16,
 	// Its people's culture
 	culture:    Culture,
+	// What it holds is shown in
+	color:      [4]f32,
 }
 
 // A proper name, held by value: up to 56 bytes of UTF-8, 64 in all. Its text is string(name[:]), a view that lasts as

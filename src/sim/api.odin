@@ -113,6 +113,8 @@ Scenario :: struct {
 Scenario_Faction :: struct {
 	name:    string,
 	culture: Culture,
+	// What it holds is shown in
+	color:   [4]f32,
 }
 
 // A piece as the world starts with it. Its owner is an index into the scenario's factions; any other owner is none.
@@ -131,6 +133,8 @@ Scenario_Piece :: struct {
 	contact:           Contact,
 	// Radius in cells; no other piece stops overlapping it
 	body:              f32,
+	// The region it is the capital of, 0 for none. A region has at most one.
+	capital_of:        Region_Id,
 }
 
 // What the world can save between runs, to spare deriving it at load
@@ -221,10 +225,21 @@ Ground :: struct {
 	region:        Region_Id,
 }
 
-// A region of the map: its name, and the colour it is shown in
+// A region of the map: its name, and the colour it is shown in, as the colouring mode has it
 Region :: struct {
 	name:  string,
 	color: [4]f32,
+	look:  u8,
+}
+
+// What colour regions are shown in
+Region_Colouring_Mode :: enum u8 {
+	// Its capital's faction's
+	Owner,
+	// Its own, apart from its neighbours'
+	Identity,
+	// All one colour, faint, never highlighted
+	Muted,
 }
 
 // A drawing: what it shows, in whose style
@@ -322,7 +337,8 @@ step :: proc(commands: []Command, walk_distance: f32) {
 }
 
 // Fills out with what the world shows, around the focus: its pawn focused, where it can reach while it is not
-// walking, and its card. A nil focus is none.
-present :: proc(focus: Piece_Id, out: ^Scene) {
-	world_present(focus, out)
+// walking, and its card; the regions coloured as the mode has them; and the pointed region highlighted while that reach
+// is not shown. A nil focus or pointed region is none.
+present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Region_Colouring_Mode, out: ^Scene) {
+	world_present(focus, pointed, region_colouring, out)
 }

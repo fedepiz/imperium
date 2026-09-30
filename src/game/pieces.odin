@@ -21,9 +21,17 @@ PIECES_FILE :: "pieces.txt"
 //
 // kind: name, icon, moves (a domain, left out for a piece that stays put), per_turn, contact, contact_on (a list of
 // domains) and body.
-// faction: name, culture, and a piece row for each piece: kind, name (may be left out), at ([x, y] in cells) and
-// culture (the faction's when left out).
-pieces_load :: proc(folder: string) -> (factions: []sim.Scenario_Faction, pieces: []sim.Scenario_Piece, ok: bool) {
+// faction: name, culture, colour ([r, g, b], each from 0 to 255), and a piece row for each piece: kind, name (may be
+// left out), at ([x, y] in cells), culture (the faction's when left out) and capital_of (the id of the region it is
+// the capital of, among region_ids; left out for none, and no region has two).
+pieces_load :: proc(
+	folder: string,
+	region_ids: []string,
+) -> (
+	factions: []sim.Scenario_Faction,
+	pieces: []sim.Scenario_Piece,
+	ok: bool,
+) {
 	Kind :: struct {
 		name:  string,
 		piece: sim.Scenario_Piece,
@@ -48,6 +56,8 @@ pieces_load :: proc(folder: string) -> (factions: []sim.Scenario_Faction, pieces
 	kinds := make([dynamic]Kind, context.temp_allocator)
 	faction_list := make([dynamic]sim.Scenario_Faction, context.temp_allocator)
 	piece_list := make([dynamic]sim.Scenario_Piece, context.temp_allocator)
+	// Per region, whether a piece is its capital yet
+	has_capital := make([]bool, len(region_ids), context.temp_allocator)
 	for row, n in root.children {
 		switch row.key {
 		case "kind":
@@ -79,6 +89,14 @@ pieces_load :: proc(folder: string) -> (factions: []sim.Scenario_Faction, pieces
 			culture, has_culture := enum_get(row, "culture", sim.Culture)
 			if !has_culture do return nil, nil, fail(path, row.key, n, "it needs a culture")
 			faction.culture = culture
+			colour := tabula.find(row, "colour")
+			colour_ok := len(colour.children) == 3
+			for value in colour.children do colour_ok &&= .Has_Num in value.flags && value.num >= 0 && value.num <= 255
+			if !colour_ok {
+				return nil, nil, fail(path, row.key, n, "its colour must be [r, g, b], each from 0 to 255")
+			}
+			for value, channel in colour.children do faction.color[channel] = value.num / 255
+			faction.color.a = 1
 			for piece_row in row.children {
 				if piece_row.key != "piece" do continue
 				kind_name := tabula.get_text(piece_row, "kind")
@@ -109,6 +127,18 @@ pieces_load :: proc(folder: string) -> (factions: []sim.Scenario_Faction, pieces
 					return nil, nil, fail(path, row.key, n, "each piece must stand at [x, y], in cells")
 				}
 				piece.pos = {at.children[0].num, at.children[1].num}
+				if region_id, has_capital_of := tabula.get_text(piece_row, "capital_of"); has_capital_of {
+					for id, m in region_ids do if id == region_id {piece.capital_of = sim.Region_Id(m + 1); break}
+					if piece.capital_of == 0 {
+						message := fmt.tprintf("its piece's capital_of %q is not a region", region_id)
+						return nil, nil, fail(path, row.key, n, message)
+					}
+					if has_capital[piece.capital_of - 1] {
+						message := fmt.tprintf("region %q already has a capital", region_id)
+						return nil, nil, fail(path, row.key, n, message)
+					}
+					has_capital[piece.capital_of - 1] = true
+				}
 				append(&piece_list, piece)
 			}
 			append(&faction_list, faction)

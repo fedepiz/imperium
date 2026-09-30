@@ -41,10 +41,10 @@ Terrain_Uniforms :: struct {
 	road_fill, arrow_fill:                          [4]f32,
 	head_length, head_width:                        f32,
 	circle_count:                                   i32,
-	border_width:                                   f32,
-	border_ink:                                     [4]f32,
+	// Rounds the size up to the shader struct's 16-byte alignment
+	_pad:                                           f32,
 }
-#assert(size_of(Terrain_Uniforms) == 224)
+#assert(size_of(Terrain_Uniforms) == 208)
 
 Renderer :: struct {
 	window:                              ^sdl.Window,
@@ -626,8 +626,6 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		sea_depth_from     = style.sea_depth_from,
 		sea_depth_full     = style.sea_depth_full,
 		circle_count       = i32(len(highlights.circles)),
-		border_width       = style.border_width,
-		border_ink         = style.border_ink,
 	}
 	wgpu.QueueWriteBuffer(
 		renderer.queue,
@@ -1488,8 +1486,7 @@ struct Terrain {
     head_length: f32,
     head_width: f32,
     circle_count: i32,
-    border_width: f32,
-    border_ink: vec4f,
+    _pad: f32,
 }
 `
 
@@ -1655,7 +1652,6 @@ fn paper_at(p: vec2f, frag: vec2f) -> vec3f {
 const RIVER = 0;
 const ROAD = 1;
 const ARROW = 2;
-const BORDER = 3;
 
 // Distance from p to the nearest line of a kind, in cells, negative inside a head. It is read from the line field where
 // p shows in the view, blended between pixels.
@@ -1718,32 +1714,19 @@ fn layer_at(layer_cells: texture_2d<f32>, palette: texture_2d<f32>, p: vec2f, ji
     return look;
 }
 
-// How far a cell's middle is in from the edge of a highlight area of a surface (0 land, 1 water), in cells, negative
-// outside it. area_cells holds, per cell and surface, the area of that surface whose field the cell holds, 0 for none;
-// area_field holds that field. A cell is at least as far outside any other area as it is from the edge of the one
-// whose field it holds.
-fn highlight_field_at(
-    area_cells: texture_2d<f32>,
-    area_field: texture_2d<f32>,
-    cell: vec2i,
-    area: i32,
-    surface: i32,
-) -> f32 {
-    let at = clamp(cell, vec2i(0), vec2i(u.grid) - 1);
-    let owner = i32(textureLoad(area_cells, at, 0)[surface] * 255.0 + 0.5);
-    let value = textureLoad(area_field, at, 0)[surface];
-    if (owner == area) { return value; }
-    return -abs(value);
-}
-
 // A layer of highlight areas over col at p, d being the signed distance to the coast there, positive on land, and px
-// device pixels per cell. Each area's depth is its field, from the fields of the areas the four cells around p hold,
-// blended; a land area's is never past the coast, nor a water area's short of it. Each area is washed over as far as
-// its depth reaches, fading in over a device pixel across its edge: the map multiplied toward its color, as strongly
-// as its border at its edge, easing to its inside at its thickness in from it. Of any two areas, one's depth is never
-// more than the other's is short of the edge, so where they meet one fades in as the other fades out, and they never
-// overlap. area_cells and area_field are the layer's fields: see highlight_field_at. area_palette holds each area's
-// color and border in row 0, and its thickness, inside and surface in row 1.
+// device pixels per cell. area_cells holds, per cell and surface (0 land, 1 water), the area of that surface whose
+// field the cell holds, 0 for none; area_field holds that field: how far the cell's middle is in from the area's edge,
+// in cells, negative outside it. A cell is at least as far outside any other area as it is from the edge of the one
+// whose field it holds, and it is in no area by as much as it is outside the one whose field it holds.
+//
+// Each area the four cells around p hold, and no area, has a field there, blended from those cells. An area's depth is
+// half how far its field is past the greatest of the others', so where two meet, one's depth is what the other's is
+// short of the edge, and where more meet, the greatest is never short of it: no gap opens between them. A land area's
+// depth is never past the coast, nor a water area's short of it. Each area is washed over as far as its depth reaches,
+// fading in over a device pixel across its edge: the map multiplied toward its color, as strongly as its border at its
+// edge, easing to its inside at its thickness in from it. area_palette holds each area's color and border in row 0,
+// and its thickness, inside and surface in row 1.
 fn areas_over(
     col: vec3f,
     p: vec2f,
@@ -1760,21 +1743,43 @@ fn areas_over(
     var covered = 0.0;
     for (var surface = 0; surface < 2; surface++) {
         let shore = select(-d, d, surface == 0);
-        var seen = vec4i(0);
+        // The four cells around p: the area each holds the field of, that field, and its weight at p
+        var owners: vec4i;
+        var values: vec4f;
+        var weights: vec4f;
+        for (var j = 0; j < 4; j++) {
+            let corner = vec2i(j & 1, j >> 1u);
+            let at = clamp(base + corner, vec2i(0), vec2i(u.grid) - 1);
+            owners[j] = i32(textureLoad(area_cells, at, 0)[surface] * 255.0 + 0.5);
+            values[j] = textureLoad(area_field, at, 0)[surface];
+            weights[j] = mix(1.0 - f.x, f.x, f32(corner.x)) * mix(1.0 - f.y, f.y, f32(corner.y));
+        }
+        // Each area's field, in the slot of the first cell holding it, far below any field in the other slots; and no
+        // area's
+        var fields = vec4f(-1e9);
+        var none = 0.0;
         for (var k = 0; k < 4; k++) {
-            let at = clamp(base + vec2i(k & 1, k >> 1u), vec2i(0), vec2i(u.grid) - 1);
-            let area = i32(textureLoad(area_cells, at, 0)[surface] * 255.0 + 0.5);
-            if (area == 0 || any(seen == vec4i(area))) { continue; }
-            seen[k] = area;
+            none += weights[k] * select(-values[k], 0.0, owners[k] == 0);
+            let area = owners[k];
+            var first = area != 0;
+            for (var i = 0; i < k; i++) { first = first && owners[i] != area; }
+            if (!first) { continue; }
             var field = 0.0;
             for (var j = 0; j < 4; j++) {
-                let corner = vec2i(j & 1, j >> 1u);
-                let weight = mix(1.0 - f.x, f.x, f32(corner.x)) * mix(1.0 - f.y, f.y, f32(corner.y));
-                field += weight * highlight_field_at(area_cells, area_field, base + corner, area, surface);
+                field += weights[j] * select(-abs(values[j]), values[j], owners[j] == area);
             }
-            let depth = min(field, shore);
+            fields[k] = field;
+        }
+        for (var k = 0; k < 4; k++) {
+            if (fields[k] < -1e8) { continue; }
+            var rival = none;
+            for (var j = 0; j < 4; j++) {
+                if (j != k) { rival = max(rival, fields[j]); }
+            }
+            let depth = min((fields[k] - rival) * 0.5, shore);
             let coverage = smoothstep(-0.5, 0.5, depth * px);
             if (coverage <= 0.0) { continue; }
+            let area = owners[k];
             let look = textureLoad(area_palette, vec2i(area, 0), 0);
             let fade = textureLoad(area_palette, vec2i(area, 1), 0);
             let strength = mix(look.a, fade.y, smoothstep(0.0, max(fade.x, 1e-3), depth));
@@ -1782,7 +1787,7 @@ fn areas_over(
             covered += coverage;
         }
     }
-    // Where three areas meet, their fades can add up to more than the whole
+    // Where areas meet, their fades can add up to more than the whole
     if (covered > 1.0) {
         tint /= covered;
         covered = 1.0;
@@ -1887,10 +1892,6 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
 
         // The regions, washed in their colours from their edges, under the rivers and roads
         col = areas_over(col, wander(p, u.wobble * 1.6, 5.7), d, px, region_cells, region_field, region_palette);
-
-        // Borders: a hairline over the land, under rivers and roads, wandering from the cells as the coast does
-        let border = line_distance(wander(p, u.wobble, 8.1), BORDER) * px;
-        col = mix(col, u.border_ink.rgb, line_aa(border, u.border_width * 0.5 * u.pixel_density) * u.border_ink.a * land);
 
         // Rivers: a faint wash either side and a line that thins toward the hills, both stopping at the shore. The line
         // never grows past a third of a cell, so rivers fade out as the map zooms away.

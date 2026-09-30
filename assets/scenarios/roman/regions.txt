@@ -1,24 +1,25 @@
-# The regions of the map, in the order of their ids, from 1. Each cell of regions.png is painted in the colour of the
-# region it lies in: [r, g, b], each from 1 to 255, a colour no other region has. A cell of any other colour, such as
-# the black of land in no region or the white of the sea, lies in none.
+# The regions of the map, in the order of their ids, from 1. Each has an id, a snake_case word the other files name it
+# by, which no other region has. Each cell of regions.png is painted in the colour of the region it lies in: [r, g, b],
+# each from 1 to 255, a colour no other region has. A cell of any other colour, such as the black of land in no region
+# or the white of the sea, lies in none.
 
 # Italia
-region = { name = "Aemilia et Liguria"   colour = [220,  50,  47] }
-region = { name = "Venetia et Histria"   colour = [ 50, 100, 220] }
-region = { name = "Flaminia et Picenum"  colour = [235, 215,  40] }
-region = { name = "Tuscia et Umbria"     colour = [ 60, 170,  70] }
-region = { name = "Campania"             colour = [140,  70, 190] }
-region = { name = "Apulia et Calabria"   colour = [240, 150,  30] }
-region = { name = "Lucania et Bruttii"   colour = [ 40, 170, 170] }
-region = { name = "Sicilia"              colour = [230, 110, 170] }
-region = { name = "Sardinia"             colour = [170, 220,  60] }
-region = { name = "Corsica"              colour = [ 90, 200, 240] }
-region = { name = "Alpes Cottiae"        colour = [150,  90,  40] }
-region = { name = "Alpes Poeninae"       colour = [210,  40, 200] }
+region = { id = aemilia_et_liguria   name = "Aemilia et Liguria"   colour = [220,  50,  47] }
+region = { id = venetia_et_histria   name = "Venetia et Histria"   colour = [ 50, 100, 220] }
+region = { id = flaminia_et_picenum  name = "Flaminia et Picenum"  colour = [235, 215,  40] }
+region = { id = tuscia_et_umbria     name = "Tuscia et Umbria"     colour = [ 60, 170,  70] }
+region = { id = campania             name = "Campania"             colour = [140,  70, 190] }
+region = { id = apulia_et_calabria   name = "Apulia et Calabria"   colour = [240, 150,  30] }
+region = { id = lucania_et_bruttii   name = "Lucania et Bruttii"   colour = [ 40, 170, 170] }
+region = { id = sicilia              name = "Sicilia"              colour = [230, 110, 170] }
+region = { id = sardinia             name = "Sardinia"             colour = [170, 220,  60] }
+region = { id = corsica              name = "Corsica"              colour = [ 90, 200, 240] }
+region = { id = alpes_cottiae        name = "Alpes Cottiae"        colour = [150,  90,  40] }
+region = { id = alpes_poeninae       name = "Alpes Poeninae"       colour = [210,  40, 200] }
 
 # North of the Alps, and across the Adriatic
-region = { name = "Raetia"               colour = [128, 128,  20] }
-region = { name = "Noricum"              colour = [130,  30,  50] }
-region = { name = "Pannonia Savia"       colour = [150, 230, 150] }
-region = { name = "Dalmatia"             colour = [250, 160, 120] }
-region = { name = "Maxima Sequanorum"    colour = [ 30,  50, 130] }
+region = { id = raetia               name = "Raetia"               colour = [128, 128,  20] }
+region = { id = noricum              name = "Noricum"              colour = [130,  30,  50] }
+region = { id = pannonia_savia       name = "Pannonia Savia"       colour = [150, 230, 150] }
+region = { id = dalmatia             name = "Dalmatia"             colour = [250, 160, 120] }
+region = { id = maxima_sequanorum    name = "Maxima Sequanorum"    colour = [ 30,  50, 130] }

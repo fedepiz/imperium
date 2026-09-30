@@ -2,24 +2,28 @@ package game
 
 import "core:fmt"
 import "core:math"
+import "core:reflect"
 
 import "../gfx"
 import "../sim"
+import "../tweak"
 import "../ui"
 
 GAME: struct {
-	camera:        Camera,
+	camera:           Camera,
 	// The piece the view is about: its pawn focused, where it can reach shown, and its card
-	focus:         sim.Piece_Id,
+	focus:            sim.Piece_Id,
+	// What colour the regions are shown in
+	region_colouring: sim.Region_Colouring_Mode,
 	// The commands sent to the world at its next step
-	commands:      [dynamic; COMMANDS_MAX]sim.Command,
+	commands:         [dynamic; COMMANDS_MAX]sim.Command,
 	// What the world showed at its last step
-	scene:         sim.Scene,
+	scene:            sim.Scene,
 	// How each piece looks beyond what its pawn says, in the slot of its handle's index
-	visuals:       [sim.PAWNS_MAX]Piece_Visual,
+	visuals:          [sim.PAWNS_MAX]Piece_Visual,
 	// The folder of the scenario loaded, and the fingerprint of each of its caches as it is saved: see cache_path
-	folder:        string,
-	saved:         [sim.Cached_File_Id]u64,
+	folder:           string,
+	saved:            [sim.Cached_File_Id]u64,
 }
 
 // How many commands wait for the world's next step; the rest are dropped
@@ -96,18 +100,21 @@ game_tick :: proc(input: Input, dt: f32) {
 	}
 
 	// The region under the cursor, from the ground last presented
-	hovered: sim.Region_Id
+	pointed: sim.Region_Id
 	if input.on_map {
 		cell := camera_screen_to_world_point(GAME.camera, input.viewport, input.cursor)
 		x, y := int(math.floor(cell.x)), int(math.floor(cell.y))
 		if x >= 0 && y >= 0 && x < sim.WORLD_WIDTH && y < sim.WORLD_HEIGHT {
-			hovered = GAME.scene.ground[y * sim.WORLD_WIDTH + x].region
+			pointed = GAME.scene.ground[y * sim.WORLD_WIDTH + x].region
 		}
 	}
 
 	sim.step(GAME.commands[:], MOVEMENT_SPEED * dt)
 	clear(&GAME.commands)
-	sim.present(GAME.focus, &GAME.scene)
+	colourings := reflect.enum_field_names(sim.Region_Colouring_Mode)
+	colouring := tweak.choice("Map/Region colouring", int(GAME.region_colouring), colourings)
+	GAME.region_colouring = sim.Region_Colouring_Mode(colouring)
+	sim.present(GAME.focus, pointed, GAME.region_colouring, &GAME.scene)
 	for file, id in GAME.scene.caches {
 		if file.fingerprint == GAME.saved[id] do continue
 		// Tried once per fingerprint, so a folder that cannot be written is not retried every frame
@@ -115,7 +122,7 @@ game_tick :: proc(input: Input, dt: f32) {
 		cache_write(cache_path(GAME.folder, id), file)
 	}
 
-	map_draw_tick(&GAME.scene, hovered, GAME.camera, input.viewport, input.pixel_density, dt)
+	map_draw_tick(&GAME.scene, GAME.camera, input.viewport, input.pixel_density, dt)
 	visuals_tick(GAME.visuals[:], GAME.scene.pawns[:], dt)
 	pawns_draw(
 		GAME.scene.pawns[:],

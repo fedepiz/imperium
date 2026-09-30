@@ -3,8 +3,10 @@
 # A kind is what a piece is: its drawing, the domain it moves in and how far it walks a turn (none for a piece that
 # stays put), its contact's radius and the domains it reaches, and its body's radius, all in cells.
 #
-# Factions play in the order written. A piece belongs to the faction it is under and is in its culture, unless it
-# gives its own. Where it stands, at, is [x, y] in cells from the top left corner of the world.
+# Factions play in the order written, each with the colour what it holds is shown in, [r, g, b]. A piece belongs to
+# the faction it is under and is in its culture, unless it gives its own. Where it stands, at, is [x, y] in cells from
+# the top left corner of the world. A piece may be the capital of a region, capital_of, named by the region's id; a
+# region has at most one.
 
 kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2 }
 kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5 }
@@ -18,21 +20,22 @@ kind = { name = envoy       icon = Envoy       moves = Land  per_turn = 50  cont
 faction = {
 	name = "Rome"
 	culture = Roman
-	piece = { kind = large_city  name = "Roma"        at = [342, 432] }
-	piece = { kind = large_city  name = "Mediolanum"  at = [296, 374] }
-	piece = { kind = city        name = "Ravenna"     at = [351, 400] }
-	piece = { kind = city        name = "Tarentum"    at = [412, 462] }
-	piece = { kind = town        name = "Aquileia"    at = [367, 369] }
+	colour = [190, 80, 70]
+	piece = { kind = large_city  name = "Roma"        at = [342, 432]  capital_of = campania }
+	piece = { kind = large_city  name = "Mediolanum"  at = [296, 374]  capital_of = aemilia_et_liguria }
+	piece = { kind = city        name = "Ravenna"     at = [351, 400]  capital_of = flaminia_et_picenum }
+	piece = { kind = city        name = "Tarentum"    at = [412, 462]  capital_of = apulia_et_calabria }
+	piece = { kind = town        name = "Aquileia"    at = [367, 369]  capital_of = venetia_et_histria }
 	piece = { kind = town        name = "Neapolis"    at = [367, 449] }
-	piece = { kind = town        name = "Florentia"   at = [330, 401] }
+	piece = { kind = town        name = "Florentia"   at = [330, 401]  capital_of = tuscia_et_umbria }
 	piece = { kind = town        name = "Genua"       at = [296, 391] }
 	piece = { kind = town        name = "Verona"      at = [327, 374] }
-	piece = { kind = town        name = "Segusio"     at = [260, 379] }
-	piece = { kind = town        name = "Rhegium"     at = [393, 506] }
-	piece = { kind = town        name = "Syracusae"   at = [385, 527] }
-	piece = { kind = town        name = "Siscia"      at = [419, 374] }
+	piece = { kind = town        name = "Segusio"     at = [260, 379]  capital_of = alpes_cottiae }
+	piece = { kind = town        name = "Rhegium"     at = [393, 506]  capital_of = lucania_et_bruttii }
+	piece = { kind = town        name = "Syracusae"   at = [385, 527]  capital_of = sicilia }
+	piece = { kind = town        name = "Siscia"      at = [419, 374]  capital_of = pannonia_savia }
 	piece = { kind = town        name = "Domavia"     at = [470, 396] }
-	piece = { kind = city        name = "Salona"      at = [421, 405] }
+	piece = { kind = city        name = "Salona"      at = [421, 405]  capital_of = dalmatia }
 	piece = { kind = army    at = [334, 419] }
 	piece = { kind = fleet   at = [353, 455] }
 	piece = { kind = fleet   at = [355, 393] }
@@ -43,10 +46,11 @@ faction = {
 faction = {
 	name = "Alamanni"
 	culture = Germanic
-	piece = { kind = large_city  name = "Augusta Vindelicorum"  at = [325, 327] }
-	piece = { kind = city        name = "Vesontio"              at = [242, 345] }
-	piece = { kind = city        name = "Virunum"               at = [385, 354] }
-	piece = { kind = town        name = "Octodurum"             at = [253, 367] }
+	colour = [80, 120, 170]
+	piece = { kind = large_city  name = "Augusta Vindelicorum"  at = [325, 327]  capital_of = raetia }
+	piece = { kind = city        name = "Vesontio"              at = [242, 345]  capital_of = maxima_sequanorum }
+	piece = { kind = city        name = "Virunum"               at = [385, 354]  capital_of = noricum }
+	piece = { kind = town        name = "Octodurum"             at = [253, 367]  capital_of = alpes_poeninae }
 	piece = { kind = town        name = "Iuvavum"               at = [362, 336] }
 	piece = { kind = army   at = [316, 342] }
 	piece = { kind = envoy  at = [292, 340] }

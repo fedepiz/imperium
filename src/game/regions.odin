@@ -16,12 +16,13 @@ import "../tabula"
 REGIONS_FILE :: "regions.txt"
 REGIONS_IMAGE :: "regions.png"
 
-// Reads the regions from their files in a scenario's folder: the region each cell lies in, and each region's name,
-// both in the temp allocator. regions.txt is tabula: a region row for each region, in the order of their ids from 1,
-// holding its name and its colour, [r, g, b] each from 1 to 255, which no other region has. regions.png is WORLD_WIDTH
-// by WORLD_HEIGHT, each cell painted in the colour of the region it lies in; a cell of any other colour, such as black,
-// lies in none. If either cannot be read, where and why is shown, and false is returned.
-regions_read :: proc(folder: string) -> (cells: []sim.Region_Id, names: []string, ok: bool) {
+// Reads the regions from their files in a scenario's folder: the region each cell lies in, and each region's name and
+// id-name, all in the temp allocator. regions.txt is tabula: a region row for each region, in the order of their ids
+// from 1, holding its id (a word other data names it by, which no other region has), its name and its
+// colour, [r, g, b] each from 1 to 255, which no other region has. regions.png is WORLD_WIDTH by WORLD_HEIGHT, each
+// cell painted in the colour of the region it lies in; a cell of any other colour, such as black, lies in none. If
+// either cannot be read, where and why is shown, and false is returned.
+regions_read :: proc(folder: string) -> (cells: []sim.Region_Id, names: []string, ids: []string, ok: bool) {
 	fail :: proc(path: string, n: int, message: string) -> bool {
 		fmt.eprintfln("%s, region %d: %s", path, n + 1, message)
 		return false
@@ -43,18 +44,24 @@ regions_read :: proc(folder: string) -> (cells: []sim.Region_Id, names: []string
 		return
 	}
 	names = make([]string, len(root.children), context.temp_allocator)
+	ids = make([]string, len(root.children), context.temp_allocator)
 	colours := make([][3]u8, len(root.children), context.temp_allocator)
 	for row, n in root.children {
-		if row.key != "region" do return nil, nil, fail(path, n, fmt.tprintf("expected a region, not %q", row.key))
+		if row.key != "region" do return nil, nil, nil, fail(path, n, fmt.tprintf("expected a region, not %q", row.key))
+		ids[n] = tabula.get_text(row, "id")
+		if ids[n] == "" do return nil, nil, nil, fail(path, n, "it needs an id")
+		for other, m in ids[:n] {
+			if other == ids[n] do return nil, nil, nil, fail(path, n, fmt.tprintf("its id is region %d's", m + 1))
+		}
 		names[n] = tabula.get_text(row, "name")
-		if names[n] == "" do return nil, nil, fail(path, n, "it needs a name")
+		if names[n] == "" do return nil, nil, nil, fail(path, n, "it needs a name")
 		colour := tabula.find(row, "colour")
 		colour_ok := len(colour.children) == 3
 		for value in colour.children do colour_ok &&= .Has_Num in value.flags && value.num >= 1 && value.num <= 255
-		if !colour_ok do return nil, nil, fail(path, n, "its colour must be [r, g, b], each from 1 to 255")
+		if !colour_ok do return nil, nil, nil, fail(path, n, "its colour must be [r, g, b], each from 1 to 255")
 		for value, channel in colour.children do colours[n][channel] = u8(value.num)
 		for other, m in colours[:n] {
-			if other == colours[n] do return nil, nil, fail(path, n, fmt.tprintf("its colour is region %d's", m + 1))
+			if other == colours[n] do return nil, nil, nil, fail(path, n, fmt.tprintf("its colour is region %d's", m + 1))
 		}
 	}
 
@@ -95,5 +102,5 @@ regions_read :: proc(folder: string) -> (cells: []sim.Region_Id, names: []string
 		}
 		region = last_region
 	}
-	return cells, names, true
+	return cells, names, ids, true
 }

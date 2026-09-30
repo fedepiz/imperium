@@ -15,8 +15,12 @@ ZONE_LOOK :: 2
 // Reach of a piece the player does not control
 OTHER_REACH_LOOK :: 3
 BODY_LOOK :: 4
+// Looks for game's region palette
+REGION_PLAIN_LOOK :: 0
+REGION_HIGHLIGHTED_LOOK :: 1
+REGION_MUTED_LOOK :: 2
 
-world_present :: proc(focus: Piece_Id, out: ^Scene) {
+world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Region_Colouring_Mode, out: ^Scene) {
 	mov := &WORLD.movement
 	movement_flood(mov, focus)
 
@@ -36,12 +40,6 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 			for id, kind in cell.way do if id != 0 do ground.ways += {kind}
 			out.ground[i] = ground
 		}
-	}
-
-	// Every region, each in its own colour
-	clear(&out.regions)
-	for &name, index in WORLD.region_names {
-		append(&out.regions, Region{name = string(name[:]), color = region_color(Region_Id(index + 1))})
 	}
 
 	// Every piece, the focus focused, and the player's controlled
@@ -94,6 +92,29 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 		area.circles = span.from_range(begin, len(out.circles))
 	}
 
+	// Every region, coloured as the mode has it, the pointed one highlighted unless the reach is shown or the mode is
+	// muted
+	clear(&out.regions)
+	for &name, index in WORLD.region_names {
+		id := Region_Id(index + 1)
+		color: [4]f32
+		look: u8 = REGION_PLAIN_LOOK
+		if !shown && id == pointed do look = REGION_HIGHLIGHTED_LOOK
+		switch region_colouring {
+		case .Owner:
+			color = REGION_UNHELD_COLOR
+			if capital := piece_get(WORLD.region_capitals[index]); capital != nil {
+				if faction := faction_get(capital.owner); faction != nil do color = faction.color
+			}
+		case .Identity:
+			color = region_identity_color(id)
+		case .Muted:
+			color = REGION_UNHELD_COLOR
+			look = REGION_MUTED_LOOK
+		}
+		append(&out.regions, Region{name = string(name[:]), color = color, look = look})
+	}
+
 	// The turn being played, and the faction playing it, with ending its part; and, when there is a focus, its picture
 	// and name, or what it is when it has none, over what it is
 	clear(&out.cards)
@@ -131,18 +152,23 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 	pathfind_cache_get(&out.caches[.Pathfind_Sea], .Sea)
 }
 
-// How much each region's hue turns from the one before: the golden ratio of a turn, so hues of nearby ids stay apart
+// The colour of a region with no capital, or whose capital belongs to no faction, and of every region when muted
+@(private = "file")
+REGION_UNHELD_COLOR :: [4]f32{0.6, 0.6, 0.6, 1}
+
+// How much each region's identity hue turns from the one before: the golden ratio of a turn, so hues of nearby ids stay
+// apart
 @(private = "file")
 REGION_HUE_STEP :: 0.618034
-// How saturated and how light region colours are: muted pigments, light enough to tint the map
+// How saturated and how light identity colours are: muted pigments, light enough to tint the map
 @(private = "file")
 REGION_SATURATION :: 0.55
 @(private = "file")
 REGION_VALUE :: 0.75
 
-// The colour a region is shown in, until regions have owners to take their colours from
+// A region's own colour, apart from its neighbours'
 @(private = "file")
-region_color :: proc(id: Region_Id) -> [4]f32 {
+region_identity_color :: proc(id: Region_Id) -> [4]f32 {
 	hue := math.mod(f32(id) * REGION_HUE_STEP, 1) * 6
 	// Each channel's distance round the hue circle from where it is strongest, as HSV has it
 	channel :: proc(hue, offset: f32) -> f32 {

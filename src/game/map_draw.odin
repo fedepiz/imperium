@@ -26,8 +26,6 @@ MAP_DRAW: struct {
 	render_list:    gfx.Render_List,
 	// The revision of each of the scene's areas its highlight was last taken from
 	area_revisions: [sim.AREAS_MAX]u64,
-	// How far each region's look has eased toward its hovered look, from 0 to 1, by its id
-	region_hover:   [gfx.RENDER_HIGHLIGHT_AREAS]f32,
 }
 
 // Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
@@ -54,8 +52,6 @@ map_draw_init :: proc() {
 		arrow_fill         = {0.700, 0.250, 0.160, 1},
 		head_length        = 7.5,
 		head_width         = 6.25,
-		border_width       = 1,
-		border_ink         = {0.400, 0.180, 0.120, 0.3},
 	}
 	MAP_DRAW.render_terrain.cover.jitter = 0.8
 }
@@ -65,16 +61,9 @@ map_draw_init :: proc() {
 TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture", "Cover"}
 
 // Keeps the map's drawing in step with the scene: the camera every frame, everything drawn from the ground when it
-// changes, the arrows every frame, the areas when they change, the regions' looks every frame, eased toward the hovered
-// region's over dt seconds, and the marks in view every frame. A nil hovered region is none.
-map_draw_tick :: proc(
-	scene: ^sim.Scene,
-	hovered: sim.Region_Id,
-	camera: Camera,
-	viewport: [2]f32,
-	pixel_density: f32,
-	dt: f32,
-) {
+// changes, the arrows every frame, the areas' cells when they change, the areas' and regions' looks every frame, eased
+// toward the scene's over dt seconds, and the marks in view every frame.
+map_draw_tick :: proc(scene: ^sim.Scene, camera: Camera, viewport: [2]f32, pixel_density: f32, dt: f32) {
 	rt := &MAP_DRAW.render_terrain
 	rt.center, rt.zoom = camera.center, camera.zoom
 	if rt.revision != scene.ground_revision {
@@ -82,8 +71,8 @@ map_draw_tick :: proc(
 		map_derive(scene.ground[:])
 	}
 	map_arrows(scene)
-	map_areas(scene)
-	map_regions(scene, hovered, dt)
+	map_areas(scene, dt)
+	map_regions(scene, dt)
 	marks_draw(&MAP_DRAW.marks, &MAP_DRAW.render_list, camera, viewport, pixel_density)
 }
 
@@ -162,16 +151,6 @@ map_derive :: proc(terrain: []sim.Ground) {
 		)
 	}
 
-	// The borders between regions, over the land
-	borders := &rt.lines[.Border]
-	clear(&borders.segments)
-	borders.revision += 1
-	// Water 0, so it has no borders, and land its region's id, one up so land in no region has borders too
-	for cell, i in terrain do labels[i] = cell.surface in sim.WATER ? 0 : u16(cell.region) + 1
-	polylines_clear()
-	trace_boundaries(labels, BORDER_SMOOTHING)
-	for r in 0 ..< polylines_count() do lines_add(borders, polylines_get(r), false)
-
 	// Each region's cells, as the area of the regions' highlights its id numbers. Regions past what the highlights
 	// hold are not drawn.
 	regions := &rt.highlights[.Regions]
@@ -245,22 +224,39 @@ AREA_LOOKS := [256]Area_Look {
 	4 = {color = {0.850, 0.700, 0.200, 1}, border = 0.6, thickness = 2, inside = 0.2},
 }
 
-// Highlights the scene's areas, each slot as the highlight area after it: its look and circles every tick, its cells
-// taken up again only when its revision is not the one last taken up
+// How quickly a highlight's drawing eases toward its look: the share of the way left it goes each second
 @(private = "file")
-map_areas :: proc(scene: ^sim.Scene) {
+HIGHLIGHT_EASE :: 10
+
+// Eases how a highlight area is drawn toward a look, by step of the way left
+@(private = "file")
+highlight_ease :: proc(drawn: ^gfx.Render_Highlight_Area, color: [4]f32, border, thickness, inside, step: f32) {
+	drawn.color += (color - drawn.color) * step
+	drawn.border += (border - drawn.border) * step
+	drawn.thickness += (thickness - drawn.thickness) * step
+	drawn.inside += (inside - drawn.inside) * step
+}
+
+// Highlights the scene's areas, each slot as the highlight area after it: its circles every tick, its look eased
+// toward the slot's over dt seconds, and its cells taken up again only when its revision is not the one last taken up,
+// fading in from nothing
+@(private = "file")
+map_areas :: proc(scene: ^sim.Scene, dt: f32) {
 	#assert(sim.AREAS_MAX < gfx.RENDER_HIGHLIGHT_AREAS)
 	#assert(sim.CIRCLES_MAX <= gfx.RENDER_HIGHLIGHT_CIRCLES_MAX)
 	highlights := &MAP_DRAW.render_terrain.highlights[.Areas]
 	clear(&highlights.circles)
+	step := 1 - math.exp(-HIGHLIGHT_EASE * dt)
 	for &area, slot in scene.areas {
 		highlight := u8(slot + 1)
 		look := AREA_LOOKS[area.look]
 		drawn := &highlights.areas[highlight]
-		drawn.color = look.color
-		drawn.border = look.border
-		drawn.thickness = look.thickness
-		drawn.inside = look.inside
+		changed := MAP_DRAW.area_revisions[slot] != area.revision
+		if changed {
+			drawn.border = 0
+			drawn.inside = 0
+		}
+		highlight_ease(drawn, look.color, look.border, look.thickness, look.inside, step)
 		drawn.surface = area.on_water ? .Water : .Land
 		for circle in scene.circles[area.circles.begin:][:area.circles.len] {
 			append(
@@ -268,7 +264,7 @@ map_areas :: proc(scene: ^sim.Scene) {
 				gfx.Render_Highlight_Circle{circle.center, circle.radius, highlight},
 			)
 		}
-		if MAP_DRAW.area_revisions[slot] == area.revision do continue
+		if !changed do continue
 		MAP_DRAW.area_revisions[slot] = area.revision
 		gfx.render_highlight_clear(highlights, highlight)
 		cells := area.cells[:]
@@ -286,45 +282,36 @@ map_areas :: proc(scene: ^sim.Scene) {
 }
 
 // Regions ------------------------------------------------------------------------------------------------------------
-// Regions: each washed in its colour in from its edge, the hovered one more strongly
+// Regions: each washed in its colour in from its edge, as strongly as its look says
 
-// How a region is drawn, resting and hovered: how strongly it is washed in its colour at its edge, how many cells in
-// that fades over, and how strongly it is washed beyond
+// How a region is drawn: how strongly it is washed in its colour at its edge, how many cells in that fades over, and
+// how strongly it is washed beyond
 @(private = "file")
 Region_Look :: struct {
 	border:    f32,
 	thickness: f32,
 	inside:    f32,
 }
-@(private = "file")
-REGION_RESTING :: Region_Look {
-	border    = 0.35,
-	thickness = 1.5,
-	inside    = 0,
-}
-@(private = "file")
-REGION_HOVERED :: Region_Look {
-	border    = 0.7,
-	thickness = 4,
-	inside    = 0.1,
-}
-// How quickly a region's look eases between the two: the share of the way left it goes each second
-@(private = "file")
-REGION_HOVER_EASE :: 10
 
-// Sets each region's look for the frame, from the scene's colour and how far it has eased toward its hovered look
+// How each look of the scene's regions is drawn: the numbers are the ones sim's present hands out. A look not set here
+// is not seen.
 @(private = "file")
-map_regions :: proc(scene: ^sim.Scene, hovered: sim.Region_Id, dt: f32) {
+REGION_LOOKS := [256]Region_Look {
+	0 = {border = 0.25, thickness = 1.5, inside = 0},
+	1 = {border = 0.4, thickness = 2.5, inside = 0.02},
+	2 = {border = 0.3, thickness = 1, inside = 0},
+}
+
+// Eases how each region is drawn toward its colour and look over dt seconds
+@(private = "file")
+map_regions :: proc(scene: ^sim.Scene, dt: f32) {
 	regions := &MAP_DRAW.render_terrain.highlights[.Regions]
-	step := 1 - math.exp(-REGION_HOVER_EASE * dt)
+	step := 1 - math.exp(-HIGHLIGHT_EASE * dt)
 	for &drawn, area in regions.areas {
 		if area == 0 || area > len(scene.regions) do continue
-		hover := &MAP_DRAW.region_hover[area]
-		hover^ += ((sim.Region_Id(area) == hovered ? 1 : 0) - hover^) * step
-		drawn.color = scene.regions[area - 1].color
-		drawn.border = math.lerp(REGION_RESTING.border, REGION_HOVERED.border, hover^)
-		drawn.thickness = math.lerp(REGION_RESTING.thickness, REGION_HOVERED.thickness, hover^)
-		drawn.inside = math.lerp(REGION_RESTING.inside, REGION_HOVERED.inside, hover^)
+		region := scene.regions[area - 1]
+		look := REGION_LOOKS[region.look]
+		highlight_ease(&drawn, region.color, look.border, look.thickness, look.inside, step)
 		drawn.surface = .Land
 	}
 }
@@ -456,16 +443,6 @@ COAST_SMOOTHING :: Polyline_Smoothing {
 	soften_iter = 2,
 	cut_iter    = 2,
 	cut_ratio   = 0.2,
-}
-
-// Borders follow no line on the ground, only the steps of the cells they were painted in, so they are softened fully
-// and over several cells.
-@(private = "file")
-BORDER_SMOOTHING :: Polyline_Smoothing {
-	softness    = 1,
-	soften_iter = 8,
-	cut_iter    = 2,
-	cut_ratio   = 0.25,
 }
 
 // Traces the boundaries between cells of different labels: the edges between them, joined corner to corner into lines

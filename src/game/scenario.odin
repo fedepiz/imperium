@@ -48,11 +48,11 @@ scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 	ways, ways_ok := ways_load(folder)
 	if !ways_ok do return {}
 	scenario.ways = ways
-	regions, region_names, regions_ok := regions_read(folder)
+	regions, region_names, region_ids, regions_ok := regions_read(folder)
 	if !regions_ok do return {}
 	scenario.regions = regions
 	scenario.region_names = region_names
-	factions, pieces, pieces_ok := pieces_load(folder)
+	factions, pieces, pieces_ok := pieces_load(folder, region_ids)
 	if !pieces_ok do return {}
 	scenario.factions = factions
 	scenario.pieces = pieces
