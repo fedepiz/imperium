@@ -1,12 +1,14 @@
 #+private
 package sim
 
+import "core:fmt"
 import "core:hash"
 import "core:math"
 import "core:math/linalg"
 import "core:mem"
 import "core:slice"
 import "core:slice/heap"
+import "core:time"
 
 PATH_MAX_LEN :: 1_000
 
@@ -348,6 +350,11 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 		// Derive is initialised by cached read
 		return
 	}
+	// Deriving takes a while, so say so, and how long it took.
+	why := len(cached.data) == 0 ? "not cached" : "cached for other ground"
+	fmt.eprintfln("Pathfinding for %v is %s: deriving it", domain, why)
+	started := time.tick_now()
+	defer fmt.eprintfln("Pathfinding for %v derived in %v", domain, time.tick_since(started))
 
 	table.derived.min_cost = math.INF_F32
 	for cost in table.grid do if cost > 0 do table.derived.min_cost = min(table.derived.min_cost, cost)

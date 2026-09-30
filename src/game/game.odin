@@ -16,7 +16,7 @@ GAME: struct {
 	scene:         sim.Scene,
 	// How each piece looks beyond what its pawn says, in the slot of its handle's index
 	visuals:       [sim.PAWNS_MAX]Piece_Visual,
-	// The folder of the scenario loaded, which keeps its caches, and the fingerprint of each cache as it is there
+	// The folder of the scenario loaded, and the fingerprint of each of its caches as it is saved: see cache_path
 	folder:        string,
 	saved:         [sim.Cached_File_Id]u64,
 }
@@ -46,8 +46,8 @@ game_init :: proc() {
 }
 
 // Loads the world from a scenario's folder: see scenario_read. If it does not load, the world is left all water, so
-// the failure shows, and false is returned. The folder's caches are rewritten whenever the world holds newer ones, so
-// the folder must outlast the game.
+// the failure shows, and false is returned. The scenario's caches are rewritten whenever the world holds newer ones:
+// see cache_path. The folder's name is kept, so it must outlast the game.
 game_load :: proc(folder: string) -> bool {
 	scenario := scenario_read(folder)
 	GAME.folder = folder

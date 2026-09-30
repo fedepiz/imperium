@@ -51,9 +51,13 @@ scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 	return
 }
 
-// Where a scenario's folder keeps a cache. Each file is its fingerprint, then its data.
+// Where caches are kept, apart from the scenarios they are derived from
+CACHE_FOLDER :: "cache"
+
+// Where a scenario's cache is kept: in CACHE_FOLDER, named after the scenario's folder and the cache. Each file is its
+// fingerprint, then its data.
 cache_path :: proc(folder: string, id: sim.Cached_File_Id) -> string {
-	return fmt.tprintf("%s/%v.cache", folder, id)
+	return fmt.tprintf("%s/%s_%v.cache", CACHE_FOLDER, os.base(folder), id)
 }
 
 // A cache as last written, in the temp allocator, or empty if there is none or it is cut short
@@ -67,6 +71,8 @@ cache_read :: proc(path: string) -> (file: sim.Cached_File) {
 
 // Writes a cache, to be read back by cache_read; true if it was written whole
 cache_write :: proc(path: string, file: sim.Cached_File) -> bool {
+	// Made on the first write; if it cannot be, creating the file says so.
+	_ = os.make_directory(CACHE_FOLDER)
 	f, err := os.create(path)
 	if err != nil {
 		fmt.eprintfln("Could not write cache %q: %v", path, err)
