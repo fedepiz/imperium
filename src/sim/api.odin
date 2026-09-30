@@ -105,11 +105,14 @@ Command :: union {
 	End_Turn,
 }
 
-// The piece walks to the destination, in cells, along the cheapest way there. Rejected, leaving what is walking as it
-// was, when the piece cannot walk there this turn.
+// The piece walks to the destination, in cells, along the cheapest way there. When the piece cannot walk there this
+// turn, it walks instead to the nearest cell it can, looked for in the square snap cells on a side around the
+// destination: see pathfind_flood_stop. Rejected, leaving what is walking as it was, if there is none, as always with
+// snap 0.
 Move_To_Point :: struct {
 	piece:       Piece_Id,
 	destination: [2]f32,
+	snap:        int,
 }
 
 // The piece walks to where the target stands, as Move_To_Point.

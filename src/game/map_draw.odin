@@ -263,9 +263,16 @@ map_areas :: proc(scene: ^sim.Scene) {
 	}
 }
 
+// How many cells of an area the disc around a cell must hold for the cell to join its thin parts: as many as a
+// straight thread of cells puts in it, however far out along the disc's edge the cell lies
+@(private = "file")
+WIDEN_SUPPORT :: 3
+
 // An area's cells, AREA_SIZE square, with its thin parts widened, in the temp allocator. Its thin parts are what an
-// opening by a disc of radius widen takes away: whatever is narrower than about twice widen plus one cell. Those
-// grow by the same disc, so a thread of cells becomes a band. Off the square counts as out of the area.
+// opening by a disc of radius widen takes away: whatever is narrower than about twice widen plus one cell. A cell joins
+// the area where the disc around it touches a thin part and holds at least WIDEN_SUPPORT of the area's cells: beside
+// a thin part, so a thread of cells becomes a band, but not past its ends, nor around a lone cell or two, which stay as
+// they are. Off the square counts as out of the area.
 @(private = "file")
 area_widen :: proc(cells: []bool, widen: int) -> []bool {
 	// The cells covered by the disc, as offsets from its middle cell
@@ -275,36 +282,29 @@ area_widen :: proc(cells: []bool, widen: int) -> []bool {
 			if dx * dx + dy * dy <= widen * widen + widen do append(&disc, [2]int{dx, dy})
 		}
 	}
-	// Each cell is in if the disc around it touches any cell of from, when growing, or lies wholly in from, when
-	// shrinking.
-	morph :: proc(from: []bool, disc: [][2]int, grow: bool) -> []bool {
+	// Each cell is in if the disc around it holds at least need cells of from: with 1 from grows, with the whole disc
+	// it shrinks.
+	morph :: proc(from: []bool, disc: [][2]int, need: int) -> []bool {
 		to := make([]bool, len(from), context.temp_allocator)
 		for y in 0 ..< sim.AREA_SIZE {
 			for x in 0 ..< sim.AREA_SIZE {
-				hit := !grow
+				held := 0
 				for offset in disc {
 					at := [2]int{x, y} + offset
-					inside :=
-						at.x >= 0 &&
-						at.y >= 0 &&
-						at.x < sim.AREA_SIZE &&
-						at.y < sim.AREA_SIZE &&
-						from[at.y * sim.AREA_SIZE + at.x]
-					if inside != hit {
-						hit = inside
-						break
-					}
+					if at.x < 0 || at.y < 0 || at.x >= sim.AREA_SIZE || at.y >= sim.AREA_SIZE do continue
+					if from[at.y * sim.AREA_SIZE + at.x] do held += 1
 				}
-				to[y * sim.AREA_SIZE + x] = hit
+				to[y * sim.AREA_SIZE + x] = held >= need
 			}
 		}
 		return to
 	}
-	opened := morph(morph(cells, disc[:], false), disc[:], true)
+	opened := morph(morph(cells, disc[:], len(disc)), disc[:], 1)
 	thin := make([]bool, len(cells), context.temp_allocator)
 	for inside, i in cells do thin[i] = inside && !opened[i]
-	widened := morph(thin, disc[:], true)
-	for &inside, i in widened do inside ||= cells[i]
+	near_thin := morph(thin, disc[:], 1)
+	widened := morph(cells, disc[:], WIDEN_SUPPORT)
+	for &inside, i in widened do inside = cells[i] || (inside && near_thin[i])
 	return widened
 }
 

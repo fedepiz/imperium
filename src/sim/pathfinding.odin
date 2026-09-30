@@ -640,12 +640,23 @@ flood_reaches :: proc(flood: ^Pathfind_Flood, cell: [2]int) -> bool {
 	)
 }
 
-// The cell to stop at for dst: dst's own if it can be stopped on, else the nearest one that can. None if the flood
-// does not reach dst's cell.
-pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32) -> (cell: [2]int, ok: bool) {
+// The cell to stop at for dst: dst's own if it can be stopped on, else the nearest one that can. If the flood does not
+// reach dst's cell, the cell nearest dst that it reaches and that can be stopped on, among those in the square snap
+// cells on a side around dst's cell; with snap 0, none.
+pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32, snap: int) -> (cell: [2]int, ok: bool) {
 	to := [2]int{int(math.floor(dst.x)), int(math.floor(dst.y))}
-	if !flood_reaches(flood, to) do return
 	nearest := math.INF_F32
+	if !flood_reaches(flood, to) {
+		for y in 0 ..< snap {
+			for x in 0 ..< snap {
+				at := to - snap / 2 + {x, y}
+				if !flood_reaches(flood, at) || flood.no_stop[grid_index(at - flood.corner, FLOOD_SQUARE)] do continue
+				distance := linalg.distance([2]f32{f32(at.x), f32(at.y)} + 0.5, dst)
+				if distance < nearest do cell, ok, nearest = at, true, distance
+			}
+		}
+		return
+	}
 	for cost, i in flood.cost {
 		if cost == math.INF_F32 || flood.no_stop[i] do continue
 		at := flood.corner + grid_pos(i, FLOOD_SQUARE)

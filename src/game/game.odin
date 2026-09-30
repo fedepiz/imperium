@@ -27,6 +27,10 @@ COMMANDS_MAX :: 64
 // The cells a walking piece covers a second, whatever the ground
 MOVEMENT_SPEED :: 10
 
+// The side, in cells, of the square around a clicked point a move looks in for somewhere it can go, when the point
+// itself is out of reach
+CLICK_MOVE_SNAP :: 9
+
 #assert(
 	gfx.RENDER_TERRAIN_WIDTH == sim.WORLD_WIDTH && gfx.RENDER_TERRAIN_HEIGHT == sim.WORLD_HEIGHT,
 )
@@ -86,7 +90,7 @@ game_tick :: proc(input: Input, dt: f32) {
 			command_send(sim.Move_To_Piece{piece = GAME.focus, target = target})
 		} else {
 			destination := camera_screen_to_world_point(GAME.camera, input.viewport, input.cursor)
-			command_send(sim.Move_To_Point{piece = GAME.focus, destination = destination})
+			command_send(sim.Move_To_Point{piece = GAME.focus, destination = destination, snap = CLICK_MOVE_SNAP})
 		}
 	}
 

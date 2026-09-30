@@ -397,7 +397,7 @@ world_step :: proc(commands: []Command, walk_distance: f32) {
 		switch c in command {
 		case Move_To_Point:
 			walker = c.piece
-			if walker == mov.flood_subject do stop, ok = pathfind_flood_stop(&mov.flood, c.destination)
+			if walker == mov.flood_subject do stop, ok = pathfind_flood_stop(&mov.flood, c.destination, c.snap)
 		case Move_To_Piece:
 			walker, target = c.piece, c.target
 			other := piece_get(target)
