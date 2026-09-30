@@ -98,21 +98,22 @@ Piece_Id :: struct {
 
 // A world to start from, cell by cell. A layer that is not CELLS_MAX long is missing.
 Scenario :: struct {
-	surface:      []Surface,
-	elevation:    []u8,
-	trees:        []u8,
-	moisture:     []u8,
+	surface:         []Surface,
+	elevation:       []u8,
+	trees:           []u8,
+	moisture:        []u8,
 	// For each way kind, the id of the way through each cell, 0 for none
-	ways:         [Way_Kind][]u16,
+	ways:            [Way_Kind][]u16,
 	// The region each cell lies in, 0 for none, and each region's name, from region 1. Water lies in no region.
-	regions:      []Region_Id,
-	region_names: []string,
-	// The factions, in the order they play, and the pieces the world starts with
-	factions:     []Scenario_Faction,
-	pieces:       []Scenario_Piece,
+	regions:         []Region_Id,
+	region_names:    []string,
+	// The factions, in the order they play, the characters' names, and the pieces the world starts with
+	factions:        []Scenario_Faction,
+	character_names: []string,
+	pieces:          []Scenario_Piece,
 	// What a scene's caches held in an earlier run, or empty. Each is taken only if its fingerprint matches what the
 	// world would derive it from now; otherwise it is derived again.
-	cached_files: [Cached_File_Id]Cached_File,
+	cached_files:    [Cached_File_Id]Cached_File,
 }
 
 // A faction as the world starts with it
@@ -142,6 +143,8 @@ Scenario_Piece :: struct {
 	traits:            bit_set[Piece_Trait;u8],
 	// The region it is the capital of, 0 for none. A region has at most one.
 	capital_of:        Region_Id,
+	// The character leading it, by its place in the scenario's characters from 1, 0 for none
+	general:           int,
 }
 
 // What the world can save between runs, to spare deriving it at load

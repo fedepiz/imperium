@@ -8,6 +8,7 @@ import "core:mem"
 
 PIECE_MAX :: 1024
 FACTION_MAX :: 256
+CHARACTER_MAX :: 1024
 
 WORLD: struct {
 	atlas:           Atlas,
@@ -24,6 +25,11 @@ WORLD: struct {
 	factions:        [FACTION_MAX]Faction,
 	faction_names:   [FACTION_MAX]Name,
 	factions_free:   [dynamic; FACTION_MAX]u16,
+	// Every slot a character can be in, each slot's name, set by character_spawn, and the slots with no character in
+	// them, the next to be used last
+	characters:      [CHARACTER_MAX]Character,
+	character_names: [CHARACTER_MAX]Name,
+	characters_free: [dynamic; CHARACTER_MAX]u16,
 	// The faction whose turn it is, which the player plays, or nil for none
 	player:          Faction_Id,
 	// The faction whose pieces take orders: the player's, nil while an interaction is open
@@ -350,6 +356,7 @@ Way_Id :: distinct u16
 world_init :: proc() {
 	for index := PIECE_MAX - 1; index >= 0; index -= 1 do append(&WORLD.pieces_free, u16(index))
 	for index := FACTION_MAX - 1; index >= 0; index -= 1 do append(&WORLD.factions_free, u16(index))
+	for index := CHARACTER_MAX - 1; index >= 0; index -= 1 do append(&WORLD.characters_free, u16(index))
 }
 
 world_load :: proc(scenario: Scenario) -> bool {
@@ -606,7 +613,8 @@ turn_end :: proc() {
 	WORLD.ordering = next
 }
 
-// Spawns the scenario's factions, in the order they play, and its pieces, each the capital of its region if it has one
+// Spawns the scenario's factions, in the order they play, its characters, and its pieces, each led by its general and
+// the capital of its region if it has them
 @(private = "file")
 world_load_pieces :: proc(scenario: Scenario) {
 	factions: [dynamic; FACTION_MAX]Faction_Id
@@ -616,9 +624,15 @@ world_load_pieces :: proc(scenario: Scenario) {
 			faction_spawn({culture = faction.culture, color = faction.color}, faction.name),
 		)
 	}
+	characters: [dynamic; CHARACTER_MAX]Character_Id
+	for name in scenario.character_names {
+		append(&characters, character_spawn({}, name))
+	}
 	for piece in scenario.pieces {
 		owner: Faction_Id
 		if piece.owner >= 0 && piece.owner < len(factions) do owner = factions[piece.owner]
+		general: Character_Id
+		if piece.general > 0 && piece.general <= len(characters) do general = characters[piece.general - 1]
 		id := piece_spawn(
 			{
 				pos = piece.pos,
@@ -630,6 +644,7 @@ world_load_pieces :: proc(scenario: Scenario) {
 				contact = piece.contact,
 				body = piece.body,
 				traits = piece.traits,
+				general = general,
 			},
 			piece.name,
 		)
@@ -660,6 +675,8 @@ Piece :: struct {
 	// Radius in cells; no other piece stops overlapping it
 	body:              f32,
 	traits:            bit_set[Piece_Trait;u8],
+	// The character leading it, nil for none
+	general:           Character_Id,
 }
 
 // Puts a piece in a free slot under a name, which may be empty, returning its id, or nil when every slot is full
@@ -773,5 +790,57 @@ faction_alive :: proc(faction: Faction) -> bool {
 // The id of the faction in a slot
 faction_id :: proc(index: int) -> Faction_Id {
 	return {u16(index), WORLD.factions[index].generation}
+}
+
+// A person of the world, with a name
+Character :: struct {
+	// Bumped as the slot takes a character and as it frees it: odd while there is a character in the slot, even while
+	// it is free. Ids to earlier characters go stale. Set by character_spawn.
+	generation: u16,
+}
+
+// Which character: its slot, and the slot's generation while the character is in it. An id with an even generation,
+// like the zero id, is nil: no character.
+Character_Id :: struct {
+	index:      u16,
+	generation: u16,
+}
+
+// Puts a character in a free slot under a name, returning its id, or nil when every slot is full
+character_spawn :: proc(character: Character, name: string) -> Character_Id {
+	index, ok := pop_safe(&WORLD.characters_free)
+	if !ok do return {}
+	slot := &WORLD.characters[index]
+	generation := slot.generation + 1
+	slot^ = character
+	slot.generation = generation
+	name_set(&WORLD.character_names[index], name)
+	return {index, generation}
+}
+
+// Frees a character's slot. A stale or nil id does nothing; the pieces it led are left with no general.
+character_despawn :: proc(id: Character_Id) {
+	character := character_get(id)
+	if character == nil do return
+	character.generation += 1
+	clear(&WORLD.character_names[id.index])
+	append(&WORLD.characters_free, id.index)
+}
+
+// The character an id is to, or nil when the id is stale or nil
+character_get :: proc(id: Character_Id) -> ^Character {
+	character := &WORLD.characters[id.index]
+	if id.generation & 1 == 0 || character.generation != id.generation do return nil
+	return character
+}
+
+// There is a character in the slot
+character_alive :: proc(character: Character) -> bool {
+	return character.generation & 1 == 1
+}
+
+// The id of the character in a slot
+character_id :: proc(index: int) -> Character_Id {
+	return {u16(index), WORLD.characters[index].generation}
 }
 

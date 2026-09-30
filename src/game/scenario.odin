@@ -52,9 +52,10 @@ scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 	if !regions_ok do return {}
 	scenario.regions = regions
 	scenario.region_names = region_names
-	factions, pieces, pieces_ok := pieces_load(folder, region_ids)
+	factions, character_names, pieces, pieces_ok := pieces_load(folder, region_ids)
 	if !pieces_ok do return {}
 	scenario.factions = factions
+	scenario.character_names = character_names
 	scenario.pieces = pieces
 	for &file, id in scenario.cached_files do file = cache_read(cache_path(folder, id))
 	return

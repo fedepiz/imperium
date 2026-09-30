@@ -151,6 +151,9 @@ world_present :: proc(
 		faction := faction_get(piece.owner)
 		append(&card.fields, Field{"Faction", faction != nil ? faction_name(piece.owner) : "None"})
 		append(&card.fields, Field{"Culture", fmt.tprintf("%v", piece.culture)})
+		if character_get(piece.general) != nil {
+			append(&card.fields, Field{"General", string(WORLD.character_names[piece.general.index][:])})
+		}
 		if piece.movement_domain != nil {
 			budget := fmt.tprintf("%.0f of %.0f", piece.movement_budget, piece.movement_per_turn)
 			append(&card.fields, Field{"Movement", budget})
