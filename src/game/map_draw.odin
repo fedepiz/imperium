@@ -52,6 +52,8 @@ map_draw_init :: proc() {
 		arrow_fill         = {0.700, 0.250, 0.160, 1},
 		head_length        = 7.5,
 		head_width         = 6.25,
+		border_width       = 2.5,
+		border_ink         = {0.400, 0.180, 0.120, 0.45},
 	}
 	MAP_DRAW.render_terrain.cover.jitter = 0.8
 }
@@ -120,10 +122,11 @@ map_derive :: proc(terrain: []sim.Ground) {
 	to_coast := make([][2]f32, sim.CELLS_MAX, context.temp_allocator)
 	coast_side := make([]f32, sim.CELLS_MAX, context.temp_allocator)
 	for &offset in to_coast do offset = COAST_REACH
-	is_land := make([]bool, sim.CELLS_MAX, context.temp_allocator)
-	for cell, i in terrain do is_land[i] = cell.surface not_in sim.WATER
+	// Sea 1 and land 2, so the land is on the left of the coast
+	labels := make([]u16, sim.CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain do labels[i] = cell.surface in sim.WATER ? 1 : 2
 	polylines_clear()
-	trace_boundaries(is_land, COAST_SMOOTHING)
+	trace_boundaries(labels, COAST_SMOOTHING)
 	for r in 0 ..< polylines_count() {
 		line := polylines_get(r)
 		polyline_stamp(line, COAST_REACH, to_coast, coast_side)
@@ -147,6 +150,16 @@ map_derive :: proc(terrain: []sim.Ground) {
 			math.smoothstep(COAST_REACH - 1, COAST_REACH, near),
 		)
 	}
+
+	// The borders between regions, over the land
+	borders := &rt.lines[.Border]
+	clear(&borders.segments)
+	borders.revision += 1
+	// Water 0, so it has no borders, and land its region's id, one up so land in no region has borders too
+	for cell, i in terrain do labels[i] = cell.surface in sim.WATER ? 0 : u16(cell.region) + 1
+	polylines_clear()
+	trace_boundaries(labels, BORDER_SMOOTHING)
+	for r in 0 ..< polylines_count() do lines_add(borders, polylines_get(r), false)
 
 	// The water near the shore, preclaimed so no mark's drawing spills into it
 	preclaim_coast_water(claimed, rt.coast[:], COAST_WATER_BAND)
@@ -375,62 +388,94 @@ COAST_REACH :: f32(3)
 // Coasts keep more of their shape, losing mostly the steps of the cells.
 @(private = "file")
 COAST_SMOOTHING :: Polyline_Smoothing {
-	softness  = 0.3,
-	cut_iter  = 2,
-	cut_ratio = 0.2,
+	softness    = 0.3,
+	soften_iter = 2,
+	cut_iter    = 2,
+	cut_ratio   = 0.2,
 }
 
-// Traces the boundaries of the cells inside: the edges between inside and outside cells, joined corner to corner into
-// lines with the inside on their left. A boundary that runs off the map ends there; the rest close.
+// Borders follow no line on the ground, only the steps of the cells they were painted in, so they are softened fully
+// and over several cells.
 @(private = "file")
-trace_boundaries :: proc(inside: []bool, smoothing: Polyline_Smoothing) {
-	// Corners are numbered y * ACROSS + x. Each holds the steps its edges leave it by: two only where inside and outside
-	// meet across it.
+BORDER_SMOOTHING :: Polyline_Smoothing {
+	softness    = 1,
+	soften_iter = 8,
+	cut_iter    = 2,
+	cut_ratio   = 0.25,
+}
+
+// Traces the boundaries between cells of different labels: the edges between them, joined corner to corner into lines
+// with the larger label on their left. Label 0 has no boundaries. A line runs on through each corner two edges meet
+// at, and ends where one, three or four do: at the map's edge, and where boundaries meet. The rest close.
+@(private = "file")
+trace_boundaries :: proc(labels: []u16, smoothing: Polyline_Smoothing) {
+	// Corners are numbered y * ACROSS + x. Each holds the steps its edges leave it by, not yet walked, and how many
+	// edges meet at it.
 	ACROSS :: sim.WORLD_WIDTH + 1
 	out := make([]bit_set[Step], ACROSS * (sim.WORLD_HEIGHT + 1), context.temp_allocator)
+	meeting := make([]u8, len(out), context.temp_allocator)
+	edge :: proc(out: []bit_set[Step], meeting: []u8, from: [2]int, step: Step) {
+		to := from + STEPS[step]
+		out[from.y * ACROSS + from.x] += {step}
+		meeting[from.y * ACROSS + from.x] += 1
+		meeting[to.y * ACROSS + to.x] += 1
+	}
 	for y in 0 ..< sim.WORLD_HEIGHT {
 		for x in 0 ..< sim.WORLD_WIDTH {
-			i := y * sim.WORLD_WIDTH + x
-			if !inside[i] do continue
-			if y > 0 && !inside[i - sim.WORLD_WIDTH] do out[y * ACROSS + x + 1] += {.West}
-			if y < sim.WORLD_HEIGHT - 1 && !inside[i + sim.WORLD_WIDTH] do out[(y + 1) * ACROSS + x] += {.East}
-			if x > 0 && !inside[i - 1] do out[y * ACROSS + x] += {.South}
-			if x < sim.WORLD_WIDTH - 1 && !inside[i + 1] do out[(y + 1) * ACROSS + x + 1] += {.North}
+			here := labels[y * sim.WORLD_WIDTH + x]
+			if here == 0 do continue
+			// The edge along the cell's top, and along its left side, walked with the larger label on the left
+			if y > 0 {
+				above := labels[(y - 1) * sim.WORLD_WIDTH + x]
+				if above != 0 && above != here {
+					if here > above do edge(out, meeting, {x + 1, y}, .West)
+					else do edge(out, meeting, {x, y}, .East)
+				}
+			}
+			if x > 0 {
+				left := labels[y * sim.WORLD_WIDTH + x - 1]
+				if left != 0 && left != here {
+					if here > left do edge(out, meeting, {x, y}, .South)
+					else do edge(out, meeting, {x, y + 1}, .North)
+				}
+			}
 		}
 	}
 
-	// Walks from a corner along the edges not yet walked, until it comes back round or runs off the map; where two edges
-	// leave a corner, it turns left.
-	walk :: proc(out: []bit_set[Step], start: [2]int, smoothing: Polyline_Smoothing) {
-		at, heading, moved := start, Step.East, false
+	// Walks from a corner along a step, and on through corners two edges meet at, until it comes to one where one,
+	// three or four do, or back round to where it started
+	walk :: proc(
+		out: []bit_set[Step],
+		meeting: []u8,
+		start: [2]int,
+		step: Step,
+		smoothing: Polyline_Smoothing,
+	) {
+		at, heading := start, step
+		polylines_add({f32(at.x), f32(at.y)})
 		for {
-			if moved && at == start {
+			out[at.y * ACROSS + at.x] -= {heading}
+			at += STEPS[heading]
+			c := at.y * ACROSS + at.x
+			if at == start && meeting[c] == 2 {
 				polylines_end(true, smoothing)
 				return
 			}
-			edges := &out[at.y * ACROSS + at.x]
-			if edges^ == {} {
-				polylines_add({f32(at.x), f32(at.y)})
+			polylines_add({f32(at.x), f32(at.y)})
+			if meeting[c] != 2 || out[c] == {} {
 				polylines_end(false, smoothing)
 				return
 			}
-			step := Step((int(heading) + 3) % 4)
-			if !moved || step not_in edges^ do for s in Step do if s in edges^ {step = s; break}
-			edges^ -= {step}
-			polylines_add({f32(at.x), f32(at.y)})
-			at += STEPS[step]
-			heading, moved = step, true
+			for s in Step do if s in out[c] {heading = s; break}
 		}
 	}
-	// Boundaries that run off the map first, from where they leave its edge, then the closed ones
-	for x in 0 ..= sim.WORLD_WIDTH {
-		for y in ([2]int{0, sim.WORLD_HEIGHT}) do if out[y * ACROSS + x] != {} do walk(out, {x, y}, smoothing)
-	}
-	for y in 0 ..= sim.WORLD_HEIGHT {
-		for x in ([2]int{0, sim.WORLD_WIDTH}) do if out[y * ACROSS + x] != {} do walk(out, {x, y}, smoothing)
+	// Lines from the corners they end at first, then the closed ones
+	for c in 0 ..< len(out) {
+		if meeting[c] == 2 do continue
+		for s in Step do if s in out[c] do walk(out, meeting, {c % ACROSS, c / ACROSS}, s, smoothing)
 	}
 	for c in 0 ..< len(out) {
-		for out[c] != {} do walk(out, {c % ACROSS, c / ACROSS}, smoothing)
+		for s in Step do if s in out[c] do walk(out, meeting, {c % ACROSS, c / ACROSS}, s, smoothing)
 	}
 }
 

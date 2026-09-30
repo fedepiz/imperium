@@ -11,6 +11,8 @@ FACTION_MAX :: 256
 
 WORLD: struct {
 	atlas:         Atlas,
+	// Each region's name, from region 1
+	region_names:  [dynamic; REGIONS_MAX]Name,
 	// Every slot a piece can be in, and each slot's name, set by piece_spawn
 	pieces:        [PIECE_MAX]Piece,
 	piece_names:   [PIECE_MAX]Name,
@@ -144,6 +146,7 @@ Terrain :: struct {
 	// Worked out from the land around it at load
 	type:          Terrain_Type,
 	type_strength: u8,
+	region:        Region_Id,
 }
 
 // Land movement cost per cell walked, by terrain type, 0 for impassable; a road costs ROAD_COST whatever its type
@@ -332,7 +335,8 @@ world_load :: proc(scenario: Scenario) -> bool {
 		len(scenario.surface) == CELLS_MAX &&
 		len(scenario.elevation) == CELLS_MAX &&
 		len(scenario.trees) == CELLS_MAX &&
-		len(scenario.moisture) == CELLS_MAX
+		len(scenario.moisture) == CELLS_MAX &&
+		len(scenario.regions) == CELLS_MAX
 	for layer in scenario.ways do ok &&= len(layer) == CELLS_MAX
 	if ok {
 		for &cell, i in terrain {
@@ -341,6 +345,7 @@ world_load :: proc(scenario: Scenario) -> bool {
 				elevation = scenario.elevation[i],
 				trees     = scenario.trees[i],
 				moisture  = scenario.moisture[i],
+				region    = scenario.regions[i],
 			}
 			for layer, kind in scenario.ways do cell.way[kind] = Way_Id(layer[i])
 		}
@@ -392,6 +397,11 @@ world_load :: proc(scenario: Scenario) -> bool {
 			grid[i] = cell.surface == .Land ? 0 : 1
 		}
 		pathfind_build_end(.Sea, scenario.cached_files[.Pathfind_Sea])
+	}
+	clear(&WORLD.region_names)
+	for name in scenario.region_names[:min(len(scenario.region_names), REGIONS_MAX)] {
+		append(&WORLD.region_names, Name{})
+		name_set(&WORLD.region_names[len(WORLD.region_names) - 1], name)
 	}
 	WORLD.atlas.revision += 1
 	world_load_pieces(scenario)

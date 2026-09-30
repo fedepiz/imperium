@@ -31,6 +31,7 @@ world_present :: proc(focus: Piece_Id, out: ^Scene) {
 				moisture      = cell.moisture,
 				type          = cell.type,
 				type_strength = cell.type_strength,
+				region        = cell.region,
 			}
 			for id, kind in cell.way do if id != 0 do ground.ways += {kind}
 			out.ground[i] = ground

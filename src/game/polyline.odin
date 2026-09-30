@@ -19,16 +19,17 @@ POLYLINE_SMOOTHED_MAX :: POLYLINE_POINTS_MAX << POLYLINE_CORNER_ITER_MAX
 // Runs of up to this many points are not softened, which would shrink them to specks.
 POLYLINE_SHORT :: 8
 
-// How a run is smoothed. Softening moves each point toward the average of its neighbours, twice, by softness from 0
-// to 1: it rounds whole stretches of line, drawing in capes and filling bays. Then every corner is cut cut_iter times,
-// Chaikin's way: each segment becomes two points cut_ratio of the way in from its ends, but never more than cut_max
-// cells in if cut_max is above 0, which rounds only the corners. A ratio near 0 cuts little, keeping corners crisp; 0.5
-// cuts the most.
+// How a run is smoothed. Softening moves each point toward the average of its neighbours, soften_iter times, by
+// softness from 0 to 1: it rounds whole stretches of line, drawing in capes and filling bays, over more of the line the
+// more times it is done. Then every corner is cut cut_iter times, Chaikin's way: each segment becomes two points
+// cut_ratio of the way in from its ends, but never more than cut_max cells in if cut_max is above 0, which rounds only
+// the corners. A ratio near 0 cuts little, keeping corners crisp; 0.5 cuts the most.
 Polyline_Smoothing :: struct {
-	softness:  f32,
-	cut_iter:  int,
-	cut_ratio: f32,
-	cut_max:   f32,
+	softness:    f32,
+	soften_iter: int,
+	cut_iter:    int,
+	cut_ratio:   f32,
+	cut_max:     f32,
 }
 
 // A smoothed run, as polylines_get reads it out: its points, and whether they close from the last back to the first
@@ -83,7 +84,7 @@ polylines_end :: proc(closed: bool, smoothing: Polyline_Smoothing) {
 	resize(&lines.points, begin + size)
 	p := lines.points[begin:]
 	copy(p, lines.tracing[:])
-	for _ in 0 ..< (n > POLYLINE_SHORT ? 2 : 0) {
+	for _ in 0 ..< (n > POLYLINE_SHORT ? smoothing.soften_iter : 0) {
 		first, prev := p[0], closed ? p[n - 1] : p[0]
 		for i in 0 ..< n {
 			if !closed && (i == 0 || i == n - 1) do continue

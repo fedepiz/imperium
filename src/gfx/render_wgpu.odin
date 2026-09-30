@@ -41,9 +41,10 @@ Terrain_Uniforms :: struct {
 	road_fill, arrow_fill:                          [4]f32,
 	head_length, head_width:                        f32,
 	circle_count:                                   i32,
-	_:                                              f32,
+	border_width:                                   f32,
+	border_ink:                                     [4]f32,
 }
-#assert(size_of(Terrain_Uniforms) == 208)
+#assert(size_of(Terrain_Uniforms) == 224)
 
 Renderer :: struct {
 	window:                              ^sdl.Window,
@@ -612,6 +613,8 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		sea_depth_from     = style.sea_depth_from,
 		sea_depth_full     = style.sea_depth_full,
 		circle_count       = i32(len(highlights.circles)),
+		border_width       = style.border_width,
+		border_ink         = style.border_ink,
 	}
 	wgpu.QueueWriteBuffer(
 		renderer.queue,
@@ -1468,6 +1471,8 @@ struct Terrain {
     head_length: f32,
     head_width: f32,
     circle_count: i32,
+    border_width: f32,
+    border_ink: vec4f,
 }
 `
 
@@ -1629,6 +1634,7 @@ fn paper_at(p: vec2f, frag: vec2f) -> vec3f {
 const RIVER = 0;
 const ROAD = 1;
 const ARROW = 2;
+const BORDER = 3;
 
 // Distance from p to the nearest line of a kind, in cells, negative inside a head. It is read from the line field where
 // p shows in the view, blended between pixels.
@@ -1838,6 +1844,10 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         var ground = col * cover.tint;
         ground = mix(ground, u.ink.rgb, stipple_at(p, px, cover.density.x) * cover.ink.x);
         col = mix(sea, ground, land);
+
+        // Borders: a hairline over the land, under rivers and roads, wandering from the cells as the coast does
+        let border = line_distance(wander(p, u.wobble, 8.1), BORDER) * px;
+        col = mix(col, u.border_ink.rgb, line_aa(border, u.border_width * 0.5 * u.pixel_density) * u.border_ink.a * land);
 
         // Rivers: a faint wash either side and a line that thins toward the hills, both stopping at the shore. The line
         // never grows past a third of a cell, so rivers fade out as the map zooms away.

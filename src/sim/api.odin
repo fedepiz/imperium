@@ -74,6 +74,12 @@ Contact :: struct {
 	domains: bit_set[Pathfind_Domain],
 }
 
+// Which region of the map a cell lies in: 1 for the scenario's first region, 0 for none
+Region_Id :: distinct u16
+
+// The most regions a scenario can have
+REGIONS_MAX :: 4096
+
 // Which piece: its slot, and the slot's generation while the piece is in it. An id with an even generation, like the
 // zero id, is nil.
 Piece_Id :: struct {
@@ -92,6 +98,9 @@ Scenario :: struct {
 	moisture:     []u8,
 	// For each way kind, the id of the way through each cell, 0 for none
 	ways:         [Way_Kind][]u16,
+	// The region each cell lies in, 0 for none, and each region's name, from region 1. Water lies in no region.
+	regions:      []Region_Id,
+	region_names: []string,
 	// The factions, in the order they play, and the pieces the world starts with
 	factions:     []Scenario_Faction,
 	pieces:       []Scenario_Piece,
@@ -207,6 +216,7 @@ Ground :: struct {
 	type:          Terrain_Type,
 	// From 0 to 255
 	type_strength: u8,
+	region:        Region_Id,
 }
 
 // A drawing: what it shows, in whose style
