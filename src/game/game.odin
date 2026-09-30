@@ -79,13 +79,13 @@ game_tick :: proc(input: Input, dt: f32) {
 	camera_tick(input, dt)
 
 	// The left click focuses the pawn under it, or nothing; the right one sends the focus, if it is controlled, to the
-	// pawn under it, or else to the place under it.
+	// pawn under it other than itself, or else to the place under it.
 	// Picked from the pawns last drawn, which the scene holds until it is presented again
 	pawns := GAME.scene.pawns[:]
 	if input.left_click do GAME.focus = pawns_pick(pawns, GAME.camera, input.viewport, input.cursor)
 	if focus, ok := scene_pawn(GAME.focus);
 	   ok && input.right_click && .Controlled in focus.flags {
-		target := pawns_pick(pawns, GAME.camera, input.viewport, input.cursor)
+		target := pawns_pick(pawns, GAME.camera, input.viewport, input.cursor, GAME.focus)
 		if target != {} {
 			command_send(sim.Move_To_Piece{piece = GAME.focus, target = target})
 		} else {

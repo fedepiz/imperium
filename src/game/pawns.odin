@@ -91,11 +91,19 @@ pawn_bounds :: proc(pawn: sim.Pawn, set: Icon_Set) -> [4]f32 {
 }
 
 // The handle of the last of the pawns whose drawing, in the set that shows more, covers the point on screen, or nil
-// for none. Pass the pawns last drawn, so what is picked is what is on screen.
-pawns_pick :: proc(pawns: []sim.Pawn, camera: Camera, viewport: [2]f32, point: [2]f32) -> sim.Piece_Id {
+// for none. The pawn with the ignored handle is never picked; nil ignores none. Pass the pawns last drawn, so what is
+// picked is what is on screen.
+pawns_pick :: proc(
+	pawns: []sim.Pawn,
+	camera: Camera,
+	viewport: [2]f32,
+	point: [2]f32,
+	ignored: sim.Piece_Id = {},
+) -> sim.Piece_Id {
 	found: sim.Piece_Id
 	set: Icon_Set = PAWNS.medallion_t < 0.5 ? .Picture : .Medallion
 	for pawn in pawns {
+		if pawn.handle == ignored do continue
 		rect, _ := camera_world_to_screen(camera, viewport, pawn_bounds(pawn, set))
 		if gfx.rect_contains(rect, point) do found = pawn.handle
 	}
