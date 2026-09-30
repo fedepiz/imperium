@@ -402,18 +402,19 @@ world_load :: proc(scenario: Scenario) -> bool {
 world_step :: proc(commands: []Command, walk_distance: f32) {
 	mov := &WORLD.movement
 	for command in commands {
-		// A walk: where it stops, and whom it meets there. Only the focus walks, from the flood the last present made.
-		walker, target: Piece_Id
+		// A walk of the focus, from the flood the last present made for it, nil when it cannot walk: where it stops,
+		// and whom it meets there
+		walker := mov.flood_subject
+		target: Piece_Id
 		stop: [2]int
 		ok: bool
 		switch c in command {
-		case Move_To_Point:
-			walker = c.piece
-			if walker == mov.flood_subject do stop, ok = pathfind_flood_stop(&mov.flood, c.destination, c.snap)
-		case Move_To_Piece:
-			walker, target = c.piece, c.target
+		case Move_Focus_To_Point:
+			if walker != {} do stop, ok = pathfind_flood_stop(&mov.flood, c.destination, c.snap)
+		case Move_Focus_To_Piece:
+			target = c.target
 			other := piece_get(target)
-			if walker == mov.flood_subject &&
+			if walker != {} &&
 			   other != nil &&
 			   mov.flood.domain in other.contact.domains {
 				stop, ok = pathfind_flood_stop_within(&mov.flood, other.pos, other.contact.radius)

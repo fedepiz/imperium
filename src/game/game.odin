@@ -87,10 +87,10 @@ game_tick :: proc(input: Input, dt: f32) {
 	   ok && input.right_click && .Controlled in focus.flags {
 		target := pawns_pick(pawns, GAME.camera, input.viewport, input.cursor, GAME.focus)
 		if target != {} {
-			command_send(sim.Move_To_Piece{piece = GAME.focus, target = target})
+			command_send(sim.Move_Focus_To_Piece{target = target})
 		} else {
 			destination := camera_screen_to_world_point(GAME.camera, input.viewport, input.cursor)
-			command_send(sim.Move_To_Point{piece = GAME.focus, destination = destination, snap = CLICK_MOVE_SNAP})
+			command_send(sim.Move_Focus_To_Point{destination = destination, snap = CLICK_MOVE_SNAP})
 		}
 	}
 
