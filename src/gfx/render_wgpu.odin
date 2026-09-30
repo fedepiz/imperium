@@ -1847,9 +1847,9 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         col = mix(col, mix(u.ink.rgb, u.sea_shallow.rgb, 0.3), line_aa(r * px, river_half) * land);
 
         // Roads: ochre between two ink edges, on a band of bare paper that hides what is drawn under it, stopping at the
-        // shore. A road never grows past a fifth of a cell; zoomed out too far for its edges to read, it narrows to a
-        // single darker line that stays in view.
-        let road = line_distance(wander(p, u.wobble * 0.6, 9.1), ROAD) * px;
+        // shore. They keep the course they were traced along, without wandering. A road never grows past a fifth of a
+        // cell; zoomed out too far for its edges to read, it narrows to a single darker line that stays in view.
+        let road = line_distance(p, ROAD) * px;
         let road_half = min(u.road_width * 0.5 * u.pixel_density, px / 5.0);
         let cased = smoothstep(2.0, 4.0, road_half / u.pixel_density);
         let road_edge = 0.5 * u.pixel_density;

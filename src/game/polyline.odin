@@ -19,14 +19,19 @@ POLYLINE_SMOOTHED_MAX :: POLYLINE_POINTS_MAX << POLYLINE_CORNER_ITER_MAX
 // Runs of up to this many points are not softened, which would shrink them to specks.
 POLYLINE_SHORT :: 8
 
-// How a run is smoothed. Softening moves each point toward the average of its neighbours, twice, by softness from 0
-// to 1: it rounds whole stretches of line, drawing in capes and filling bays. Then every corner is cut cut_iter times,
-// Chaikin's way: each segment becomes two points cut_ratio of the way in from its ends, which rounds only the corners.
-// A ratio near 0 cuts little, keeping corners crisp; 0.5 cuts the most.
+// How a run is smoothed. First, if simplify is above 0, every point within simplify cells of the line between the
+// points kept either side of it is dropped: steps from cell to cell straighten into long runs at any angle, bending
+// only where the cells really turn. Softening then moves each point toward the average of its neighbours, twice, by
+// softness from 0 to 1: it rounds whole stretches of line, drawing in capes and filling bays. Then every corner is cut
+// cut_iter times, Chaikin's way: each segment becomes two points cut_ratio of the way in from its ends, but never more
+// than cut_max cells in if cut_max is above 0, which rounds only the corners. A ratio near 0 cuts little, keeping
+// corners crisp; 0.5 cuts the most.
 Polyline_Smoothing :: struct {
+	simplify:  f32,
 	softness:  f32,
 	cut_iter:  int,
 	cut_ratio: f32,
+	cut_max:   f32,
 }
 
 // A smoothed run, as polylines_get reads it out: its points, and whether they close from the last back to the first
@@ -81,6 +86,7 @@ polylines_end :: proc(closed: bool, smoothing: Polyline_Smoothing) {
 	resize(&lines.points, begin + size)
 	p := lines.points[begin:]
 	copy(p, lines.tracing[:])
+	if smoothing.simplify > 0 do n = polyline_simplify(p, n, smoothing.simplify)
 	for _ in 0 ..< (n > POLYLINE_SHORT ? 2 : 0) {
 		first, prev := p[0], closed ? p[n - 1] : p[0]
 		for i in 0 ..< n {
@@ -91,7 +97,7 @@ polylines_end :: proc(closed: bool, smoothing: Polyline_Smoothing) {
 			prev = here
 		}
 	}
-	for _ in 0 ..< smoothing.cut_iter do n = polyline_cut_corners(p, n, closed, smoothing.cut_ratio)
+	for _ in 0 ..< smoothing.cut_iter do n = polyline_cut_corners(p, n, closed, smoothing.cut_ratio, smoothing.cut_max)
 	resize(&lines.points, begin + n)
 	append(&lines.runs, Polyline_Run{points = {begin, n}, closed = closed})
 }
@@ -108,23 +114,64 @@ polylines_get :: proc(run: int) -> Polyline {
 	return {points = lines.points[r.points.begin:][:r.points.len], closed = r.closed}
 }
 
-// Cuts every corner of the first n points of p, in place, and returns how many points there are now: twice as many.
-// Each segment becomes the two points ratio of the way in from its ends; an open line keeps its end points. The points
-// are written from the last back, so each is read before anything is written over it.
+// Drops, in place, those of the first n points of p that lie within tolerance cells of the line between the points
+// kept either side of them, Douglas and Peucker's way, and returns how many are left. The first and last are kept.
 @(private = "file")
-polyline_cut_corners :: proc(p: [][2]f32, n: int, closed: bool, ratio: f32) -> int {
-	cut :: proc(a, b: [2]f32, ratio: f32) -> (near_a, near_b: [2]f32) {
-		return a + (b - a) * ratio, b + (a - b) * ratio
+polyline_simplify :: proc(p: [][2]f32, n: int, tolerance: f32) -> int {
+	if n < 3 do return n
+	keep := make([]bool, n, context.temp_allocator)
+	keep[0] = true
+	keep[n - 1] = true
+	// Stretches between two kept points, still to be split at their farthest point from the line between them
+	stretches := make([dynamic][2]int, 0, n, context.temp_allocator)
+	append(&stretches, [2]int{0, n - 1})
+	for len(stretches) > 0 {
+		s := pop(&stretches)
+		a := p[s[0]]
+		ab := p[s[1]] - a
+		length2 := max(linalg.dot(ab, ab), 1e-6)
+		farthest := -1
+		far := tolerance
+		for i in s[0] + 1 ..< s[1] {
+			t := clamp(linalg.dot(p[i] - a, ab) / length2, 0, 1)
+			d := linalg.length(a + ab * t - p[i])
+			if d <= far do continue
+			farthest = i
+			far = d
+		}
+		if farthest < 0 do continue
+		keep[farthest] = true
+		append(&stretches, [2]int{s[0], farthest}, [2]int{farthest, s[1]})
+	}
+	count := 0
+	for i in 0 ..< n {
+		if !keep[i] do continue
+		p[count] = p[i]
+		count += 1
+	}
+	return count
+}
+
+// Cuts every corner of the first n points of p, in place, and returns how many points there are now: twice as many.
+// Each segment becomes the two points ratio of the way in from its ends, but no more than cut_max cells in if cut_max
+// is above 0; an open line keeps its end points. The points are written from the last back, so each is read before
+// anything is written over it.
+@(private = "file")
+polyline_cut_corners :: proc(p: [][2]f32, n: int, closed: bool, ratio, cut_max: f32) -> int {
+	cut :: proc(a, b: [2]f32, ratio, cut_max: f32) -> (near_a, near_b: [2]f32) {
+		t := ratio
+		if cut_max > 0 do t = min(t, cut_max / max(linalg.length(b - a), 1e-6))
+		return a + (b - a) * t, b + (a - b) * t
 	}
 	if closed {
 		for i := n - 1; i >= 0; i -= 1 {
-			p[2 * i], p[2 * i + 1] = cut(p[i], p[(i + 1) % n], ratio)
+			p[2 * i], p[2 * i + 1] = cut(p[i], p[(i + 1) % n], ratio, cut_max)
 		}
 		return 2 * n
 	}
 	p[2 * n - 1] = p[n - 1]
 	for i := n - 2; i >= 0; i -= 1 {
-		p[2 * i + 1], p[2 * i + 2] = cut(p[i], p[i + 1], ratio)
+		p[2 * i + 1], p[2 * i + 2] = cut(p[i], p[i + 1], ratio, cut_max)
 	}
 	return 2 * n
 }

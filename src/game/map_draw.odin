@@ -8,6 +8,7 @@ import "core:slice"
 import "../gfx"
 import "../sim"
 import "../span"
+import "../tweak"
 
 // Map -----------------------------------------------------------------------------------------------------------------
 // Map: what the map is drawn from, and how it keeps in step with the world
@@ -65,7 +66,12 @@ TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture
 map_draw_tick :: proc(scene: ^sim.Scene, camera: Camera, viewport: [2]f32, pixel_density: f32) {
 	rt := &MAP_DRAW.render_terrain
 	rt.center, rt.zoom = camera.center, camera.zoom
-	if rt.revision != scene.ground_revision {
+	// How the roads are straightened, tuned live: a change works everything out again
+	road := &WAY_TRACE[.Road].smoothing
+	road_before := road^
+	tweak.slider_in_place("Roads/Simplify", &road.simplify, 0, 2)
+	tweak.slider_in_place("Roads/Cut max", &road.cut_max, 0, 5)
+	if rt.revision != scene.ground_revision || road^ != road_before {
 		rt.revision = scene.ground_revision
 		map_derive(scene.ground[:])
 	}
@@ -281,7 +287,8 @@ WAY_REACH :: f32(4)
 
 // How each kind of way is traced: how its lines are smoothed, whether an end by the water is carried on to the shore,
 // how far either side of its lines, in cells, it claims ground that no mark's drawing may cover, and the kind of line
-// it is drawn as. Rivers are smoothed fully; roads keep more of their course.
+// it is drawn as. Rivers are smoothed fully, meandering; roads are straightened into long runs, their bends kept
+// tight.
 @(private = "file")
 Way_Trace :: struct {
 	smoothing: Polyline_Smoothing,
@@ -290,7 +297,7 @@ Way_Trace :: struct {
 	line:      gfx.Render_Line_Kind,
 }
 
-@(private = "file", rodata)
+@(private = "file")
 WAY_TRACE := [sim.Way_Kind]Way_Trace {
 	.River = {
 		smoothing = {softness = 1, cut_iter = 2, cut_ratio = 0.25},
@@ -299,7 +306,7 @@ WAY_TRACE := [sim.Way_Kind]Way_Trace {
 		line = .River,
 	},
 	.Road = {
-		smoothing = {softness = 0.5, cut_iter = 2, cut_ratio = 0.25},
+		smoothing = {simplify = 1.1, cut_iter = 2, cut_ratio = 0.25, cut_max = 1.5},
 		band = 1.2,
 		line = .Road,
 	},
