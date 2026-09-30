@@ -62,6 +62,18 @@ Icon :: enum u8 {
 	Envoy,
 }
 
+// Where a piece can walk, each with its own ways across the world
+Pathfind_Domain :: enum {
+	Land,
+	Sea,
+}
+
+// Radius in cells, 0 for none, and the movement domains it reaches
+Contact :: struct {
+	radius:  f32,
+	domains: bit_set[Pathfind_Domain],
+}
+
 // Which piece: its slot, and the slot's generation while the piece is in it. An id with an even generation, like the
 // zero id, is nil.
 Piece_Id :: struct {
@@ -80,9 +92,36 @@ Scenario :: struct {
 	moisture:     []u8,
 	// For each way kind, the id of the way through each cell, 0 for none
 	ways:         [Way_Kind][]u16,
+	// The factions, in the order they play, and the pieces the world starts with
+	factions:     []Scenario_Faction,
+	pieces:       []Scenario_Piece,
 	// What a scene's caches held in an earlier run, or empty. Each is taken only if its fingerprint matches what the
 	// world would derive it from now; otherwise it is derived again.
 	cached_files: [Cached_File_Id]Cached_File,
+}
+
+// A faction as the world starts with it
+Scenario_Faction :: struct {
+	name:    string,
+	culture: Culture,
+}
+
+// A piece as the world starts with it. Its owner is an index into the scenario's factions; any other owner is none.
+Scenario_Piece :: struct {
+	// May be empty
+	name:              string,
+	owner:             int,
+	// Where it stands, in cells
+	pos:               [2]f32,
+	icon:              Icon,
+	culture:           Culture,
+	// Nil for a piece that does not walk
+	movement_domain:   Maybe(Pathfind_Domain),
+	// The cost it can spend walking each turn
+	movement_per_turn: f32,
+	contact:           Contact,
+	// Radius in cells; no other piece stops overlapping it
+	body:              f32,
 }
 
 // What the world can save between runs, to spare deriving it at load
@@ -255,7 +294,7 @@ init :: proc() {
 	world_init()
 }
 
-// Starts the world from a scenario, on its first turn, with the test pieces. If a layer is missing, the world is left
+// Starts a fresh world from a scenario, on its first turn, with its factions and pieces. If a layer is missing, the world is left
 // all water, so the failure shows, and false is returned.
 load :: proc(scenario: Scenario) -> bool {
 	return world_load(scenario)

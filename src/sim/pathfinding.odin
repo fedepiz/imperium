@@ -146,11 +146,6 @@ Derived :: struct {
 	},
 }
 
-Pathfind_Domain :: enum {
-	Land,
-	Sea,
-}
-
 @(private = "file")
 TABLE: [Pathfind_Domain]Pathfind_Table
 

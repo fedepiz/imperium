@@ -9,10 +9,11 @@ import stbi "vendor:stb/image"
 
 import "../sim"
 
-// Reads a scenario from its folder: one greyscale PNG per layer, WORLD_WIDTH by WORLD_HEIGHT, and the ways, from
-// rivers.txt and roads.txt: see ways_load. surface.png is black for land, grey for lake and white for sea;
-// elevation.png, trees.png and moisture.png run from 0 to 255 on land. The layers live in the temp allocator. If a
-// layer is missing or the wrong size, or the ways cannot be read, every layer is left empty.
+// Reads a scenario from its folder: one greyscale PNG per layer, WORLD_WIDTH by WORLD_HEIGHT; the ways, from
+// rivers.txt and roads.txt: see ways_load; and the factions and pieces, from pieces.txt: see pieces_load. surface.png
+// is black for land, grey for lake and white for sea; elevation.png, trees.png and moisture.png run from 0 to 255 on
+// land. The layers live in the temp allocator. If a layer is missing or the wrong size, or the ways or pieces cannot be
+// read, every layer is left empty.
 scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 	Layer :: enum {
 		Surface,
@@ -47,6 +48,10 @@ scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 	ways, ways_ok := ways_load(folder)
 	if !ways_ok do return {}
 	scenario.ways = ways
+	factions, pieces, pieces_ok := pieces_load(folder)
+	if !pieces_ok do return {}
+	scenario.factions = factions
+	scenario.pieces = pieces
 	for &file, id in scenario.cached_files do file = cache_read(cache_path(folder, id))
 	return
 }

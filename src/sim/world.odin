@@ -382,7 +382,7 @@ world_load :: proc(scenario: Scenario) -> bool {
 		pathfind_build_end(.Sea, scenario.cached_files[.Pathfind_Sea])
 	}
 	WORLD.atlas.revision += 1
-	world_load_test_pieces()
+	world_load_pieces(scenario)
 	turns_begin()
 	return ok
 }
@@ -473,102 +473,26 @@ turn_can_end :: proc() -> bool {
 	return WORLD.movement.subject == {}
 }
 
-// Test factions and their pieces in late-Roman Italy and Germanic lands north of the Alps, in place of whatever factions
-// and pieces there were. Rome plays first.
+// Spawns the scenario's factions, in the order they play, and its pieces
 @(private = "file")
-world_load_test_pieces :: proc() {
-	Test_Faction :: enum {
-		Rome,
-		Alamanni,
+world_load_pieces :: proc(scenario: Scenario) {
+	factions: [dynamic; FACTION_MAX]Faction_Id
+	for faction in scenario.factions {
+		append(&factions, faction_spawn({culture = faction.culture}, faction.name))
 	}
-	Test_Faction_Def :: struct {
-		name:    string,
-		culture: Culture,
-	}
-	@(static, rodata)
-	TEST_FACTIONS := [Test_Faction]Test_Faction_Def {
-		.Rome     = {"Rome", .Roman},
-		.Alamanni = {"Alamanni", .Germanic},
-	}
-	Test_Piece :: struct {
-		pos:      [2]f32,
-		icon:     Icon,
-		name:     string,
-		owner:    Test_Faction,
-		culture:  Culture,
-		movement: Maybe(Pathfind_Domain),
-		per_turn: f32,
-	}
-	@(static, rodata)
-	TEST_PIECES := [?]Test_Piece {
-		{{342, 432}, .Large_City, "Roma", .Rome, .Roman, nil, 0},
-		{{296, 374}, .Large_City, "Mediolanum", .Rome, .Roman, nil, 0},
-		{{351, 400}, .City, "Ravenna", .Rome, .Roman, nil, 0},
-		{{412, 462}, .City, "Tarentum", .Rome, .Roman, nil, 0},
-		{{367, 369}, .Town, "Aquileia", .Rome, .Roman, nil, 0},
-		{{367, 449}, .Town, "Neapolis", .Rome, .Roman, nil, 0},
-		{{330, 401}, .Town, "Florentia", .Rome, .Roman, nil, 0},
-		{{296, 391}, .Town, "Genua", .Rome, .Roman, nil, 0},
-		{{327, 374}, .Town, "Verona", .Rome, .Roman, nil, 0},
-		{{260, 379}, .Town, "Segusio", .Rome, .Roman, nil, 0},
-		{{393, 506}, .Town, "Rhegium", .Rome, .Roman, nil, 0},
-		{{385, 527}, .Town, "Syracusae", .Rome, .Roman, nil, 0},
-		{{419, 374}, .Town, "Siscia", .Rome, .Roman, nil, 0},
-		{{470, 396}, .Town, "Domavia", .Rome, .Roman, nil, 0},
-		{{421, 405}, .City, "Salona", .Rome, .Roman, nil, 0},
-		{{334, 419}, .Army, "", .Rome, .Roman, .Land, 30},
-		{{353, 455}, .Fleet, "", .Rome, .Roman, .Sea, 80},
-		{{355, 393}, .Fleet, "", .Rome, .Roman, .Sea, 80},
-		{{350, 430}, .Priest, "", .Rome, .Roman, .Land, 40},
-		{{306, 382}, .Envoy, "", .Rome, .Roman, .Land, 50},
-		{{325, 327}, .Large_City, "Augusta Vindelicorum", .Alamanni, .Germanic, nil, 0},
-		{{242, 345}, .City, "Vesontio", .Alamanni, .Germanic, nil, 0},
-		{{385, 354}, .City, "Virunum", .Alamanni, .Germanic, nil, 0},
-		{{253, 367}, .Town, "Octodurum", .Alamanni, .Germanic, nil, 0},
-		{{362, 336}, .Town, "Iuvavum", .Alamanni, .Germanic, nil, 0},
-		{{316, 342}, .Army, "", .Alamanni, .Germanic, .Land, 30},
-		{{292, 340}, .Envoy, "", .Alamanni, .Germanic, .Land, 50},
-	}
-	// What each test piece is, by its icon
-	// Each test piece's contact and body, by icon
-	@(static, rodata)
-	TEST_CONTACTS := [Icon]Contact {
-		.Village    = {6, {.Land}},
-		.Town       = {7, {.Land}},
-		.City       = {8, {.Land}},
-		.Large_City = {9, {.Land}},
-		.Army       = {8, {.Land}},
-		.Fleet      = {8, {.Sea}},
-		.Priest     = {4, {.Land}},
-		.Envoy      = {4, {.Land}},
-	}
-	@(static, rodata)
-	TEST_BODIES := [Icon]f32 {
-		.Village    = 2,
-		.Town       = 2.5,
-		.City       = 3,
-		.Large_City = 3.5,
-		.Army       = 2,
-		.Fleet      = 2,
-		.Priest     = 2,
-		.Envoy      = 2,
-	}
-	for piece, index in WORLD.pieces do if piece_alive(piece) do piece_despawn(piece_id(index))
-	for faction, index in WORLD.factions do if faction_alive(faction) do faction_despawn(faction_id(index))
-	factions: [Test_Faction]Faction_Id
-	for faction, test in TEST_FACTIONS do factions[test] = faction_spawn({culture = faction.culture}, faction.name)
-	// The Roman army walks to Neapolis.
-	for piece in TEST_PIECES {
+	for piece in scenario.pieces {
+		owner: Faction_Id
+		if piece.owner >= 0 && piece.owner < len(factions) do owner = factions[piece.owner]
 		piece_spawn(
 			{
 				pos = piece.pos,
 				icon = piece.icon,
-				owner = factions[piece.owner],
+				owner = owner,
 				culture = piece.culture,
-				movement_domain = piece.movement,
-				movement_per_turn = piece.per_turn,
-				contact = TEST_CONTACTS[piece.icon],
-				body = TEST_BODIES[piece.icon],
+				movement_domain = piece.movement_domain,
+				movement_per_turn = piece.movement_per_turn,
+				contact = piece.contact,
+				body = piece.body,
 			},
 			piece.name,
 		)
@@ -595,12 +519,6 @@ Piece :: struct {
 	contact:           Contact,
 	// Radius in cells; no other piece stops overlapping it
 	body:              f32,
-}
-
-// Radius in cells, 0 for none, and the movement domains it reaches
-Contact :: struct {
-	radius:  f32,
-	domains: bit_set[Pathfind_Domain],
 }
 
 // Puts a piece in a free slot under a name, which may be empty, returning its id, or nil when every slot is full
