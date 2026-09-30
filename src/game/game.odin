@@ -122,7 +122,7 @@ game_tick :: proc(input: Input, dt: f32) {
 		cache_write(cache_path(GAME.folder, id), file)
 	}
 
-	map_draw_tick(&GAME.scene, GAME.camera, input.viewport, input.pixel_density, dt)
+	map_draw_tick(&GAME.scene, GAME.region_colouring, GAME.camera, input.viewport, input.pixel_density, dt)
 	visuals_tick(GAME.visuals[:], GAME.scene.pawns[:], dt)
 	pawns_draw(
 		GAME.scene.pawns[:],

@@ -88,6 +88,10 @@ Render_Terrain_Style :: struct {
 	// at its back. Its kind's width is drawn around it, as around the rest of the line.
 	head_length:        f32,
 	head_width:         f32,
+	// Border line width in logical pixels, and its colour, as strong as its alpha: a line over the land where two
+	// regions meet
+	border_width:       f32,
+	border_ink:         [4]f32,
 }
 
 // How many categories a layer can have, category 0 included

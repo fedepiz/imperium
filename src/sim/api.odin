@@ -227,9 +227,10 @@ Ground :: struct {
 
 // A region of the map: its name, and the colour it is shown in, as the colouring mode has it
 Region :: struct {
-	name:  string,
-	color: [4]f32,
-	look:  u8,
+	name:        string,
+	color:       [4]f32,
+	// It is pointed at, in a mode that highlights, while no reach is shown
+	highlighted: bool,
 }
 
 // What colour regions are shown in
@@ -238,7 +239,7 @@ Region_Colouring_Mode :: enum u8 {
 	Owner,
 	// Its own, apart from its neighbours'
 	Identity,
-	// All one colour, faint, never highlighted
+	// All one colour, never highlighted
 	Muted,
 }
 
@@ -338,7 +339,7 @@ step :: proc(commands: []Command, walk_distance: f32) {
 
 // Fills out with what the world shows, around the focus: its pawn focused, where it can reach while it is not
 // walking, and its card; the regions coloured as the mode has them; and the pointed region highlighted while that reach
-// is not shown. A nil focus or pointed region is none.
+// is not shown, unless the mode is muted. A nil focus or pointed region is none.
 present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Region_Colouring_Mode, out: ^Scene) {
 	world_present(focus, pointed, region_colouring, out)
 }

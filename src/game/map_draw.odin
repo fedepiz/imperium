@@ -52,6 +52,8 @@ map_draw_init :: proc() {
 		arrow_fill         = {0.700, 0.250, 0.160, 1},
 		head_length        = 7.5,
 		head_width         = 6.25,
+		border_width       = 1.5,
+		border_ink         = {0.400, 0.180, 0.120, 0.3},
 	}
 	MAP_DRAW.render_terrain.cover.jitter = 0.8
 }
@@ -62,8 +64,15 @@ TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture
 
 // Keeps the map's drawing in step with the scene: the camera every frame, everything drawn from the ground when it
 // changes, the arrows every frame, the areas' cells when they change, the areas' and regions' looks every frame, eased
-// toward the scene's over dt seconds, and the marks in view every frame.
-map_draw_tick :: proc(scene: ^sim.Scene, camera: Camera, viewport: [2]f32, pixel_density: f32, dt: f32) {
+// toward the scene's over dt seconds, the regions' as the colouring mode has them, and the marks in view every frame.
+map_draw_tick :: proc(
+	scene: ^sim.Scene,
+	region_colouring: sim.Region_Colouring_Mode,
+	camera: Camera,
+	viewport: [2]f32,
+	pixel_density: f32,
+	dt: f32,
+) {
 	rt := &MAP_DRAW.render_terrain
 	rt.center, rt.zoom = camera.center, camera.zoom
 	if rt.revision != scene.ground_revision {
@@ -72,7 +81,7 @@ map_draw_tick :: proc(scene: ^sim.Scene, camera: Camera, viewport: [2]f32, pixel
 	}
 	map_arrows(scene)
 	map_areas(scene, dt)
-	map_regions(scene, dt)
+	map_regions(scene, region_colouring, camera.zoom, dt)
 	marks_draw(&MAP_DRAW.marks, &MAP_DRAW.render_list, camera, viewport, pixel_density)
 }
 
@@ -282,7 +291,8 @@ map_areas :: proc(scene: ^sim.Scene, dt: f32) {
 }
 
 // Regions ------------------------------------------------------------------------------------------------------------
-// Regions: each washed in its colour in from its edge, as strongly as its look says
+// Regions: each washed in its colour in from its edge, as strongly as the colouring mode, how near the camera is and
+// whether it is highlighted say
 
 // How a region is drawn: how strongly it is washed in its colour at its edge, how many cells in that fades over, and
 // how strongly it is washed beyond
@@ -293,24 +303,70 @@ Region_Look :: struct {
 	inside:    f32,
 }
 
-// How each look of the scene's regions is drawn: the numbers are the ones sim's present hands out. A look not set here
-// is not seen.
+// How a region is drawn while it is not highlighted, and while it is
 @(private = "file")
-REGION_LOOKS := [256]Region_Look {
-	0 = {border = 0.25, thickness = 1.5, inside = 0},
-	1 = {border = 0.4, thickness = 2.5, inside = 0.02},
-	2 = {border = 0.3, thickness = 1, inside = 0},
+Region_Looks :: struct {
+	plain:       Region_Look,
+	highlighted: Region_Look,
 }
 
-// Eases how each region is drawn toward its colour and look over dt seconds
+// How near the camera is to the map: far below REGION_FAR_ZOOM, near from it on
 @(private = "file")
-map_regions :: proc(scene: ^sim.Scene, dt: f32) {
+Region_Range :: enum u8 {
+	Near,
+	Far,
+}
+
+// In pixels per cell
+@(private = "file")
+REGION_FAR_ZOOM :: 5
+
+// How regions are drawn in each colouring mode, near and far
+@(private = "file")
+REGION_LOOKS := [sim.Region_Colouring_Mode][Region_Range]Region_Looks {
+	.Owner = {
+		.Near = {
+			plain = {border = 0.25, thickness = 1.5, inside = 0},
+			highlighted = {border = 0.4, thickness = 2.5, inside = 0.02},
+		},
+		.Far = {
+			plain = {border = 0.4, thickness = 3, inside = 0.35},
+			highlighted = {border = 0.5, thickness = 3.5, inside = 0.45},
+		},
+	},
+	.Identity = {
+		.Near = {
+			plain = {border = 0.25, thickness = 1.5, inside = 0},
+			highlighted = {border = 0.4, thickness = 2.5, inside = 0.02},
+		},
+		.Far = {
+			plain = {border = 0.25, thickness = 1.5, inside = 0},
+			highlighted = {border = 0.4, thickness = 2.5, inside = 0.02},
+		},
+	},
+	.Muted = {
+		.Near = {
+			plain = {border = 0, thickness = 1, inside = 0},
+			highlighted = {border = 0, thickness = 1, inside = 0},
+		},
+		.Far = {
+			plain = {border = 0, thickness = 1, inside = 0},
+			highlighted = {border = 0, thickness = 1, inside = 0},
+		},
+	},
+}
+
+// Eases how each region is drawn toward its colour and its look over dt seconds, as the colouring mode and zoom, in
+// pixels per cell, have it
+@(private = "file")
+map_regions :: proc(scene: ^sim.Scene, colouring: sim.Region_Colouring_Mode, zoom: f32, dt: f32) {
 	regions := &MAP_DRAW.render_terrain.highlights[.Regions]
 	step := 1 - math.exp(-HIGHLIGHT_EASE * dt)
+	looks := REGION_LOOKS[colouring][zoom < REGION_FAR_ZOOM ? .Far : .Near]
 	for &drawn, area in regions.areas {
 		if area == 0 || area > len(scene.regions) do continue
 		region := scene.regions[area - 1]
-		look := REGION_LOOKS[region.look]
+		look := region.highlighted ? looks.highlighted : looks.plain
 		highlight_ease(&drawn, region.color, look.border, look.thickness, look.inside, step)
 		drawn.surface = .Land
 	}

@@ -15,10 +15,6 @@ ZONE_LOOK :: 2
 // Reach of a piece the player does not control
 OTHER_REACH_LOOK :: 3
 BODY_LOOK :: 4
-// Looks for game's region palette
-REGION_PLAIN_LOOK :: 0
-REGION_HIGHLIGHTED_LOOK :: 1
-REGION_MUTED_LOOK :: 2
 
 world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Region_Colouring_Mode, out: ^Scene) {
 	mov := &WORLD.movement
@@ -98,8 +94,6 @@ world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Reg
 	for &name, index in WORLD.region_names {
 		id := Region_Id(index + 1)
 		color: [4]f32
-		look: u8 = REGION_PLAIN_LOOK
-		if !shown && id == pointed do look = REGION_HIGHLIGHTED_LOOK
 		switch region_colouring {
 		case .Owner:
 			color = REGION_UNHELD_COLOR
@@ -110,9 +104,9 @@ world_present :: proc(focus: Piece_Id, pointed: Region_Id, region_colouring: Reg
 			color = region_identity_color(id)
 		case .Muted:
 			color = REGION_UNHELD_COLOR
-			look = REGION_MUTED_LOOK
 		}
-		append(&out.regions, Region{name = string(name[:]), color = color, look = look})
+		highlighted := !shown && id == pointed && region_colouring != .Muted
+		append(&out.regions, Region{name = string(name[:]), color = color, highlighted = highlighted})
 	}
 
 	// The turn being played, and the faction playing it, with ending its part; and, when there is a focus, its picture

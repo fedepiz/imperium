@@ -41,10 +41,10 @@ Terrain_Uniforms :: struct {
 	road_fill, arrow_fill:                          [4]f32,
 	head_length, head_width:                        f32,
 	circle_count:                                   i32,
-	// Rounds the size up to the shader struct's 16-byte alignment
-	_pad:                                           f32,
+	border_width:                                   f32,
+	border_ink:                                     [4]f32,
 }
-#assert(size_of(Terrain_Uniforms) == 208)
+#assert(size_of(Terrain_Uniforms) == 224)
 
 Renderer :: struct {
 	window:                              ^sdl.Window,
@@ -626,6 +626,8 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		sea_depth_from     = style.sea_depth_from,
 		sea_depth_full     = style.sea_depth_full,
 		circle_count       = i32(len(highlights.circles)),
+		border_width       = style.border_width,
+		border_ink         = style.border_ink,
 	}
 	wgpu.QueueWriteBuffer(
 		renderer.queue,
@@ -1486,7 +1488,8 @@ struct Terrain {
     head_length: f32,
     head_width: f32,
     circle_count: i32,
-    _pad: f32,
+    border_width: f32,
+    border_ink: vec4f,
 }
 `
 
@@ -1714,6 +1717,18 @@ fn layer_at(layer_cells: texture_2d<f32>, palette: texture_2d<f32>, p: vec2f, ji
     return look;
 }
 
+// A layer of highlight areas as shown: the color under them, washed over, and how far p is from the nearest edge where
+// two areas meet, in cells, far where none do
+struct Areas_Shown {
+    col: vec3f,
+    edge: f32,
+}
+
+// The range an edge's steepness is kept within, in the change of the fields' gap per cell: 1 where the fields are true
+// distances
+const EDGE_STEEPNESS_MIN = 0.25;
+const EDGE_STEEPNESS_MAX = 4.0;
+
 // A layer of highlight areas over col at p, d being the signed distance to the coast there, positive on land, and px
 // device pixels per cell. area_cells holds, per cell and surface (0 land, 1 water), the area of that surface whose
 // field the cell holds, 0 for none; area_field holds that field: how far the cell's middle is in from the area's edge,
@@ -1735,40 +1750,78 @@ fn areas_over(
     area_cells: texture_2d<f32>,
     area_field: texture_2d<f32>,
     area_palette: texture_2d<f32>,
-) -> vec3f {
+) -> Areas_Shown {
     let q = p - 0.5;
     let base = vec2i(floor(q));
     let f = q - floor(q);
     var tint = vec3f(0.0);
     var covered = 0.0;
+    var edge = 1e9;
     for (var surface = 0; surface < 2; surface++) {
         let shore = select(-d, d, surface == 0);
-        // The four cells around p: the area each holds the field of, that field, and its weight at p
+        // The four cells around p: the area each holds the field of, that field, and its weight at p, with how the
+        // weight changes along x and y, per cell
         var owners: vec4i;
         var values: vec4f;
         var weights: vec4f;
+        var weights_dx: vec4f;
+        var weights_dy: vec4f;
         for (var j = 0; j < 4; j++) {
             let corner = vec2i(j & 1, j >> 1u);
             let at = clamp(base + corner, vec2i(0), vec2i(u.grid) - 1);
             owners[j] = i32(textureLoad(area_cells, at, 0)[surface] * 255.0 + 0.5);
             values[j] = textureLoad(area_field, at, 0)[surface];
-            weights[j] = mix(1.0 - f.x, f.x, f32(corner.x)) * mix(1.0 - f.y, f.y, f32(corner.y));
+            let wx = mix(1.0 - f.x, f.x, f32(corner.x));
+            let wy = mix(1.0 - f.y, f.y, f32(corner.y));
+            weights[j] = wx * wy;
+            weights_dx[j] = (f32(corner.x) * 2.0 - 1.0) * wy;
+            weights_dy[j] = wx * (f32(corner.y) * 2.0 - 1.0);
         }
-        // Each area's field, in the slot of the first cell holding it, far below any field in the other slots; and no
-        // area's
+        // Each area's field and its slope, in the slot of the first cell holding it, far below any field in the other
+        // slots; and no area's
         var fields = vec4f(-1e9);
-        var none = 0.0;
+        var slopes_x = vec4f(0.0);
+        var slopes_y = vec4f(0.0);
+        let none_at = select(-values, vec4f(0.0), owners == vec4i(0));
+        let none = dot(weights, none_at);
+        let none_slope = vec2f(dot(weights_dx, none_at), dot(weights_dy, none_at));
         for (var k = 0; k < 4; k++) {
-            none += weights[k] * select(-values[k], 0.0, owners[k] == 0);
             let area = owners[k];
             var first = area != 0;
             for (var i = 0; i < k; i++) { first = first && owners[i] != area; }
             if (!first) { continue; }
-            var field = 0.0;
-            for (var j = 0; j < 4; j++) {
-                field += weights[j] * select(-abs(values[j]), values[j], owners[j] == area);
+            let at = select(-abs(values), values, owners == vec4i(area));
+            fields[k] = dot(weights, at);
+            slopes_x[k] = dot(weights_dx, at);
+            slopes_y[k] = dot(weights_dy, at);
+        }
+        // The greatest two fields, whether each is an area's rather than no area's, and their slopes
+        var top = none;
+        var second = -1e9;
+        var top_area = false;
+        var second_area = false;
+        var top_slope = none_slope;
+        var second_slope = vec2f(0.0);
+        for (var k = 0; k < 4; k++) {
+            let slope = vec2f(slopes_x[k], slopes_y[k]);
+            if (fields[k] > top) {
+                second = top;
+                second_area = top_area;
+                second_slope = top_slope;
+                top = fields[k];
+                top_area = true;
+                top_slope = slope;
+            } else if (fields[k] > second) {
+                second = fields[k];
+                second_area = true;
+                second_slope = slope;
             }
-            fields[k] = field;
+        }
+        // How far p is from where the two meet: how far apart their fields are, over how fast that changes, which is
+        // kept within reason so the line keeps near its width
+        if (top_area && second_area) {
+            let steepness = clamp(length(top_slope - second_slope) * 0.5, EDGE_STEEPNESS_MIN, EDGE_STEEPNESS_MAX);
+            edge = min(edge, (top - second) * 0.5 / steepness);
         }
         for (var k = 0; k < 4; k++) {
             if (fields[k] < -1e8) { continue; }
@@ -1793,14 +1846,14 @@ fn areas_over(
         covered = 1.0;
     }
 
-    return col * (tint + (1.0 - covered));
+    return Areas_Shown(col * (tint + (1.0 - covered)), edge);
 }
 
 // The areas' highlights over col at p, as areas_over has them, and then each area's circles washed over that, as one
 // shape: see circles_over. highlight_circles holds circle_count circles, each its center, radius and area.
 fn highlights_over(col: vec3f, p: vec2f, d: f32, px: f32) -> vec3f {
     // Each area's circles, as one shape, over the areas' cells: its depth is the farthest in of its circles
-    var shown = areas_over(col, p, d, px, highlight_cells, highlight_field, highlight_palette);
+    var shown = areas_over(col, p, d, px, highlight_cells, highlight_field, highlight_palette).col;
     var area = -1;
     var depth = -1e9;
     for (var i = 0; i <= u.circle_count; i++) {
@@ -1891,7 +1944,12 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         col = mix(sea, ground, land);
 
         // The regions, washed in their colours from their edges, under the rivers and roads
-        col = areas_over(col, wander(p, u.wobble * 1.6, 5.7), d, px, region_cells, region_field, region_palette);
+        let regions = areas_over(col, wander(p, u.wobble * 1.6, 5.7), d, px, region_cells, region_field, region_palette);
+        col = regions.col;
+
+        // Borders: a hairline over the land where two regions meet, on the edge their washes share
+        let border = line_aa(regions.edge * px, u.border_width * 0.5 * u.pixel_density);
+        col = mix(col, u.border_ink.rgb, border * u.border_ink.a * land);
 
         // Rivers: a faint wash either side and a line that thins toward the hills, both stopping at the shore. The line
         // never grows past a third of a cell, so rivers fade out as the map zooms away.
