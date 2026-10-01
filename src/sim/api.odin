@@ -80,6 +80,17 @@ Piece_Trait :: enum u8 {
 	Capturable,
 }
 
+// An army's men, and how fit they are to fight. A piece whose strength_max is 0 has no army.
+Army :: struct {
+	// How many men it has, and how many at full complement
+	strength_current: int,
+	strength_max:     int,
+	// How good its troops are in general, in percent from 0 to 100
+	proficiency:      f32,
+	// How rested and fit to fight its troops are, in percent from 0 to 100
+	readiness:        f32,
+}
+
 // Which region of the map a cell lies in: 1 for the scenario's first region, 0 for none
 Region_Id :: distinct u16
 
@@ -145,6 +156,7 @@ Scenario_Piece :: struct {
 	capital_of:        Region_Id,
 	// The character leading it, by its place in the scenario's characters from 1, 0 for none
 	general:           int,
+	army:              Army,
 }
 
 // What the world can save between runs, to spare deriving it at load

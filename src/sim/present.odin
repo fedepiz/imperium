@@ -158,6 +158,12 @@ world_present :: proc(
 			budget := fmt.tprintf("%.0f of %.0f", piece.movement_budget, piece.movement_per_turn)
 			append(&card.fields, Field{"Movement", budget})
 		}
+		if army := piece.army; army.strength_max > 0 {
+			strength := fmt.tprintf("%d/%d", army.strength_current, army.strength_max)
+			append(&card.fields, Field{"Strength", strength})
+			append(&card.fields, Field{"Proficiency", fmt.tprintf("%.0f%%", army.proficiency)})
+			append(&card.fields, Field{"Readiness", fmt.tprintf("%.0f%%", army.readiness)})
+		}
 		append(&out.cards, card)
 	}
 	open := WORLD.interaction

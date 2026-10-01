@@ -140,11 +140,11 @@ movement_advance :: proc(mov: ^Movement, walk_distance: f32) -> (walker, met: Pi
 			distance := linalg.distance(subject.pos, target)
 			if step < distance {
 				subject.pos += linalg.normalize(target - subject.pos) * step
-				subject.movement_budget = max(0, subject.movement_budget - step * cost)
+				movement_spend(subject, step * cost, cost == ROAD_COST)
 				break
 			}
 			step -= distance
-			subject.movement_budget = max(0, subject.movement_budget - distance * cost)
+			movement_spend(subject, distance * cost, cost == ROAD_COST)
 			subject.pos = target
 			mov.next += 1
 		}
@@ -157,6 +157,20 @@ movement_advance :: proc(mov: ^Movement, walk_distance: f32) -> (walker, met: Pi
 		mov.subject, mov.target, mov.next = {}, {}, 0
 	}
 	return
+}
+
+// Readiness an army loses per movement point it spends, in percent: on roads, and off them
+ROAD_READINESS_PER_MOVEMENT :: 0.1
+READINESS_PER_MOVEMENT :: 1
+
+// Pays cost from a piece's movement budget, as far as it lasts, and wears down its army's readiness by what was paid,
+// less on a road
+@(private = "file")
+movement_spend :: proc(piece: ^Piece, cost: f32, on_road: bool) {
+	spent := min(cost, piece.movement_budget)
+	piece.movement_budget -= spent
+	rate: f32 = on_road ? ROAD_READINESS_PER_MOVEMENT : READINESS_PER_MOVEMENT
+	piece.army.readiness = max(0, piece.army.readiness - spent * rate)
 }
 
 Atlas :: struct {
@@ -588,13 +602,21 @@ turns_begin :: proc() {
 	WORLD.ordering = WORLD.player
 }
 
-// Ends the player's faction's part of the turn, refilling its pieces' movement budgets: the faction in the next slot
-// with one plays, and its pieces take orders, and once past the last slot, the next turn begins. Nil when there is no
-// faction.
+// Readiness an army recovers at the end of its faction's turn with all its movement budget left, in percent; with
+// part of it left, as much less
+READINESS_RECOVERY :: 20
+
+// Ends the player's faction's part of the turn, its armies recovering readiness by the share of movement budget they
+// have left, and refilling its pieces' movement budgets: the faction in the next slot with one plays, and its pieces
+// take orders, and once past the last slot, the next turn begins. Nil when there is no faction.
 @(private = "file")
 turn_end :: proc() {
 	for &piece in WORLD.pieces {
 		if piece_alive(piece) && piece.owner == WORLD.player && piece.movement_domain != nil {
+			if piece.army.strength_max > 0 && piece.movement_per_turn > 0 {
+				left := piece.movement_budget / piece.movement_per_turn
+				piece.army.readiness = min(100, piece.army.readiness + left * READINESS_RECOVERY)
+			}
 			piece.movement_budget = piece.movement_per_turn
 		}
 	}
@@ -645,6 +667,7 @@ world_load_pieces :: proc(scenario: Scenario) {
 				body = piece.body,
 				traits = piece.traits,
 				general = general,
+				army = piece.army,
 			},
 			piece.name,
 		)
@@ -677,6 +700,7 @@ Piece :: struct {
 	traits:            bit_set[Piece_Trait;u8],
 	// The character leading it, nil for none
 	general:           Character_Id,
+	army:              Army,
 }
 
 // Puts a piece in a free slot under a name, which may be empty, returning its id, or nil when every slot is full

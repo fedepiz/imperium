@@ -23,8 +23,10 @@ PIECES_FILE :: "pieces.txt"
 // domains), body and traits (a list of traits, left out for none).
 // faction: name, culture, colour ([r, g, b], each from 0 to 255), and a piece row for each piece: kind, name (may be
 // left out), at ([x, y] in cells), culture (the faction's when left out), capital_of (the id of the region it is the
-// capital of, among region_ids; left out for none, and no region has two) and general (the name of a character who
-// leads it, made for it; left out for none).
+// capital of, among region_ids; left out for none, and no region has two), general (the name of a character who
+// leads it, made for it; left out for none), and strength and proficiency (its army's men at full complement, and how
+// good they are in percent from 0 to 100; left out for a piece with no army). An army starts at full strength and
+// fully ready.
 pieces_load :: proc(
 	folder: string,
 	region_ids: []string,
@@ -153,6 +155,21 @@ pieces_load :: proc(
 					}
 					append(&character_list, general)
 					piece.general = len(character_list)
+				}
+				if strength, has_strength := tabula.get_num(piece_row, "strength"); has_strength {
+					if strength < 1 || strength != f32(int(strength)) {
+						return nil, nil, nil, fail(path, row.key, n, "its piece's strength must be a whole number of men")
+					}
+					proficiency, has_proficiency := tabula.get_num(piece_row, "proficiency")
+					if !has_proficiency || proficiency < 0 || proficiency > 100 {
+						return nil, nil, nil, fail(path, row.key, n, "its piece's proficiency must be from 0 to 100")
+					}
+					piece.army = {
+						strength_current = int(strength),
+						strength_max     = int(strength),
+						proficiency      = proficiency,
+						readiness        = 100,
+					}
 				}
 				append(&piece_list, piece)
 			}

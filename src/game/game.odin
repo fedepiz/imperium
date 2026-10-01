@@ -238,7 +238,7 @@ cards_build :: proc(place: sim.Card_Place) {
 			}
 			for field in card.fields {
 				if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
-					ui.label(field.label, {width = ui.em(5), text_color = CARD_FADED_INK})
+					ui.label(field.label, {width = ui.em(7), text_color = CARD_FADED_INK})
 					ui.label(field.value)
 				}
 			}

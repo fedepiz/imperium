@@ -9,7 +9,8 @@
 # the faction it is under and is in its culture, unless it gives its own. Where it stands, at, is [x, y] in cells from
 # the top left corner of the world. A piece may be the capital of a region, capital_of, named by the region's id; a
 # region has at most one, and each settlement is the capital of its own. A piece may be led by a general, a character
-# of that name made for it.
+# of that name made for it. A piece may hold an army: its strength, the men it has at full complement, and its
+# proficiency, how good they are in general, in percent from 0 to 100. An army starts at full strength and fully ready.
 
 kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    traits = [Capturable] }
 kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  traits = [Capturable] }
@@ -37,7 +38,7 @@ faction = {
 	piece = { kind = town        name = "Siscia"      at = [419, 374]  capital_of = siscia }
 	piece = { kind = town        name = "Domavia"     at = [470, 396]  capital_of = domavia }
 	piece = { kind = city        name = "Salona"      at = [421, 405]  capital_of = salona }
-	piece = { kind = army    at = [334, 419]  general = "Flavius Aetius" }
+	piece = { kind = army    at = [334, 419]  general = "Flavius Aetius"  strength = 20000  proficiency = 70 }
 	piece = { kind = fleet   at = [353, 455] }
 	piece = { kind = fleet   at = [355, 393] }
 }
@@ -51,5 +52,5 @@ faction = {
 	piece = { kind = city        name = "Virunum"               at = [385, 354]  capital_of = virunum }
 	piece = { kind = town        name = "Octodurum"             at = [253, 367]  capital_of = octodurum }
 	piece = { kind = town        name = "Iuvavum"               at = [362, 336]  capital_of = iuvavum }
-	piece = { kind = army   at = [316, 342]  general = "Gibuld" }
+	piece = { kind = army   at = [316, 342]  general = "Gibuld"  strength = 12000  proficiency = 55 }
 }
