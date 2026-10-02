@@ -2,6 +2,7 @@
 package sim
 
 import "core:fmt"
+import "core:math"
 import "core:math/linalg"
 
 import "../util"
@@ -55,32 +56,64 @@ BASIN_REACH :: 24
 ROAD_READINESS_PER_MOVEMENT :: 0.1
 READINESS_PER_MOVEMENT :: 1
 
-// Readiness recovered at end of turn, scaled by the fraction of movement left
+// End of turn: readiness rises toward stock / baggage by up to READINESS_RECOVERY, scaled by
+// rest = (1 − exertion)², and drops by SUPPLY_DRAG when above it
 READINESS_RECOVERY :: 20
+SUPPLY_DRAG :: 5
+
+// Resupply per turn = min(fed, 1 + SUPPLY_REFILL_MAX) − 1, in turns of food, where fed = what the place can feed
+// (supply map or foraging, whichever is more) / nearby friendly men
+SUPPLY_REFILL_MAX :: 1
+// Stock used per movement point spent, in turns: on roads, and off them
+ROAD_STOCK_PER_MOVEMENT :: 0.002
+STOCK_PER_MOVEMENT :: 0.01
+
+// Supply lost per movement point of path cost from a source
+SUPPLY_DECAY :: 2
+// Men a cell's supply point feeds
+MEN_PER_SUPPLY :: 200
+// Friendly men within this many cells share the supply, weighted by 1 − distance / FORAGE_RADIUS
+FORAGE_RADIUS :: 12
+
+// What the land yields to foragers, 0..1, by terrain type; blended from Open by the type's strength
+FORAGE_YIELD := [Terrain_Type]f32 {
+	.Open      = 0.7,
+	.Forest    = 0.5,
+	.Desert    = 0.1,
+	.Steppe    = 0.5,
+	.Fertile   = 1,
+	.Marsh     = 0.3,
+	.Highland  = 0.3,
+	.Mountains = 0.05,
+	.Fields    = 1,
+}
 
 WORLD: struct {
-	atlas:           Atlas,
+	atlas:               Atlas,
 	// Index 0 = region 1
-	region_names:    [dynamic; REGIONS_MAX]Name,
-	region_capitals: [dynamic; REGIONS_MAX]Piece_Id,
+	region_names:        [dynamic; REGIONS_MAX]Name,
+	region_capitals:     [dynamic; REGIONS_MAX]Piece_Id,
 	// Pieces, names and armies are parallel arrays indexed by slot
-	pieces:          [PIECE_MAX]Piece,
-	piece_names:     [PIECE_MAX]Name,
-	armies:          [PIECE_MAX]Army,
+	pieces:              [PIECE_MAX]Piece,
+	piece_names:         [PIECE_MAX]Name,
+	armies:              [PIECE_MAX]Army,
 	// Free slots; the last is used next
-	pieces_free:     [dynamic; PIECE_MAX]u16,
-	factions:        [FACTION_MAX]Faction,
-	faction_names:   [FACTION_MAX]Name,
-	factions_free:   [dynamic; FACTION_MAX]u16,
-	characters:      [CHARACTER_MAX]Character,
-	character_names: [CHARACTER_MAX]Name,
-	characters_free: [dynamic; CHARACTER_MAX]u16,
+	pieces_free:         [dynamic; PIECE_MAX]u16,
+	factions:            [FACTION_MAX]Faction,
+	faction_names:       [FACTION_MAX]Name,
+	factions_free:       [dynamic; FACTION_MAX]u16,
+	characters:          [CHARACTER_MAX]Character,
+	character_names:     [CHARACTER_MAX]Name,
+	characters_free:     [dynamic; CHARACTER_MAX]u16,
 	// Faction whose turn it is (played by the player), nil = none
-	player:          Faction_Id,
-	interaction:     Interaction,
-	movement:        Movement,
+	player:              Faction_Id,
+	interaction:         Interaction,
+	movement:            Movement,
 	// From 1. Each faction plays once per turn, in slot order.
-	turn:            int,
+	turn:                int,
+	// The player's supply map, 0..100 per cell, rebuilt at the start of each faction's turn
+	supply_map:          [CELLS_MAX]u8,
+	supply_map_revision: u32,
 }
 
 // Nil actor = none open
@@ -225,7 +258,10 @@ terrain_to_highland :: proc(cell: ^Terrain) {
 terrain_open_passes :: proc(terrain: []Terrain) {
 	for road, i in terrain {
 		if road.way[.Road] == 0 do continue
-		around := util.cell_rect_clip(util.cell_rect_around(util.grid_pos(i, WORLD_SIZE), PASS_REACH), WORLD_SIZE)
+		around := util.cell_rect_clip(
+			util.cell_rect_around(util.grid_pos(i, WORLD_SIZE), PASS_REACH),
+			WORLD_SIZE,
+		)
 		for y in around.min.y ..< around.max.y do for x in around.min.x ..< around.max.x {
 			cell := &terrain[util.grid_index({x, y}, WORLD_SIZE)]
 			if cell.type == .Mountains do terrain_to_highland(cell)
@@ -368,7 +404,8 @@ world_load :: proc(scenario: Scenario) -> bool {
 					movement_per_turn = piece.movement_per_turn,
 					contact = piece.contact,
 					body = piece.body,
-				hindrance = piece.hindrance,
+					hindrance = piece.hindrance,
+					supply = piece.supply,
 					traits = piece.traits,
 					general = general,
 				},
@@ -390,6 +427,17 @@ world_load :: proc(scenario: Scenario) -> bool {
 			break
 		}
 	}
+	// Supply: every faction's armies, then the first player's map
+	for faction, index in WORLD.factions {
+		if !faction_alive(faction) do continue
+		supply_map_build(faction_id(index))
+		for &army, slot in WORLD.armies {
+			if army.active && WORLD.pieces[slot].owner == faction_id(index) {
+				army.resupply, army.resupply_efficiency = army_resupply(slot)
+			}
+		}
+	}
+	supply_map_build(WORLD.player)
 	return ok
 }
 
@@ -431,7 +479,14 @@ world_step :: proc(input: Step_Input) {
 
 			// Reflood only when an input changed
 			budget := movement_budget(subject^)
-			key := util.hash_contents(input.focus, subject.pos, budget, domain, zones[:], bodies[:])
+			key := util.hash_contents(
+				input.focus,
+				subject.pos,
+				budget,
+				domain,
+				zones[:],
+				bodies[:],
+			)
 			if key != mov.flood_key {
 				pathfind_flood(subject.pos, domain, budget, zones[:], bodies[:], &mov.flood)
 				mov.flood_subject, mov.flood_key = input.focus, key
@@ -454,7 +509,10 @@ world_step :: proc(input: Step_Input) {
 			target = order.target
 			other := piece_get(target)
 			if walker != {} && other != nil && mov.flood.domain in other.contact.domains {
-				stop, ok = pathfind_flood_stop_within(&mov.flood, util.Disc{other.pos, other.contact.radius})
+				stop, ok = pathfind_flood_stop_within(
+					&mov.flood,
+					util.Disc{other.pos, other.contact.radius},
+				)
 			}
 		}
 		path: [dynamic; PATH_MAX_LEN][2]f32
@@ -562,14 +620,31 @@ world_step :: proc(input: Step_Input) {
 		if !army.active do continue
 		piece := WORLD.pieces[index]
 		readiness := army.readiness
+		stock := army.stock
+		if piece.owner == WORLD.player do army.resupply, army.resupply_efficiency = army_resupply(index)
+		// Marching
 		if walk.piece != {} && int(walk.piece.index) == index {
 			readiness -= walk.spent_road * ROAD_READINESS_PER_MOVEMENT
 			readiness -= walk.spent_off_road * READINESS_PER_MOVEMENT
+			stock -= walk.spent_road * ROAD_STOCK_PER_MOVEMENT
+			stock -= walk.spent_off_road * STOCK_PER_MOVEMENT
 		}
-		if turn_ending && piece.owner == WORLD.player && piece.movement_per_turn > 0 {
-			readiness += movement_budget(piece) / piece.movement_per_turn * READINESS_RECOVERY
+		// End of its faction's turn: supplies in and out, then rest toward what the stock allows
+		if turn_ending && piece.owner == WORLD.player {
+			stock += army.resupply
+			stock = clamp(stock, 0, army.baggage)
+			cap: f32 = army.baggage > 0 ? 100 * stock / army.baggage : 0
+			exertion: f32 =
+				piece.movement_per_turn > 0 ? 1 - movement_budget(piece) / piece.movement_per_turn : 0
+			rest := (1 - exertion) * (1 - exertion)
+			if readiness < cap {
+				readiness = min(cap, readiness + READINESS_RECOVERY * rest)
+			} else {
+				readiness = max(cap, readiness - SUPPLY_DRAG)
+			}
 		}
 		army.readiness = clamp(readiness, 0, 100)
+		army.stock = clamp(stock, 0, army.baggage)
 	}
 
 	// Step: Turn End
@@ -588,6 +663,60 @@ world_step :: proc(input: Step_Input) {
 		}
 		WORLD.player = next
 	}
+
+	// Step: Turn Start
+	if turn_ending do supply_map_build(WORLD.player)
+}
+
+// Rebuilds the supply map for a faction: spread from its sources, slowed by everyone else's zones
+supply_map_build :: proc(faction: Faction_Id) {
+	sources: [dynamic; PIECE_MAX]Pathfind_Source
+	zones: [dynamic; PIECE_MAX]Pathfind_Zone
+	for piece in WORLD.pieces {
+		if !piece_alive(piece) do continue
+		if piece.owner == faction {
+			if piece.supply > 0 do append(&sources, Pathfind_Source{piece.pos, piece.supply})
+		} else if piece.contact.radius > 0 && .Land in piece.contact.domains {
+			append(&zones, Pathfind_Zone{{piece.pos, piece.contact.radius}, piece.hindrance})
+		}
+	}
+	spread := make([]f32, CELLS_MAX, context.temp_allocator)
+	pathfind_spread(.Land, sources[:], zones[:], SUPPLY_DECAY, spread)
+	for value, i in spread do WORLD.supply_map[i] = u8(clamp(value, 0, 100) + 0.5)
+	WORLD.supply_map_revision += 1
+}
+
+// Resupply of the army in a slot at its current position, and its resupply efficiency. The supply map must be its
+// faction's.
+army_resupply :: proc(index: int) -> (resupply, efficiency: f32) {
+	army := WORLD.armies[index]
+	piece := WORLD.pieces[index]
+	// Friendly men nearby, weighted by distance
+	local_men: f32
+	for other, other_index in WORLD.armies {
+		if !other.active || WORLD.pieces[other_index].owner != piece.owner do continue
+		distance := linalg.distance(piece.pos, WORLD.pieces[other_index].pos)
+		if distance < FORAGE_RADIUS do local_men += f32(other.strength_current) * (1 - distance / FORAGE_RADIUS)
+	}
+	cell := util.cell_of(piece.pos)
+	if !util.grid_contains(cell, WORLD_SIZE) || local_men <= 0 do return -1, 0
+	index := util.grid_index(cell, WORLD_SIZE)
+
+	// The supply map, and foraging: the army's skill times what the land yields
+	supplied := f32(WORLD.supply_map[index])
+	land := WORLD.atlas.terrain[index]
+	yield: f32
+	if land.surface == .Land {
+		yield = math.lerp(FORAGE_YIELD[.Open], FORAGE_YIELD[land.type], util.normalized(land.type_strength))
+	}
+	foraged := army.foraging * yield
+
+	// Men the place can feed; this army's share of it, by its men among everyone nearby
+	feeds := max(supplied, foraged) * MEN_PER_SUPPLY
+	men := f32(army.strength_current)
+	efficiency = men / local_men
+	fed: f32 = men > 0 ? feeds * efficiency / men : 0
+	return min(fed, 1 + SUPPLY_REFILL_MAX) - 1, efficiency
 }
 
 // The player, or nil while an interaction is open
@@ -624,6 +753,8 @@ Piece :: struct {
 	hindrance:         f32,
 	traits:            bit_set[Piece_Trait;u8],
 	general:           Character_Id,
+	// Supply source value, 0 = not a source
+	supply:            f32,
 }
 
 // Returns nil if all slots are full. Pass an inactive army for none.

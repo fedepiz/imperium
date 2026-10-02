@@ -290,13 +290,15 @@ MARKINGS := [?]Marking {
 // Map -----------------------------------------------------------------------------------------------------------------
 @(private = "file")
 MAP_DRAW: struct {
-	marks:          Map_Marks,
-	render_terrain: gfx.Render_Terrain,
-	render_list:    gfx.Render_List,
+	marks:               Map_Marks,
+	render_terrain:      gfx.Render_Terrain,
+	render_list:         gfx.Render_List,
 	// Per scene area: last uploaded revision, and the highlight layer it was last drawn in (if placed)
-	area_revisions: [sim.AREAS_MAX]u64,
-	area_layers:    [sim.AREAS_MAX]gfx.Render_Highlight_Layer,
-	area_placed:    [sim.AREAS_MAX]bool,
+	area_revisions:      [sim.AREAS_MAX]u64,
+	area_layers:         [sim.AREAS_MAX]gfx.Render_Highlight_Layer,
+	area_placed:         [sim.AREAS_MAX]bool,
+	// Last scene supply_map_revision copied into the overlay
+	supply_map_revision: u32,
 }
 
 // Call before sprites_load: defines the marks' images.
@@ -332,6 +334,7 @@ map_draw_init :: proc() {
 map_draw_tick :: proc(
 	scene: ^sim.Scene,
 	region_colouring: sim.Region_Colouring_Mode,
+	supply_shown: bool,
 	camera: Camera,
 	viewport: [2]f32,
 	pixel_density: f32,
@@ -339,6 +342,12 @@ map_draw_tick :: proc(
 ) {
 	rt := &MAP_DRAW.render_terrain
 	rt.center, rt.zoom = camera.center, camera.zoom
+	rt.overlay_shown = supply_shown
+	if MAP_DRAW.supply_map_revision != scene.supply_map_revision {
+		MAP_DRAW.supply_map_revision = scene.supply_map_revision
+		for value, i in scene.supply_map do rt.overlay[i] = util.to_u8(f32(value) / 100)
+		rt.overlay_revision += 1
+	}
 	if rt.revision != scene.ground_revision {
 		rt.revision = scene.ground_revision
 		map_derive(scene.ground[:])

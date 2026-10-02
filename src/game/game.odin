@@ -17,6 +17,13 @@ CLICK_MOVE_SNAP :: 9
 
 CARD_MARGIN :: [2]f32{20, 20}
 CARD_FADED_INK :: [4]f32{MAP_INK.r, MAP_INK.g, MAP_INK.b, 0.6}
+// Card columns, in em; fixed so cards don't resize as values change. Stats are the shorter right-hand values.
+CARD_LABEL_EM :: 7
+CARD_VALUE_EM :: 9
+CARD_STAT_EM :: 8
+// Between the fields and stats columns, in pixels
+CARD_COLUMN_GAP :: 24
+
 // Card button: hovered, pressed
 CARD_BUTTON_HOT_PAPER :: [4]f32{0.760, 0.690, 0.545, 1}
 CARD_BUTTON_ACTIVE_PAPER :: [4]f32{0.680, 0.610, 0.475, 1}
@@ -26,6 +33,7 @@ GAME: struct {
 	// Selected piece: highlighted, reach shown, card shown
 	focus:            sim.Piece_Id,
 	region_colouring: sim.Region_Colouring_Mode,
+	supply_shown:     bool,
 	// Input for the next sim step
 	input:            sim.Step_Input,
 	// Time not yet simulated, in seconds
@@ -120,6 +128,7 @@ game_tick :: proc(input: Input, dt: f32) {
 	colourings := reflect.enum_field_names(sim.Region_Colouring_Mode)
 	colouring := tweak.choice("Map/Region colouring", int(GAME.region_colouring), colourings)
 	GAME.region_colouring = sim.Region_Colouring_Mode(colouring)
+	tweak.toggle("Map/Supply", "Shown", &GAME.supply_shown)
 	sim.present(GAME.focus, pointed, GAME.region_colouring, &GAME.scene)
 	for file, id in GAME.scene.caches {
 		if file.fingerprint == GAME.saved[id] do continue
@@ -131,6 +140,7 @@ game_tick :: proc(input: Input, dt: f32) {
 	map_draw_tick(
 		&GAME.scene,
 		GAME.region_colouring,
+		GAME.supply_shown,
 		GAME.camera,
 		input.viewport,
 		input.pixel_density,
@@ -241,10 +251,20 @@ cards_build :: proc(place: sim.Card_Place) {
 			} else {
 				ui.label(card.title, {font = font_id(.Title)})
 			}
-			for field in card.fields {
-				if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
-					ui.label(field.label, {width = ui.em(7), text_color = CARD_FADED_INK})
-					ui.label(field.value)
+			// Fields, and stats beside them
+			if ui.row({width = ui.fit(), height = ui.fit(), gap = CARD_COLUMN_GAP}) {
+				columns := [2][]sim.Field{card.fields[:], card.stats[:]}
+				value_em := [2]f32{CARD_VALUE_EM, CARD_STAT_EM}
+				for fields, column in columns {
+					if len(fields) == 0 do continue
+					if ui.column({width = ui.fit(), height = ui.fit(), gap = 6}) {
+						for field in fields {
+							if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
+								ui.label(field.label, {width = ui.em(CARD_LABEL_EM), text_color = CARD_FADED_INK})
+								ui.label(field.value, {width = ui.em(value_em[column])})
+							}
+						}
+					}
 				}
 			}
 			for action in card.actions {

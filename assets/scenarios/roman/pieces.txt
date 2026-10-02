@@ -2,17 +2,19 @@
 #
 # kind: name, icon, moves (domain; omit = static), per_turn (movement points), contact (radius), contact_on (domains),
 #       body (radius), hindrance (enemy movement cost multiplier inside its contact zone, default 1; roads don't
-#       count there), traits (Captures can conquer Capturable)
+#       count there), supply (supply source value 0..100, default 0 = not a source), traits (Captures can conquer
+#       Capturable)
 # faction: name, culture, colour [r, g, b] 0..255. Factions play in file order. Then one piece row per piece:
 #   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
 #   region), general (creates a character), strength + proficiency 0..100 (optional; makes it an army, starting at
-#   full strength and 100% readiness)
+#   full strength and 100% readiness), foraging 0..100 (army skill at living off the land, default 40), baggage
+#   (turns of food carried at most, default 4; starts full)
 
-kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    hindrance = 2    traits = [Capturable] }
-kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  hindrance = 2.5  traits = [Capturable] }
-kind = { name = city        icon = City                                  contact = 8  contact_on = [Land]  body = 3    hindrance = 3    traits = [Capturable] }
-kind = { name = large_city  icon = Large_City                            contact = 9  contact_on = [Land]  body = 3.5  hindrance = 3.5  traits = [Capturable] }
-kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 8  contact_on = [Land]  body = 2    hindrance = 3    traits = [Captures] }
+kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    hindrance = 2    supply = 50  traits = [Capturable] }
+kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  hindrance = 2.5  supply = 65  traits = [Capturable] }
+kind = { name = city        icon = City                                  contact = 8  contact_on = [Land]  body = 3    hindrance = 3    supply = 80  traits = [Capturable] }
+kind = { name = large_city  icon = Large_City                            contact = 9  contact_on = [Land]  body = 3.5  hindrance = 3.5  supply = 90  traits = [Capturable] }
+kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 8  contact_on = [Land]  body = 2    hindrance = 3                traits = [Captures] }
 kind = { name = fleet       icon = Fleet       moves = Sea   per_turn = 80  contact = 8  contact_on = [Sea]   body = 2    hindrance = 2 }
 
 faction = {
@@ -35,6 +37,7 @@ faction = {
 	piece = { kind = town        name = "Domavia"     at = [470, 396]  capital_of = domavia }
 	piece = { kind = city        name = "Salona"      at = [421, 405]  capital_of = salona }
 	piece = { kind = army    at = [334, 419]  general = "Flavius Aetius"  strength = 20000  proficiency = 70 }
+	piece = { kind = army    at = [338, 410]  general = "Bonifacius"      strength = 15000  proficiency = 50 }
 	piece = { kind = fleet   at = [353, 455] }
 	piece = { kind = fleet   at = [355, 393] }
 }
@@ -48,5 +51,5 @@ faction = {
 	piece = { kind = city        name = "Virunum"               at = [385, 354]  capital_of = virunum }
 	piece = { kind = town        name = "Octodurum"             at = [253, 367]  capital_of = octodurum }
 	piece = { kind = town        name = "Iuvavum"               at = [362, 336]  capital_of = iuvavum }
-	piece = { kind = army   at = [316, 342]  general = "Gibuld"  strength = 12000  proficiency = 55 }
+	piece = { kind = army   at = [316, 342]  general = "Gibuld"  strength = 12000  proficiency = 55  foraging = 60 }
 }

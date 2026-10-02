@@ -1,6 +1,7 @@
 package util
 
 import "base:runtime"
+import "core:fmt"
 import "core:hash"
 import "core:math"
 import "core:math/linalg"
@@ -336,6 +337,30 @@ pick_weighted :: proc(weights: []f32, roll: f32) -> (index: int, picked: bool) {
 		if left < 0 do break
 	}
 	return
+}
+
+// Text --------------------------------------------------------------------------------------------------------------
+
+// Compact number for display, three significant digits from 1000 up: 200, 1.50K, 10.0K, 200K, 1.20M. Temp allocator.
+format_compact :: proc(value: f64) -> string {
+	SUFFIXES := [?]string{"", "K", "M", "B"}
+	sign := value < 0 ? "-" : ""
+	magnitude := abs(value)
+	tier := 0
+	// Rounded, not raw, so 999.6 becomes 1.00K rather than 1000
+	for math.round(magnitude) >= 1000 && tier < len(SUFFIXES) - 1 {
+		magnitude /= 1000
+		tier += 1
+	}
+	if tier == 0 do return fmt.tprintf("%s%.0f", sign, magnitude)
+	// Decimals from the rounded value, so 9999 shows 10.0K rather than 10.00K
+	switch {
+	case math.round(magnitude * 100) < 1000:
+		return fmt.tprintf("%s%.2f%s", sign, magnitude, SUFFIXES[tier])
+	case math.round(magnitude * 10) < 1000:
+		return fmt.tprintf("%s%.1f%s", sign, magnitude, SUFFIXES[tier])
+	}
+	return fmt.tprintf("%s%.0f%s", sign, magnitude, SUFFIXES[tier])
 }
 
 // Hashing -------------------------------------------------------------------------------------------------------------

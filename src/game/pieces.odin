@@ -10,6 +10,9 @@ import "../tabula"
 
 // Pieces --------------------------------------------------------------------------------------------------------------
 PIECES_FILE :: "pieces.txt"
+// Defaults for armies that don't set them: foraging skill (0..100), and turns of food carried at most
+ARMY_FORAGING_DEFAULT :: 40
+ARMY_BAGGAGE_DEFAULT :: 4
 
 // Results in the temp allocator. Prints the error and returns false on failure. File format: see pieces.txt.
 pieces_load :: proc(
@@ -71,6 +74,7 @@ pieces_load :: proc(
 			}
 			kind.piece.body = tabula.get_num(row, "body")
 			kind.piece.hindrance = tabula.get_num(row, "hindrance", 1)
+			kind.piece.supply = tabula.get_num(row, "supply")
 			for value in tabula.find(row, "traits").children {
 				trait, is_trait := reflect.enum_from_name(sim.Piece_Trait, value.text)
 				if !is_trait do return nil, nil, nil, fail(path, row.key, n, "traits must list traits")
@@ -156,7 +160,10 @@ pieces_load :: proc(
 						strength_max     = int(strength),
 						proficiency      = proficiency,
 						readiness        = 100,
+						foraging         = tabula.get_num(piece_row, "foraging", ARMY_FORAGING_DEFAULT),
+						baggage          = tabula.get_num(piece_row, "baggage", ARMY_BAGGAGE_DEFAULT),
 					}
+					piece.army.stock = piece.army.baggage
 				}
 				append(&piece_list, piece)
 			}

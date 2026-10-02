@@ -658,3 +658,68 @@ pathfind_flood_trace :: proc(
 	slice.reverse(costs[:])
 	return true
 }
+
+// Spread ------------------------------------------------------------------------------------------------------------
+
+Pathfind_Source :: struct {
+	// In cells
+	pos:   [2]f32,
+	value: f32,
+}
+
+// Multi-source decaying spread over a domain: out[cell] = max over sources of value − decay × path cost, 0 where
+// nothing reaches. Enemy zones cost off-road × hindrance, as in the flood. out is CELLS_FINE_MAX long.
+pathfind_spread :: proc(
+	domain: Pathfind_Domain,
+	sources: []Pathfind_Source,
+	zones: []Pathfind_Zone,
+	decay: f32,
+	out: []f32,
+) {
+	assert(len(out) == CELLS_FINE_MAX && decay > 0)
+	table := &TABLE[domain]
+	slice.fill(out, 0)
+
+	// Zone hindrance per cell, 0 = none; overlaps take the max
+	hindrance := make([]f32, CELLS_FINE_MAX, context.temp_allocator)
+	for zone in zones {
+		disc := zone.disc
+		covered := util.cell_rect_clip(util.cell_rect_covering(disc.center - disc.radius, disc.center + disc.radius), WORLD_SIZE)
+		for y in covered.min.y ..< covered.max.y do for x in covered.min.x ..< covered.max.x {
+			if !util.disc_contains(disc, util.cell_center({x, y})) do continue
+			cell := &hindrance[util.grid_index({x, y}, WORLD_SIZE)]
+			cell^ = max(cell^, zone.hindrance)
+		}
+	}
+
+	// Dijkstra, highest value first (priority = −value)
+	queue := make([dynamic]Heap_Entry, context.temp_allocator)
+	for source in sources {
+		cell := util.cell_of(source.pos)
+		if !util.grid_contains(cell, WORLD_SIZE) do continue
+		index := util.grid_index(cell, WORLD_SIZE)
+		if table.grid[index] == 0 || source.value <= out[index] do continue
+		out[index] = source.value
+		append(&queue, Heap_Entry{-source.value, u32(index)})
+		heap.push(queue[:], heap_entry_less)
+	}
+	for len(queue) > 0 {
+		heap.pop(queue[:], heap_entry_less)
+		entry := pop(&queue)
+		value := -entry.priority
+		// Skip stale heap entries
+		if value < out[entry.index] do continue
+		at := util.grid_pos(int(entry.index), WORLD_SIZE)
+		for dir in Dir {
+			move := step_cost(table, at, dir)
+			if move == 0 do continue
+			next := util.grid_index(at + DIR_OFFSET[dir], WORLD_SIZE)
+			if h := hindrance[next]; h > 0 do move = table.off_road[next] * DIR_LENGTH[dir] * h
+			reached := value - decay * move
+			if reached <= out[next] do continue
+			out[next] = reached
+			append(&queue, Heap_Entry{-reached, u32(next)})
+			heap.push(queue[:], heap_entry_less)
+		}
+	}
+}

@@ -82,6 +82,18 @@ Army :: struct {
 	proficiency:      f32,
 	// Fatigue, 0..100 (100 = fully rested)
 	readiness:        f32,
+	// Skill at living off the land, 0..100; times the terrain's yield, it's what foraging brings in
+	foraging:         f32,
+	// Food carried, in turns of the army's needs, 0..baggage. Supply level = stock / baggage; readiness can't
+	// exceed it.
+	stock:            f32,
+	baggage:          f32,
+	// Stock change at the end of its faction's turn, before marching, in turns. Live for the player's armies;
+	// others keep the value from their own last turn.
+	resupply:            f32,
+	// Share of what the place can deliver that reaches this army, 0..1: own men / nearby friendly men. Updated
+	// with resupply.
+	resupply_efficiency: f32,
 }
 
 // 0 = none, 1 = scenario's first region
@@ -140,6 +152,8 @@ Scenario_Piece :: struct {
 	body:              f32,
 	// Movement cost multiplier inside its contact zone for enemies (off-road cost × hindrance)
 	hindrance:         f32,
+	// Supply source value, 0..100; 0 = not a source
+	supply:            f32,
 	traits:            bit_set[Piece_Trait;u8],
 	// 0 = none. At most one capital per region.
 	capital_of:        Region_Id,
@@ -216,19 +230,22 @@ AREA_SIZE :: PATHFIND_FLOOD_SIZE
 // Filled by present; valid until the next present
 Scene :: struct {
 	// Rewritten only when ground_revision changes
-	ground:          [CELLS_MAX]Ground,
-	ground_revision: u32,
-	pawns:           [dynamic; PAWNS_MAX]Pawn,
+	ground:              [CELLS_MAX]Ground,
+	ground_revision:     u32,
+	// The playing faction's supply map, 0..100 per cell. Rewritten only when supply_map_revision changes.
+	supply_map:          [CELLS_MAX]u8,
+	supply_map_revision: u32,
+	pawns:               [dynamic; PAWNS_MAX]Pawn,
 	// Ranges of arrow_points, tail to head
-	arrows:          [dynamic; ARROWS_MAX]span.Span,
-	arrow_points:    [dynamic; ARROW_POINTS_MAX][2]f32,
-	areas:           [AREAS_MAX]Area,
-	circles:         [dynamic; CIRCLES_MAX]Circle,
-	cards:           [dynamic; CARDS_MAX]Card,
+	arrows:              [dynamic; ARROWS_MAX]span.Span,
+	arrow_points:        [dynamic; ARROW_POINTS_MAX][2]f32,
+	areas:               [AREAS_MAX]Area,
+	circles:             [dynamic; CIRCLES_MAX]Circle,
+	cards:               [dynamic; CARDS_MAX]Card,
 	// Index 0 = region 1
-	regions:         [dynamic; REGIONS_MAX]Region,
+	regions:             [dynamic; REGIONS_MAX]Region,
 	// Save when the fingerprint differs from the saved one
-	caches:          [Cached_File_Id]Cached_File,
+	caches:              [Cached_File_Id]Cached_File,
 }
 
 Ground :: struct {
@@ -311,7 +328,10 @@ Card :: struct {
 	place:   Card_Place,
 	title:   string,
 	picture: Maybe(Picture),
+	// Facts that rarely change
 	fields:  [dynamic; CARD_FIELDS_MAX]Field,
+	// Values that change from turn to turn; shown beside fields
+	stats:   [dynamic; CARD_FIELDS_MAX]Field,
 	actions: [dynamic; CARD_ACTIONS_MAX]Action,
 }
 

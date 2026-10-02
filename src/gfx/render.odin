@@ -223,6 +223,10 @@ Render_Terrain :: struct {
 	// Land cover (forest, desert...); water draws over it
 	cover:      Render_Layer,
 	highlights: [Render_Highlight_Layer]Render_Highlights,
+	// Map mode wash over the land, 0..255 per cell (low red, high green). Bump overlay_revision on change.
+	overlay:          [RENDER_TERRAIN_CELLS]u8,
+	overlay_revision: u32,
+	overlay_shown:    bool,
 	// center: in cells. zoom: logical pixels per cell.
 	center:     [2]f32,
 	zoom:       f32,

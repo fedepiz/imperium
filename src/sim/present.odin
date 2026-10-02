@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:math"
 
 import "../span"
+import "../util"
 
 // Area slots, in drawing order
 REACH_AREA :: 0
@@ -46,6 +47,12 @@ world_present :: proc(
 ) {
 	mov := &WORLD.movement
 	ordering := ordering()
+
+	// Supply map (only when rebuilt)
+	if out.supply_map_revision != WORLD.supply_map_revision {
+		out.supply_map_revision = WORLD.supply_map_revision
+		out.supply_map = WORLD.supply_map
+	}
 
 	// Ground (only when the atlas changed)
 	if out.ground_revision != WORLD.atlas.revision {
@@ -151,7 +158,7 @@ world_present :: proc(
 		title = fmt.tprintf("Turn %d", WORLD.turn),
 	}
 	player := faction_get(WORLD.player)
-	append(&status.fields, Field{"Playing", player != nil ? faction_name(WORLD.player) : "None"})
+	append(&status.fields, Field{label = "Playing", value = player != nil ? faction_name(WORLD.player) : "None"})
 	append(
 		&status.actions,
 		Action{label = "End turn", ask = .End_Turn, enabled = turn_endable()},
@@ -163,22 +170,38 @@ world_present :: proc(
 			title   = piece_title(focus),
 			picture = Picture{piece.icon, piece.culture},
 		}
-		append(&card.fields, Field{"Type", ICON_TITLES[piece.icon]})
+		append(&card.fields, Field{label = "Type", value = ICON_TITLES[piece.icon]})
 		faction := faction_get(piece.owner)
-		append(&card.fields, Field{"Faction", faction != nil ? faction_name(piece.owner) : "None"})
-		append(&card.fields, Field{"Culture", fmt.tprintf("%v", piece.culture)})
+		append(&card.fields, Field{label = "Faction", value = faction != nil ? faction_name(piece.owner) : "None"})
+		append(&card.fields, Field{label = "Culture", value = fmt.tprintf("%v", piece.culture)})
 		if character_get(piece.general) != nil {
-			append(&card.fields, Field{"General", string(WORLD.character_names[piece.general.index][:])})
+			append(&card.fields, Field{label = "General", value = string(WORLD.character_names[piece.general.index][:])})
 		}
+		army := WORLD.armies[focus.index]
+		if army.active do append(&card.fields, Field{label = "Baggage", value = fmt.tprintf("%.0f turns", army.baggage)})
 		if piece.movement_domain != nil {
-			budget := fmt.tprintf("%.0f of %.0f", movement_budget(piece^), piece.movement_per_turn)
-			append(&card.fields, Field{"Movement", budget})
+			budget := fmt.tprintf(
+				"%s of %s",
+				util.format_compact(f64(movement_budget(piece^))),
+				util.format_compact(f64(piece.movement_per_turn)),
+			)
+			append(&card.stats, Field{label = "Movement", value = budget})
 		}
-		if army := WORLD.armies[focus.index]; army.active {
-			strength := fmt.tprintf("%d/%d", army.strength_current, army.strength_max)
-			append(&card.fields, Field{"Strength", strength})
-			append(&card.fields, Field{"Proficiency", fmt.tprintf("%.0f%%", army.proficiency)})
-			append(&card.fields, Field{"Readiness", fmt.tprintf("%.0f%%", army.readiness)})
+		if army.active {
+			strength := fmt.tprintf(
+				"%s of %s",
+				util.format_compact(f64(army.strength_current)),
+				util.format_compact(f64(army.strength_max)),
+			)
+			append(&card.stats, Field{label = "Strength", value = strength})
+			append(&card.stats, Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
+			append(&card.stats, Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
+			supply: f32 = army.baggage > 0 ? 100 * army.stock / army.baggage : 0
+			append(&card.stats, Field{label = "Supply", value = fmt.tprintf("%.0f%%", supply)})
+			stock := fmt.tprintf("%.1f (%+.1f)", army.stock, army.resupply)
+			append(&card.stats, Field{label = "Stock", value = stock})
+			efficiency := fmt.tprintf("%.0f%%", 100 * army.resupply_efficiency)
+			append(&card.stats, Field{label = "Efficiency", value = efficiency})
 		}
 		append(&out.cards, card)
 	}
@@ -189,9 +212,9 @@ world_present :: proc(
 			title   = piece_title(open.target),
 			picture = Picture{met.icon, met.culture},
 		}
-		append(&card.fields, Field{"Met by", piece_title(open.actor)})
+		append(&card.fields, Field{label = "Met by", value = piece_title(open.actor)})
 		faction := faction_get(met.owner)
-		append(&card.fields, Field{"Faction", faction != nil ? faction_name(met.owner) : "None"})
+		append(&card.fields, Field{label = "Faction", value = faction != nil ? faction_name(met.owner) : "None"})
 		append(
 			&card.actions,
 			Action{label = "Conquer", ask = .Conquer, enabled = open.conquerable},

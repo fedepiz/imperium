@@ -69,7 +69,7 @@ Terrain_Uniforms :: struct {
 	road_stroke, arrow_width:                       f32,
 	road_fill, arrow_fill:                          [4]f32,
 	head_length, head_width:                        f32,
-	_unused:                                        i32,
+	overlay_shown:                                  i32,
 	border_width:                                   f32,
 	border_ink:                                     [4]f32,
 	// Per highlight layer
@@ -122,6 +122,9 @@ Renderer :: struct {
 	terrain_uniforms:                    wgpu.Buffer,
 	terrain_cells, terrain_coast:        Texture,
 	cover_cells, cover_palette:          Texture,
+	overlay:                             Texture,
+	overlay_revision:                    u32,
+	overlay_uploaded:                    bool,
 	// Uploaded revisions
 	terrain_revision, cover_revision:    u32,
 	terrain_uploaded, cover_uploaded:    bool,
@@ -339,6 +342,7 @@ render_destroy :: proc(renderer: ^Renderer) {
 	texture_release(renderer.marks_layer)
 	texture_release(renderer.cover_cells)
 	texture_release(renderer.cover_palette)
+	texture_release(renderer.overlay)
 	texture_release(renderer.highlight_cells)
 	texture_release(renderer.highlight_field)
 	texture_release(renderer.highlight_palette)
@@ -493,7 +497,7 @@ frame_targets_create :: proc(renderer: ^Renderer, size: [2]u32) {
 	renderer.line_field = target_create(renderer, LINE_FIELD_FORMAT, size)
 	renderer.marks_layer = target_create(renderer, renderer.surface_format, size)
 
-	group_entries := [12]wgpu.BindGroupEntry {
+	group_entries := [13]wgpu.BindGroupEntry {
 		{binding = 0, buffer = renderer.terrain_uniforms, size = size_of(Terrain_Uniforms)},
 		{binding = 1, textureView = renderer.terrain_cells.view},
 		{binding = 2, textureView = renderer.terrain_coast.view},
@@ -506,6 +510,7 @@ frame_targets_create :: proc(renderer: ^Renderer, size: [2]u32) {
 		{binding = 9, textureView = renderer.highlight_palette.view},
 		{binding = 10, textureView = renderer.highlight_circles.view},
 		{binding = 11, textureView = renderer.marks_layer.view},
+		{binding = 12, textureView = renderer.overlay.view},
 	}
 	renderer.terrain_group = wgpu.DeviceCreateBindGroup(
 		renderer.device,
@@ -573,6 +578,12 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain, marks: ^Re
 		)
 		renderer.cover_revision = cover.revision
 		renderer.cover_uploaded = true
+	}
+
+	if !renderer.overlay_uploaded || renderer.overlay_revision != terrain.overlay_revision {
+		texture_write(renderer, renderer.overlay.texture, raw_data(terrain.overlay[:]), 1)
+		renderer.overlay_revision = terrain.overlay_revision
+		renderer.overlay_uploaded = true
 	}
 
 	circle_counts: [4]i32
@@ -651,6 +662,7 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain, marks: ^Re
 		border_width       = style.border_width,
 		border_ink         = style.border_ink,
 		circle_counts      = circle_counts,
+		overlay_shown      = i32(terrain.overlay_shown),
 	}
 	wgpu.QueueWriteBuffer(
 		renderer.queue,
@@ -1160,6 +1172,7 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 		{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
 	)
 	renderer.cover_palette = texture_create(renderer, .RGBA8Unorm, {RENDER_LAYER_CATEGORIES, 2})
+	renderer.overlay = texture_create(renderer, .R8Unorm, {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT})
 	layers :: u32(len(Render_Highlight_Layer))
 	renderer.highlight_cells = texture_create(renderer, .RG8Unorm, {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}, layers)
 	renderer.highlight_field = texture_create(renderer, .RG16Float, {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}, layers)
@@ -1181,7 +1194,7 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 			texture = {sampleType = sample, viewDimension = dimension},
 		}
 	}
-	layout_entries := [12]wgpu.BindGroupLayoutEntry {
+	layout_entries := [13]wgpu.BindGroupLayoutEntry {
 		{
 			binding = 0,
 			visibility = {.Fragment},
@@ -1198,6 +1211,7 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 		texture_entry(9, .UnfilterableFloat, ._2DArray),
 		texture_entry(10, .UnfilterableFloat),
 		texture_entry(11, .Float),
+		texture_entry(12, .Float),
 	}
 	renderer.terrain_layout = wgpu.DeviceCreateBindGroupLayout(
 		device,
@@ -1447,7 +1461,7 @@ struct Terrain {
     arrow_fill: vec4f,
     head_length: f32,
     head_width: f32,
-    _unused: i32,
+    overlay_shown: i32,
     border_width: f32,
     border_ink: vec4f,
     circle_counts: vec4i,
@@ -1558,6 +1572,8 @@ MAP_SOURCE ::
 @group(0) @binding(10) var highlight_circles: texture_2d<f32>;
 // Premultiplied
 @group(0) @binding(11) var marks: texture_2d<f32>;
+// Map mode value per cell, 0..1
+@group(0) @binding(12) var overlay: texture_2d<f32>;
 
 // Render_Highlight_Layer
 const REGIONS = 0;
@@ -1944,6 +1960,13 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         col = highlights_over(col, wandered, d, px, ZONES);
         col = highlights_over(col, wandered, d, px, CONTACTS);
         col = highlights_over(col, wandered, d, px, REACH);
+
+        // Map mode wash: red where the value is low, green where high
+        if (u.overlay_shown != 0) {
+            let value = textureSampleLevel(overlay, linear_sampler, p / u.grid, 0.0).r;
+            let tint = mix(vec3f(0.85, 0.45, 0.35), vec3f(0.45, 0.75, 0.40), value);
+            col = mix(col, col * tint, 0.8 * land);
+        }
 
         // Arrows, over everything else on land and sea: their fill between two ink edges, the same width however far
         // the map zooms, and their heads as wide again as the triangles they are drawn from
