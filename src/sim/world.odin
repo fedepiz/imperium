@@ -73,7 +73,7 @@ STOCK_PER_MOVEMENT :: 0.01
 SUPPLY_DECAY :: 2
 // Men a cell's supply point feeds
 MEN_PER_SUPPLY :: 200
-// Engagements: an army sent at an enemy attacks this much more readily; falling back and pursuit walk within
+// Battles: an army sent at an enemy attacks this much more readily; falling back and pursuit walk within
 // these movement budgets
 ORDERED_ATTACK_BONUS :: 2
 FALL_BACK_BUDGET :: 10
@@ -118,7 +118,6 @@ WORLD: struct {
 	// Faction whose turn it is (played by the player), nil = none
 	player:              Faction_Id,
 	interaction:         Interaction,
-	engagement:          Engagement,
 	// Detected contacts waiting to be resolved, oldest first
 	contacts:            [dynamic; CONTACTS_MAX]Contact_Event,
 	// The player asked to end the turn; it ends once contacts are resolved and nothing is open
@@ -147,20 +146,24 @@ Contact_Event :: struct {
 	targeted:         bool,
 }
 
-// An engagement waiting on the player, advanced by Next: announced, then fought and reported, then falling back,
-// then pursuit. Nil attacker = none open.
-Engagement :: struct {
-	attacker, defender: Piece_Id,
-	// Both sides as they stood when it was announced; fought on the first Next
-	battle:             Battle,
-	result:             Battle_Result,
-	stage:              Engagement_Stage,
+// Something being resolved, waiting on the player's answer. Nil actor = none open.
+Interaction :: struct {
+	// In a battle: attacker and defender
+	actor, target: Piece_Id,
+	stage:         Interaction_Stage,
+	// Meet_Town: computed when opened
+	conquerable:   bool,
+	// Battle: both sides as they stood when announced; fought on the first Next
+	battle:        Battle,
+	result:        Battle_Result,
 	// Where the loser stood before falling back; a pursuer walks there
-	loser_start:        [2]f32,
+	loser_start:   [2]f32,
 }
 
-Engagement_Stage :: enum u8 {
-	// Who attacks whom, before it's fought
+Interaction_Stage :: enum u8 {
+	// Met a piece that isn't an army: Conquer or Leave
+	Meet_Town,
+	// Battle, advanced by Next. Who attacks whom, before it's fought.
 	Announce,
 	// What happened in the battle
 	Report,
@@ -168,13 +171,6 @@ Engagement_Stage :: enum u8 {
 	Outcome,
 	Fall_Back,
 	Pursuit,
-}
-
-// Nil actor = none open
-Interaction :: struct {
-	actor, target: Piece_Id,
-	// Computed when opened
-	conquerable:   bool,
 }
 
 Movement :: struct {
@@ -519,25 +515,78 @@ world_step :: proc(input: Step_Input) {
 	}
 
 	// Step: Interaction
-	// Conquer or leave the open interaction
-	if WORLD.interaction.actor != {} {
-		if input.conquer && WORLD.interaction.conquerable {
-			actor, conquered :=
-				piece_get(WORLD.interaction.actor), piece_get(WORLD.interaction.target)
-			if actor != nil && conquered != nil do conquered.owner = actor.owner
-			WORLD.interaction = {}
-		} else if input.leave {
-			WORLD.interaction = {}
+	// The open interaction takes the player's answer. A battle advances on Next once nothing walks: fight, fall back,
+	// pursue, close.
+	// Battle losses this tick, for the Armies step to apply
+	fought: struct {
+		armies: [Battle_Role]Piece_Id,
+		result: Battle_Result,
+	}
+	if open := &WORLD.interaction; open.actor != {} {
+		if open.stage == .Meet_Town {
+			if input.answer == .Conquer && open.conquerable {
+				actor, conquered := piece_get(open.actor), piece_get(open.target)
+				if actor != nil && conquered != nil do conquered.owner = actor.owner
+				open^ = {}
+			} else if input.answer == .Leave {
+				open^ = {}
+			}
+		} else if input.answer == .Next && mov.subject == {} {
+			result := open.result
+			roles := [Battle_Role]Piece_Id {
+				.Attacker = open.actor,
+				.Defender = open.target,
+			}
+			loser := roles[OTHER_ROLE[result.winner]]
+			winner := roles[result.winner]
+			close := true
+			#partial switch open.stage {
+			case .Announce:
+				open.result = combat_resolve(open.battle)
+				fought.armies = roles
+				fought.result = open.result
+				open.stage = .Report
+				close = false
+			case .Report:
+				open.stage = .Outcome
+				close = false
+			case .Outcome:
+				// Dissolved armies leave the map
+				for side, role in result.sides do if side.dissolved do piece_despawn(roles[role])
+
+				// Fall back: away from the winner
+				beaten, victor := piece_get(loser), piece_get(winner)
+				if !result.sides[OTHER_ROLE[result.winner]].falls_back || beaten == nil || victor == nil do break
+				open.loser_start = beaten.pos
+				order = {
+					piece       = loser,
+					destination = beaten.pos + linalg.normalize0(beaten.pos - victor.pos) * FALL_BACK_BUDGET,
+					snap        = 2 * FALL_BACK_BUDGET + 1,
+					budget      = FALL_BACK_BUDGET,
+				}
+				open.stage = .Fall_Back
+				close = false
+			case .Fall_Back:
+				// Pursuit: the winner walks to where the loser stood
+				if !result.pursued || piece_get(winner) == nil || piece_get(loser) == nil do break
+				order = {
+					piece       = winner,
+					destination = open.loser_start,
+					snap        = 9,
+					budget      = PURSUIT_BUDGET,
+				}
+				open.stage = .Pursuit
+				close = false
+			}
+			if close do open^ = {}
 		}
 	}
 
 	// Step: Contacts
-	// Resolve contacts, oldest first, until one opens an engagement or an interaction. A contact holds while both
-	// pieces live, are enemies and touch. Between armies the initiator attacks (more readily when sent at the enemy),
-	// else the other may; each army attacks at most once per turn; otherwise nothing happens. Any other enemy piece (a
-	// town) opens an interaction.
-	engagement := &WORLD.engagement
-	for len(WORLD.contacts) > 0 && engagement.attacker == {} && WORLD.interaction.actor == {} {
+	// Resolve contacts, oldest first, until one opens an interaction. A contact holds while both pieces live, are
+	// enemies and touch. Between armies the initiator attacks (more readily when sent at the enemy), else the other
+	// may; each army attacks at most once per turn; otherwise nothing happens. Any other enemy piece (a town) is met.
+	for len(WORLD.contacts) > 0 && WORLD.interaction.actor == {} {
 		contact := WORLD.contacts[0]
 		ordered_remove(&WORLD.contacts, 0)
 		initiator, other := piece_get(contact.initiator), piece_get(contact.other)
@@ -550,6 +599,7 @@ world_step :: proc(input: Step_Input) {
 			WORLD.interaction = {
 				actor       = contact.initiator,
 				target      = contact.other,
+				stage       = .Meet_Town,
 				conquerable = .Captures in initiator.traits && .Capturable in other.traits,
 			}
 			continue
@@ -585,72 +635,16 @@ world_step :: proc(input: Step_Input) {
 			continue
 		}
 		WORLD.piece_turns[ids[0].index].attacked = true
-		engagement.attacker = ids[0]
-		engagement.defender = ids[1]
-		engagement.stage = .Announce
-		engagement.battle = {
-			sides = {.Attacker = sides[0], .Defender = sides[1]},
-			can_avoid = true,
-			seed = util.hash_contents(WORLD.turn, WORLD.player, ids[0], ids[1]),
+		WORLD.interaction = {
+			actor = ids[0],
+			target = ids[1],
+			stage = .Announce,
+			battle = {
+				sides = {.Attacker = sides[0], .Defender = sides[1]},
+				can_avoid = true,
+				seed = util.hash_contents(WORLD.turn, WORLD.player, ids[0], ids[1]),
+			},
 		}
-	}
-
-	// Step: Battle Next
-	// The open engagement advances on Next, once nothing walks: fight, fall back, pursue, close
-	// Battle losses this tick, for the Armies step to apply
-	fought: struct {
-		armies: [Battle_Role]Piece_Id,
-		result: Battle_Result,
-	}
-	if engagement.attacker != {} && input.battle_next && mov.subject == {} {
-		result := engagement.result
-		roles := [Battle_Role]Piece_Id {
-			.Attacker = engagement.attacker,
-			.Defender = engagement.defender,
-		}
-		loser := roles[OTHER_ROLE[result.winner]]
-		winner := roles[result.winner]
-		close := true
-		switch engagement.stage {
-		case .Announce:
-			engagement.result = combat_resolve(engagement.battle)
-			fought.armies = roles
-			fought.result = engagement.result
-			engagement.stage = .Report
-			close = false
-		case .Report:
-			engagement.stage = .Outcome
-			close = false
-		case .Outcome:
-			// Dissolved armies leave the map
-			for side, role in result.sides do if side.dissolved do piece_despawn(roles[role])
-
-			// Fall back: away from the winner
-			beaten, victor := piece_get(loser), piece_get(winner)
-			if !result.sides[OTHER_ROLE[result.winner]].falls_back || beaten == nil || victor == nil do break
-			engagement.loser_start = beaten.pos
-			order = {
-				piece       = loser,
-				destination = beaten.pos + linalg.normalize0(beaten.pos - victor.pos) * FALL_BACK_BUDGET,
-				snap        = 2 * FALL_BACK_BUDGET + 1,
-				budget      = FALL_BACK_BUDGET,
-			}
-			engagement.stage = .Fall_Back
-			close = false
-		case .Fall_Back:
-			// Pursuit: the winner walks to where the loser stood
-			if !result.pursued || piece_get(winner) == nil || piece_get(loser) == nil do break
-			order = {
-				piece       = winner,
-				destination = engagement.loser_start,
-				snap        = 9,
-				budget      = PURSUIT_BUDGET,
-			}
-			engagement.stage = .Pursuit
-			close = false
-		case .Pursuit:
-		}
-		if close do engagement^ = {}
 	}
 
 	// Step: Player Order
@@ -786,10 +780,10 @@ world_step :: proc(input: Step_Input) {
 			else do walk.marched_off_road += due
 		}
 
-		// Contact: entering an enemy zone ends the walk (not while an engagement plays out its walks)
+		// Contact: entering an enemy zone ends the walk (not while an interaction plays out its walks)
 		met: Piece_Id
 		domain := subject.movement_domain.(Pathfind_Domain)
-		if WORLD.engagement.attacker == {} do for other, index in WORLD.pieces {
+		if WORLD.interaction.actor == {} do for other, index in WORLD.pieces {
 			if !piece_alive(other) || piece_id(index) == walk.piece || pieces_friendly(subject^, other) do continue
 			if other.contact.radius == 0 || domain not_in other.contact.domains do continue
 			zone := util.Disc{other.pos, other.contact.radius}
@@ -813,7 +807,6 @@ world_step :: proc(input: Step_Input) {
 	turn_ending :=
 		WORLD.ending &&
 		len(WORLD.contacts) == 0 &&
-		engagement.attacker == {} &&
 		WORLD.interaction.actor == {} &&
 		mov.subject == {}
 
@@ -954,7 +947,7 @@ supply_map_build :: proc(faction: Faction_Id) {
 // The player, or nil while an interaction is open
 ordering :: proc() -> Faction_Id {
 	return(
-		WORLD.interaction.actor == {} && WORLD.engagement.attacker == {} && !WORLD.ending ? WORLD.player : {} \
+		WORLD.interaction.actor == {} && !WORLD.ending ? WORLD.player : {} \
 	)
 }
 
@@ -963,8 +956,7 @@ turn_endable :: proc() -> bool {
 		!WORLD.ending &&
 		WORLD.movement.subject == {} &&
 		len(WORLD.contacts) == 0 &&
-		WORLD.interaction.actor == {} &&
-		WORLD.engagement.attacker == {} \
+		WORLD.interaction.actor == {} \
 	)
 }
 

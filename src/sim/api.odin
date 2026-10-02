@@ -192,12 +192,21 @@ STEP_SECONDS :: 1.0 / f32(STEPS_PER_SECOND)
 // Each field is read by one phase of world_step, in fixed order
 Step_Input :: struct {
 	// Selected piece: its reach is flooded, for showing
-	focus:       Piece_Id,
-	order:       Order,
-	conquer:     bool,
-	leave:       bool,
-	end_turn:    bool,
-	battle_next: bool,
+	focus:    Piece_Id,
+	order:    Order,
+	// To the open interaction
+	answer:   Answer,
+	end_turn: bool,
+}
+
+// Ignored unless the open interaction takes it
+Answer :: enum u8 {
+	None,
+	// Advances a battle: fought, falling back, pursuit, then closing. Ignored while something walks.
+	Next,
+	// Only a conquerable town
+	Conquer,
+	Leave,
 }
 
 Order :: union {
@@ -208,11 +217,10 @@ Order :: union {
 Card_Ask :: enum u8 {
 	// Ignored while walking or in an interaction
 	End_Turn,
-	// Ignored unless the open interaction is conquerable
+	// Answers to the open interaction
 	Conquer,
-	Leave_Interaction,
-	// Advances the open engagement: falling back, pursuit, then closing. Ignored while something walks.
-	Battle_Next,
+	Leave,
+	Next,
 }
 
 // The piece walks toward destination; if it's out of reach, to the nearest reachable cell within a snap-sized square
@@ -313,7 +321,7 @@ Pawn_Flag :: enum u8 {
 	Focused,
 	// Player's piece, and no interaction open
 	Controlled,
-	// In the open engagement
+	// In the open interaction
 	Engaged,
 }
 
@@ -341,8 +349,6 @@ Card_Place :: enum u8 {
 	Status,
 	Focus,
 	Interaction,
-	// An engagement between two armies, advanced by Next
-	Battle,
 }
 
 Card :: struct {

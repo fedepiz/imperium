@@ -194,11 +194,11 @@ ask :: proc(what: sim.Card_Ask) {
 	case .End_Turn:
 		GAME.input.end_turn = true
 	case .Conquer:
-		GAME.input.conquer = true
-	case .Leave_Interaction:
-		GAME.input.leave = true
-	case .Battle_Next:
-		GAME.input.battle_next = true
+		GAME.input.answer = .Conquer
+	case .Leave:
+		GAME.input.answer = .Leave
+	case .Next:
+		GAME.input.answer = .Next
 	}
 }
 
@@ -212,7 +212,7 @@ game_next_map_view :: proc() {
 	map_draw_next_view()
 }
 
-// Call between ui.begin() and ui.end(). Cards: status top right, interaction centre, focus bottom left.
+// Call between ui.begin() and ui.end(). Cards: status top right, interaction left, focus bottom left.
 game_ui :: proc() {
 	ui.style_push(
 		{
@@ -229,10 +229,7 @@ game_ui :: proc() {
 			cards_build(.Status)
 		}
 		ui.spacer(ui.grow())
-		// Battle reports on the left, interactions in the middle
 		if ui.row({width = ui.grow(), height = ui.fit()}) {
-			cards_build(.Battle)
-			ui.spacer(ui.grow())
 			cards_build(.Interaction)
 			ui.spacer(ui.grow())
 		}

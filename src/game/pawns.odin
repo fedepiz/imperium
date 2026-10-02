@@ -48,7 +48,7 @@ PAWN_SIZES := [sim.Icon]f32 {
 PAWN_FOCUSED_TINT :: [4]f32{1.000, 0.700, 0.350, 1}
 @(private = "file")
 PAWN_FOCUSED_PULSE :: 1.2
-// Armies in the open engagement
+// Pieces in the open interaction
 PAWN_ENGAGED_TINT :: [4]f32{0.900, 0.350, 0.300, 1}
 
 // One scale per set keeps pen line weight consistent across the set

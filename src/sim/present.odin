@@ -128,7 +128,7 @@ world_present :: proc(
 		}
 		if id == focus do pawn.flags += {.Focused}
 		if ordering != {} && piece.owner == ordering do pawn.flags += {.Controlled}
-		if id == WORLD.engagement.attacker || id == WORLD.engagement.defender do pawn.flags += {.Engaged}
+		if id == WORLD.interaction.actor || id == WORLD.interaction.target do pawn.flags += {.Engaged}
 		append(&out.pawns, pawn)
 	}
 
@@ -250,8 +250,10 @@ world_present :: proc(
 		}
 		append(&out.cards, card)
 	}
-	open := WORLD.interaction
-	if actor, met := piece_get(open.actor), piece_get(open.target); actor != nil && met != nil {
+	// Interaction: a town met, or a battle
+	open := &WORLD.interaction
+	if actor, met := piece_get(open.actor), piece_get(open.target);
+	   open.stage == .Meet_Town && actor != nil && met != nil {
 		card := Card {
 			place   = .Interaction,
 			title   = piece_title(open.target),
@@ -266,18 +268,18 @@ world_present :: proc(
 		)
 		append(
 			&card.actions,
-			Action{label = "Back", ask = .Leave_Interaction, enabled = true},
+			Action{label = "Back", ask = .Leave, enabled = true},
 		)
 		append(&out.cards, card)
 	}
 
-	// Engagement: the attacker's side on the left, the defender's on the right. Announced with both sides as they
-	// stand, then the result.
-	if engagement := &WORLD.engagement; engagement.attacker != {} {
-		result := engagement.result
+	// Battle: the attacker's side on the left, the defender's on the right. Announced with both sides as they stand,
+	// then the result.
+	if open.actor != {} && open.stage != .Meet_Town {
+		result := open.result
 		roles := [Battle_Role]Piece_Id {
-			.Attacker = engagement.attacker,
-			.Defender = engagement.defender,
+			.Attacker = open.actor,
+			.Defender = open.target,
 		}
 		names := [Battle_Role]string {
 			.Attacker = piece_title(roles[.Attacker]),
@@ -285,9 +287,9 @@ world_present :: proc(
 		}
 		winner, loser := names[result.winner], names[OTHER_ROLE[result.winner]]
 		card := Card {
-			place = .Battle,
+			place = .Interaction,
 		}
-		switch engagement.stage {
+		#partial switch open.stage {
 		case .Announce:
 			card.title = fmt.tprintf("%s attacks %s", names[.Attacker], names[.Defender])
 		case .Report:
@@ -412,12 +414,12 @@ world_present :: proc(
 		case .Pursuit:
 			card.title = fmt.tprintf("%s pursues", winner)
 		}
-		if engagement.stage != .Report do for role in Battle_Role {
+		if open.stage != .Report do for role in Battle_Role {
 			column := role == .Attacker ? &card.fields : &card.stats
 			append(column, Field{label = ROLE_TITLES[role], value = piece_title(roles[role])})
-			if engagement.stage == .Announce {
-				side := engagement.battle.sides[role]
-				other := engagement.battle.sides[OTHER_ROLE[role]]
+			if open.stage == .Announce {
+				side := open.battle.sides[role]
+				other := open.battle.sides[OTHER_ROLE[role]]
 				append(column, Field{label = "Commander", value = fmt.tprintf("%v", side.temperament)})
 				append(column, Field{label = "Men", value = util.format_compact(f64(side.men))})
 				append(column, Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", side.proficiency)})
@@ -432,7 +434,7 @@ world_present :: proc(
 			append(column, Field{label = "Supply", value = fmt.tprintf("%+.1f", side.stock)})
 			if side.dissolved do append(column, Field{label = "Fate", value = "Dissolved"})
 		}
-		append(&card.actions, Action{label = "Next", ask = .Battle_Next, enabled = WORLD.movement.subject == {}})
+		append(&card.actions, Action{label = "Next", ask = .Next, enabled = WORLD.movement.subject == {}})
 		append(&out.cards, card)
 	}
 
