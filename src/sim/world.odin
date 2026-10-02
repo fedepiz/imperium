@@ -72,7 +72,7 @@ STOCK_PER_MOVEMENT :: 0.01
 // Supply lost per movement point of path cost from a source
 SUPPLY_DECAY :: 2
 // Men a cell's supply point feeds
-MEN_PER_SUPPLY :: 200
+MEN_PER_SUPPLY :: 250
 // Initiative to attack: sent at the enemy; intercepting one that entered the zone
 ORDERED_INITIATIVE :: 2
 INTERCEPT_INITIATIVE :: -1
@@ -201,6 +201,7 @@ Movement :: struct {
 
 // pos moved along path toward point next, up to step cells, ending at point last or once max_due movement points are
 // due. The leg onto point 0 costs like the first segment.
+@(private = "file")
 walk_along :: proc(
 	pos: [2]f32,
 	path: [][2]f32,
@@ -544,7 +545,7 @@ world_step :: proc(input: Step_Input) {
 	}
 
 	// This tick's order, if any: at most one piece is sent to walk per tick
-	order:          struct {
+	order: struct {
 		piece:          Piece_Id,
 		// Toward the target's contact zone when set, else toward destination (snapped within a square of snap cells)
 		destination:    [2]f32,
@@ -620,7 +621,8 @@ world_step :: proc(input: Step_Input) {
 					temperament := open.battle.sides[result.winner].temperament
 					order.chaser = winner
 					order.chaser_follows = result.caught
-					order.chaser_budget = movement_budget(winner) + TEMPERAMENT_FOLLOW_OVERDRAW[temperament]
+					order.chaser_budget =
+						movement_budget(winner) + TEMPERAMENT_FOLLOW_OVERDRAW[temperament]
 				}
 				side := result.sides[loser_role]
 				if result.caught do losses[loser_role] = {loser, side.pursuit_men.total, side.pursuit_readiness, 0}
@@ -829,7 +831,9 @@ world_step :: proc(input: Step_Input) {
 
 		// Subject: holds while clear of clear_of's zone
 		clear_of := piece_get(mov.clear_of)
-		clear := clear_of != nil && !util.disc_contains({clear_of.pos, clear_of.contact.radius}, subject.pos)
+		clear :=
+			clear_of != nil &&
+			!util.disc_contains({clear_of.pos, clear_of.contact.radius}, subject.pos)
 		if !clear {
 			moved, reached, road, off_road := walk_along(
 				subject.pos,
@@ -1045,9 +1049,7 @@ supply_map_build :: proc(faction: Faction_Id) {
 
 // The player, or nil while an interaction is open
 ordering :: proc() -> Faction_Id {
-	return(
-		WORLD.interaction.actor == {} && !WORLD.ending ? WORLD.player : {} \
-	)
+	return WORLD.interaction.actor == {} && !WORLD.ending ? WORLD.player : {}
 }
 
 turn_endable :: proc() -> bool {
@@ -1237,3 +1239,4 @@ character_alive :: proc(character: Character) -> bool {
 character_id :: proc(index: int) -> Character_Id {
 	return {u16(index), WORLD.characters[index].generation}
 }
+
