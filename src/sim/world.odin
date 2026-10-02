@@ -52,7 +52,7 @@ MOUNTAINS_PATCH_MIN :: 12
 // Radius in cells for basin detection
 BASIN_REACH :: 24
 
-// Readiness lost per movement point marched, in percent; and on top, per point marched beyond the turn's budget
+// Readiness lost per movement point marched, in percent; overdraw: per point beyond the budget, on top
 ROAD_READINESS_PER_MOVEMENT :: 0.1
 READINESS_PER_MOVEMENT :: 1
 OVERDRAW_READINESS :: 2
@@ -73,11 +73,12 @@ STOCK_PER_MOVEMENT :: 0.01
 SUPPLY_DECAY :: 2
 // Men a cell's supply point feeds
 MEN_PER_SUPPLY :: 200
-// Battles: an army sent at an enemy attacks this much more readily; falling back and pursuit walk within
-// these movement budgets
-ORDERED_ATTACK_BONUS :: 2
+// Initiative to attack: sent at the enemy; intercepting one that entered the zone
+ORDERED_INITIATIVE :: 2
+INTERCEPT_INITIATIVE :: -1
+// Falling back, in movement points: at most when getting away; when caught
 FALL_BACK_BUDGET :: 10
-PURSUIT_BUDGET :: 15
+CHASE_BUDGET :: 15
 
 // Armies within this many cells share supply (network: friendly ones; forage: all), weighted by
 // 1 − distance / FORAGE_RADIUS
@@ -156,8 +157,6 @@ Interaction :: struct {
 	// Battle: both sides as they stood when announced; fought on the first Next
 	battle:        Battle,
 	result:        Battle_Result,
-	// Where the loser stood before falling back; a pursuer walks there
-	loser_start:   [2]f32,
 }
 
 Interaction_Stage :: enum u8 {
@@ -169,25 +168,66 @@ Interaction_Stage :: enum u8 {
 	Report,
 	// What it cost each side
 	Outcome,
+	// The loser falls back, the winner trailing as it chose
 	Fall_Back,
-	Pursuit,
+	// An ordered attack the commander won't make; closes on Next
+	Refused,
 }
 
 Movement :: struct {
 	// Walking piece, nil = none
-	subject:       Piece_Id,
+	subject:        Piece_Id,
 	// Smoothed path. cost[i] = cost per cell from point i-1 to i. next = point being walked to.
-	path:          [dynamic; WALK_POINTS_MAX][2]f32,
-	cost:          [dynamic; WALK_POINTS_MAX]f32,
-	next:          int,
-	target:        Piece_Id,
+	path:           [dynamic; WALK_POINTS_MAX][2]f32,
+	cost:           [dynamic; WALK_POINTS_MAX]f32,
+	next:           int,
+	target:         Piece_Id,
+	// Ends once outside its zone and the chaser has stopped; nil = at the path's end
+	clear_of:       Piece_Id,
+	// Trails the subject, stepping onto the path at point 0; to the end when chaser_follows, else to point 0. Stops
+	// on reaching the subject or spending chaser_budget movement points.
+	chaser:         Piece_Id,
+	chaser_next:    int,
+	chaser_follows: bool,
+	chaser_budget:  f32,
 	// Reach of the focus. Nil subject and 0 key = none. Key hashes all flood inputs; recomputed only on change.
-	flood:         Pathfind_Flood,
-	enemy_zones:   [dynamic; PIECE_MAX]Pathfind_Zone,
-	friend_zones:  [dynamic; PIECE_MAX]util.Disc,
-	bodies:        [dynamic; PIECE_MAX]util.Disc,
-	flood_subject: Piece_Id,
-	flood_key:     u64,
+	flood:          Pathfind_Flood,
+	enemy_zones:    [dynamic; PIECE_MAX]Pathfind_Zone,
+	friend_zones:   [dynamic; PIECE_MAX]util.Disc,
+	bodies:         [dynamic; PIECE_MAX]util.Disc,
+	flood_subject:  Piece_Id,
+	flood_key:      u64,
+}
+
+// pos moved along path toward point next, up to step cells, ending at point last or once max_due movement points are
+// due. The leg onto point 0 costs like the first segment.
+walk_along :: proc(
+	pos: [2]f32,
+	path: [][2]f32,
+	cost: []f32,
+	next, last: int,
+	step, max_due: f32,
+) -> (
+	moved: [2]f32,
+	reached: int,
+	road, off_road: f32,
+) {
+	moved, reached = pos, next
+	step := step
+	for step > 0 && reached <= last && road + off_road < max_due {
+		target := path[reached]
+		segment_cost := cost[clamp(reached, 1, len(cost) - 1)]
+		distance := linalg.distance(moved, target)
+		walked := min(step, distance)
+		if segment_cost > 0 do walked = min(walked, (max_due - road - off_road) / segment_cost)
+		moved = walked < distance ? moved + linalg.normalize(target - moved) * walked : target
+		step -= walked
+		if walked == distance do reached += 1
+		// Road cells always cost exactly ROAD_COST
+		if segment_cost == ROAD_COST do road += walked * segment_cost
+		else do off_road += walked * segment_cost
+	}
+	return
 }
 
 // 0 for a stale or nil id
@@ -504,23 +544,29 @@ world_step :: proc(input: Step_Input) {
 	}
 
 	// This tick's order, if any: at most one piece is sent to walk per tick
-	order: struct {
-		piece:       Piece_Id,
+	order:          struct {
+		piece:          Piece_Id,
 		// Toward the target's contact zone when set, else toward destination (snapped within a square of snap cells)
-		destination: [2]f32,
-		snap:        int,
-		target:      Piece_Id,
+		destination:    [2]f32,
+		snap:           int,
+		target:         Piece_Id,
 		// Movement points the walk may use; 0 = the piece's movement budget left
-		budget:      f32,
+		budget:         f32,
+		// Its zone doesn't slow the walk
+		unhindered_by:  Piece_Id,
+		// See Movement
+		clear_of:       Piece_Id,
+		chaser:         Piece_Id,
+		chaser_follows: bool,
+		chaser_budget:  f32,
 	}
 
 	// Step: Interaction
-	// The open interaction takes the player's answer. A battle advances on Next once nothing walks: fight, fall back,
-	// pursue, close.
-	// Battle losses this tick, for the Armies step to apply
-	fought: struct {
-		armies: [Battle_Role]Piece_Id,
-		result: Battle_Result,
+	// Answers to the open interaction. A battle advances on Next once nothing walks.
+	// Battle and chase losses, for the Armies step
+	losses: [Battle_Role]struct {
+		army:                  Piece_Id,
+		men, readiness, stock: f32,
 	}
 	if open := &WORLD.interaction; open.actor != {} {
 		if open.stage == .Meet_Town {
@@ -537,14 +583,17 @@ world_step :: proc(input: Step_Input) {
 				.Attacker = open.actor,
 				.Defender = open.target,
 			}
-			loser := roles[OTHER_ROLE[result.winner]]
+			loser_role := OTHER_ROLE[result.winner]
+			loser := roles[loser_role]
 			winner := roles[result.winner]
 			close := true
 			#partial switch open.stage {
 			case .Announce:
 				open.result = combat_resolve(open.battle)
-				fought.armies = roles
-				fought.result = open.result
+				for id, role in roles {
+					side := open.result.sides[role]
+					losses[role] = {id, side.men, side.readiness, side.stock}
+				}
 				open.stage = .Report
 				close = false
 			case .Report:
@@ -554,28 +603,28 @@ world_step :: proc(input: Step_Input) {
 				// Dissolved armies leave the map
 				for side, role in result.sides do if side.dissolved do piece_despawn(roles[role])
 
-				// Fall back: away from the winner
+				// Fall back away from the winner: the chase's length when caught, else until clear of the winner. The
+				// winner trails within movement left plus the temperament's overdraw. Chase losses land here.
 				beaten, victor := piece_get(loser), piece_get(winner)
-				if !result.sides[OTHER_ROLE[result.winner]].falls_back || beaten == nil || victor == nil do break
-				open.loser_start = beaten.pos
+				if !result.sides[loser_role].falls_back || beaten == nil || victor == nil do break
+				reach: f32 = result.caught ? CHASE_BUDGET : FALL_BACK_BUDGET
 				order = {
-					piece       = loser,
-					destination = beaten.pos + linalg.normalize0(beaten.pos - victor.pos) * FALL_BACK_BUDGET,
-					snap        = 2 * FALL_BACK_BUDGET + 1,
-					budget      = FALL_BACK_BUDGET,
+					piece         = loser,
+					destination   = beaten.pos + linalg.normalize0(beaten.pos - victor.pos) * reach,
+					snap          = 2 * int(reach) + 1,
+					budget        = reach,
+					unhindered_by = winner,
 				}
+				if !result.caught do order.clear_of = winner
+				if result.follow != .Stay {
+					temperament := open.battle.sides[result.winner].temperament
+					order.chaser = winner
+					order.chaser_follows = result.caught
+					order.chaser_budget = movement_budget(winner) + TEMPERAMENT_FOLLOW_OVERDRAW[temperament]
+				}
+				side := result.sides[loser_role]
+				if result.caught do losses[loser_role] = {loser, side.pursuit_men, side.pursuit_readiness, 0}
 				open.stage = .Fall_Back
-				close = false
-			case .Fall_Back:
-				// Pursuit: the winner walks to where the loser stood
-				if !result.pursued || piece_get(winner) == nil || piece_get(loser) == nil do break
-				order = {
-					piece       = winner,
-					destination = open.loser_start,
-					snap        = 9,
-					budget      = PURSUIT_BUDGET,
-				}
-				open.stage = .Pursuit
 				close = false
 			}
 			if close do open^ = {}
@@ -583,9 +632,9 @@ world_step :: proc(input: Step_Input) {
 	}
 
 	// Step: Contacts
-	// Resolve contacts, oldest first, until one opens an interaction. A contact holds while both pieces live, are
-	// enemies and touch. Between armies the initiator attacks (more readily when sent at the enemy), else the other
-	// may; each army attacks at most once per turn; otherwise nothing happens. Any other enemy piece (a town) is met.
+	// Oldest first, until one opens an interaction. A contact holds while both live, are enemies and touch. Between
+	// armies the initiator attacks, else the other may intercept; a refused ordered attack is announced. Other enemy
+	// pieces are met.
 	for len(WORLD.contacts) > 0 && WORLD.interaction.actor == {} {
 		contact := WORLD.contacts[0]
 		ordered_remove(&WORLD.contacts, 0)
@@ -621,16 +670,28 @@ world_step :: proc(input: Step_Input) {
 			}
 		}
 		gap := battle_strength(sides[0], sides[1]) - battle_strength(sides[1], sides[0])
-		eagerness: f32 = contact.targeted ? ORDERED_ATTACK_BONUS : 0
+		ordered: f32 = contact.targeted ? ORDERED_INITIATIVE : 0
+		initiative := [2]f32 {
+			TEMPERAMENT_ATTACK_INITIATIVE[sides[0].temperament] + ordered,
+			TEMPERAMENT_ATTACK_INITIATIVE[sides[1].temperament] + INTERCEPT_INITIATIVE,
+		}
 		fresh := [2]bool {
 			!WORLD.piece_turns[ids[0].index].attacked,
 			!WORLD.piece_turns[ids[1].index].attacked,
 		}
 		switch {
-		case fresh[0] && gap + eagerness >= TEMPERAMENT_ATTACK_THRESHOLD[sides[0].temperament]:
-		case fresh[1] && -gap >= TEMPERAMENT_ATTACK_THRESHOLD[sides[1].temperament]:
+		case fresh[0] && gap + initiative[0] >= 0:
+		case fresh[1] && -gap + initiative[1] >= 0:
 			ids[0], ids[1] = ids[1], ids[0]
 			sides[0], sides[1] = sides[1], sides[0]
+		case contact.targeted:
+			WORLD.interaction = {
+				actor = ids[0],
+				target = ids[1],
+				stage = .Refused,
+				battle = {sides = {.Attacker = sides[0], .Defender = sides[1]}},
+			}
+			continue
 		case:
 			continue
 		}
@@ -694,7 +755,7 @@ world_step :: proc(input: Step_Input) {
 				if !util.disc_overlaps_rect(contact, square) do continue
 				if pieces_friendly(subject^, other) {
 					append(&mov.friend_zones, contact)
-				} else {
+				} else if piece_id(index) != order.unhindered_by {
 					append(zones, Pathfind_Zone{contact, other.hindrance})
 				}
 			}
@@ -734,6 +795,11 @@ world_step :: proc(input: Step_Input) {
 			append(&mov.path, ..path[:])
 			append(&mov.cost, ..cost[:])
 			mov.next = 1
+			mov.clear_of = order.clear_of
+			mov.chaser = order.chaser
+			mov.chaser_next = 0
+			mov.chaser_follows = order.chaser_follows
+			mov.chaser_budget = order.chaser_budget
 
 			// Smooth; cut points keep their segment's cost
 			n := len(mov.path)
@@ -748,8 +814,8 @@ world_step :: proc(input: Step_Input) {
 	}
 
 	// Step: Walk
-	// What the walker did this step. Nil piece = nobody walked.
-	walk: struct {
+	// What the subject, then its chaser, did this step. Nil piece = didn't walk.
+	walks: [2]struct {
 		piece:            Piece_Id,
 		// Movement points, all of the walk
 		marched_road:     f32,
@@ -758,33 +824,64 @@ world_step :: proc(input: Step_Input) {
 		overdrawn:        f32,
 	}
 	if subject := piece_get(mov.subject); subject != nil {
-		walk.piece = mov.subject
 		before := subject.pos
-		step: f32 = WALK_PER_STEP
-		for step > 0 && mov.next < len(mov.path) {
-			target, cost := mov.path[mov.next], mov.cost[mov.next]
-			distance := linalg.distance(subject.pos, target)
-			walked := min(step, distance)
-			subject.pos =
-				walked < distance ? subject.pos + linalg.normalize(target - subject.pos) * walked : target
-			step -= walked
-			if walked == distance do mov.next += 1
+		last := len(mov.path) - 1
 
-			// Pay from the budget, as far as it lasts; the rest is overdrawn
-			due := walked * cost
+		// Subject: holds while clear of clear_of's zone
+		clear_of := piece_get(mov.clear_of)
+		clear := clear_of != nil && !util.disc_contains({clear_of.pos, clear_of.contact.radius}, subject.pos)
+		if !clear {
+			moved, reached, road, off_road := walk_along(
+				subject.pos,
+				mov.path[:],
+				mov.cost[:],
+				mov.next,
+				last,
+				WALK_PER_STEP,
+				math.INF_F32,
+			)
+			subject.pos = moved
+			mov.next = reached
+			walks[0] = {mov.subject, road, off_road, 0}
+		}
+
+		// Chaser: stops on reaching the subject, its last point or the end of its budget
+		chasing: bool
+		if chaser := piece_get(mov.chaser); chaser != nil {
+			until := mov.chaser_follows ? last : 0
+			touching := linalg.distance(chaser.pos, subject.pos) <= chaser.body + subject.body
+			chasing = !touching && mov.chaser_next <= until && mov.chaser_budget > 0
+			if chasing {
+				moved, reached, road, off_road := walk_along(
+					chaser.pos,
+					mov.path[:],
+					mov.cost[:],
+					mov.chaser_next,
+					until,
+					WALK_PER_STEP,
+					mov.chaser_budget,
+				)
+				chaser.pos = moved
+				mov.chaser_next = reached
+				mov.chaser_budget -= road + off_road
+				walks[1] = {mov.chaser, road, off_road, 0}
+			}
+		}
+
+		// Pay from the budget; the rest is overdrawn
+		for &walk in walks {
+			if walk.piece == {} do continue
+			due := walk.marched_road + walk.marched_off_road
 			spent := min(due, movement_budget(walk.piece))
 			WORLD.piece_turns[walk.piece.index].movement_spent += spent
-			walk.overdrawn += due - spent
-			// Road cells always cost exactly ROAD_COST
-			if cost == ROAD_COST do walk.marched_road += due
-			else do walk.marched_off_road += due
+			walk.overdrawn = due - spent
 		}
 
 		// Contact: entering an enemy zone ends the walk (not while an interaction plays out its walks)
 		met: Piece_Id
 		domain := subject.movement_domain.(Pathfind_Domain)
 		if WORLD.interaction.actor == {} do for other, index in WORLD.pieces {
-			if !piece_alive(other) || piece_id(index) == walk.piece || pieces_friendly(subject^, other) do continue
+			if !piece_alive(other) || piece_id(index) == mov.subject || pieces_friendly(subject^, other) do continue
 			if other.contact.radius == 0 || domain not_in other.contact.domains do continue
 			zone := util.Disc{other.pos, other.contact.radius}
 			if util.disc_contains(zone, subject.pos) && !util.disc_contains(zone, before) {
@@ -793,14 +890,16 @@ world_step :: proc(input: Step_Input) {
 			}
 		}
 
-		if met != {} || mov.next >= len(mov.path) {
+		if met != {} || ((mov.next > last || clear) && !chasing) {
 			if met == {} do met = mov.target
-			if met != {} do append(&WORLD.contacts, Contact_Event{walk.piece, met, met == mov.target})
+			if met != {} do append(&WORLD.contacts, Contact_Event{mov.subject, met, met == mov.target})
 			mov.subject, mov.target, mov.next = {}, {}, 0
+			mov.clear_of, mov.chaser = {}, {}
 		}
 	} else {
 		// Walker gone
 		mov.subject, mov.target, mov.next = {}, {}, 0
+		mov.clear_of, mov.chaser = {}, {}
 	}
 
 	// The turn ends now if it was asked to and everything is settled
@@ -817,13 +916,12 @@ world_step :: proc(input: Step_Input) {
 		readiness := army.readiness
 		stock := army.stock
 
-		// Battle losses
-		for id, role in fought.armies {
-			if id == {} || int(id.index) != index do continue
-			side := fought.result.sides[role]
-			army.men = max(0, army.men + int(math.round(side.men)))
-			readiness += side.readiness
-			stock += side.stock
+		// Battle and chase losses
+		for loss in losses {
+			if loss.army == {} || int(loss.army.index) != index do continue
+			army.men = max(0, army.men + int(math.round(loss.men)))
+			readiness += loss.readiness
+			stock += loss.stock
 		}
 
 		// Resupply, live for the player's armies: the better of network and foraging, each as men fed over own men,
@@ -876,7 +974,8 @@ world_step :: proc(input: Step_Input) {
 		}
 
 		// Marching
-		if walk.piece != {} && int(walk.piece.index) == index {
+		for walk in walks {
+			if walk.piece == {} || int(walk.piece.index) != index do continue
 			readiness -= walk.marched_road * ROAD_READINESS_PER_MOVEMENT
 			readiness -= walk.marched_off_road * READINESS_PER_MOVEMENT
 			readiness -= walk.overdrawn * OVERDRAW_READINESS

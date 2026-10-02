@@ -7,8 +7,7 @@ import "core:math"
 
 // Constants -----------------------------------------------------------------------------------------------------------
 
-// 2d6 is continuous: each die uniform on [0.5, 6.5), so fractional modifiers count in full. Targets sit half a pip
-// below the whole-dice ones to keep their odds.
+// 2d6 is continuous: each die uniform on [0.5, 6.5)
 
 // Numbers bonus = clamp(NUMBERS_SCALE × log2(own men / enemy men), 0, NUMBERS_MAX)
 NUMBERS_SCALE :: 1.5
@@ -18,8 +17,7 @@ NUMBERS_MAX :: 2
 MOBILITY_BONUS :: 2
 MOBILITY_TARGET :: 7.5
 
-// Onset: a margin below ONSET_TIE is a tie (no edge); this big routs the loser outright; otherwise the winner's
-// edge is margin / 2
+// Onset margin: below ONSET_TIE a tie, from ONSET_ROUT_MARGIN a rout, else the winner's edge is margin / 2
 ONSET_TIE :: 0.5
 ONSET_ROUT_MARGIN :: 7
 // A probing side pulls out after the onset when its edge is this far behind or worse
@@ -50,11 +48,11 @@ Temperament :: enum u8 {
 	Cunning,
 }
 
-// Attacks when own strength − enemy strength ≥ this
-TEMPERAMENT_ATTACK_THRESHOLD := [Temperament]f32 {
-	.Bold     = -1,
+// Attacks when own strength − enemy strength + initiative ≥ 0
+TEMPERAMENT_ATTACK_INITIATIVE := [Temperament]f32 {
+	.Bold     = 1,
 	.Steady   = 0,
-	.Cautious = 1,
+	.Cautious = -2,
 	.Cunning  = 0,
 }
 // As defender, tries to avoid battle when own strength − enemy strength < this (−inf: never)
@@ -81,12 +79,25 @@ TEMPERAMENT_BREAK_OFF_AT := [Temperament]f32 {
 	.Cautious = -2,
 	.Cunning  = -2,
 }
-// The winner pursues when the outcome's severity is at least this
+// Least severity at which the winner advances, and pursues (4: never)
+TEMPERAMENT_ADVANCE_FROM := [Temperament]int {
+	.Bold     = 0,
+	.Steady   = 1,
+	.Cautious = 3,
+	.Cunning  = 0,
+}
 TEMPERAMENT_PURSUE_FROM := [Temperament]int {
-	.Bold     = 1,
+	.Bold     = 2,
 	.Steady   = 3,
 	.Cautious = 4,
 	.Cunning  = 2,
+}
+// Movement points a winner marches beyond its budget to follow
+TEMPERAMENT_FOLLOW_OVERDRAW := [Temperament]f32 {
+	.Bold     = 0,
+	.Steady   = 0,
+	.Cautious = 0,
+	.Cunning  = 0,
 }
 
 // Postures -----------------------------------------------------------------------------------------------------------
@@ -135,7 +146,7 @@ Battle_Outcome :: enum u8 {
 	Rout,
 }
 
-// How bad for the loser: pursuit needs at least 1
+// How bad for the loser
 OUTCOME_SEVERITY := [Battle_Outcome]int {
 	.Avoided      = 0,
 	.Stalemate    = 0,
@@ -166,9 +177,21 @@ OUTCOME_DECIDED := bit_set[Battle_Outcome] {
 	.Heavy_Defeat,
 	.Rout,
 }
+// The loser falls back and the winner may advance (Avoided: the attacker is the winner)
+OUTCOME_RETREATS := bit_set[Battle_Outcome] {
+	.Avoided,
+	.Probed,
+	.Withdrew,
+	.Repulsed,
+	.Defeat,
+	.Heavy_Defeat,
+	.Rout,
+}
+// The winner may pursue
+OUTCOME_PURSUABLE := bit_set[Battle_Outcome]{.Heavy_Defeat, .Rout}
 
-// Losses by outcome. Men: share of the smaller side's men. Readiness: points. Stock: turns of supply. With no winner, the loser
-// row is the defender (Avoided) or both sides (Stalemate).
+// Losses by outcome. Men: share of the smaller side's men. Readiness: points. Stock: turns of supply. With no winner,
+// the loser row is the defender (Avoided) or both sides (Stalemate).
 OUTCOME_MEN_LOST := [Battle_Role_Result][Battle_Outcome]f32 {
 	.Loser = {
 		.Avoided = 0,
@@ -235,14 +258,14 @@ OUTCOME_STOCK_CAPTURED := [Battle_Outcome]f32 {
 	.Heavy_Defeat = 0.4,
 	.Rout         = 0.6,
 }
-// Extra losses for a loser caught by pursuit: share of its own men left
+// Loser caught by pursuit: share of its men left
 OUTCOME_PURSUIT_MEN := [Battle_Outcome]f32 {
 	.Avoided      = 0,
 	.Stalemate    = 0,
 	.Probed       = 0,
 	.Withdrew     = 0,
 	.Repulsed     = 0,
-	.Defeat       = 0.10,
+	.Defeat       = 0,
 	.Heavy_Defeat = 0.10,
 	.Rout         = 0.15,
 }
@@ -263,6 +286,15 @@ OTHER_ROLE := [Battle_Role]Battle_Role {
 Battle_Role_Result :: enum u8 {
 	Loser,
 	Winner,
+}
+
+// The winner's move once the loser falls back
+Follow :: enum u8 {
+	Stay,
+	// To where the loser stood
+	Advance,
+	// Advances, or on a catch follows the loser
+	Pursue,
 }
 
 // One side, copied in from its army
@@ -290,21 +322,24 @@ Battle :: struct {
 
 // What happened to one side. Changes are deltas, to apply to its army.
 Battle_Side_Result :: struct {
-	posture:    Posture,
-	choice:     Crisis_Choice,
-	edge:       f32,
-	men:        f32,
-	readiness:  f32,
-	stock:      f32,
+	posture:           Posture,
+	choice:            Crisis_Choice,
+	edge:              f32,
+	men:               f32,
+	readiness:         f32,
+	stock:             f32,
+	// Caught by pursuit: further losses
+	pursuit_men:       f32,
+	pursuit_readiness: f32,
 	// Failed the holding-together roll: the army is gone
-	dissolved:  bool,
+	dissolved:         bool,
 	// Falls back or retreats after the battle
-	falls_back: bool,
+	falls_back:        bool,
 	// Power going in
-	power:      f32,
-	onset:      Battle_Roll,
-	crisis:     Battle_Roll,
-	hold:       Battle_Roll,
+	power:             f32,
+	onset:             Battle_Roll,
+	crisis:            Battle_Roll,
+	hold:              Battle_Roll,
 }
 
 // A roll as it happened: 2d6, the total with modifiers, and what it had to reach (threshold rolls only)
@@ -317,12 +352,14 @@ Battle_Roll :: struct {
 
 Battle_Result :: struct {
 	outcome:       Battle_Outcome,
-	// Valid when outcome in OUTCOME_DECIDED
+	// Valid when outcome in OUTCOME_RETREATS
 	winner:        Battle_Role,
 	sides:         [Battle_Role]Battle_Side_Result,
 	onset_margin:  f32,
 	crisis_margin: f32,
-	pursued:       bool,
+	follow:        Follow,
+	// The pursuit caught the loser
+	caught:        bool,
 	// The defender's attempt to get away, and the winner's chase
 	avoid:         Battle_Roll,
 	pursuit:       Battle_Roll,
@@ -510,7 +547,7 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			out := &result.sides[role]
 			out.men = -engaged * OUTCOME_MEN_LOST[row][outcome]
 			out.readiness = OUTCOME_READINESS[row][outcome]
-			out.falls_back = as_loser[role] && outcome != .Stalemate
+			out.falls_back = as_loser[role] && outcome in OUTCOME_RETREATS
 		}
 		// Supply: the loser loses some; the winner captures a share, converted to its own men's turns
 		beaten := battle.sides[loser]
@@ -523,19 +560,25 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		}
 	}
 
-	// Step: Pursuit
-	if outcome := result.outcome; outcome in OUTCOME_DECIDED {
+	// Step: Follow
+	{
+		outcome := result.outcome
+		can_advance := outcome in OUTCOME_RETREATS
+		can_pursue := outcome in OUTCOME_PURSUABLE
 		victor := battle.sides[result.winner]
 		beaten := battle.sides[loser]
-		if OUTCOME_SEVERITY[outcome] >= TEMPERAMENT_PURSUE_FROM[victor.temperament] {
+		severity := OUTCOME_SEVERITY[outcome]
+		if can_advance && severity >= TEMPERAMENT_ADVANCE_FROM[victor.temperament] do result.follow = .Advance
+		if can_pursue && severity >= TEMPERAMENT_PURSUE_FROM[victor.temperament] do result.follow = .Pursue
+		if result.follow == .Pursue {
 			dice := roll_2d6(&rng)
 			catch := dice + MOBILITY_BONUS * (victor.mobility - beaten.mobility)
 			result.pursuit = {true, dice, catch, MOBILITY_TARGET}
 			if catch >= MOBILITY_TARGET {
-				result.pursued = true
-				result.sides[loser].men -=
-					(beaten.men + result.sides[loser].men) * OUTCOME_PURSUIT_MEN[outcome]
-				result.sides[loser].readiness += PURSUIT_READINESS
+				result.caught = true
+				out := &result.sides[loser]
+				out.pursuit_men = -(beaten.men + out.men) * OUTCOME_PURSUIT_MEN[outcome]
+				out.pursuit_readiness = PURSUIT_READINESS
 			}
 		}
 	}
@@ -543,8 +586,8 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	// Step: Holding together
 	for side, role in battle.sides {
 		out := &result.sides[role]
-		men := side.men + out.men
-		readiness := clamp(side.readiness + out.readiness, 0, 100)
+		men := side.men + out.men + out.pursuit_men
+		readiness := clamp(side.readiness + out.readiness + out.pursuit_readiness, 0, 100)
 		men_percent: f32 = side.men_max > 0 ? 100 * men / side.men_max : 100
 		if readiness >= HOLD_READINESS && men_percent >= HOLD_MEN do continue
 		penalty :=

@@ -202,7 +202,7 @@ Step_Input :: struct {
 // Ignored unless the open interaction takes it
 Answer :: enum u8 {
 	None,
-	// Advances a battle: fought, falling back, pursuit, then closing. Ignored while something walks.
+	// Advances a battle. Ignored while something walks.
 	Next,
 	// Only a conquerable town
 	Conquer,

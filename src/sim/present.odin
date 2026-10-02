@@ -273,8 +273,7 @@ world_present :: proc(
 		append(&out.cards, card)
 	}
 
-	// Battle: the attacker's side on the left, the defender's on the right. Announced with both sides as they stand,
-	// then the result.
+	// Battle: attacker's side left, defender's right
 	if open.actor != {} && open.stage != .Meet_Town {
 		result := open.result
 		roles := [Battle_Role]Piece_Id {
@@ -292,6 +291,10 @@ world_present :: proc(
 		#partial switch open.stage {
 		case .Announce:
 			card.title = fmt.tprintf("%s attacks %s", names[.Attacker], names[.Defender])
+		case .Refused:
+			card.title = fmt.tprintf("%s won't attack %s", names[.Attacker], names[.Defender])
+			attacked := WORLD.piece_turns[open.actor.index].attacked
+			append(&card.lines, attacked ? "It has already attacked this turn." : "Its commander judges the odds too poor.")
 		case .Report:
 			card.title = "Battle report"
 			a, d := result.sides[.Attacker], result.sides[.Defender]
@@ -387,7 +390,7 @@ world_present :: proc(
 
 			// Pursuit and holding together
 			if roll := result.pursuit; roll.rolled {
-				caught := result.pursued ? "catches them" : "they get away"
+				caught := result.caught ? "catches them" : "they get away"
 				append(
 					lines,
 					fmt.tprintf(
@@ -410,14 +413,23 @@ world_present :: proc(
 		case .Outcome:
 			card.title = fmt.tprintf("Battle: %s", OUTCOME_TITLES[result.outcome])
 		case .Fall_Back:
-			card.title = fmt.tprintf("%s falls back", loser)
-		case .Pursuit:
-			card.title = fmt.tprintf("%s pursues", winner)
+			switch result.follow {
+			case .Stay:
+				card.title = fmt.tprintf("%s falls back", loser)
+			case .Advance:
+				card.title = fmt.tprintf("%s falls back; %s advances", loser, winner)
+			case .Pursue:
+				if result.caught {
+					card.title = fmt.tprintf("%s pursues and catches %s", winner, loser)
+				} else {
+					card.title = fmt.tprintf("%s pursues; %s gets away", winner, loser)
+				}
+			}
 		}
 		if open.stage != .Report do for role in Battle_Role {
 			column := role == .Attacker ? &card.fields : &card.stats
 			append(column, Field{label = ROLE_TITLES[role], value = piece_title(roles[role])})
-			if open.stage == .Announce {
+			if open.stage == .Announce || open.stage == .Refused {
 				side := open.battle.sides[role]
 				other := open.battle.sides[OTHER_ROLE[role]]
 				append(column, Field{label = "Commander", value = fmt.tprintf("%v", side.temperament)})
@@ -428,6 +440,13 @@ world_present :: proc(
 				continue
 			}
 			side := result.sides[role]
+			// The chase's losses alone
+			if open.stage == .Fall_Back {
+				if !result.caught || role == result.winner do continue
+				append(column, Field{label = "Men", value = util.format_compact(f64(side.pursuit_men))})
+				append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.pursuit_readiness)})
+				continue
+			}
 			append(column, Field{label = "Posture", value = fmt.tprintf("%v", side.posture)})
 			append(column, Field{label = "Men", value = util.format_compact(f64(side.men))})
 			append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.readiness)})
