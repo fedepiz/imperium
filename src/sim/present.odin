@@ -6,15 +6,37 @@ import "core:math"
 
 import "../span"
 
-// Area slots, in drawing order, and looks for game's area palette
+// Area slots, in drawing order
 REACH_AREA :: 0
 FRIEND_AREA :: 1
 ZONE_AREA :: 2
+// Indices into the game's area palette
 REACH_LOOK :: 1
 ZONE_LOOK :: 2
-// Reach of a piece the player does not control
 OTHER_REACH_LOOK :: 3
 FRIEND_LOOK :: 4
+
+// Regions with no owner, and all regions when Muted
+@(private = "file")
+REGION_UNHELD_COLOR :: [4]f32{0.6, 0.6, 0.6, 1}
+
+// Golden ratio, so hues of nearby ids stay apart
+@(private = "file")
+REGION_HUE_STEP :: 0.618034
+@(private = "file")
+REGION_SATURATION :: 0.55
+@(private = "file")
+REGION_VALUE :: 0.75
+
+@(private = "file", rodata)
+ICON_TITLES := [Icon]string {
+	.Village    = "Village",
+	.Town       = "Town",
+	.City       = "City",
+	.Large_City = "Large City",
+	.Army       = "Army",
+	.Fleet      = "Fleet",
+}
 
 world_present :: proc(
 	focus: Piece_Id,
@@ -23,11 +45,9 @@ world_present :: proc(
 	out: ^Scene,
 ) {
 	mov := &WORLD.movement
-	movement_flood(mov, focus)
-	// Whether the turn can end, which the next step's End_Turn goes by
-	WORLD.turn_endable = mov.subject == {} && WORLD.interaction.actor == {}
+	ordering := ordering()
 
-	// The ground, taken up again only when it changed
+	// Ground (only when the atlas changed)
 	if out.ground_revision != WORLD.atlas.revision {
 		out.ground_revision = WORLD.atlas.revision
 		for cell, i in WORLD.atlas.terrain {
@@ -45,7 +65,7 @@ world_present :: proc(
 		}
 	}
 
-	// Every piece, the focus focused, and those that take orders controlled
+	// Pawns
 	clear(&out.pawns)
 	for piece, index in WORLD.pieces {
 		if !piece_alive(piece) do continue
@@ -57,11 +77,11 @@ world_present :: proc(
 			label   = string(WORLD.piece_names[index][:]),
 		}
 		if id == focus do pawn.flags += {.Focused}
-		if WORLD.ordering != {} && piece.owner == WORLD.ordering do pawn.flags += {.Controlled}
+		if ordering != {} && piece.owner == ordering do pawn.flags += {.Controlled}
 		append(&out.pawns, pawn)
 	}
 
-	// The way the walking piece has still to go, from where it stands
+	// Walk arrow
 	clear(&out.arrows)
 	clear(&out.arrow_points)
 	if walker := piece_get(mov.subject); walker != nil {
@@ -71,12 +91,10 @@ world_present :: proc(
 		append(&out.arrows, span.from_range(begin, len(out.arrow_points)))
 	}
 
-	// Where the focus can walk, unless it is walking: the reach as cells, rebuilt when the flood changes, and friends'
-	// contacts and enemies' zones as circles over it
+	// Reach and zones of the focus (hidden while it walks)
 	flood := &mov.flood
 	shown := mov.flood_subject != {} && mov.flood_subject != mov.subject
-	// The flood's key while shown, 0 while not: the revision of the reach and of the circles over it, which the flood
-	// is gathered with
+	// Flood key doubles as the areas' revision
 	revision := shown ? mov.flood_key : 0
 	reach := &out.areas[REACH_AREA]
 	if reach.revision != revision {
@@ -85,8 +103,7 @@ world_present :: proc(
 		if shown do for cost, i in flood.cost do reach.cells[i] = cost != math.INF_F32
 	}
 	reach.look = OTHER_REACH_LOOK
-	if piece := piece_get(focus);
-	   piece != nil && WORLD.ordering != {} && piece.owner == WORLD.ordering {
+	if piece := piece_get(focus); piece != nil && ordering != {} && piece.owner == ordering {
 		reach.look = REACH_LOOK
 	}
 	clear(&out.circles)
@@ -102,8 +119,7 @@ world_present :: proc(
 		area.circles = span.from_range(begin, len(out.circles))
 	}
 
-	// Every region, coloured as the mode has it, the pointed one highlighted unless the reach is shown or the mode is
-	// muted
+	// Regions
 	clear(&out.regions)
 	for &name, index in WORLD.region_names {
 		id := Region_Id(index + 1)
@@ -126,9 +142,7 @@ world_present :: proc(
 		)
 	}
 
-	// The turn being played, and the faction playing it, with ending its part; when there is a focus, its picture and
-	// title over what it is; and when an interaction is open, the met piece's picture and title over who met it and
-	// whose it is, with what can be done
+	// Cards
 	clear(&out.cards)
 	status := Card {
 		place = .Status,
@@ -138,7 +152,7 @@ world_present :: proc(
 	append(&status.fields, Field{"Playing", player != nil ? faction_name(WORLD.player) : "None"})
 	append(
 		&status.actions,
-		Action{label = "End turn", command = End_Turn{}, enabled = WORLD.turn_endable},
+		Action{label = "End turn", ask = .End_Turn, enabled = turn_endable()},
 	)
 	append(&out.cards, status)
 	if piece := piece_get(focus); piece != nil {
@@ -155,10 +169,10 @@ world_present :: proc(
 			append(&card.fields, Field{"General", string(WORLD.character_names[piece.general.index][:])})
 		}
 		if piece.movement_domain != nil {
-			budget := fmt.tprintf("%.0f of %.0f", piece.movement_budget, piece.movement_per_turn)
+			budget := fmt.tprintf("%.0f of %.0f", movement_budget(piece^), piece.movement_per_turn)
 			append(&card.fields, Field{"Movement", budget})
 		}
-		if army := piece.army; army.strength_max > 0 {
+		if army := WORLD.armies[focus.index]; army.active {
 			strength := fmt.tprintf("%d/%d", army.strength_current, army.strength_max)
 			append(&card.fields, Field{"Strength", strength})
 			append(&card.fields, Field{"Proficiency", fmt.tprintf("%.0f%%", army.proficiency)})
@@ -178,40 +192,25 @@ world_present :: proc(
 		append(&card.fields, Field{"Faction", faction != nil ? faction_name(met.owner) : "None"})
 		append(
 			&card.actions,
-			Action{label = "Conquer", command = Conquer{}, enabled = open.conquerable},
+			Action{label = "Conquer", ask = .Conquer, enabled = open.conquerable},
 		)
 		append(
 			&card.actions,
-			Action{label = "Back", command = Leave_Interaction{}, enabled = true},
+			Action{label = "Back", ask = .Leave_Interaction, enabled = true},
 		)
 		append(&out.cards, card)
 	}
 
-	// Take cached slices
+	// Caches
 	out.caches = {}
 	pathfind_cache_get(&out.caches[.Pathfind_Land], .Land)
 	pathfind_cache_get(&out.caches[.Pathfind_Sea], .Sea)
 }
 
-// The colour of a region with no capital, or whose capital belongs to no faction, and of every region when muted
-@(private = "file")
-REGION_UNHELD_COLOR :: [4]f32{0.6, 0.6, 0.6, 1}
-
-// How much each region's identity hue turns from the one before: the golden ratio of a turn, so hues of nearby ids stay
-// apart
-@(private = "file")
-REGION_HUE_STEP :: 0.618034
-// How saturated and how light identity colours are: muted pigments, light enough to tint the map
-@(private = "file")
-REGION_SATURATION :: 0.55
-@(private = "file")
-REGION_VALUE :: 0.75
-
-// A region's own colour, apart from its neighbours'
 @(private = "file")
 region_identity_color :: proc(id: Region_Id) -> [4]f32 {
 	hue := math.mod(f32(id) * REGION_HUE_STEP, 1) * 6
-	// Each channel's distance round the hue circle from where it is strongest, as HSV has it
+	// HSV to RGB
 	channel :: proc(hue, offset: f32) -> f32 {
 		k := math.mod(offset + hue, 6)
 		return REGION_VALUE - REGION_VALUE * REGION_SATURATION * max(0, min(k, 4 - k, 1))
@@ -219,26 +218,14 @@ region_identity_color :: proc(id: Region_Id) -> [4]f32 {
 	return {channel(hue, 5), channel(hue, 3), channel(hue, 1), 1}
 }
 
-// A living piece's title on a card: its name, or what it is when it has none, as a view into the world
+// Name, or icon title if unnamed. Piece must be alive.
 @(private = "file")
 piece_title :: proc(id: Piece_Id) -> string {
 	name := WORLD.piece_names[id.index][:]
 	return len(name) > 0 ? string(name) : ICON_TITLES[WORLD.pieces[id.index].icon]
 }
 
-// What each icon shows, as the cards call it. Words for the player, so they belong with the cards' other words; they
-// leave with them once the game writes the cards.
-@(private = "file", rodata)
-ICON_TITLES := [Icon]string {
-	.Village    = "Village",
-	.Town       = "Town",
-	.City       = "City",
-	.Large_City = "Large City",
-	.Army       = "Army",
-	.Fleet      = "Fleet",
-}
-
-// The name of a living faction, as a view into the world
+// Faction must be alive
 @(private = "file")
 faction_name :: proc(id: Faction_Id) -> string {
 	return string(WORLD.faction_names[id.index][:])

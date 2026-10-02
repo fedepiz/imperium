@@ -2,17 +2,15 @@ package tabula
 
 import "core:strconv"
 
-// Text made of rows, key = value, one after another. A value is a number, a word, a "quoted string", an object of rows
-// in { }, or a list of values in [ ] with commas between them. A key is a word, and can repeat. A document is an object
-// with its braces left out. # starts a comment, to the end of the line.
+// Format: rows of `key = value`. Value: number, word, "string", { rows }, or [a, b, ...]. Keys can repeat.
+// A document is an object without braces. # comments to end of line.
 
 Row_Flag :: enum {
 	Has_Text,
 	Has_Num,
 }
 
-// A key and its value. A word or a string is the text, without the quotes; a number is also the num. An object's rows
-// and a list's values, which have no key, are the children.
+// Words and strings set text (unquoted); numbers set num too. Object rows and list values are children.
 Row :: struct {
 	flags:    bit_set[Row_Flag],
 	key:      string,
@@ -21,7 +19,7 @@ Row :: struct {
 	children: []Row,
 }
 
-// Where a document stops being readable, and why. The line and column count from 1, the column in bytes.
+// Line and column from 1; column in bytes
 Error :: struct {
 	line:    int,
 	column:  int,
@@ -34,7 +32,7 @@ Parser :: struct {
 	pos:        int,
 	line:       int,
 	line_start: int,
-	// The rows of every object and list still open, innermost last
+	// Open objects/lists, innermost last
 	open:       [dynamic]Row,
 	// The rows of those closed, each one's together
 	closed:     []Row,

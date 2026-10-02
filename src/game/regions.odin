@@ -10,18 +10,12 @@ import "../sim"
 import "../tabula"
 
 // Regions -------------------------------------------------------------------------------------------------------------
-// Regions: the pieces the map is cut into, painted cell by cell, each in its own colour
-
-// The files the regions are read from, in a scenario's folder
 REGIONS_FILE :: "regions.txt"
 REGIONS_IMAGE :: "regions.png"
 
-// Reads the regions from their files in a scenario's folder: the region each cell lies in, and each region's name and
-// id-name, all in the temp allocator. regions.txt is tabula: a region row for each region, in the order of their ids
-// from 1, holding its id (a word other data names it by, which no other region has), its name and its
-// colour, [r, g, b] each from 1 to 255, which no other region has. regions.png is WORLD_WIDTH by WORLD_HEIGHT, each
-// cell painted in the colour of the region it lies in; a cell of any other colour, such as black, lies in none. If
-// either cannot be read, where and why is shown, and false is returned.
+// Results in the temp allocator. Prints the error and returns false on failure.
+// regions.txt (tabula): one `region = { id  name  colour = [r, g, b] }` per region, ids and colours unique.
+// regions.png: WORLD_WIDTH x WORLD_HEIGHT, each cell painted its region's colour; other colours = no region.
 regions_read :: proc(folder: string) -> (cells: []sim.Region_Id, names: []string, ids: []string, ok: bool) {
 	fail :: proc(path: string, n: int, message: string) -> bool {
 		fmt.eprintfln("%s, region %d: %s", path, n + 1, message)
@@ -89,7 +83,7 @@ regions_read :: proc(folder: string) -> (cells: []sim.Region_Id, names: []string
 		)
 		return
 	}
-	// Neighbouring cells are mostly of one colour, so the last colour's region is tried first.
+	// Neighbours usually share a colour, so try the last match first
 	cells = make([]sim.Region_Id, sim.CELLS_MAX, context.temp_allocator)
 	last_colour: [3]u8
 	last_region: sim.Region_Id

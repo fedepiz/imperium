@@ -1,16 +1,11 @@
-# The pieces the world starts with.
+# Starting factions and pieces. Distances in cells; enum values written as declared (Large_City, Land).
 #
-# A kind is what a piece is: its drawing, the domain it moves in and how far it walks a turn (none for a piece that
-# stays put), its contact's radius and the domains it reaches, and its body's radius, all in cells; and its traits,
-# what it can do to a piece of another faction it walks to and what can be done to it there: a piece that Captures
-# can conquer a Capturable one.
-#
-# Factions play in the order written, each with the colour what it holds is shown in, [r, g, b]. A piece belongs to
-# the faction it is under and is in its culture, unless it gives its own. Where it stands, at, is [x, y] in cells from
-# the top left corner of the world. A piece may be the capital of a region, capital_of, named by the region's id; a
-# region has at most one, and each settlement is the capital of its own. A piece may be led by a general, a character
-# of that name made for it. A piece may hold an army: its strength, the men it has at full complement, and its
-# proficiency, how good they are in general, in percent from 0 to 100. An army starts at full strength and fully ready.
+# kind: name, icon, moves (domain; omit = static), per_turn (movement points), contact (radius), contact_on (domains),
+#       body (radius), traits (Captures can conquer Capturable)
+# faction: name, culture, colour [r, g, b] 0..255. Factions play in file order. Then one piece row per piece:
+#   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
+#   region), general (creates a character), strength + proficiency 0..100 (optional; makes it an army, starting at
+#   full strength and 100% readiness)
 
 kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    traits = [Capturable] }
 kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  traits = [Capturable] }

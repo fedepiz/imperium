@@ -3,7 +3,7 @@ package game
 
 import "core:math"
 
-// A repeatable pseudo-random number in [0, 1) for a position and a stream.
+// Deterministic hash to [0, 1)
 random_xy :: proc(x, y: int, stream: u32) -> f32 {
 	h := u32(x) * 374761393 + u32(y) * 668265263 + stream * 2246822519
 	h = (h ~ (h >> 13)) * 1274126177
@@ -11,8 +11,7 @@ random_xy :: proc(x, y: int, stream: u32) -> f32 {
 	return f32(h >> 8) / f32(1 << 24)
 }
 
-// An index into weights, picked by roll, from 0 to 1, each with a chance in proportion to its weight. None is picked
-// where every weight is 0.
+// roll in 0..1. picked = false if all weights are 0.
 pick_weighted :: proc(weights: []f32, roll: f32) -> (index: int, picked: bool) {
 	total: f32
 	for weight in weights do total += weight
@@ -26,8 +25,7 @@ pick_weighted :: proc(weights: []f32, roll: f32) -> (index: int, picked: bool) {
 	return
 }
 
-// Euclidean distance from every cell of a grid, size across and down, to the nearest source cell, by the exact
-// transform of Felzenszwalb and Huttenlocher: a pass down each column, then along each row.
+// Exact Euclidean distance to the nearest source cell (Felzenszwalb-Huttenlocher), columns then rows
 distance_from :: proc(out: []f32, source: []bool, size: [2]int) {
 	assert(len(out) == size.x * size.y && len(source) == size.x * size.y)
 	FAR :: 1e20
@@ -54,8 +52,7 @@ distance_from :: proc(out: []f32, source: []bool, size: [2]int) {
 	}
 }
 
-// One-dimensional squared distance transform of f into out: the lower envelope of parabolas rooted at each sample.
-// parabolas and bounds are scratch, at least as long as f and one longer.
+// 1D squared distance transform (lower envelope of parabolas). Scratch: parabolas len(f), bounds len(f)+1.
 @(private = "file")
 distance_line :: proc(f, out: []f32, parabolas: []i32, bounds: []f32) {
 	v, z := parabolas, bounds
@@ -87,12 +84,11 @@ distance_line :: proc(f, out: []f32, parabolas: []i32, bounds: []f32) {
 	}
 }
 
-// A smooth step over a value, 0 at from and 1 at full; full below from makes it fall.
+// Smoothstep: 0 at from, 1 at full. full < from makes it decreasing.
 Ramp :: struct {
 	from, full: f32,
 }
 
-// 0 at from, 1 at full, smooth between; full below from makes it fall.
 ramp :: proc {
 	ramp_between,
 	ramp_over,
@@ -110,13 +106,12 @@ ramp_between :: proc(from, full, value: f32) -> f32 {
 	return value
 }
 
-// A byte as a fraction: 0 at 0, 1 at max(u8)
+// 0..255 to 0..1
 normalized :: proc(value: u8) -> f32 {
 	return f32(value) / f32(max(u8))
 }
 
-// The value of a grid, size across and down, at p, in cells: each cell's value at its middle, blended between them,
-// and held at the edges
+// Bilinear sample at p (in cells, values at cell centres), clamped at edges
 bilinear :: proc(values: []f32, size: [2]int, p: [2]f32) -> f32 {
 	q := p - 0.5
 	base := [2]int{int(math.floor(q.x)), int(math.floor(q.y))}

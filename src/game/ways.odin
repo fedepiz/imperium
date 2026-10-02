@@ -10,51 +10,44 @@ import "../span"
 import "../tabula"
 
 // Ways ----------------------------------------------------------------------------------------------------------------
-// Ways: rivers and roads. A scenario gives each as the cells it runs through; the line through their middles, smoothed,
-// is what the map draws it as, and the cells that line crosses are the way as the world knows it, so the two always
-// agree.
+// Rivers and roads. Loaded as cell lists, smoothed into lines; the sim's way cells are the cells the smoothed line
+// crosses, so map and sim always agree.
 
-// The most ways, and the most points of all their smoothed lines
 WAYS_MAX :: 1 << 12
 WAY_POINTS_MAX :: 1 << 17
 
-// The file each kind of way is read from, in a scenario's folder
 @(rodata)
 WAY_FILES := [sim.Way_Kind]string {
 	.River = "rivers.txt",
 	.Road  = "roads.txt",
 }
 
-// How each kind of way is smoothed from its points. Rivers bend in wide curves; roads run straight between their
-// points, their bends kept tight.
+// Rivers: wide curves. Roads: straight, tight bends.
 @(rodata)
 WAY_SMOOTHING := [sim.Way_Kind]Polyline_Smoothing {
 	.River = {cut_iter = 3, cut_ratio = 0.25},
 	.Road = {cut_iter = 2, cut_ratio = 0.25, cut_max = 1.5},
 }
 
-// A way: its kind, the id its cells are marked with, and its smoothed line, in WAYS.points
 Way :: struct {
 	kind:   sim.Way_Kind,
+	// Marked on its cells
 	id:     u16,
+	// Range of WAYS.points
 	points: span.Span,
 }
 
-// The ways of the scenario loaded
 WAYS: struct {
 	ways:   [dynamic; WAYS_MAX]Way,
 	points: [dynamic; WAY_POINTS_MAX][2]f32,
 }
 
-// A way's smoothed line
 way_line :: proc(way: Way) -> Polyline {
 	return {points = WAYS.points[way.points.begin:][:way.points.len]}
 }
 
-// Reads every kind of way from its file in a scenario's folder into WAYS, in place of what it held, and gives for each
-// kind the id of the way through each cell, 0 for none. The layers live in the temp allocator. A file is tabula: a
-// way row for each way, holding its id, from 1 up, and its points, a list of the cells it runs through, each [x, y]
-// from the top left corner of the world. If a file cannot be read, where and why is shown, and false is returned.
+// Replaces WAYS. layers: per kind, per cell way id (0 = none), in the temp allocator. Prints the error and returns
+// false on failure. File format (tabula): `way = { id = 1  points = [[x, y], ...] }`, cells from top left.
 ways_load :: proc(folder: string) -> (layers: [sim.Way_Kind][]u16, ok: bool) {
 	clear(&WAYS.ways)
 	clear(&WAYS.points)
@@ -65,7 +58,6 @@ ways_load :: proc(folder: string) -> (layers: [sim.Way_Kind][]u16, ok: bool) {
 	return layers, true
 }
 
-// Reads the ways of a kind from a file into WAYS, and marks the cells each crosses with its id in layer
 @(private = "file")
 ways_read :: proc(path: string, kind: sim.Way_Kind, layer: []u16) -> bool {
 	fail :: proc(path: string, way: int, message: string) -> bool {
@@ -111,8 +103,7 @@ ways_read :: proc(path: string, kind: sim.Way_Kind, layer: []u16) -> bool {
 	return true
 }
 
-// Marks with id every cell a line passes through, stepping from cell to cell across their sides. Cells off the world
-// are left alone.
+// Marks every cell the line passes through (grid traversal). Off-world cells are skipped.
 @(private = "file")
 way_mark :: proc(layer: []u16, points: [][2]f32, id: u16) {
 	mark :: proc(layer: []u16, cell: [2]int, id: u16) {
@@ -125,8 +116,7 @@ way_mark :: proc(layer: []u16, points: [][2]f32, id: u16) {
 		cell := [2]int{int(math.floor(a.x)), int(math.floor(a.y))}
 		last := [2]int{int(math.floor(b.x)), int(math.floor(b.y))}
 		step := [2]int{ab.x < 0 ? -1 : 1, ab.y < 0 ? -1 : 1}
-		// How far along the segment, from 0 at a to 1 at b, it next crosses a side of a cell along each axis, and how
-		// far apart along it those sides are
+		// Parameter (0 at a, 1 at b) of the next cell boundary per axis, and the step between boundaries
 		next := [2]f32{math.INF_F32, math.INF_F32}
 		apart := [2]f32{math.INF_F32, math.INF_F32}
 		for axis in 0 ..< 2 {
@@ -138,7 +128,7 @@ way_mark :: proc(layer: []u16, points: [][2]f32, id: u16) {
 		mark(layer, cell, id)
 		for cell != last {
 			axis := next.x < next.y ? 0 : 1
-			// Rounding can carry the last crossing past b.
+			// Rounding can overshoot b
 			if next[axis] > 1 do break
 			cell[axis] += step[axis]
 			next[axis] += apart[axis]

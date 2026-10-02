@@ -9,24 +9,9 @@ import "../sim"
 import "../tabula"
 
 // Pieces --------------------------------------------------------------------------------------------------------------
-// Pieces: the factions a scenario starts with, and the pieces each holds
-
-// The file the pieces are read from, in a scenario's folder
 PIECES_FILE :: "pieces.txt"
 
-// Reads the factions, characters and pieces from their file in a scenario's folder. They live in the temp allocator.
-// The file is tabula: first kind rows, each a kind of piece to be named by pieces below it, then faction rows, each
-// holding its pieces. A word for an enum value is written as it is declared, such as Large_City or Land. If the file
-// cannot be read, where and why is shown, and false is returned.
-//
-// kind: name, icon, moves (a domain, left out for a piece that stays put), per_turn, contact, contact_on (a list of
-// domains), body and traits (a list of traits, left out for none).
-// faction: name, culture, colour ([r, g, b], each from 0 to 255), and a piece row for each piece: kind, name (may be
-// left out), at ([x, y] in cells), culture (the faction's when left out), capital_of (the id of the region it is the
-// capital of, among region_ids; left out for none, and no region has two), general (the name of a character who
-// leads it, made for it; left out for none), and strength and proficiency (its army's men at full complement, and how
-// good they are in percent from 0 to 100; left out for a piece with no army). An army starts at full strength and
-// fully ready.
+// Results in the temp allocator. Prints the error and returns false on failure. File format: see pieces.txt.
 pieces_load :: proc(
 	folder: string,
 	region_ids: []string,
@@ -61,7 +46,7 @@ pieces_load :: proc(
 	faction_list := make([dynamic]sim.Scenario_Faction, context.temp_allocator)
 	piece_list := make([dynamic]sim.Scenario_Piece, context.temp_allocator)
 	character_list := make([dynamic]string, context.temp_allocator)
-	// Per region, whether a piece is its capital yet
+	// Per region: already has a capital
 	has_capital := make([]bool, len(region_ids), context.temp_allocator)
 	for row, n in root.children {
 		switch row.key {
@@ -165,6 +150,7 @@ pieces_load :: proc(
 						return nil, nil, nil, fail(path, row.key, n, "its piece's proficiency must be from 0 to 100")
 					}
 					piece.army = {
+						active           = true,
 						strength_current = int(strength),
 						strength_max     = int(strength),
 						proficiency      = proficiency,
@@ -181,7 +167,6 @@ pieces_load :: proc(
 	return faction_list[:], character_list[:], piece_list[:], true
 }
 
-// The value of an enum written as a word under the key, if there is one and it names a value
 @(private = "file")
 enum_get :: proc(row: tabula.Row, key: string, $T: typeid) -> (value: T, ok: bool) {
 	text := tabula.get_text(row, key) or_return

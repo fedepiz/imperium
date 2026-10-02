@@ -7,9 +7,36 @@ import sdl "vendor:sdl3"
 import "vendor:wgpu"
 import "vendor:wgpu/sdl3glue"
 
-// How many render lists can be drawn in one frame: each gets its own part of the instance buffer, as every upload
-// lands before any of the frame's drawing runs.
+// Each list gets its own slice of the instance buffer, since all uploads land before any drawing
 RENDER_LISTS_PER_FRAME :: 4
+
+// Blur sigma, in cells
+@(private = "file")
+HIGHLIGHT_SMOOTHING :: 1.5
+
+// Blur radius, in cells
+@(private = "file")
+HIGHLIGHT_BLUR_REACH :: 4
+
+// Margin recomputed around an area's cells, in cells
+@(private = "file")
+HIGHLIGHT_MARGIN :: HIGHLIGHT_BLUR_REACH + 2
+
+// Field clamp, in cells
+@(private = "file")
+HIGHLIGHT_FIELD_MAX :: 64
+
+// Min field on the area's own cells after blurring, so they stay covered
+@(private = "file")
+HIGHLIGHT_OWN_MIN :: 0.1
+
+// Line field value far from any line, in cells
+@(private = "file")
+LINE_FAR :: 1000
+
+// One channel per line kind
+@(private = "file")
+LINE_FIELD_FORMAT :: wgpu.TextureFormat.RGBA16Float
 
 // A texture the render list can draw from, bound with its sampler
 @(private = "file")
@@ -26,7 +53,7 @@ Texture :: struct {
 	view:    wgpu.TextureView,
 }
 
-// The map shader's uniforms, laid out as the shader's Terrain struct
+// Must match the shader's Terrain struct
 @(private = "file")
 Terrain_Uniforms :: struct {
 	grid, center, view_size:                        [2]f32,
@@ -50,9 +77,9 @@ Renderer :: struct {
 	window:                              ^sdl.Window,
 	// Whether presenting waits for the display's refresh
 	vsync:                               bool,
-	// Logical window dimensions, matching SDL mouse coordinates.
+	// Logical pixels, matching SDL mouse coordinates
 	view_size:                           [2]f32,
-	// Physical pixels per logical pixel; zero is taken as one.
+	// Physical pixels per logical pixel; 0 = 1
 	pixel_density:                       f32,
 	instance:                            wgpu.Instance,
 	surface:                             wgpu.Surface,
@@ -63,80 +90,69 @@ Renderer :: struct {
 	failed:                              bool,
 	surface_format:                      wgpu.TextureFormat,
 	surface_alpha:                       wgpu.CompositeAlphaMode,
-	// The size the surface is configured at, in physical pixels; zero until it is
+	// Physical pixels; 0 until configured
 	surface_size:                        [2]u32,
 	max_texture_size:                    int,
-	// The frame being drawn: its target, and one pass recording everything
+	// Current frame target and its single pass
 	frame_texture:                       wgpu.Texture,
 	frame_view:                          wgpu.TextureView,
 	frame_encoder:                       wgpu.CommandEncoder,
 	frame_pass:                          wgpu.RenderPassEncoder,
 	// Render lists drawn so far this frame
 	frame_lists:                         int,
-	// The render list pass: view size uniform, instances, and a bind group per texture
+	// Render list pass: view size uniform, instances, one bind group per texture
 	list_pipeline:                       wgpu.RenderPipeline,
 	list_view_layout, list_image_layout: wgpu.BindGroupLayout,
 	list_view_buffer, list_instances:    wgpu.Buffer,
 	list_view_group:                     wgpu.BindGroup,
 	linear_sampler:                      wgpu.Sampler,
 	white:                               Image,
-	// Slot zero is never registered; untextured batches use white.
+	// Slot 0 is unused; untextured batches bind white
 	images:                              [65536]Image,
 	// The map pass
 	terrain_pipeline:                    wgpu.RenderPipeline,
 	terrain_layout:                      wgpu.BindGroupLayout,
-	// Made again with the surface, as it reads the line field
+	// Recreated with the surface (reads the line field)
 	terrain_group:                       wgpu.BindGroup,
 	terrain_uniforms:                    wgpu.Buffer,
 	terrain_cells, terrain_coast:        Texture,
 	cover_cells, cover_palette:          Texture,
-	// The revisions the textures hold, once anything has been uploaded
+	// Uploaded revisions
 	terrain_revision, cover_revision:    u32,
 	terrain_uploaded, cover_uploaded:    bool,
-	// The coast converted to half floats for upload, as its texture holds it
+	// Coast as f16, for upload
 	coast_half:                          [RENDER_TERRAIN_CELLS]f16,
-	// Each layer of highlights, and the frame's circles of the areas, one texel each: center, radius, area
+	// Circles texel: center, radius, area
 	highlight_layers:                    [Render_Highlight_Layer]Highlight_Layer,
 	highlight_circles:                   Texture,
-	// The lines pass: a pipeline for each kind of line, drawing into its own channel of the field, and each kind's
-	// segments, with the revisions they hold once anything has been uploaded
+	// Lines pass: one pipeline per line kind, each writing its own channel of the line field
 	line_pipelines:                      [Render_Line_Kind]wgpu.RenderPipeline,
 	line_layout:                         wgpu.BindGroupLayout,
 	line_group:                          wgpu.BindGroup,
 	line_segments:                       [Render_Line_Kind]wgpu.Buffer,
 	line_revisions:                      [Render_Line_Kind]u32,
 	lines_uploaded:                      [Render_Line_Kind]bool,
-	// For each pixel of the frame, the distance to the nearest line of each kind, in cells, in a channel for each kind.
-	// Made again with the surface, at its size.
+	// Per pixel: distance in cells to the nearest line of each kind (one channel each). Recreated with the surface.
 	line_field:                          Texture,
 }
 
-// A layer of highlights as the map pass reads it: per cell and surface, the area of that surface whose field the cell
-// holds, and that field; and each area's look
+// Per cell and surface: which area's field the cell holds, and that field. Plus each area's look.
 @(private = "file")
 Highlight_Layer :: struct {
 	cells, field, palette: Texture,
-	// Per area, the revision the textures hold, and the bounds and surface its cells were taken up with
+	// Per area: uploaded revision, and the bounds and surface last uploaded
 	revisions:             [RENDER_HIGHLIGHT_AREAS]u32,
 	bounds:                [RENDER_HIGHLIGHT_AREAS]Render_Cell_Rect,
 	surfaces:              [RENDER_HIGHLIGHT_AREAS]Render_Highlight_Surface,
-	// What the cell textures hold, kept here to be uploaded a rectangle at a time
+	// CPU copy of the cell textures, uploaded by rectangle
 	owners:                [RENDER_TERRAIN_CELLS][Render_Highlight_Surface]u8,
 	fields:                [RENDER_TERRAIN_CELLS][Render_Highlight_Surface]f16,
 }
 
-// The binding's BlendOperation leaves out webgpu.h's Undefined, so each of its values is one below the native one, and
-// .Min is taken for ReverseSubtract. This is the native Min.
+// The binding's BlendOperation omits webgpu.h's Undefined, so its values are off by one (.Min is ReverseSubtract).
+// This is the native Min.
 @(private = "file")
 BLEND_MIN :: wgpu.BlendOperation(4)
-
-// The line field's distance where no line is near, in cells
-@(private = "file")
-LINE_FAR :: 1000
-
-// The line field's format: a channel for each kind of line
-@(private = "file")
-LINE_FIELD_FORMAT :: wgpu.TextureFormat.RGBA16Float
 
 #assert(len(Render_Line_Kind) <= 4, "the line field has a channel for each kind of line")
 
@@ -145,8 +161,7 @@ RENDER_BACKENDS ::
 	wgpu.InstanceBackendFlags{.Metal} when ODIN_OS ==
 	.Darwin else wgpu.InstanceBackendFlags{.Vulkan}
 
-// On macOS the window draws through a Metal layer, which the surface is made from; elsewhere the surface is made
-// from the native window handle.
+// macOS: surface from the window's Metal layer. Elsewhere: from the native window handle.
 render_window_flags :: proc() -> (sdl.WindowFlags, bool) {
 	when ODIN_OS == .Darwin {
 		return {.METAL}, true
@@ -172,7 +187,7 @@ render_init :: proc(renderer: ^Renderer, window: ^sdl.Window) -> bool {
 		return false
 	}
 
-	// Adapter and device arrive through callbacks, which run while the instance processes its events.
+	// Adapter and device callbacks run while the instance processes events
 	on_adapter :: proc "c" (
 		status: wgpu.RequestAdapterStatus,
 		adapter: wgpu.Adapter,
@@ -206,7 +221,7 @@ render_init :: proc(renderer: ^Renderer, window: ^sdl.Window) -> bool {
 	for !adapter_done do wgpu.InstanceProcessEvents(renderer.instance)
 	if renderer.adapter == nil do return false
 
-	// Ask for what the adapter can do rather than the portable defaults, so the atlas can be as large as the GPU allows.
+	// Request the adapter's limits (not portable defaults) so the atlas can be as large as possible
 	limits, limits_status := wgpu.AdapterGetLimits(renderer.adapter)
 	if limits_status != .Success {
 		fmt.eprintln("wgpu adapter limits query failed")
@@ -256,7 +271,7 @@ render_init :: proc(renderer: ^Renderer, window: ^sdl.Window) -> bool {
 	renderer.queue = wgpu.DeviceGetQueue(renderer.device)
 	renderer.max_texture_size = int(limits.maxTextureDimension2D)
 
-	// Colors are written as they are, with no conversion to sRGB, so a plain format.
+	// No sRGB conversion
 	capabilities, capabilities_status := wgpu.SurfaceGetCapabilities(
 		renderer.surface,
 		renderer.adapter,
@@ -277,7 +292,7 @@ render_init :: proc(renderer: ^Renderer, window: ^sdl.Window) -> bool {
 	for mode in capabilities.alphaModes[:capabilities.alphaModeCount] {
 		if mode == .Opaque do renderer.surface_alpha = mode
 	}
-	// Fifo waits for the display's refresh, and every surface supports it.
+	// Fifo = vsync, supported everywhere
 	renderer.vsync = true
 
 	renderer.linear_sampler = wgpu.DeviceCreateSampler(
@@ -348,8 +363,7 @@ render_max_texture_size :: proc(renderer: ^Renderer) -> int {
 	return renderer.max_texture_size
 }
 
-// Takes the next image of the window and starts the frame's pass, cleared. False when there is nothing to draw to: the
-// window is hidden or empty, or the surface had to be configured again.
+// Acquires the next surface image and begins the cleared pass. False if hidden, zero-sized, or reconfigured.
 render_frame_begin :: proc(renderer: ^Renderer, clear_color: [4]f32) -> bool {
 	size, ok := window_pixels(renderer.window)
 	if !ok {
@@ -386,7 +400,7 @@ render_frame_begin :: proc(renderer: ^Renderer, clear_color: [4]f32) -> bool {
 	return true
 }
 
-// Begins a pass of the frame's commands drawing into view: cleared to clear_color, or keeping what it holds.
+// Clears to clear_color, or loads existing contents
 @(private = "file")
 pass_begin :: proc(
 	renderer: ^Renderer,
@@ -414,7 +428,7 @@ pass_begin :: proc(
 	)
 }
 
-// Submits the frame and presents it; presenting waits for the display's refresh.
+// Submits and presents (waits for vsync)
 render_frame_end :: proc(renderer: ^Renderer) {
 	wgpu.RenderPassEncoderEnd(renderer.frame_pass)
 	wgpu.RenderPassEncoderRelease(renderer.frame_pass)
@@ -447,7 +461,7 @@ surface_configure :: proc(renderer: ^Renderer, size: [2]u32) {
 	line_field_create(renderer, size)
 }
 
-// Makes the line field at size, and the map pass's bind group, which reads it.
+// Recreates the line field and the map bind group that reads it
 @(private = "file")
 line_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
 	if renderer.terrain_group != nil do wgpu.BindGroupRelease(renderer.terrain_group)
@@ -494,8 +508,7 @@ line_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
 	)
 }
 
-// Draws the map over the whole view. Cells, coast, cover and each kind of line are uploaded again only when their
-// revision has changed. The lines are drawn first, in a pass of their own, into the line field the map reads.
+// Uploads changed data (by revision), draws lines into the line field in their own pass, then the map.
 render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	if renderer.view_size.x <= 0 || renderer.view_size.y <= 0 || terrain.zoom <= 0 {
 		return
@@ -555,7 +568,7 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 
 	for &highlights, kind in terrain.highlights {
 		layer := &renderer.highlight_layers[kind]
-		// Each area whose cells changed, taken up again around where it was and is
+		// Re-upload changed areas, around old and new positions
 		for &area, index in highlights.areas {
 			if layer.revisions[index] == area.revision do continue
 			rect := highlight_take_up(layer, terrain, &highlights, u8(index))
@@ -564,7 +577,7 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 			layer.revisions[index] = area.revision
 			layer.bounds[index] = area.bounds
 		}
-		// The looks, every frame, as they are small: color and border in row 0, thickness, inside and surface in row 1
+		// Looks, every frame. Row 0: color, border. Row 1: thickness, inside, surface.
 		palette: [2][RENDER_HIGHLIGHT_AREAS][4]f32
 		for area, i in highlights.areas {
 			palette[0][i] = {area.color.r, area.color.g, area.color.b, area.border}
@@ -581,7 +594,7 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	}
 	highlights := &terrain.highlights[.Areas]
 
-	// The circles, every frame
+	// Circles, every frame
 	if len(highlights.circles) > 0 {
 		circles: [RENDER_HIGHLIGHT_CIRCLES_MAX][4]f32
 		for circle, i in highlights.circles {
@@ -637,7 +650,7 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		size_of(uniforms),
 	)
 
-	// The frame's pass ends for the lines' own, and begins again keeping what it holds.
+	// Interrupt the frame pass for the lines pass, then resume (load, not clear)
 	wgpu.RenderPassEncoderEnd(renderer.frame_pass)
 	wgpu.RenderPassEncoderRelease(renderer.frame_pass)
 	lines_pass := pass_begin(
@@ -705,7 +718,7 @@ render_list :: proc(renderer: ^Renderer, list: ^Render_List) {
 	)
 
 	for first := 0; first < RENDER_MAX_INSTANCES; {
-		// Untextured instances sample nothing, so they join a batch of any texture; the first textured one picks it.
+		// Untextured instances join any batch; the first textured one sets its texture
 		batch_texture: Texture_Id
 		end := first
 		for end < RENDER_MAX_INSTANCES {
@@ -783,7 +796,7 @@ texture_create :: proc(
 	return
 }
 
-// Uploads a whole terrain-sized texture, texel_size bytes per cell.
+// texel_size bytes per cell
 @(private = "file")
 texture_write :: proc(renderer: ^Renderer, texture: wgpu.Texture, data: rawptr, texel_size: u32) {
 	wgpu.QueueWriteTexture(
@@ -796,8 +809,7 @@ texture_write :: proc(renderer: ^Renderer, texture: wgpu.Texture, data: rawptr, 
 	)
 }
 
-// Uploads a rectangle of a terrain-sized texture from terrain-sized data, texel_size bytes per cell. An empty rectangle
-// uploads nothing.
+// texel_size bytes per cell. Empty rect = no-op.
 @(private = "file")
 texture_write_rect :: proc(
 	renderer: ^Renderer,
@@ -822,24 +834,8 @@ texture_write_rect :: proc(
 	)
 }
 
-// How far, in cells, an area's field is smoothed over, as the standard deviation of the blur
-@(private = "file")
-HIGHLIGHT_SMOOTHING :: 1.5
-// The blur's reach either side, in cells
-@(private = "file")
-HIGHLIGHT_BLUR_REACH :: 4
-// How far around an area's cells its field is taken up, in cells: past the blur's reach, and the cell beyond
-@(private = "file")
-HIGHLIGHT_MARGIN :: HIGHLIGHT_BLUR_REACH + 2
-// The farthest in or out an area's field goes, in cells
-@(private = "file")
-HIGHLIGHT_FIELD_MAX :: 64
-// The least an area's field is on its own cells after blurring, so each of its cells stays covered
-@(private = "file")
-HIGHLIGHT_OWN_MIN :: 0.1
-
-// Takes up a highlight area's cells, around where they were and where they are, for its surface, and for the surface it
-// was taken up for before if that was the other. Returns the rectangle of the terrain gone over.
+// Recomputes an area around its old and new cells, for its surface (and the old one if it changed).
+// Returns the rect touched.
 @(private = "file")
 highlight_take_up :: proc(
 	layer: ^Highlight_Layer,
@@ -859,13 +855,10 @@ highlight_take_up :: proc(
 	return cell_rect_clip(around)
 }
 
-// Takes up a highlight area over a rectangle for the areas of a surface, or takes it away from them unless present. The
-// area's field is its signed distance, in cells, from the middles of its cells, less half a cell, positive inside; cells
-// of the other surface are neither in it nor out of it, and are as far in as they are nearer its cells than the cells
-// out of it, halved. The field is then blurred, so its edge runs smooth across the steps of the cells, and kept at
-// least HIGHLIGHT_OWN_MIN on the area's own cells. Each cell of the area holds the area's field; each other cell holds
-// the field of whichever area of the surface it is least outside, unless it is in another area of the surface. Cells
-// off the terrain count as out.
+// Computes an area's field over rect for one surface (or removes it if !present).
+// Field = signed distance from cell centres minus half a cell, + inside. Cells of the other surface count halfway.
+// Blurred to smooth cell steps, and kept >= HIGHLIGHT_OWN_MIN on own cells. Non-area cells keep the field of the
+// area they're least outside of. Off-terrain = outside.
 @(private = "file")
 highlight_take_up_on :: proc(
 	layer: ^Highlight_Layer,
@@ -888,7 +881,7 @@ highlight_take_up_on :: proc(
 		return
 	}
 
-	// The cell is on the terrain and of the surface; land is surface 0 in the terrain's cells
+	// On terrain and of this surface (land = 0)
 	on_surface :: proc(terrain: ^Render_Terrain, surface: Render_Highlight_Surface, cell: [2]i32) -> bool {
 		if cell.x < 0 || cell.y < 0 || cell.x >= RENDER_TERRAIN_WIDTH || cell.y >= RENDER_TERRAIN_HEIGHT do return false
 		land := terrain.cells[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)].r == 0
@@ -908,7 +901,7 @@ highlight_take_up_on :: proc(
 		return highlights.cells[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)] == area
 	}
 
-	// Squared distances from each cell to the nearest out of the area, and to the nearest in it, exactly
+	// Exact squared distances to nearest outside / inside cell
 	FAR :: 1e12
 	origin := around.min
 	size := [2]int{int(around.max.x - around.min.x), int(around.max.y - around.min.y)}
@@ -942,7 +935,7 @@ highlight_take_up_on :: proc(
 		index := int(y) * RENDER_TERRAIN_WIDTH + int(x)
 		value := field[int(y - origin.y) * size.x + int(x - origin.x)]
 		if in_area(terrain, highlights, area, surface, {x, y}) do value = max(value, HIGHLIGHT_OWN_MIN)
-		// Another area's cell holds that area's field, which its own take up writes
+		// Cells of other areas are written by those areas' own updates
 		member := highlights.cells[index]
 		if member != 0 && member != area && highlights.areas[member].surface == surface {
 			if on_surface(terrain, surface, {x, y}) do continue
@@ -956,8 +949,7 @@ highlight_take_up_on :: proc(
 	}
 }
 
-// Replaces squared distances over a grid of a size, 0 at the cells measured to, with the squared distance from each
-// cell to the nearest of those, a line at a time along each axis
+// In place: 0 at sources -> squared distance to nearest source. Separable.
 @(private = "file")
 distance_transform_2d :: proc(squared: []f64, size: [2]int) {
 	longest := max(size.x, size.y)
@@ -974,8 +966,7 @@ distance_transform_2d :: proc(squared: []f64, size: [2]int) {
 	}
 }
 
-// Blurs values over a grid of a size, by HIGHLIGHT_SMOOTHING, a line at a time along each axis. Past the grid's edges
-// the edge values go on.
+// Separable Gaussian blur (HIGHLIGHT_SMOOTHING), edges extended
 @(private = "file")
 blur :: proc(values: []f32, size: [2]int) {
 	weights: [2 * HIGHLIGHT_BLUR_REACH + 1]f32
@@ -986,7 +977,7 @@ blur :: proc(values: []f32, size: [2]int) {
 		total += weight
 	}
 	for &weight in weights do weight /= total
-	// Where in values the value at a place along a line of an axis is, the line being across others of it
+	// Index of position i along line `line` of axis
 	at :: proc(axis, along, across: int, size: [2]int) -> int {
 		return axis == 0 ? across * size.x + along : along * size.x + across
 	}
@@ -1006,9 +997,8 @@ blur :: proc(values: []f32, size: [2]int) {
 	}
 }
 
-// Replaces each squared distance f[q] along a line with the least of f[p] + (q - p)^2 over the line: the squared
-// distance to the nearest point, with f the squared distance already along the other axis. The lower envelope of
-// parabolas, as Felzenszwalb and Huttenlocher give it; parabolas and bounds are scratch, the length of f and one more.
+// 1D squared distance transform (Felzenszwalb-Huttenlocher lower envelope). Scratch: parabolas len(f),
+// bounds len(f)+1.
 @(private = "file")
 distance_transform :: proc(f: []f64, parabolas: []int, bounds: []f64) {
 	n := len(f)
@@ -1017,13 +1007,13 @@ distance_transform :: proc(f: []f64, parabolas: []int, bounds: []f64) {
 	k := 0
 	parabolas[0] = 0
 	bounds[0], bounds[1] = math.inf_f64(-1), math.inf_f64(1)
-	// Where the parabola from q overtakes the one from p
+	// Intersection of parabolas q and p
 	crossing :: proc(f: []f64, q, p: int) -> f64 {
 		return ((f[q] + f64(q * q)) - (f[p] + f64(p * p))) / f64(2 * q - 2 * p)
 	}
 	for q in 1 ..< n {
 		s := crossing(f, q, parabolas[k])
-		// bounds[0] is -infinity, so this stops at the first parabola at the latest
+		// bounds[0] = -inf, so this terminates
 		for s <= bounds[k] {
 			k -= 1
 			s = crossing(f, q, parabolas[k])
@@ -1049,7 +1039,7 @@ shader_create :: proc(renderer: ^Renderer, source: string) -> wgpu.ShaderModule 
 	)
 }
 
-// Makes the render list pipeline, its buffers, and the white texture untextured batches bind.
+// Also creates the white texture for untextured batches
 @(private = "file")
 list_init :: proc(renderer: ^Renderer) -> bool {
 	device := renderer.device
@@ -1172,12 +1162,11 @@ list_init :: proc(renderer: ^Renderer) -> bool {
 	return renderer.list_pipeline != nil && !renderer.failed
 }
 
-// Makes the map pipeline and its textures, with storage for the largest terrain and nothing in them yet.
+// Textures sized for the largest terrain, empty
 @(private = "file")
 terrain_init :: proc(renderer: ^Renderer) -> bool {
 	device := renderer.device
-	// Cells and coast are filtered between cells: that makes the coast smooth and the washes soft. Everything else is
-	// read cell by cell and blended in the shader.
+	// Coast is linearly filtered (smooth coast); everything else is read per cell and blended in the shader
 	renderer.terrain_cells = texture_create(
 		renderer,
 		.RGBA8Unorm,
@@ -1250,7 +1239,7 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 		&{bindGroupLayoutCount = 1, bindGroupLayouts = &renderer.terrain_layout},
 	)
 	defer wgpu.PipelineLayoutRelease(pipeline_layout)
-	// The map is opaque and covers everything drawn before it.
+	// Opaque, covers everything before it
 	target := wgpu.ColorTargetState {
 		format    = renderer.surface_format,
 		writeMask = wgpu.ColorWriteMaskFlags_All,
@@ -1273,7 +1262,7 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 	return lines_init(renderer) && renderer.terrain_pipeline != nil && !renderer.failed
 }
 
-// Makes the lines pass: its pipelines, and storage for the most segments of each kind of line.
+// Storage sized for RENDER_LINE_SEGMENTS_MAX per kind
 @(private = "file")
 lines_init :: proc(renderer: ^Renderer) -> bool {
 	device := renderer.device
@@ -1287,7 +1276,7 @@ lines_init :: proc(renderer: ^Renderer) -> bool {
 		)
 	}
 
-	// The lines read the map's uniforms, for the view and the size of heads.
+	// Uses the map uniforms (view, head size)
 	entry := wgpu.BindGroupLayoutEntry {
 		binding = 0,
 		visibility = {.Vertex, .Fragment},
@@ -1325,7 +1314,7 @@ lines_init :: proc(renderer: ^Renderer) -> bool {
 		attributeCount = len(attributes),
 		attributes     = &attributes[0],
 	}
-	// Where quads overlap, the field keeps the nearest distance.
+	// Min blending: keep the nearest distance
 	nearest := wgpu.BlendState {
 		color = {operation = BLEND_MIN, srcFactor = .One, dstFactor = .One},
 		alpha = {operation = BLEND_MIN, srcFactor = .One, dstFactor = .One},

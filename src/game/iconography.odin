@@ -7,20 +7,18 @@ import "core:os"
 import "../gfx"
 import "../sim"
 
-// The two sets of drawings an icon comes in: its picture, seen up close, and its medallion, seen from afar
+// Picture: zoomed in. Medallion: zoomed out.
 Icon_Set :: enum u8 {
 	Picture,
 	Medallion,
 }
 
-// The fonts the map and its cards are written in: names and text, and titles
 Font :: enum u8 {
 	Text,
 	Title,
 }
 
-// Each icon's drawings are made from art/<set> by tools/pawnify, as <culture>_<tag> under assets/gfx/<set>. Each has
-// a silhouette, <culture>_<tag>_fill, to draw in paper under it.
+// Images: assets/gfx/<set>/<culture>_<tag>, plus <culture>_<tag>_fill silhouettes. Made by tools/pawnify.
 @(private = "file", rodata)
 ICON_TAGS := [sim.Icon]string {
 	.Village    = "town_0",
@@ -31,7 +29,6 @@ ICON_TAGS := [sim.Icon]string {
 	.Fleet      = "fleet",
 }
 
-// The folder under assets/gfx each set's drawings are in, and each culture's part of their names
 @(private = "file", rodata)
 ICON_SET_NAMES := [Icon_Set]string {
 	.Picture   = "pawns",
@@ -46,16 +43,15 @@ CULTURE_NAMES := [sim.Culture]string {
 
 @(private = "file")
 ICONOGRAPHY: struct {
-	// Each icon's drawing in each set and each culture's style, and its silhouette. A drawing not there yet is the
-	// blank image.
+	// Missing drawings use blank
 	image: [sim.Icon][Icon_Set][sim.Culture]gfx.Image_Id,
 	fill:  [sim.Icon][Icon_Set][sim.Culture]gfx.Image_Id,
-	// Stands in for a drawing that is not there yet: fully clear
+	// Fully transparent
 	blank: gfx.Image_Id,
 	fonts: [Font]gfx.Font_Id,
 }
 
-// Defines the icons' images and the fonts, so call this before sprites_load.
+// Call before sprites_load
 iconography_init :: proc() {
 	ICONOGRAPHY.blank = gfx.sprites_image_add("blank")
 	ICONOGRAPHY.fonts = {
@@ -78,12 +74,10 @@ iconography_init :: proc() {
 	}
 }
 
-// An icon's drawing in a set, in a culture's style
 icon_image :: proc(icon: sim.Icon, set: Icon_Set, culture: sim.Culture) -> gfx.Image_Id {
 	return ICONOGRAPHY.image[icon][set][culture]
 }
 
-// The silhouette of an icon's drawing in a set, in a culture's style
 icon_fill :: proc(icon: sim.Icon, set: Icon_Set, culture: sim.Culture) -> gfx.Image_Id {
 	return ICONOGRAPHY.fill[icon][set][culture]
 }

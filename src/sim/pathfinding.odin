@@ -12,13 +12,27 @@ import "core:time"
 
 PATH_MAX_LEN :: 1_000
 
-// The cells whose middles lie within radius of center, in cells
-Disc :: struct {
-	center: [2]f32,
-	radius: f32,
-}
+// Changes with any edit to this file, invalidating caches built by older code
+@(private = "file")
+CACHE_SOURCE :: #hash(#load("pathfinding.odin", string), "fnv64a")
 
-// How many cells get grouped together in the search
+// Max heuristic overestimate factor
+@(private = "file")
+HEURISTIC_TIE_BREAK :: 1 + 1.0 / 1024
+
+// Side of the flood square, in cells, centred on the start cell
+PATHFIND_FLOOD_SIZE :: 256
+PATHFIND_FLOOD_CELLS :: PATHFIND_FLOOD_SIZE * PATHFIND_FLOOD_SIZE
+
+@(private = "file")
+FLOOD_SQUARE :: [2]int{PATHFIND_FLOOD_SIZE, PATHFIND_FLOOD_SIZE}
+
+#assert(
+	PATHFIND_FLOOD_CELLS <= CELLS_COARSE_MAX,
+	"a flood queues each cell up to once per direction on the heap",
+)
+
+// Side of a coarse block, in cells
 @(private = "file")
 BLOCKING_FACTOR :: 4
 
@@ -29,13 +43,18 @@ CELLS_COARSE_MAX :: CELLS_FINE_MAX / (BLOCKING_FACTOR * BLOCKING_FACTOR)
 
 #assert(WORLD_WIDTH % BLOCKING_FACTOR == 0 && WORLD_HEIGHT % BLOCKING_FACTOR == 0)
 
-// How many blocks a domain keeps the costs to and from of every other block, to bound the costs between blocks
+// Landmarks for the ALT heuristic
 @(private = "file")
 LANDMARKS_MAX :: 16
 
-// How many blocks the world is across and down
 @(private = "file")
 BLOCKS_SIZE :: [2]int{WORLD_WIDTH / BLOCKING_FACTOR, WORLD_HEIGHT / BLOCKING_FACTOR}
+
+// Cells whose centres are within radius of center. In cells.
+Disc :: struct {
+	center: [2]f32,
+	radius: f32,
+}
 
 @(private = "file")
 Dir :: enum u8 {
@@ -49,7 +68,7 @@ Dir :: enum u8 {
 	SE,
 }
 
-// The step to the neighbour in each direction, in cells; y grows down the map
+// +y is down
 @(private = "file", rodata)
 DIR_OFFSET := [Dir][2]int {
 	.NW = {-1, -1},
@@ -62,7 +81,7 @@ DIR_OFFSET := [Dir][2]int {
 	.SE = {1, 1},
 }
 
-// How far the step in each direction goes, in cells
+// Step length per direction, in cells
 @(private = "file", rodata)
 DIR_LENGTH := [Dir]f32 {
 	.NW = math.SQRT_TWO,
@@ -75,7 +94,6 @@ DIR_LENGTH := [Dir]f32 {
 	.SE = math.SQRT_TWO,
 }
 
-// The direction back the other way
 @(private = "file", rodata)
 DIR_OPPOSITE := [Dir]Dir {
 	.NW = .SE,
@@ -96,14 +114,14 @@ Node :: struct {
 	closed: bool,
 }
 
-// A node queued with its priority at the time. A node is queued again whenever its priority improves.
+// A node is re-queued whenever its priority improves
 @(private = "file")
 Heap_Entry :: struct {
 	priority: f32,
 	index:    u32,
 }
 
-// Orders the heap for core:slice/heap, which keeps the greatest first: the lowest priority comes first
+// Min-heap ordering for core:slice/heap (which is a max-heap)
 @(private = "file")
 heap_entry_less :: proc(a, b: Heap_Entry) -> bool {
 	return a.priority > b.priority
@@ -113,34 +131,25 @@ heap_entry_less :: proc(a, b: Heap_Entry) -> bool {
 Pathfind_Table :: struct {
 	// Input cost grid
 	grid:    [CELLS_FINE_MAX]f32,
-	// The key of the grid the derived state was derived from: see pathfind_key
+	// Key of the grid `derived` was built from, see pathfind_key
 	key:     u64,
-	// Derived state
 	derived: Derived,
 }
 
-// Changes with any edit to this file, so derived state saved by other code is not taken
-@(private = "file")
-CACHE_SOURCE :: #hash(#load("pathfinding.odin", string), "fnv64a")
-
 @(private = "file")
 Derived :: struct {
-	// Per cell, which piece of ground connected by moves it is in, counting from 1; 0 for a cell of cost 0
+	// Connected component per cell, from 1; 0 = impassable
 	component: [CELLS_FINE_MAX]u16,
-	// The lowest cost of any enterable cell
 	min_cost:  f32,
-	// Coarse-grained grid
 	coarse:    struct {
-		// Representative fine cell for coarse cell: its cheapest enterable cell, or its first cell if it has none
+		// Cheapest passable cell of the block, or its first cell
 		representative: [CELLS_COARSE_MAX][2]int,
-		// Coarse adjacency move cost: of the cheapest way between the representatives within the two blocks, or the four
-		// blocks around their shared corner; 0 if there is none
+		// Cost between representatives, searched within the two blocks (four for diagonals); 0 = none
 		move:           [CELLS_COARSE_MAX][Dir]f32,
 	},
-	// Blocks spread over the largest component, far from each other
+	// Blocks in the largest component, spread far apart
 	landmarks: struct {
-		// Per landmark and block, the cost of the cheapest way over the blocks from the landmark to the block, and from
-		// the block to the landmark; infinite if there is none
+		// Coarse costs landmark->block and block->landmark; infinite = unreachable
 		from, to: [LANDMARKS_MAX][CELLS_COARSE_MAX]f32,
 		count:    int,
 	},
@@ -149,37 +158,29 @@ Derived :: struct {
 @(private = "file")
 TABLE: [Pathfind_Domain]Pathfind_Table
 
-// How much the heuristic overestimates by at most, as a factor
-@(private = "file")
-HEURISTIC_TIE_BREAK :: 1 + 1.0 / 1024
-
-// The grid a search runs over: the cells, or the blocks of cells
 @(private = "file")
 Level :: enum u8 {
 	Fine,
 	Coarse,
 }
 
-// The state of the latest search over one level
 @(private = "file")
 Search_Scratch :: struct {
-	// Node-states
 	node:  [CELLS_FINE_MAX]Node,
-	// Heap, with room for each block queued once per direction
+	// Room for each block queued once per direction
 	heap:  [dynamic; len(Dir) * CELLS_COARSE_MAX]Heap_Entry,
-	// Which search the node-states are from: a node whose stamp is not the latest has not been reached by it
+	// Nodes with an older stamp are unvisited
 	stamp: u32,
 }
 
 @(private = "file")
 SCRATCH: struct {
 	search:         [Level]Search_Scratch,
-	// Per block, the corridor stamp of the latest trace whose corridor it is in
+	// Block is in the current corridor if equal to corridor_stamp
 	corridor:       [CELLS_COARSE_MAX]u32,
 	corridor_stamp: u32,
 }
 
-// Queues an entry on a search's heap
 @(private = "file")
 heap_push :: proc(scratch: ^Search_Scratch, entry: Heap_Entry) {
 	assert(len(scratch.heap) < cap(scratch.heap), "Pathfinding heap full")
@@ -187,22 +188,20 @@ heap_push :: proc(scratch: ^Search_Scratch, entry: Heap_Entry) {
 	heap.push(scratch.heap[:], heap_entry_less)
 }
 
-// Takes the entry of lowest priority off a search's heap, which must not be empty
+// Heap must not be empty
 @(private = "file")
 heap_pop :: proc(scratch: ^Search_Scratch) -> Heap_Entry {
 	heap.pop(scratch.heap[:], heap_entry_less)
 	return pop(&scratch.heap)
 }
 
-// Puts a block in the latest corridor, if it is in the world
 @(private = "file")
 corridor_mark :: proc(block: [2]int) {
 	if grid_contains(block, BLOCKS_SIZE) do SCRATCH.corridor[grid_index(block, BLOCKS_SIZE)] = SCRATCH.corridor_stamp
 }
 
-// Searches a level of a table for the cheapest way from one node to another, given as cells or blocks. Each node
-// reached keeps in SCRATCH the cost of the cheapest way to it found, and the direction back to the node before it on
-// that way. Over the cells, it moves only within the latest corridor, and never diagonally past an unenterable cell.
+// A* over cells or blocks. Results (cost, back direction) are left in SCRATCH. The fine level stays inside the
+// current corridor and never cuts corners past impassable cells.
 @(private = "file")
 search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost: f32, ok: bool) {
 	scratch := &SCRATCH.search[level]
@@ -210,10 +209,7 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 	clear(&scratch.heap)
 	size := level == .Fine ? WORLD_SIZE : BLOCKS_SIZE
 
-	// No more than the cheapest way from a node to the goal costs, but for the tie-break, which puts the nearer the goal
-	// first of nodes as promising, at the price of ways up to that much dearer than the cheapest. It is the octile
-	// distance at the lowest cost; over the blocks, from representative to representative, and at least how much
-	// farther the goal is than the node from each landmark, and the node than the goal to each landmark.
+	// Octile distance * min cost; at the coarse level, max'd with the landmark (ALT) bounds. Scaled by the tie-break.
 	estimate :: proc(table: ^Pathfind_Table, $level: Level, node, goal: [2]int) -> f32 {
 		when level == .Fine {
 			h := octile(node, goal) * table.derived.min_cost
@@ -247,7 +243,7 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 	for len(scratch.heap) > 0 {
 		index := heap_pop(scratch).index
 		node := &scratch.node[index]
-		// A node is queued again whenever its cost improves, so its older entries come up after it is expanded
+		// Skip stale heap entries
 		if node.closed do continue
 		node.closed = true
 		if index == goal do return node.g, true
@@ -279,8 +275,7 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 	return 0, false
 }
 
-// The cost of the step from a cell in a direction: the cost of the cell entered, per cell walked. 0 when the step leaves
-// the world, enters a cell of cost 0, or cuts diagonally past one.
+// Cost of the entered cell * step length. 0 if out of bounds, impassable, or cutting a corner.
 @(private = "file")
 step_cost :: proc(table: ^Pathfind_Table, at: [2]int, dir: Dir) -> f32 {
 	next := at + DIR_OFFSET[dir]
@@ -292,26 +287,22 @@ step_cost :: proc(table: ^Pathfind_Table, at: [2]int, dir: Dir) -> f32 {
 	return table.grid[grid_index(next, WORLD_SIZE)] * DIR_LENGTH[dir]
 }
 
-// The length of the shortest way between two cells moving in the eight directions, in cells
 @(private = "file")
 octile :: proc(a, b: [2]int) -> f32 {
 	d := [2]f32{f32(abs(a.x - b.x)), f32(abs(a.y - b.y))}
 	return max(d.x, d.y) + (math.SQRT_TWO - 1) * min(d.x, d.y)
 }
 
-// Where in a grid of a size, of cells or blocks, the node at a position is kept
 @(private = "file")
 grid_index :: proc(pos, size: [2]int) -> int {
 	return pos.y * size.x + pos.x
 }
 
-// The position of the node kept at an index of a grid of a size
 @(private = "file")
 grid_pos :: proc(index: int, size: [2]int) -> [2]int {
 	return {index % size.x, index / size.x}
 }
 
-// Whether a position is inside a grid of a size
 @(private = "file")
 grid_contains :: proc(pos, size: [2]int) -> bool {
 	return pos.x >= 0 && pos.y >= 0 && pos.x < size.x && pos.y < size.y
@@ -321,31 +312,27 @@ pathfind_build_begin :: proc(domain: Pathfind_Domain) -> []f32 {
 	return TABLE[domain].grid[:]
 }
 
-// The key of a domain's grid, and of the code deriving from it. A different layout of the derived state has a different
-// size, so the size is left to be checked apart.
+// Hash of the grid and of this file's source. Derived layout changes are caught by the size check instead.
 @(private = "file")
 pathfind_key :: proc(domain: Pathfind_Domain) -> u64 {
 	return hash.crc64_xz(mem.slice_to_bytes(TABLE[domain].grid[:]), CACHE_SOURCE)
 }
 
-// The derived state of a domain, stamped with its key, to be handed back to pathfind_build_end in a later load. The
-// data lives in the table, so it lasts until the domain is built again.
+// Data points into the table; valid until the domain is rebuilt
 pathfind_cache_get :: proc(out: ^Cached_File, domain: Pathfind_Domain) {
 	table := &TABLE[domain]
 	out^ = {table.key, mem.ptr_to_bytes(&table.derived)}
 }
 
-// Derives what the searches of a domain use from the grid written since pathfind_build_begin, or takes it from cached
-// when that was derived from the same grid by the same code
+// Uses cached if its key matches, otherwise derives from the grid
 pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 	table := &TABLE[domain]
 	table.key = pathfind_key(domain)
 	if len(cached.data) == size_of(Derived) && cached.fingerprint == table.key {
 		copy(mem.ptr_to_bytes(&table.derived), cached.data)
-		// Derive is initialised by cached read
 		return
 	}
-	// Deriving takes a while, so say so, and how long it took.
+	// Log, since deriving is slow
 	why := len(cached.data) == 0 ? "not cached" : "cached for other ground"
 	fmt.eprintfln("Pathfinding for %v is %s: deriving it", domain, why)
 	started := time.tick_now()
@@ -355,8 +342,7 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 	for cost in table.grid do if cost > 0 do table.derived.min_cost = min(table.derived.min_cost, cost)
 	if table.derived.min_cost == math.INF_F32 do table.derived.min_cost = 1
 
-	// Components, by flooding each in turn. Without cutting corners, cells connected by moves in eight directions are
-	// connected by moves in four.
+	// Components (4-connected flood fill is enough, since moves can't cut corners)
 	table.derived.component = {}
 	queue := make([]u32, CELLS_FINE_MAX, context.temp_allocator)
 	count: u16 = 0
@@ -382,7 +368,7 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 		}
 	}
 
-	// Representatives: the cheapest cell, and of those the nearest the middle
+	// Representatives: cheapest cell, nearest the block centre on ties
 	for &representative, block_index in table.derived.coarse.representative {
 		corner := grid_pos(block_index, BLOCKS_SIZE) * BLOCKING_FACTOR
 		representative = corner
@@ -392,7 +378,7 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 			cell := corner + {x, y}
 			cost := table.grid[grid_index(cell, WORLD_SIZE)]
 			if cost == 0 do continue
-			// Twice the offset from the middle, to keep it whole
+			// Doubled to stay integer
 			offset := 2 * [2]int{x, y} + 1 - BLOCKING_FACTOR
 			distance := offset.x * offset.x + offset.y * offset.y
 			if best_cost == 0 || cost < best_cost || (cost == best_cost && distance < best_distance) {
@@ -401,7 +387,7 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 		}
 	}
 
-	// Moves, each searched over the cells of its blocks
+	// Coarse moves
 	for &moves, block_index in table.derived.coarse.move {
 		moves = {}
 		block := grid_pos(block_index, BLOCKS_SIZE)
@@ -414,15 +400,14 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 			to := table.derived.coarse.representative[grid_index(next, BLOCKS_SIZE)]
 			to_index := grid_index(to, WORLD_SIZE)
 			if table.grid[to_index] == 0 || table.derived.component[to_index] != table.derived.component[from_index] do continue
-			// The blocks around the corner the two blocks share, which for a straight move are just the two
+			// Corridor: the blocks around the shared corner
 			SCRATCH.corridor_stamp += 1
 			for around in ([4][2]int{block, next, {block.x, next.y}, {next.x, block.y}}) do corridor_mark(around)
 			if cost, ok := search(table, .Fine, from, to); ok do move = cost
 		}
 	}
 
-	// Landmarks: each the block of the largest component farthest from those before it, the first farthest from its first
-	// block
+	// Landmarks: farthest-point sampling over the largest component
 	sizes := make([]int, int(max(u16)) + 1, context.temp_allocator)
 	for component in table.derived.component do sizes[component] += 1
 	largest := 1
@@ -437,7 +422,6 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 	}
 	table.derived.landmarks.count = 0
 	if first < 0 do return
-	// Per block, the cost from the nearest landmark so far
 	nearest := make([]f32, CELLS_COARSE_MAX, context.temp_allocator)
 	blocks_dijkstra(table, first, false, nearest)
 	for table.derived.landmarks.count < LANDMARKS_MAX {
@@ -455,8 +439,7 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 	}
 }
 
-// Fills cost with the cost of the cheapest way over the blocks from a block to every block, or with reverse, from
-// every block to it; infinite where there is none
+// Dijkstra over blocks from a block (or to it, with reverse). Infinite = unreachable.
 @(private = "file")
 blocks_dijkstra :: proc(table: ^Pathfind_Table, start: int, reverse: bool, cost: []f32) {
 	scratch := &SCRATCH.search[.Coarse]
@@ -466,7 +449,7 @@ blocks_dijkstra :: proc(table: ^Pathfind_Table, start: int, reverse: bool, cost:
 	heap_push(scratch, {0, u32(start)})
 	for len(scratch.heap) > 0 {
 		entry := heap_pop(scratch)
-		// A block is queued again whenever its cost improves, so its older entries come up after it is settled
+		// Skip stale heap entries
 		if entry.priority > cost[entry.index] do continue
 		at := grid_pos(int(entry.index), BLOCKS_SIZE)
 		for dir in Dir {
@@ -484,18 +467,14 @@ blocks_dijkstra :: proc(table: ^Pathfind_Table, start: int, reverse: bool, cost:
 	}
 }
 
-// Finds the cheapest way from src to dst, both in cells: out gets the centres of the cells along it, after src's up to
-// and including dst's, and costs the cost of entering each of those cells, per cell walked. False, with both empty, if
-// there is no way or it is longer than they hold.
+// out: cell centres after src up to and including dst. costs: per-cell cost of each. In cells.
+// False (both empty) if unreachable or longer than PATH_MAX_LEN.
 pathfind_trace :: proc(
-	src: [2]f32, // Where the path starts from
-	// Which pathfind domain
+	src: [2]f32,
 	domain: Pathfind_Domain,
-	// Where it ends
 	dst: [2]f32,
-	// Relevant zones. For now assumed to always mean opposition zone of conrol
+	// Enemy zones of control
 	zones: []Disc,
-	// Output
 	out: ^[dynamic; PATH_MAX_LEN][2]f32,
 	costs: ^[dynamic; PATH_MAX_LEN]f32,
 ) -> (
@@ -507,11 +486,11 @@ pathfind_trace :: proc(
 	from := [2]int{int(math.floor(src.x)), int(math.floor(src.y))}
 	to := [2]int{int(math.floor(dst.x)), int(math.floor(dst.y))}
 	if !grid_contains(from, WORLD_SIZE) || !grid_contains(to, WORLD_SIZE) do return false
-	// Different components have no way between them, and component 0 is the cells of cost 0
+	// Different components (or component 0, impassable) can't connect
 	component := table.derived.component[grid_index(from, WORLD_SIZE)]
 	if component == 0 || component != table.derived.component[grid_index(to, WORLD_SIZE)] do return false
 
-	// The corridor: the blocks of the way over the blocks, and those around them
+	// Coarse path, then corridor around it
 	from_block := from / BLOCKING_FACTOR
 	to_block := to / BLOCKING_FACTOR
 	if from_block != to_block do _ = search(table, .Coarse, from_block, to_block) or_return
@@ -524,7 +503,7 @@ pathfind_trace :: proc(
 	}
 
 	_ = search(table, .Fine, from, to) or_return
-	// The way back from dst, then turned around
+	// Walk back from dst, then reverse
 	for cell := to; cell != from; {
 		if len(out) == PATH_MAX_LEN {
 			clear(out)
@@ -542,39 +521,25 @@ pathfind_trace :: proc(
 }
 
 
-// The side of the square of cells a flood covers, with the cell it starts from at its middle
-PATHFIND_FLOOD_SIZE :: 256
-PATHFIND_FLOOD_CELLS :: PATHFIND_FLOOD_SIZE * PATHFIND_FLOOD_SIZE
 
-@(private = "file")
-FLOOD_SQUARE :: [2]int{PATHFIND_FLOOD_SIZE, PATHFIND_FLOOD_SIZE}
-
-#assert(
-	PATHFIND_FLOOD_CELLS <= CELLS_COARSE_MAX,
-	"a flood queues each cell up to once per direction on the heap",
-)
-
-// Every cell reachable from a place within a budget, and the cheapest way to each, over the square of cells around it
+// Cells reachable within a budget, and the cheapest way to each
 Pathfind_Flood :: struct {
-	// What it was flooded from: the place, its domain, and the budget
 	src:     [2]f32,
 	domain:  Pathfind_Domain,
 	budget:  f32,
-	// The cell src is in, and the cell at the square's top left
+	// start: src's cell. corner: top left of the square.
 	start:   [2]int,
 	corner:  [2]int,
-	// Per cell of the square, the cost of the cheapest way there from start; infinite where the budget does not reach
+	// Infinite = not reached
 	cost:    [PATHFIND_FLOOD_CELLS]f32,
-	// Per cell reached, the direction back to the cell before it on that way
 	back:    [PATHFIND_FLOOD_CELLS]Dir,
-	// Per cell of the square: in a zone, entered but never left; no stop, passed but not stopped on
+	// Zone cells can be entered but not left; no_stop cells can be passed but not stopped on
 	zone:    [PATHFIND_FLOOD_CELLS]bool,
 	no_stop: [PATHFIND_FLOOD_CELLS]bool,
 }
 
-// Floods from src over a domain: every cell of the square around it whose cheapest way from src's cell costs no more
-// than budget is reached. Moves as pathfind_trace does, never out of a zone cell, src's included. Nothing is reached if
-// src's cell is outside the world or of cost 0.
+// Dijkstra within budget over the square. Never leaves a zone cell (src's included). Empty if src is out of bounds
+// or impassable.
 pathfind_flood :: proc(
 	src: [2]f32,
 	domain: Pathfind_Domain,
@@ -598,7 +563,7 @@ pathfind_flood :: proc(
 	heap_push(scratch, {0, u32(start)})
 	for len(scratch.heap) > 0 {
 		entry := heap_pop(scratch)
-		// A cell is queued again whenever its cost improves, so its older entries come up after it is settled
+		// Skip stale heap entries
 		if entry.priority > flood.cost[entry.index] do continue
 		if flood.zone[entry.index] do continue
 		at := grid_pos(int(entry.index), FLOOD_SQUARE)
@@ -617,7 +582,6 @@ pathfind_flood :: proc(
 	}
 }
 
-// Marks the cells of the flood's square the discs cover, clearing the rest
 @(private = "file")
 stamp :: proc(flood: ^Pathfind_Flood, mask: []bool, discs: []Disc) {
 	slice.fill(mask, false)
@@ -632,7 +596,6 @@ stamp :: proc(flood: ^Pathfind_Flood, mask: []bool, discs: []Disc) {
 	}
 }
 
-// The flood reaches the cell
 @(private = "file")
 flood_reaches :: proc(flood: ^Pathfind_Flood, cell: [2]int) -> bool {
 	local := cell - flood.corner
@@ -642,9 +605,8 @@ flood_reaches :: proc(flood: ^Pathfind_Flood, cell: [2]int) -> bool {
 	)
 }
 
-// The cell to stop at for dst: dst's own if it can be stopped on, else the nearest one that can. If the flood does not
-// reach dst's cell, the cell nearest dst that it reaches and that can be stopped on, among those in the square snap
-// cells on a side around dst's cell; with snap 0, none.
+// Cell to stop at for dst: dst's own if possible, else the nearest reached stoppable cell within a snap-sized square
+// (none with snap 0)
 pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32, snap: int) -> (cell: [2]int, ok: bool) {
 	to := [2]int{int(math.floor(dst.x)), int(math.floor(dst.y))}
 	nearest := math.INF_F32
@@ -668,7 +630,7 @@ pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32, snap: int) -> (
 	return
 }
 
-// The cheapest cell that can be stopped on whose middle lies within radius of center, as a disc stamps it, if any
+// Cheapest stoppable cell inside the disc
 pathfind_flood_stop_within :: proc(
 	flood: ^Pathfind_Flood,
 	center: [2]f32,
@@ -687,8 +649,7 @@ pathfind_flood_stop_within :: proc(
 	return
 }
 
-// The cheapest way from the flood's src to dst, given as pathfind_trace gives it. False, with both empty, if the flood
-// does not reach dst's cell.
+// Output as pathfind_trace. False (both empty) if dst isn't reached.
 pathfind_flood_trace :: proc(
 	flood: ^Pathfind_Flood,
 	dst: [2]f32,
@@ -702,7 +663,7 @@ pathfind_flood_trace :: proc(
 	to := [2]int{int(math.floor(dst.x)), int(math.floor(dst.y))}
 	if !flood_reaches(flood, to) do return false
 	table := &TABLE[flood.domain]
-	// The way back from dst, then turned around
+	// Walk back from dst, then reverse
 	for cell := to; cell != flood.start; {
 		if len(out) == PATH_MAX_LEN {
 			clear(out)

@@ -8,7 +8,7 @@ import "gfx"
 import "tweak"
 import "ui"
 
-// A list of this frame's tweaks floating over everything while tweak is open, filtered by what is typed on top.
+// Tweak palette overlay, filtered by typed text
 Palette :: struct {
 	filter:      [64]u8,
 	filter_len:  int,
@@ -20,17 +20,16 @@ Palette :: struct {
 
 PALETTE_WIDTH :: 520
 PALETTE_LIST_HEIGHT :: 360
-// The column the widgets sit in, right of the names
+// Widget column width
 PALETTE_WIDGET_WIDTH :: 200
-// Space around the text in the widgets, which sets where it starts
 PALETTE_WIDGET_PADDING :: [2]f32{10, 0}
 // Most rows shown at once
 PALETTE_ROWS_MAX :: 200
-// Space between the top of the window and the palette
+// Offset from the window top
 PALETTE_TOP :: 80
 
 palette_build :: proc(p: ^Palette, input: Input) {
-	// Space opens and closes it unless the ui takes the keys, and Escape in the filter closes it.
+	// Space toggles (unless the ui has the keyboard); Escape in the filter closes
 	open := tweak.is_open()
 	opening := false
 	if key_is_pressed(input, .SPACE) && !ui.keyboard_captured() {
@@ -43,7 +42,7 @@ palette_build :: proc(p: ^Palette, input: Input) {
 	tweak.set_open(open)
 	if !open {return}
 
-	// The rows: the tweaks matching the filter, the first ones declared up to the cap, by label
+	// Rows matching the filter, up to the cap
 	filter := string(p.filter[:p.filter_len])
 	rows: [dynamic; PALETTE_ROWS_MAX]tweak.Shown
 	for s in tweak.shown() {
@@ -56,7 +55,7 @@ palette_build :: proc(p: ^Palette, input: Input) {
 		return tweak.display(tweak.shown_label(a)) < tweak.display(tweak.shown_label(b))
 	})
 
-	// The rows Up, Down and Enter move through, labels aside
+	// Selectable rows (labels excluded)
 	selectable: [dynamic; PALETTE_ROWS_MAX]int
 	at := 0
 	for s, i in rows {
@@ -81,7 +80,7 @@ palette_build :: proc(p: ^Palette, input: Input) {
 		}
 	}
 
-	// Everything in the palette is in the small font, one and a half lines of it tall.
+	// Small font, rows 1.5 lines tall
 	small := GLOBAL.fonts[.Small]
 	ui.style_push({font = small, height = ui.px(1.5 * gfx.font_size(small))})
 	defer ui.style_pop()
@@ -92,7 +91,7 @@ palette_build :: proc(p: ^Palette, input: Input) {
 				ui.spacer(ui.grow())
 				ui.style_next(MIDNIGHT_PANEL_STYLE)
 				if ui.panel("tweak palette", {width = ui.px(PALETTE_WIDTH)}) {
-					// The filter keeps the keyboard while the palette is open.
+					// Filter keeps keyboard focus while open
 					if opening || !ui.focused_any() {
 						ui.focus("filter")
 					}
@@ -122,7 +121,7 @@ palette_build :: proc(p: ^Palette, input: Input) {
 	}
 }
 
-// What Enter does to a row: fires a button, flips a toggle, steps a choice.
+// Enter: fire button, flip toggle, step choice
 palette_activate :: proc(s: tweak.Shown) {
 	t := tweak.get(s.id)
 	#partial switch s.kind {
@@ -137,7 +136,6 @@ palette_activate :: proc(s: tweak.Shown) {
 	}
 }
 
-// A tweak's name on the left, and on the right its widget, on a background while selected.
 palette_row :: proc(p: ^Palette, s: tweak.Shown) {
 	label := tweak.shown_label(s)
 	name := tweak.display(label)
@@ -154,7 +152,7 @@ palette_row :: proc(p: ^Palette, s: tweak.Shown) {
 		},
 	)
 	if ui.panel(label, {}, .X) {
-		// The name may be cut short, so hovering it shows all of it.
+		// Hover shows the full name if truncated
 		ui.label_text({{text = name, key = "name"}}, {width = ui.grow()})
 		if ui.signal("name").hovered {
 			if ui.tooltip(MIDNIGHT_PANEL_STYLE) {
@@ -167,7 +165,6 @@ palette_row :: proc(p: ^Palette, s: tweak.Shown) {
 	}
 }
 
-// The widget showing a tweak's text and changing its copy.
 palette_widget :: proc(p: ^Palette, s: tweak.Shown, text: string) {
 	t := tweak.get(s.id)
 	switch s.kind {
@@ -219,7 +216,7 @@ palette_widget :: proc(p: ^Palette, s: tweak.Shown, text: string) {
 	}
 }
 
-// Every rune of filter appears in text in order, whatever the case.
+// Case-insensitive subsequence match
 palette_matches :: proc(text, filter: string) -> bool {
 	rest := filter
 	for ch in text {

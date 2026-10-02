@@ -9,222 +9,16 @@ import "../gfx"
 import "../sim"
 import "../span"
 
-// Map -----------------------------------------------------------------------------------------------------------------
-// Map: what the map is drawn from, and how it keeps in step with the world
-
-// The map's paper, and the ink it is drawn in, which pawns and their names are drawn in too
+// Constants -----------------------------------------------------------------------------------------------------------
+// Also used for pawns and labels
 MAP_PAPER :: [4]f32{0.840, 0.772, 0.620, 1}
 MAP_INK :: [4]f32{0.150, 0.105, 0.070, 1}
 
-// What the map is drawn from: everything worked out from the scene's ground for the map pass and the marks over it
-@(private = "file")
-MAP_DRAW: struct {
-	// The drawings scattered over the terrain
-	marks:          Map_Marks,
-	// What the map pass draws
-	render_terrain: gfx.Render_Terrain,
-	render_list:    gfx.Render_List,
-	// The revision of each of the scene's areas its highlight was last taken from
-	area_revisions: [sim.AREAS_MAX]u64,
-}
-
-// Sets how the map is drawn and defines the marks' images, so call this before sprites_load.
-map_draw_init :: proc() {
-	marks_init(&MAP_DRAW.marks)
-
-	MAP_DRAW.render_terrain.style = {
-		paper              = MAP_PAPER,
-		paper_stain        = {0.720, 0.620, 0.460, 1},
-		paper_stain_amount = 0.50,
-		ink                = MAP_INK,
-		sea_shallow        = {0.560, 0.610, 0.620, 1},
-		sea_deep           = {0.200, 0.330, 0.480, 1},
-		sea_depth_from     = 0,
-		sea_depth_full     = 80,
-		sea_tint           = 0.55,
-		coast_width        = 1.6,
-		wobble             = 0.3,
-		river_width        = 12.,
-		road_width         = 8,
-		road_stroke        = 1.1,
-		road_fill          = {0.950, 0.840, 0.660, 0.55},
-		arrow_width        = 5,
-		arrow_fill         = {0.700, 0.250, 0.160, 1},
-		head_length        = 7.5,
-		head_width         = 6.25,
-		border_width       = 1.5,
-		border_ink         = {0.400, 0.180, 0.120, 0.3},
-	}
-	MAP_DRAW.render_terrain.cover.jitter = 0.8
-}
-
-// Named in the order of gfx.Render_Terrain_Debug
+// In gfx.Render_Terrain_Debug order
 @(private = "file")
 TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture", "Cover"}
 
-// Keeps the map's drawing in step with the scene: the camera every frame, everything drawn from the ground when it
-// changes, the arrows every frame, the areas' cells when they change, the areas' and regions' looks every frame, eased
-// toward the scene's over dt seconds, the regions' as the colouring mode has them, and the marks in view every frame.
-map_draw_tick :: proc(
-	scene: ^sim.Scene,
-	region_colouring: sim.Region_Colouring_Mode,
-	camera: Camera,
-	viewport: [2]f32,
-	pixel_density: f32,
-	dt: f32,
-) {
-	rt := &MAP_DRAW.render_terrain
-	rt.center, rt.zoom = camera.center, camera.zoom
-	if rt.revision != scene.ground_revision {
-		rt.revision = scene.ground_revision
-		map_derive(scene.ground[:])
-	}
-	map_arrows(scene)
-	map_areas(scene, dt)
-	map_regions(scene, region_colouring, camera.zoom, dt)
-	marks_draw(&MAP_DRAW.marks, &MAP_DRAW.render_list, camera, viewport, pixel_density)
-}
-
-// Draws the map: the terrain, then the marks over it
-map_draw_render :: proc(renderer: ^gfx.Renderer) {
-	gfx.render_terrain(renderer, &MAP_DRAW.render_terrain)
-	gfx.render_list(renderer, &MAP_DRAW.render_list)
-}
-
-// Steps the map to its next view: the map itself, then each raw terrain property in turn
-map_draw_next_view :: proc() {
-	debug := &MAP_DRAW.render_terrain.debug_mode
-	debug^ = gfx.Render_Terrain_Debug((int(debug^) + 1) % len(gfx.Render_Terrain_Debug))
-}
-
-// Works out everything the map draws from the terrain, stage by stage: its cells, its ways, its coast, the land's
-// terrain types, and the marks over it.
-@(private = "file")
-map_derive :: proc(terrain: []sim.Ground) {
-	rt := &MAP_DRAW.render_terrain
-	for cell, i in terrain {
-		rt.cells[i] = {u8(cell.surface) * 127, cell.elevation, cell.trees, cell.moisture}
-	}
-
-	// Each kind of way, drawn as its kind of line, and stamped around its lines so each cell near one learns the offset
-	// from its middle to its nearest point: from which it preclaims the ground along it.
-	claimed := make([]u8, FOOTPRINT_SIZE.x * FOOTPRINT_SIZE.y, context.temp_allocator)
-	to_way := make([][2]f32, sim.CELLS_MAX, context.temp_allocator)
-	for look in WAY_LOOKS {
-		lines := &rt.lines[look.line]
-		clear(&lines.segments)
-		lines.revision += 1
-	}
-	for kind in sim.Way_Kind {
-		for &offset in to_way do offset = WAY_REACH
-		for way in WAYS.ways {
-			if way.kind != kind do continue
-			line := way_line(way)
-			lines_add(&rt.lines[WAY_LOOKS[kind].line], line, false)
-			polyline_stamp(line, WAY_REACH, to_way, nil)
-		}
-		ways_claim_ground(claimed, to_way, WAY_LOOKS[kind].band)
-	}
-
-	// The coasts, the boundaries of the land, traced into smoothed lines, then stamped around themselves: each cell near
-	// the coast learns the offset to it, and which side of it it lies on.
-	to_coast := make([][2]f32, sim.CELLS_MAX, context.temp_allocator)
-	coast_side := make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	for &offset in to_coast do offset = COAST_REACH
-	// Sea 1 and land 2, so the land is on the left of the coast
-	labels := make([]u16, sim.CELLS_MAX, context.temp_allocator)
-	for cell, i in terrain do labels[i] = cell.surface in sim.WATER ? 1 : 2
-	polylines_clear()
-	trace_boundaries(labels, COAST_SMOOTHING)
-	for r in 0 ..< polylines_count() {
-		line := polylines_get(r)
-		polyline_stamp(line, COAST_REACH, to_coast, coast_side)
-	}
-
-	// Signed distance to the coast, in cells, positive on land: to the smoothed coast near it, and farther out from
-	// cell to cell, half a cell at the cells either side of the coast, the two blending over the last cell of reach.
-	to_water := make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	to_land := make([]f32, sim.CELLS_MAX, context.temp_allocator)
-	distance_to(to_water, terrain, true)
-	distance_to(to_land, terrain, false)
-	for cell, i in terrain {
-		water := cell.surface in sim.WATER
-		far := water ? -(to_land[i] - 0.5) : to_water[i] - 0.5
-		near := linalg.length(to_coast[i])
-		// Away from the line, the cell itself says which side it is on.
-		if near > 1 do coast_side[i] = water ? -1 : 1
-		rt.coast[i] = math.lerp(
-			coast_side[i] * near,
-			far,
-			math.smoothstep(COAST_REACH - 1, COAST_REACH, near),
-		)
-	}
-
-	// Each region's cells, as the area of the regions' highlights its id numbers. Regions past what the highlights
-	// hold are not drawn.
-	regions := &rt.highlights[.Regions]
-	for area in 1 ..< gfx.RENDER_HIGHLIGHT_AREAS do gfx.render_highlight_clear(regions, u8(area))
-	for cell, i in terrain {
-		if cell.surface in sim.WATER || cell.region == 0 || int(cell.region) >= gfx.RENDER_HIGHLIGHT_AREAS do continue
-		gfx.render_highlight_add(regions, u8(cell.region), {i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH})
-	}
-
-	// The water near the shore, preclaimed so no mark's drawing spills into it
-	preclaim_coast_water(claimed, rt.coast[:], COAST_WATER_BAND)
-
-	// The terrain types, drawn as the cover layer, and the marks over the land
-	cover_draw(&rt.cover, terrain)
-	marks_place(&MAP_DRAW.marks, terrain, rt.coast[:], claimed)
-}
-
-// Adds a line to be drawn among lines, as its segments, ending in a head if head
-@(private = "file")
-lines_add :: proc(lines: ^gfx.Render_Lines, line: Polyline, head: bool) {
-	points := len(line.points)
-	segments := line.closed ? points : points - 1
-	for s in 0 ..< segments {
-		append(
-			&lines.segments,
-			gfx.Render_Segment {
-				start = line.points[s],
-				end = line.points[(s + 1) % points],
-				head = b32(head && s == segments - 1),
-			},
-		)
-	}
-}
-
-// Arrows --------------------------------------------------------------------------------------------------------------
-// Arrows: lines over the map along the way something is going, ending in a head where it is going to
-
-// Draws the scene's arrows over the map, each through its points as given, in cells, its head at the last
-@(private = "file")
-map_arrows :: proc(scene: ^sim.Scene) {
-	arrows := &MAP_DRAW.render_terrain.lines[.Arrow]
-	clear(&arrows.segments)
-	arrows.revision += 1
-	for arrow in scene.arrows {
-		lines_add(arrows, {points = scene.arrow_points[arrow.begin:][:arrow.len]}, true)
-	}
-}
-
-// Highlights ----------------------------------------------------------------------------------------------------------
-// Highlights: areas of cells washed in color over the map
-
-// How a look of the scene's areas is drawn: its highlight's colour, border, thickness and inside, and how far, in
-// cells, the thin parts of its cells are widened: see area_widen. Widening draws cells the area does not hold, so
-// areas that must meet others edge to edge, such as provinces, keep it 0 and are drawn as their cells are.
-@(private = "file")
-Area_Look :: struct {
-	color:     [4]f32,
-	border:    f32,
-	thickness: f32,
-	inside:    f32,
-	widen:     int,
-}
-
-// How each look of the scene's areas is drawn: the numbers are the ones sim's present hands out. A look not set here
-// is not seen. Reaches are widened, so a reach along a road reads as a band rather than a thread.
+// Indexed by the look ids from sim/present.odin; unset = invisible. Reaches are widened so roads read as bands.
 @(private = "file")
 AREA_LOOKS := [256]Area_Look {
 	1 = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2, widen = 1},
@@ -233,95 +27,14 @@ AREA_LOOKS := [256]Area_Look {
 	4 = {color = {0.850, 0.700, 0.200, 1}, border = 0.6, thickness = 2, inside = 0.2},
 }
 
-// How quickly a highlight's drawing eases toward its look: the share of the way left it goes each second
+// Exponential ease rate, per second
 @(private = "file")
 HIGHLIGHT_EASE :: 10
 
-// Eases how a highlight area is drawn toward a look, by step of the way left
-@(private = "file")
-highlight_ease :: proc(drawn: ^gfx.Render_Highlight_Area, color: [4]f32, border, thickness, inside, step: f32) {
-	drawn.color += (color - drawn.color) * step
-	drawn.border += (border - drawn.border) * step
-	drawn.thickness += (thickness - drawn.thickness) * step
-	drawn.inside += (inside - drawn.inside) * step
-}
-
-// Highlights the scene's areas, each slot as the highlight area after it: its circles every tick, its look eased
-// toward the slot's over dt seconds, and its cells taken up again only when its revision is not the one last taken up,
-// fading in from nothing
-@(private = "file")
-map_areas :: proc(scene: ^sim.Scene, dt: f32) {
-	#assert(sim.AREAS_MAX < gfx.RENDER_HIGHLIGHT_AREAS)
-	#assert(sim.CIRCLES_MAX <= gfx.RENDER_HIGHLIGHT_CIRCLES_MAX)
-	highlights := &MAP_DRAW.render_terrain.highlights[.Areas]
-	clear(&highlights.circles)
-	step := 1 - math.exp(-HIGHLIGHT_EASE * dt)
-	for &area, slot in scene.areas {
-		highlight := u8(slot + 1)
-		look := AREA_LOOKS[area.look]
-		drawn := &highlights.areas[highlight]
-		changed := MAP_DRAW.area_revisions[slot] != area.revision
-		if changed {
-			drawn.border = 0
-			drawn.inside = 0
-		}
-		highlight_ease(drawn, look.color, look.border, look.thickness, look.inside, step)
-		drawn.surface = area.on_water ? .Water : .Land
-		for circle in scene.circles[area.circles.begin:][:area.circles.len] {
-			append(
-				&highlights.circles,
-				gfx.Render_Highlight_Circle{circle.center, circle.radius, highlight},
-			)
-		}
-		if !changed do continue
-		MAP_DRAW.area_revisions[slot] = area.revision
-		gfx.render_highlight_clear(highlights, highlight)
-		cells := area.cells[:]
-		if look.widen > 0 do cells = area_widen(cells, look.widen)
-		for inside, i in cells {
-			if !inside do continue
-			cell := area.corner + {i % sim.AREA_SIZE, i / sim.AREA_SIZE}
-			if cell.x < 0 || cell.y < 0 || cell.x >= sim.WORLD_WIDTH || cell.y >= sim.WORLD_HEIGHT do continue
-			// A cell only the widening adds is left to any other area it is in.
-			owner := highlights.cells[cell.y * sim.WORLD_WIDTH + cell.x]
-			if !area.cells[i] && owner != 0 && owner != highlight do continue
-			gfx.render_highlight_add(highlights, highlight, cell)
-		}
-	}
-}
-
-// Regions ------------------------------------------------------------------------------------------------------------
-// Regions: each washed in its colour in from its edge, as strongly as the colouring mode, how near the camera is and
-// whether it is highlighted say
-
-// How a region is drawn: how strongly it is washed in its colour at its edge, how many cells in that fades over, and
-// how strongly it is washed beyond
-@(private = "file")
-Region_Look :: struct {
-	border:    f32,
-	thickness: f32,
-	inside:    f32,
-}
-
-// How a region is drawn while it is not highlighted, and while it is
-@(private = "file")
-Region_Looks :: struct {
-	plain:       Region_Look,
-	highlighted: Region_Look,
-}
-
-// How near the camera is to the map: far below REGION_FAR_ZOOM, near from it on
-@(private = "file")
-Region_Range :: enum u8 {
-	Near,
-	Far,
-}
-
-// In pixels per cell
+// Below this zoom (pixels per cell) regions use the Far look
 @(private = "file")
 REGION_FAR_ZOOM :: 5
 
-// How regions are drawn in each colouring mode, near and far
 @(private = "file")
 REGION_LOOKS := [sim.Region_Colouring_Mode][Region_Range]Region_Looks {
 	.Owner = {
@@ -356,74 +69,13 @@ REGION_LOOKS := [sim.Region_Colouring_Mode][Region_Range]Region_Looks {
 	},
 }
 
-// Eases how each region is drawn toward its colour and its look over dt seconds, as the colouring mode and zoom, in
-// pixels per cell, have it
-@(private = "file")
-map_regions :: proc(scene: ^sim.Scene, colouring: sim.Region_Colouring_Mode, zoom: f32, dt: f32) {
-	regions := &MAP_DRAW.render_terrain.highlights[.Regions]
-	step := 1 - math.exp(-HIGHLIGHT_EASE * dt)
-	looks := REGION_LOOKS[colouring][zoom < REGION_FAR_ZOOM ? .Far : .Near]
-	for &drawn, area in regions.areas {
-		if area == 0 || area > len(scene.regions) do continue
-		region := scene.regions[area - 1]
-		look := region.highlighted ? looks.highlighted : looks.plain
-		highlight_ease(&drawn, region.color, look.border, look.thickness, look.inside, step)
-		drawn.surface = .Land
-	}
-}
-
-// How many cells of an area the disc around a cell must hold for the cell to join its thin parts: as many as a
-// straight thread of cells puts in it, however far out along the disc's edge the cell lies
+// Min area cells in the disc for a cell to be added by widening (a straight 1-cell thread gives 3)
 @(private = "file")
 WIDEN_SUPPORT :: 3
-
-// An area's cells, AREA_SIZE square, with its thin parts widened, in the temp allocator. Its thin parts are what an
-// opening by a disc of radius widen takes away: whatever is narrower than about twice widen plus one cell. A cell joins
-// the area where the disc around it touches a thin part and holds at least WIDEN_SUPPORT of the area's cells: beside
-// a thin part, so a thread of cells becomes a band, but not past its ends, nor around a lone cell or two, which stay as
-// they are. Off the square counts as out of the area.
-@(private = "file")
-area_widen :: proc(cells: []bool, widen: int) -> []bool {
-	// The cells covered by the disc, as offsets from its middle cell
-	disc := make([dynamic][2]int, context.temp_allocator)
-	for dy in -widen ..= widen {
-		for dx in -widen ..= widen {
-			if dx * dx + dy * dy <= widen * widen + widen do append(&disc, [2]int{dx, dy})
-		}
-	}
-	// Each cell is in if the disc around it holds at least need cells of from: with 1 from grows, with the whole disc
-	// it shrinks.
-	morph :: proc(from: []bool, disc: [][2]int, need: int) -> []bool {
-		to := make([]bool, len(from), context.temp_allocator)
-		for y in 0 ..< sim.AREA_SIZE {
-			for x in 0 ..< sim.AREA_SIZE {
-				held := 0
-				for offset in disc {
-					at := [2]int{x, y} + offset
-					if at.x < 0 || at.y < 0 || at.x >= sim.AREA_SIZE || at.y >= sim.AREA_SIZE do continue
-					if from[at.y * sim.AREA_SIZE + at.x] do held += 1
-				}
-				to[y * sim.AREA_SIZE + x] = held >= need
-			}
-		}
-		return to
-	}
-	opened := morph(morph(cells, disc[:], len(disc)), disc[:], 1)
-	thin := make([]bool, len(cells), context.temp_allocator)
-	for inside, i in cells do thin[i] = inside && !opened[i]
-	near_thin := morph(thin, disc[:], 1)
-	widened := morph(cells, disc[:], WIDEN_SUPPORT)
-	for &inside, i in widened do inside = cells[i] || (inside && near_thin[i])
-	return widened
-}
-
-// Cover ---------------------------------------------------------------------------------------------------------------
-// Cover: each land cell's terrain type, drawn as the cover layer and read by the marks
 
 @(private = "file", rodata)
 COVER_SAND := [4]f32{0.900, 0.800, 0.600, 1}
 
-// How each terrain type is drawn
 @(private = "file")
 COVER_LOOKS := [sim.Terrain_Type]gfx.Render_Layer_Palette {
 	.Open = {},
@@ -437,28 +89,9 @@ COVER_LOOKS := [sim.Terrain_Type]gfx.Render_Layer_Palette {
 	.Fields = {color = {0.790, 0.770, 0.600, 1}, wash = 0.35},
 }
 
-// Hands the terrain types to layer to draw.
-@(private = "file")
-cover_draw :: proc(layer: ^gfx.Render_Layer, terrain: []sim.Ground) {
-	for cell, i in terrain do layer.cells[i] = {u8(cell.type), cell.type_strength}
-	for look, type in COVER_LOOKS do layer.palette[type] = look
-	layer.revision += 1
-}
-
-// Ways ----------------------------------------------------------------------------------------------------------------
-// Ways: rivers and roads, drawn from their lines: see Way
-
-// How far around the ways the offset to them is kept, in cells: enough for the ground they claim
+// Max distance, in cells, for the offset-to-way field
 @(private = "file")
 WAY_REACH :: f32(4)
-
-// How each kind of way is drawn: how far either side of its lines, in cells, it claims ground that no mark's drawing
-// may cover, and the kind of line it is drawn as
-@(private = "file")
-Way_Look :: struct {
-	band: f32,
-	line: gfx.Render_Line_Kind,
-}
 
 @(private = "file", rodata)
 WAY_LOOKS := [sim.Way_Kind]Way_Look {
@@ -466,33 +99,11 @@ WAY_LOOKS := [sim.Way_Kind]Way_Look {
 	.Road = {band = 1.2, line = .Road},
 }
 
-// Preclaims the ground within band of the ways: each square of claimed ground whose middle lies within band of the
-// nearest point of a way. to_way holds, for each cell, the offset from its middle to the nearest point of a way.
-@(private = "file")
-ways_claim_ground :: proc(claimed: []u8, to_way: [][2]f32, band: f32) {
-	for offset, i in to_way {
-		if linalg.length(offset) > band + 1 do continue
-		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
-		way := [2]f32{f32(cell.x), f32(cell.y)} + 0.5 + offset
-		for y in 0 ..< FOOTPRINT_RES {
-			for x in 0 ..< FOOTPRINT_RES {
-				square := cell * FOOTPRINT_RES + {x, y}
-				middle := ([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES
-				if linalg.length(middle - way) >= band do continue
-				claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
-			}
-		}
-	}
-}
-
-// Coasts --------------------------------------------------------------------------------------------------------------
-// Coasts: the boundaries of the land, traced into lines, and the distances across land and water
-
-// How far around the coast its smoothed line decides the distance to it, in cells
+// Within this many cells, distance comes from the smoothed coast line
 @(private = "file")
 COAST_REACH :: f32(3)
 
-// Coasts keep more of their shape, losing mostly the steps of the cells.
+// Light smoothing: removes cell steps, keeps the shape
 @(private = "file")
 COAST_SMOOTHING :: Polyline_Smoothing {
 	softness    = 0.3,
@@ -501,226 +112,52 @@ COAST_SMOOTHING :: Polyline_Smoothing {
 	cut_ratio   = 0.2,
 }
 
-// Traces the boundaries between cells of different labels: the edges between them, joined corner to corner into lines
-// with the larger label on their left. Label 0 has no boundaries. A line runs on through each corner two edges meet
-// at, and ends where one, three or four do: at the map's edge, and where boundaries meet. The rest close.
-@(private = "file")
-trace_boundaries :: proc(labels: []u16, smoothing: Polyline_Smoothing) {
-	// Corners are numbered y * ACROSS + x. Each holds the steps its edges leave it by, not yet walked, and how many
-	// edges meet at it.
-	ACROSS :: sim.WORLD_WIDTH + 1
-	out := make([]bit_set[Step], ACROSS * (sim.WORLD_HEIGHT + 1), context.temp_allocator)
-	meeting := make([]u8, len(out), context.temp_allocator)
-	edge :: proc(out: []bit_set[Step], meeting: []u8, from: [2]int, step: Step) {
-		to := from + STEPS[step]
-		out[from.y * ACROSS + from.x] += {step}
-		meeting[from.y * ACROSS + from.x] += 1
-		meeting[to.y * ACROSS + to.x] += 1
-	}
-	for y in 0 ..< sim.WORLD_HEIGHT {
-		for x in 0 ..< sim.WORLD_WIDTH {
-			here := labels[y * sim.WORLD_WIDTH + x]
-			if here == 0 do continue
-			// The edge along the cell's top, and along its left side, walked with the larger label on the left
-			if y > 0 {
-				above := labels[(y - 1) * sim.WORLD_WIDTH + x]
-				if above != 0 && above != here {
-					if here > above do edge(out, meeting, {x + 1, y}, .West)
-					else do edge(out, meeting, {x, y}, .East)
-				}
-			}
-			if x > 0 {
-				left := labels[y * sim.WORLD_WIDTH + x - 1]
-				if left != 0 && left != here {
-					if here > left do edge(out, meeting, {x, y}, .South)
-					else do edge(out, meeting, {x, y + 1}, .North)
-				}
-			}
-		}
-	}
-
-	// Walks from a corner along a step, and on through corners two edges meet at, until it comes to one where one,
-	// three or four do, or back round to where it started
-	walk :: proc(
-		out: []bit_set[Step],
-		meeting: []u8,
-		start: [2]int,
-		step: Step,
-		smoothing: Polyline_Smoothing,
-	) {
-		at, heading := start, step
-		polylines_add({f32(at.x), f32(at.y)})
-		for {
-			out[at.y * ACROSS + at.x] -= {heading}
-			at += STEPS[heading]
-			c := at.y * ACROSS + at.x
-			if at == start && meeting[c] == 2 {
-				polylines_end(true, smoothing)
-				return
-			}
-			polylines_add({f32(at.x), f32(at.y)})
-			if meeting[c] != 2 || out[c] == {} {
-				polylines_end(false, smoothing)
-				return
-			}
-			for s in Step do if s in out[c] {heading = s; break}
-		}
-	}
-	// Lines from the corners they end at first, then the closed ones
-	for c in 0 ..< len(out) {
-		if meeting[c] == 2 do continue
-		for s in Step do if s in out[c] do walk(out, meeting, {c % ACROSS, c / ACROSS}, s, smoothing)
-	}
-	for c in 0 ..< len(out) {
-		for s in Step do if s in out[c] do walk(out, meeting, {c % ACROSS, c / ACROSS}, s, smoothing)
-	}
-}
-
-// The steps along the edges between cells, turning clockwise with y down the map
-@(private = "file")
-Step :: enum {
-	East,
-	South,
-	West,
-	North,
-}
-
-@(private = "file", rodata)
-STEPS := [Step][2]int {
-	.East  = {1, 0},
-	.South = {0, 1},
-	.West  = {-1, 0},
-	.North = {0, -1},
-}
-
-// Euclidean distance from every cell to the nearest cell whose water matches.
-@(private = "file")
-distance_to :: proc(out: []f32, terrain: []sim.Ground, water: bool) {
-	source := make([]bool, sim.CELLS_MAX, context.temp_allocator)
-	for cell, i in terrain do source[i] = (cell.surface in sim.WATER) == water
-	distance_from(out, source, sim.WORLD_SIZE)
-}
-
-// How far out from the shore, in cells, the water is preclaimed
+// Near-shore water kept free of marks, in cells
 @(private = "file")
 COAST_WATER_BAND :: f32(3)
 
-// Preclaims the water within reach of the shore: each square of claimed ground where coast, the signed distance to the
-// coast, blended between cells, is below 0 and above -reach.
-@(private = "file")
-preclaim_coast_water :: proc(claimed: []u8, coast: []f32, reach: f32) {
-	for distance, i in coast {
-		// A distance changes by at most as far as its point moves, so only cells this near the strip have squares in it.
-		if distance >= 1 || distance <= -reach - 1 do continue
-		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
-		for y in 0 ..< FOOTPRINT_RES {
-			for x in 0 ..< FOOTPRINT_RES {
-				square := cell * FOOTPRINT_RES + {x, y}
-				at := bilinear(
-					coast,
-					sim.WORLD_SIZE,
-					([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES,
-				)
-				if at < 0 && at > -reach do claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
-			}
-		}
-	}
-}
-
-// Marks ---------------------------------------------------------------------------------------------------------------
-// The marks: drawings scattered over the map, laid layer by layer, each layer on a jittered grid of points over the
-// world. At a point, every marking of the layer scores how densely it grows there, by whether the cell's distance to
-// the coast, elevation and temperature are in its ranges, and by its terrain type; the point keeps a mark with the sum
-// of the scores as its chance, and the mark is one of the markings, picked in proportion to its score.
-
-// Ground where no mark may stand, kept FOOTPRINT_RES squares to a cell each way, row by row. Each square holds who
-// claimed it first: 0 for none, PRECLAIMED for what claims it before any mark is placed, such as the ways, and a
-// layer's number plus 2 for its marks. No mark's drawing may cover preclaimed ground.
+// Claim grid: FOOTPRINT_RES squares per cell side. 0 = free, PRECLAIMED = ways/coast (no drawing may cover it),
+// layer + 2 = claimed by that layer's marks.
 @(private = "file")
 FOOTPRINT_RES :: 4
+
 @(private = "file")
 FOOTPRINT_SIZE :: [2]int{sim.WORLD_WIDTH * FOOTPRINT_RES, sim.WORLD_HEIGHT * FOOTPRINT_RES}
+
 @(private = "file")
 PRECLAIMED :: 1
 
-// How much of its width, about its middle, a mark's drawing covers, as far as keeping it off preclaimed ground
+// Fraction of a mark's width checked against preclaimed ground
 @(private = "file")
 MARK_DRAWN_WIDTH :: 0.7
 
-// The square of claimed ground a point, in cells, lies in
-@(private = "file")
-footprint_square :: proc(p: [2]f32) -> [2]int {
-	return {int(p.x * FOOTPRINT_RES), int(p.y * FOOTPRINT_RES)}
-}
-
-@(private = "file")
-Map_Marks :: struct {
-	// The marks laid, by where they stand, top to bottom, so nearer marks overlap farther ones
-	marks:    [dynamic; MARKS_MAX]Mark,
-	// Each marking's images, by variant, defined by marks_init: the first variants[marking] of them. Marks name their
-	// image by marking and variant, so what ids the images were given does not matter to them.
-	images:   [len(MARKINGS)][VARIANTS_MAX]gfx.Image_Id,
-	variants: [len(MARKINGS)]u8,
-}
-
-// Enough marks for a full world at the densities of MARKINGS
+// Enough for a full world at MARKINGS densities
 @(private = "file")
 MARKS_MAX :: 1 << 17
 
-// One drawing on the map: where its middle sits, in cells, the layer it was laid in, and how wide and tall it is, in
-// cells.
 @(private = "file")
-Mark :: struct {
-	pos:     [2]f32,
-	layer:   Layer,
-	width:   f32,
-	// Given by its image's proportions once its width is set
-	height:  f32,
-	// Its drawing: the marking's variant-th image
-	marking: u8,
-	variant: u8,
-	// Opacity, up to max(u8)
-	alpha:   u8,
-}
+VARIANTS_MAX :: 4
 
-#assert(
-	len(MARKINGS) <= 256 && VARIANTS_MAX <= 256,
-	"a mark names its marking and variant in a byte each",
-)
-
-// The layers of marks, in the order they are laid: each claims its ground from those after it
+// Random offset on coast, elevation, temperature, so neighbouring ranges blend instead of meeting at a line
 @(private = "file")
-Layer :: enum {
-	Mountain,
-	Molehill,
-	Tree,
-	Tuft,
-	Marsh,
-	Dune,
-	Sea,
-}
+BLUR := [3]f32{1, 0.1, 0.1}
 
-// How a layer lays its marks. Its points are spacing cells apart across and row_squash of that down, every other row
-// shifted half a step; each wanders within its step by up to jitter of it, across and down. A mark is width cells wide,
-// varying by up to vary of that either way. It claims footprint of ground as it is laid: no mark of a later layer
-// stands there, nor, if claims_own, a later mark of its own layer.
+// Coast distance ranges
 @(private = "file")
-Layer_Def :: struct {
-	spacing:    f32,
-	row_squash: f32,
-	jitter:     [2]f32,
-	width:      f32,
-	vary:       f32,
-	footprint:  struct {
-		width: f32,
-		below: f32,
-	},
-	claims_own: bool,
+ON_LAND :: Range{1, 1000}
+
+@(private = "file")
+OFFSHORE :: Range{-1000, -5}
+
+@(private = "file")
+TREE_COVER :: #partial [sim.Terrain_Type]f32 {
+	.Forest  = 1,
+	.Fertile = 0.45,
 }
 
 @(private = "file", rodata)
 LAYERS := [Layer]Layer_Def {
-	// Mountains keep to their rows, so the peak behind always shows clear over the one in front.
+	// Low vertical jitter so back peaks stay visible over front ones
 	.Mountain = {
 		spacing = 8.04,
 		row_squash = 0.8,
@@ -751,52 +188,6 @@ LAYERS := [Layer]Layer_Def {
 	.Marsh = {spacing = 3.2, row_squash = 0.8, jitter = {0.7, 0.6}, width = 2.3, vary = 0.15},
 	.Dune = {spacing = 5.5, row_squash = 0.8, jitter = {0.7, 0.6}, width = 3.4, vary = 0.2},
 	.Sea = {spacing = 12, row_squash = 0.8, jitter = {0.7, 0.6}, width = 3},
-}
-
-// A kind of mark: its images, under assets/gfx, the layer it is laid in, and where it grows. Each mark is one of the
-// images, the named ones first; an empty name is an image it does not have. It grows where the cell's signed distance
-// to the coast, elevation and temperature are in its ranges, as densely as its cover says of the cell's terrain type
-// times the type's strength, or fully if it names none. Its width grows by grow times how far up its elevation range the
-// cell is, and its opacity follows fade over the signed distance to the coast; an unset fade is opaque.
-@(private = "file")
-Marking :: struct {
-	images:      [VARIANTS_MAX]string,
-	layer:       Layer,
-	coast:       Range,
-	elevation:   Range,
-	temperature: Range,
-	cover:       [sim.Terrain_Type]f32,
-	grow:        f32,
-	fade:        Ramp,
-}
-
-// From lo up to hi. A range whose ends meet is any value.
-@(private = "file")
-Range :: struct {
-	lo, hi: f32,
-}
-
-// On land, a cell or more from the shore, and out at sea, five cells or more
-@(private = "file")
-ON_LAND :: Range{1, 1000}
-
-@(private = "file")
-OFFSHORE :: Range{-1000, -5}
-
-// How far either way, at most, a point's distance to the coast, elevation and temperature are read off, so that
-// neighbouring ranges mix at their edges instead of meeting at a line
-@(private = "file")
-BLUR := [3]f32{1, 0.1, 0.1}
-
-// Each marking has up to this many images, so the scatter does not look stamped
-@(private = "file")
-VARIANTS_MAX :: 4
-
-// The trees' covers: forests, and fertile land more thinly
-@(private = "file")
-TREE_COVER :: #partial [sim.Terrain_Type]f32 {
-	.Forest  = 1,
-	.Fertile = 0.45,
 }
 
 @(private = "file", rodata)
@@ -856,7 +247,6 @@ MARKINGS := [?]Marking {
 		temperature = {0.34, 0.5},
 		cover = TREE_COVER,
 	},
-	// Palms only on fertile land
 	{
 		images = {"terrain/palm_0", "terrain/palm_1", "terrain/palm_2", "terrain/palm_3"},
 		layer = .Tree,
@@ -882,7 +272,6 @@ MARKINGS := [?]Marking {
 		coast = ON_LAND,
 		cover = #partial{.Desert = 1},
 	},
-	// Fading over the open sea
 	{
 		images = {"terrain/sea_0", "terrain/sea_1", "", ""},
 		layer = .Sea,
@@ -891,7 +280,560 @@ MARKINGS := [?]Marking {
 	},
 }
 
-// Defines the markings' images, so call this before sprites_load.
+// Map -----------------------------------------------------------------------------------------------------------------
+@(private = "file")
+MAP_DRAW: struct {
+	marks:          Map_Marks,
+	render_terrain: gfx.Render_Terrain,
+	render_list:    gfx.Render_List,
+	// Last uploaded revision per scene area
+	area_revisions: [sim.AREAS_MAX]u64,
+}
+
+// Call before sprites_load: defines the marks' images.
+map_draw_init :: proc() {
+	marks_init(&MAP_DRAW.marks)
+
+	MAP_DRAW.render_terrain.style = {
+		paper              = MAP_PAPER,
+		paper_stain        = {0.720, 0.620, 0.460, 1},
+		paper_stain_amount = 0.50,
+		ink                = MAP_INK,
+		sea_shallow        = {0.560, 0.610, 0.620, 1},
+		sea_deep           = {0.200, 0.330, 0.480, 1},
+		sea_depth_from     = 0,
+		sea_depth_full     = 80,
+		sea_tint           = 0.55,
+		coast_width        = 1.6,
+		wobble             = 0.3,
+		river_width        = 12.,
+		road_width         = 8,
+		road_stroke        = 1.1,
+		road_fill          = {0.950, 0.840, 0.660, 0.55},
+		arrow_width        = 5,
+		arrow_fill         = {0.700, 0.250, 0.160, 1},
+		head_length        = 7.5,
+		head_width         = 6.25,
+		border_width       = 1.5,
+		border_ink         = {0.400, 0.180, 0.120, 0.3},
+	}
+	MAP_DRAW.render_terrain.cover.jitter = 0.8
+}
+
+map_draw_tick :: proc(
+	scene: ^sim.Scene,
+	region_colouring: sim.Region_Colouring_Mode,
+	camera: Camera,
+	viewport: [2]f32,
+	pixel_density: f32,
+	dt: f32,
+) {
+	rt := &MAP_DRAW.render_terrain
+	rt.center, rt.zoom = camera.center, camera.zoom
+	if rt.revision != scene.ground_revision {
+		rt.revision = scene.ground_revision
+		map_derive(scene.ground[:])
+	}
+	map_arrows(scene)
+	map_areas(scene, dt)
+	map_regions(scene, region_colouring, camera.zoom, dt)
+	marks_draw(&MAP_DRAW.marks, &MAP_DRAW.render_list, camera, viewport, pixel_density)
+}
+
+map_draw_render :: proc(renderer: ^gfx.Renderer) {
+	gfx.render_terrain(renderer, &MAP_DRAW.render_terrain)
+	gfx.render_list(renderer, &MAP_DRAW.render_list)
+}
+
+// Cycles the map view: normal, then each raw terrain layer
+map_draw_next_view :: proc() {
+	debug := &MAP_DRAW.render_terrain.debug_mode
+	debug^ = gfx.Render_Terrain_Debug((int(debug^) + 1) % len(gfx.Render_Terrain_Debug))
+}
+
+// Rebuilds everything derived from the ground
+@(private = "file")
+map_derive :: proc(terrain: []sim.Ground) {
+	rt := &MAP_DRAW.render_terrain
+	for cell, i in terrain {
+		rt.cells[i] = {u8(cell.surface) * 127, cell.elevation, cell.trees, cell.moisture}
+	}
+
+	// Ways: lines, and preclaim the ground along them
+	claimed := make([]u8, FOOTPRINT_SIZE.x * FOOTPRINT_SIZE.y, context.temp_allocator)
+	to_way := make([][2]f32, sim.CELLS_MAX, context.temp_allocator)
+	for look in WAY_LOOKS {
+		lines := &rt.lines[look.line]
+		clear(&lines.segments)
+		lines.revision += 1
+	}
+	for kind in sim.Way_Kind {
+		for &offset in to_way do offset = WAY_REACH
+		for way in WAYS.ways {
+			if way.kind != kind do continue
+			line := way_line(way)
+			lines_add(&rt.lines[WAY_LOOKS[kind].line], line, false)
+			polyline_stamp(line, WAY_REACH, to_way, nil)
+		}
+		ways_claim_ground(claimed, to_way, WAY_LOOKS[kind].band)
+	}
+
+	// Coast lines, and offset + side per nearby cell
+	to_coast := make([][2]f32, sim.CELLS_MAX, context.temp_allocator)
+	coast_side := make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	for &offset in to_coast do offset = COAST_REACH
+	// Sea 1, land 2, so land is on the left of the coast
+	labels := make([]u16, sim.CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain do labels[i] = cell.surface in sim.WATER ? 1 : 2
+	polylines_clear()
+	trace_boundaries(labels, COAST_SMOOTHING)
+	for r in 0 ..< polylines_count() {
+		line := polylines_get(r)
+		polyline_stamp(line, COAST_REACH, to_coast, coast_side)
+	}
+
+	// Signed distance to coast, in cells, + on land. Exact near the smoothed line, cell-based farther out, blended.
+	to_water := make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	to_land := make([]f32, sim.CELLS_MAX, context.temp_allocator)
+	distance_to(to_water, terrain, true)
+	distance_to(to_land, terrain, false)
+	for cell, i in terrain {
+		water := cell.surface in sim.WATER
+		far := water ? -(to_land[i] - 0.5) : to_water[i] - 0.5
+		near := linalg.length(to_coast[i])
+		// Far from the line, use the cell's own surface
+		if near > 1 do coast_side[i] = water ? -1 : 1
+		rt.coast[i] = math.lerp(
+			coast_side[i] * near,
+			far,
+			math.smoothstep(COAST_REACH - 1, COAST_REACH, near),
+		)
+	}
+
+	// Region highlight areas (ids past RENDER_HIGHLIGHT_AREAS aren't drawn)
+	regions := &rt.highlights[.Regions]
+	for area in 1 ..< gfx.RENDER_HIGHLIGHT_AREAS do gfx.render_highlight_clear(regions, u8(area))
+	for cell, i in terrain {
+		if cell.surface in sim.WATER || cell.region == 0 || int(cell.region) >= gfx.RENDER_HIGHLIGHT_AREAS do continue
+		gfx.render_highlight_add(regions, u8(cell.region), {i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH})
+	}
+
+	// Preclaim near-shore water so marks don't spill into it
+	preclaim_coast_water(claimed, rt.coast[:], COAST_WATER_BAND)
+
+	// Cover layer and marks
+	cover_draw(&rt.cover, terrain)
+	marks_place(&MAP_DRAW.marks, terrain, rt.coast[:], claimed)
+}
+
+@(private = "file")
+lines_add :: proc(lines: ^gfx.Render_Lines, line: Polyline, head: bool) {
+	points := len(line.points)
+	segments := line.closed ? points : points - 1
+	for s in 0 ..< segments {
+		append(
+			&lines.segments,
+			gfx.Render_Segment {
+				start = line.points[s],
+				end = line.points[(s + 1) % points],
+				head = b32(head && s == segments - 1),
+			},
+		)
+	}
+}
+
+// Arrows --------------------------------------------------------------------------------------------------------------
+@(private = "file")
+map_arrows :: proc(scene: ^sim.Scene) {
+	arrows := &MAP_DRAW.render_terrain.lines[.Arrow]
+	clear(&arrows.segments)
+	arrows.revision += 1
+	for arrow in scene.arrows {
+		lines_add(arrows, {points = scene.arrow_points[arrow.begin:][:arrow.len]}, true)
+	}
+}
+
+// Highlights ----------------------------------------------------------------------------------------------------------
+@(private = "file")
+Area_Look :: struct {
+	color:     [4]f32,
+	border:    f32,
+	thickness: f32,
+	inside:    f32,
+	// In cells, see area_widen. Keep 0 for areas that must tile edge to edge.
+	widen:     int,
+}
+
+@(private = "file")
+highlight_ease :: proc(drawn: ^gfx.Render_Highlight_Area, color: [4]f32, border, thickness, inside, step: f32) {
+	drawn.color += (color - drawn.color) * step
+	drawn.border += (border - drawn.border) * step
+	drawn.thickness += (thickness - drawn.thickness) * step
+	drawn.inside += (inside - drawn.inside) * step
+}
+
+// Scene area slot i -> highlight area i+1. Cells re-uploaded only on revision change, fading in.
+@(private = "file")
+map_areas :: proc(scene: ^sim.Scene, dt: f32) {
+	#assert(sim.AREAS_MAX < gfx.RENDER_HIGHLIGHT_AREAS)
+	#assert(sim.CIRCLES_MAX <= gfx.RENDER_HIGHLIGHT_CIRCLES_MAX)
+	highlights := &MAP_DRAW.render_terrain.highlights[.Areas]
+	clear(&highlights.circles)
+	step := 1 - math.exp(-HIGHLIGHT_EASE * dt)
+	for &area, slot in scene.areas {
+		highlight := u8(slot + 1)
+		look := AREA_LOOKS[area.look]
+		drawn := &highlights.areas[highlight]
+		changed := MAP_DRAW.area_revisions[slot] != area.revision
+		if changed {
+			drawn.border = 0
+			drawn.inside = 0
+		}
+		highlight_ease(drawn, look.color, look.border, look.thickness, look.inside, step)
+		drawn.surface = area.on_water ? .Water : .Land
+		for circle in scene.circles[area.circles.begin:][:area.circles.len] {
+			append(
+				&highlights.circles,
+				gfx.Render_Highlight_Circle{circle.center, circle.radius, highlight},
+			)
+		}
+		if !changed do continue
+		MAP_DRAW.area_revisions[slot] = area.revision
+		gfx.render_highlight_clear(highlights, highlight)
+		cells := area.cells[:]
+		if look.widen > 0 do cells = area_widen(cells, look.widen)
+		for inside, i in cells {
+			if !inside do continue
+			cell := area.corner + {i % sim.AREA_SIZE, i / sim.AREA_SIZE}
+			if cell.x < 0 || cell.y < 0 || cell.x >= sim.WORLD_WIDTH || cell.y >= sim.WORLD_HEIGHT do continue
+			// Cells added by widening don't steal from other areas
+			owner := highlights.cells[cell.y * sim.WORLD_WIDTH + cell.x]
+			if !area.cells[i] && owner != 0 && owner != highlight do continue
+			gfx.render_highlight_add(highlights, highlight, cell)
+		}
+	}
+}
+
+// Regions ------------------------------------------------------------------------------------------------------------
+@(private = "file")
+Region_Look :: struct {
+	// Wash strength at the edge
+	border:    f32,
+	// Edge fade width, in cells
+	thickness: f32,
+	// Wash strength inside
+	inside:    f32,
+}
+
+@(private = "file")
+Region_Looks :: struct {
+	plain:       Region_Look,
+	highlighted: Region_Look,
+}
+
+@(private = "file")
+Region_Range :: enum u8 {
+	Near,
+	Far,
+}
+
+@(private = "file")
+map_regions :: proc(scene: ^sim.Scene, colouring: sim.Region_Colouring_Mode, zoom: f32, dt: f32) {
+	regions := &MAP_DRAW.render_terrain.highlights[.Regions]
+	step := 1 - math.exp(-HIGHLIGHT_EASE * dt)
+	looks := REGION_LOOKS[colouring][zoom < REGION_FAR_ZOOM ? .Far : .Near]
+	for &drawn, area in regions.areas {
+		if area == 0 || area > len(scene.regions) do continue
+		region := scene.regions[area - 1]
+		look := region.highlighted ? looks.highlighted : looks.plain
+		highlight_ease(&drawn, region.color, look.border, look.thickness, look.inside, step)
+		drawn.surface = .Land
+	}
+}
+
+// Thickens parts thinner than ~2*widen+1 cells (what a morphological opening removes), so threads become bands.
+// Doesn't extend past thread ends or grow isolated cells. Result in the temp allocator.
+@(private = "file")
+area_widen :: proc(cells: []bool, widen: int) -> []bool {
+	// Disc offsets
+	disc := make([dynamic][2]int, context.temp_allocator)
+	for dy in -widen ..= widen {
+		for dx in -widen ..= widen {
+			if dx * dx + dy * dy <= widen * widen + widen do append(&disc, [2]int{dx, dy})
+		}
+	}
+	// need = 1: dilate. need = len(disc): erode.
+	morph :: proc(from: []bool, disc: [][2]int, need: int) -> []bool {
+		to := make([]bool, len(from), context.temp_allocator)
+		for y in 0 ..< sim.AREA_SIZE {
+			for x in 0 ..< sim.AREA_SIZE {
+				held := 0
+				for offset in disc {
+					at := [2]int{x, y} + offset
+					if at.x < 0 || at.y < 0 || at.x >= sim.AREA_SIZE || at.y >= sim.AREA_SIZE do continue
+					if from[at.y * sim.AREA_SIZE + at.x] do held += 1
+				}
+				to[y * sim.AREA_SIZE + x] = held >= need
+			}
+		}
+		return to
+	}
+	opened := morph(morph(cells, disc[:], len(disc)), disc[:], 1)
+	thin := make([]bool, len(cells), context.temp_allocator)
+	for inside, i in cells do thin[i] = inside && !opened[i]
+	near_thin := morph(thin, disc[:], 1)
+	widened := morph(cells, disc[:], WIDEN_SUPPORT)
+	for &inside, i in widened do inside = cells[i] || (inside && near_thin[i])
+	return widened
+}
+
+// Cover ---------------------------------------------------------------------------------------------------------------
+@(private = "file")
+cover_draw :: proc(layer: ^gfx.Render_Layer, terrain: []sim.Ground) {
+	for cell, i in terrain do layer.cells[i] = {u8(cell.type), cell.type_strength}
+	for look, type in COVER_LOOKS do layer.palette[type] = look
+	layer.revision += 1
+}
+
+// Ways ----------------------------------------------------------------------------------------------------------------
+@(private = "file")
+Way_Look :: struct {
+	// Half-width, in cells, kept free of marks
+	band: f32,
+	line: gfx.Render_Line_Kind,
+}
+
+// to_way: per cell, offset from its centre to the nearest way point
+@(private = "file")
+ways_claim_ground :: proc(claimed: []u8, to_way: [][2]f32, band: f32) {
+	for offset, i in to_way {
+		if linalg.length(offset) > band + 1 do continue
+		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
+		way := [2]f32{f32(cell.x), f32(cell.y)} + 0.5 + offset
+		for y in 0 ..< FOOTPRINT_RES {
+			for x in 0 ..< FOOTPRINT_RES {
+				square := cell * FOOTPRINT_RES + {x, y}
+				middle := ([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES
+				if linalg.length(middle - way) >= band do continue
+				claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
+			}
+		}
+	}
+}
+
+// Coasts --------------------------------------------------------------------------------------------------------------
+// Traces edges between different labels into polylines, larger label on the left. Label 0 is ignored. Lines end
+// at corners where 1, 3 or 4 edges meet; the rest are closed loops.
+@(private = "file")
+trace_boundaries :: proc(labels: []u16, smoothing: Polyline_Smoothing) {
+	// Per corner (y * ACROSS + x): unwalked outgoing edges, and how many edges meet there
+	ACROSS :: sim.WORLD_WIDTH + 1
+	out := make([]bit_set[Step], ACROSS * (sim.WORLD_HEIGHT + 1), context.temp_allocator)
+	meeting := make([]u8, len(out), context.temp_allocator)
+	edge :: proc(out: []bit_set[Step], meeting: []u8, from: [2]int, step: Step) {
+		to := from + STEPS[step]
+		out[from.y * ACROSS + from.x] += {step}
+		meeting[from.y * ACROSS + from.x] += 1
+		meeting[to.y * ACROSS + to.x] += 1
+	}
+	for y in 0 ..< sim.WORLD_HEIGHT {
+		for x in 0 ..< sim.WORLD_WIDTH {
+			here := labels[y * sim.WORLD_WIDTH + x]
+			if here == 0 do continue
+			// Top and left edges
+			if y > 0 {
+				above := labels[(y - 1) * sim.WORLD_WIDTH + x]
+				if above != 0 && above != here {
+					if here > above do edge(out, meeting, {x + 1, y}, .West)
+					else do edge(out, meeting, {x, y}, .East)
+				}
+			}
+			if x > 0 {
+				left := labels[y * sim.WORLD_WIDTH + x - 1]
+				if left != 0 && left != here {
+					if here > left do edge(out, meeting, {x, y}, .South)
+					else do edge(out, meeting, {x, y + 1}, .North)
+				}
+			}
+		}
+	}
+
+	// Follows edges until a junction/end corner or back to start
+	walk :: proc(
+		out: []bit_set[Step],
+		meeting: []u8,
+		start: [2]int,
+		step: Step,
+		smoothing: Polyline_Smoothing,
+	) {
+		at, heading := start, step
+		polylines_add({f32(at.x), f32(at.y)})
+		for {
+			out[at.y * ACROSS + at.x] -= {heading}
+			at += STEPS[heading]
+			c := at.y * ACROSS + at.x
+			if at == start && meeting[c] == 2 {
+				polylines_end(true, smoothing)
+				return
+			}
+			polylines_add({f32(at.x), f32(at.y)})
+			if meeting[c] != 2 || out[c] == {} {
+				polylines_end(false, smoothing)
+				return
+			}
+			for s in Step do if s in out[c] {heading = s; break}
+		}
+	}
+	// Open lines first, then closed loops
+	for c in 0 ..< len(out) {
+		if meeting[c] == 2 do continue
+		for s in Step do if s in out[c] do walk(out, meeting, {c % ACROSS, c / ACROSS}, s, smoothing)
+	}
+	for c in 0 ..< len(out) {
+		for s in Step do if s in out[c] do walk(out, meeting, {c % ACROSS, c / ACROSS}, s, smoothing)
+	}
+}
+
+// Clockwise, +y down
+@(private = "file")
+Step :: enum {
+	East,
+	South,
+	West,
+	North,
+}
+
+@(private = "file", rodata)
+STEPS := [Step][2]int {
+	.East  = {1, 0},
+	.South = {0, 1},
+	.West  = {-1, 0},
+	.North = {0, -1},
+}
+
+// Distance to the nearest water cell (or land cell if !water)
+@(private = "file")
+distance_to :: proc(out: []f32, terrain: []sim.Ground, water: bool) {
+	source := make([]bool, sim.CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain do source[i] = (cell.surface in sim.WATER) == water
+	distance_from(out, source, sim.WORLD_SIZE)
+}
+
+// Preclaims squares where -reach < coast < 0 (bilinear)
+@(private = "file")
+preclaim_coast_water :: proc(claimed: []u8, coast: []f32, reach: f32) {
+	for distance, i in coast {
+		// Skip cells too far from the band to have squares in it
+		if distance >= 1 || distance <= -reach - 1 do continue
+		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
+		for y in 0 ..< FOOTPRINT_RES {
+			for x in 0 ..< FOOTPRINT_RES {
+				square := cell * FOOTPRINT_RES + {x, y}
+				at := bilinear(
+					coast,
+					sim.WORLD_SIZE,
+					([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES,
+				)
+				if at < 0 && at > -reach do claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
+			}
+		}
+	}
+}
+
+// Marks ---------------------------------------------------------------------------------------------------------------
+// Scattered drawings (trees, hills...). Each layer is a jittered grid; at each point every marking of the layer gets
+// a score from coast distance, elevation, temperature and terrain. A mark is kept with probability sum(scores), and
+// the marking is picked weighted by score.
+
+@(private = "file")
+footprint_square :: proc(p: [2]f32) -> [2]int {
+	return {int(p.x * FOOTPRINT_RES), int(p.y * FOOTPRINT_RES)}
+}
+
+@(private = "file")
+Map_Marks :: struct {
+	// Sorted by foot, top to bottom, so nearer marks draw over farther ones
+	marks:    [dynamic; MARKS_MAX]Mark,
+	// [marking][variant]; the first variants[marking] are valid
+	images:   [len(MARKINGS)][VARIANTS_MAX]gfx.Image_Id,
+	variants: [len(MARKINGS)]u8,
+}
+
+@(private = "file")
+Mark :: struct {
+	// Centre, in cells
+	pos:     [2]f32,
+	layer:   Layer,
+	// In cells
+	width:   f32,
+	// From the image's aspect ratio
+	height:  f32,
+	marking: u8,
+	variant: u8,
+	// 0..255
+	alpha:   u8,
+}
+
+#assert(
+	len(MARKINGS) <= 256 && VARIANTS_MAX <= 256,
+	"a mark names its marking and variant in a byte each",
+)
+
+// In placement order; earlier layers claim ground from later ones
+@(private = "file")
+Layer :: enum {
+	Mountain,
+	Molehill,
+	Tree,
+	Tuft,
+	Marsh,
+	Dune,
+	Sea,
+}
+
+@(private = "file")
+Layer_Def :: struct {
+	// Grid step in cells; rows are spacing * row_squash apart, odd rows offset half a step
+	spacing:    f32,
+	row_squash: f32,
+	// Fraction of a step
+	jitter:     [2]f32,
+	// In cells, +-vary as a fraction
+	width:      f32,
+	vary:       f32,
+	// Ground claimed by each mark, as fractions of its size. Zero = claims nothing.
+	footprint:  struct {
+		width: f32,
+		below: f32,
+	},
+	// Also blocks later marks of the same layer
+	claims_own: bool,
+}
+
+@(private = "file")
+Marking :: struct {
+	// Under assets/gfx; empty = no more variants
+	images:      [VARIANTS_MAX]string,
+	layer:       Layer,
+	// Where it grows
+	coast:       Range,
+	elevation:   Range,
+	temperature: Range,
+	// Density per terrain type (times type strength). All zero = density 1 everywhere.
+	cover:       [sim.Terrain_Type]f32,
+	// Width multiplier at the top of the elevation range
+	grow:        f32,
+	// Opacity over coast distance; unset = opaque
+	fade:        Ramp,
+}
+
+// [lo, hi). lo == hi = any value.
+@(private = "file")
+Range :: struct {
+	lo, hi: f32,
+}
+
+// Call before sprites_load
 @(private = "file")
 marks_init :: proc(mm: ^Map_Marks) {
 	for marking, k in MARKINGS {
@@ -903,18 +845,13 @@ marks_init :: proc(mm: ^Map_Marks) {
 	}
 }
 
-// Lays the marks over the terrain, in three passes: every layer's grid points, scored; a candidate mark at each point
-// that keeps one; and, in order, each candidate that fits, stamping its footprint. coast is for every cell: the signed
-// distance to the coast. claimed holds the preclaimed ground: see FOOTPRINT_RES. Call after sprites_load: marks take
-// their images' proportions.
+// Call after sprites_load (needs image aspect ratios). coast: signed distance per cell. claimed: see FOOTPRINT_RES.
 @(private = "file")
 marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed: []u8) {
-	// Each layer has sixteen random streams, one for each use at a point.
+	// 16 random streams per layer
 	stream :: proc(layer: Layer, use: u32) -> u32 {return u32(layer) * 16 + use}
-	// Where a mark stands, in cells down the map: its drawing's bottom edge
+	// Bottom edge y, in cells
 	mark_foot :: proc(mark: Mark) -> f32 {return mark.pos.y + mark.height / 2}
-	// A point of a layer's grid, col across and row down, where it lies, in cells, the cell it lies in, and how densely
-	// each marking grows there, 0 for the markings of other layers
 	Point :: struct {
 		layer:    Layer,
 		col, row: int,
@@ -923,8 +860,7 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 		scores:   [len(MARKINGS)]f32,
 	}
 
-	// Each marking's variants' height over width, as their images were loaded; 0 where an image is missing. The marks
-	// read their images only through this, so they depend on the images' proportions, not on their ids.
+	// Aspect ratios (height / width); 0 = missing image
 	aspects := make([][VARIANTS_MAX]f32, len(MARKINGS), context.temp_allocator)
 	for &variants, m in aspects {
 		for &aspect, v in variants[:mm.variants[m]] {
@@ -933,14 +869,13 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 		}
 	}
 
-	// Every layer's grid points that lie in the world, each with every marking's score there
+	// Grid points and scores
 	points := make([dynamic]Point, context.temp_allocator)
 	for def, layer in LAYERS {
 		step := [2]f32{def.spacing, def.spacing * def.row_squash}
 		cols, rows := int(sim.WORLD_WIDTH / step.x), int(sim.WORLD_HEIGHT / step.y)
 		for row in 0 ..< rows {
 			for col in 0 ..< cols {
-				// The middle of its step, every other row shifted half a step across, wandering within its step
 				wander :=
 					[2]f32 {
 						random_xy(col, row, stream(layer, 0)),
@@ -964,8 +899,6 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 				temperature := 1 - north - 0.47 * elevation + 0.5 * (0.6 - moisture)
 				values := [3]f32{coast[point.cell], elevation, temperature}
 				values += (random_xy(col, row, stream(layer, 2)) - 0.5) * 2 * BLUR
-				// Each marking of the layer grows where the values are in its ranges: as densely as its cover says of the
-				// cell's terrain type, times the type's strength, or fully if it names none.
 				here := terrain[point.cell]
 				marking: for m, k in MARKINGS {
 					if m.layer != layer do continue
@@ -982,8 +915,7 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 		}
 	}
 
-	// A candidate mark at each point that keeps one, with the sum of the scores as its chance: one of the markings,
-	// picked in proportion to its score
+	// Candidates
 	candidates := make([dynamic]Mark, context.temp_allocator)
 	for &point in points {
 		col, row, layer := point.col, point.row, point.layer
@@ -993,7 +925,6 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 		k, _ := pick_weighted(point.scores[:], random_xy(col, row, stream(layer, 4)))
 		marking, def := MARKINGS[k], LAYERS[layer]
 
-		// Markings that grow with elevation are wider the higher up their range the cell is.
 		width :=
 			def.width *
 			math.lerp(1 - def.vary, 1 + def.vary, random_xy(col, row, stream(layer, 5)))
@@ -1014,15 +945,14 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 		if marking.fade.from != marking.fade.full {
 			mark.alpha = u8(ramp(marking.fade, coast[point.cell]) * f32(max(u8)))
 		}
-		// A mark whose image is missing is never drawn, so it is not kept.
+		// Skip missing images
 		aspect := aspects[mark.marking][mark.variant]
 		if aspect <= 0 do continue
 		mark.height = width * aspect
 		append(&candidates, mark)
 	}
 
-	// In order, each candidate that fits: standing on ground nothing before its layer has claimed, nor its own layer if
-	// it claims its own, and with no preclaimed ground under its drawing
+	// Place candidates that fit, then claim their footprint
 	clear(&mm.marks)
 	candidate: for mark in candidates {
 		def := LAYERS[mark.layer]
@@ -1044,7 +974,7 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 		assert(len(mm.marks) < MARKS_MAX, "more marks than MARKS_MAX")
 		append(&mm.marks, mark)
 
-		// Its footprint: width of the mark wide, from the top of its drawing to below of its height in front of it
+		// Claim footprint
 		if def.footprint == {} do continue
 		half := mark.width * def.footprint.width / 2
 		first := footprint_square({mark.pos.x - half, mark_foot(mark) - mark.height})
@@ -1061,8 +991,7 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 	slice.sort_by(mm.marks[:], proc(a, b: Mark) -> bool {return mark_foot(a) < mark_foot(b)})
 }
 
-// Fills list with the marks in view. Marks are fixed in the world and scale with the map; marks past the list's room
-// are dropped.
+// Marks beyond the list's capacity are dropped
 @(private = "file")
 marks_draw :: proc(
 	mm: ^Map_Marks,
@@ -1075,7 +1004,6 @@ marks_draw :: proc(
 	rect: [4]f32 = {0, 0, viewport.x, viewport.y}
 	gfx.draw_begin(&draw, list, span.from_array(&list.instances), rect, pixel_density)
 	for mark in mm.marks[:] {
-		// The drawing is centred on the mark.
 		size := [2]f32{mark.width, mark.height}
 		corner := mark.pos - size / 2
 		rect: [4]f32 = {corner.x, corner.y, size.x, size.y}

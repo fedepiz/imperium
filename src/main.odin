@@ -10,6 +10,47 @@ import "tweak"
 import "ui"
 import sdl "vendor:sdl3"
 
+// FPS averaging window, in seconds
+FPS_PERIOD :: 0.5
+
+// Midnight colors beyond the ui's base style
+MIDNIGHT_BACKGROUND :: [4]f32{0.07, 0.09, 0.13, 1}
+MIDNIGHT_PANEL :: [4]f32{0.105, 0.125, 0.165, 1}
+MIDNIGHT_GOLD :: [4]f32{0.9, 0.71, 0.38, 1}
+MIDNIGHT_MUTED :: [4]f32{0.55, 0.61, 0.7, 1}
+MIDNIGHT_PRIMARY :: [4]f32{0.23, 0.39, 0.61, 1}
+MIDNIGHT_DANGER :: [4]f32{0.48, 0.15, 0.19, 1}
+// Text drawn on the saturated primary and danger fills
+MIDNIGHT_TEXT_ON_FILL :: [4]f32{1, 1, 1, 1}
+// Globals because ui.Size isn't constant; read-only after main sets them up
+MIDNIGHT_PANEL_STYLE := ui.Style {
+	width      = ui.Size{.Fit, 0, 1},
+	height     = ui.Size{.Fit, 0, 1},
+	padding    = [2]f32{16, 14},
+	gap        = 8,
+	background = MIDNIGHT_PANEL,
+}
+
+// Its font is the heading font, set by main once the fonts are defined
+MIDNIGHT_HEADING := ui.Style {
+	height     = ui.Size{.Text, 0, 1},
+	text_color = MIDNIGHT_GOLD,
+}
+
+MIDNIGHT_MUTED_TEXT :: ui.Style {
+	text_color = MIDNIGHT_MUTED,
+}
+
+MIDNIGHT_PRIMARY_BUTTON :: ui.Style {
+	background = MIDNIGHT_PRIMARY,
+	text_color = MIDNIGHT_TEXT_ON_FILL,
+}
+
+MIDNIGHT_DANGER_BUTTON :: ui.Style {
+	background = MIDNIGHT_DANGER,
+	text_color = MIDNIGHT_TEXT_ON_FILL,
+}
+
 GLOBAL: struct {
 	input:       Input,
 	render_list: gfx.Render_List,
@@ -81,12 +122,12 @@ main :: proc() {
 	renderer.pixel_density = pixel_density
 	ui.init(GLOBAL.fonts[.Default])
 
-	// Seconds the display shows each frame for, or 0 when unknown
+	// Seconds, 0 = unknown
 	refresh_period := display_refresh_period(window)
 
 	demo: Demo_Ui
 	palette: Palette
-	// Frames and time counted toward the next frame rate shown, and the one shown
+	// FPS counter
 	fps_frames: int
 	fps_time, fps: f32
 	frame_previous := sdl.GetTicksNS()
@@ -97,8 +138,7 @@ main :: proc() {
 		dt := f32(f64(frame_now - frame_previous) / 1e9)
 		frame_previous = frame_now
 
-		// With vsync, a frame stays on screen for a whole number of refreshes, whenever the loop happened to wake;
-		// stepping by the time shown rather than the time measured keeps motion even.
+		// With vsync, use whole refresh periods instead of measured time, for even motion
 		if renderer.vsync && refresh_period > 0 {
 			dt = max(1, math.round(dt / refresh_period)) * refresh_period
 		}
@@ -153,7 +193,7 @@ main :: proc() {
 			}
 		}
 
-		// Escape leaves the game when nothing in the ui is focused; otherwise the ui takes it to drop the focus.
+		// Escape quits unless the ui has focus (then it drops focus)
 		keep_going &= !(key_is_pressed(GLOBAL.input, .ESCAPE) && !ui.focused_any())
 		if !keep_going {
 			break
@@ -165,7 +205,7 @@ main :: proc() {
 			return
 		}
 
-		// Fps calcualtion
+		// FPS counter
 		fps_frames += 1
 		fps_time += dt
 		if fps_time >= FPS_PERIOD {
@@ -181,13 +221,13 @@ main :: proc() {
 		}
 		demo.enabled = tweak.toggle("Demo.UI", "Shown", demo.enabled)
 
-		// Texts last one frame; the game writes names before the ui builds its texts.
+		// Texts last one frame
 		gfx.text_begin()
 		{
 			viewport: [2]f32 = {f32(logical_width), f32(logical_height)}
 			game.game_tick(game_input(GLOBAL.input, viewport, pixel_density), dt)
 		}
-		// Tab steps through the map and the raw terrain properties.
+		// Tab: cycle map view
 		if key_is_pressed(GLOBAL.input, .TAB) && !ui.keyboard_captured() {
 			game.game_next_map_view()
 		}
@@ -257,10 +297,7 @@ game_input :: proc(input: Input, viewport: [2]f32, pixel_density: f32) -> game.I
 	}
 }
 
-// Seconds over which the frame rate is averaged
-FPS_PERIOD :: 0.5
-
-// Seconds between refreshes of the display the window is on, or 0 when the display does not say.
+// 0 if unknown
 display_refresh_period :: proc(window: ^sdl.Window) -> f32 {
 	mode := sdl.GetCurrentDisplayMode(sdl.GetDisplayForWindow(window))
 	if mode == nil || mode.refresh_rate_numerator <= 0 || mode.refresh_rate_denominator <= 0 {
@@ -284,9 +321,9 @@ Input :: struct {
 	btns:         [Old_New][Button_State][max(u8)]b8,
 	pos:          [2]f32,
 	pos_is_valid: b32,
-	// Wheel movement this frame, in notches (fractional on touchpads); positive y is away from the user, positive x to the right
+	// Notches this frame (fractional on touchpads); +y away from the user, +x right
 	wheel:        [2]f32,
-	// Keys going down, repeats included, and typed characters, in the order they came this frame; the rest are dropped
+	// Key presses (incl. repeats) and typed text, in order; overflow is dropped
 	events:       [dynamic; ui.EVENTS_MAX]ui.Event,
 }
 
@@ -324,45 +361,6 @@ Demo_Ui :: struct {
 }
 
 DEMO_DIFFICULTIES := []string{"Easy", "Normal", "Hard"}
-
-// Midnight colors beyond the ui's base style
-MIDNIGHT_BACKGROUND :: [4]f32{0.07, 0.09, 0.13, 1}
-MIDNIGHT_PANEL :: [4]f32{0.105, 0.125, 0.165, 1}
-MIDNIGHT_GOLD :: [4]f32{0.9, 0.71, 0.38, 1}
-MIDNIGHT_MUTED :: [4]f32{0.55, 0.61, 0.7, 1}
-MIDNIGHT_PRIMARY :: [4]f32{0.23, 0.39, 0.61, 1}
-MIDNIGHT_DANGER :: [4]f32{0.48, 0.15, 0.19, 1}
-// Text drawn on the saturated primary and danger fills
-MIDNIGHT_TEXT_ON_FILL :: [4]f32{1, 1, 1, 1}
-// Styles holding a ui.Size are not compile-time constants, so they are globals; treat them as read-only once main has
-// set them up.
-MIDNIGHT_PANEL_STYLE := ui.Style {
-	width      = ui.Size{.Fit, 0, 1},
-	height     = ui.Size{.Fit, 0, 1},
-	padding    = [2]f32{16, 14},
-	gap        = 8,
-	background = MIDNIGHT_PANEL,
-}
-
-// Its font is the heading font, set by main once the fonts are defined
-MIDNIGHT_HEADING := ui.Style {
-	height     = ui.Size{.Text, 0, 1},
-	text_color = MIDNIGHT_GOLD,
-}
-
-MIDNIGHT_MUTED_TEXT :: ui.Style {
-	text_color = MIDNIGHT_MUTED,
-}
-
-MIDNIGHT_PRIMARY_BUTTON :: ui.Style {
-	background = MIDNIGHT_PRIMARY,
-	text_color = MIDNIGHT_TEXT_ON_FILL,
-}
-
-MIDNIGHT_DANGER_BUTTON :: ui.Style {
-	background = MIDNIGHT_DANGER,
-	text_color = MIDNIGHT_TEXT_ON_FILL,
-}
 
 demo_build :: proc(demo: ^Demo_Ui) {
 	if ui.column({width = ui.grow(), height = ui.grow(), padding = [2]f32{24, 20}, gap = 16}) {
@@ -469,7 +467,6 @@ demo_build :: proc(demo: ^Demo_Ui) {
 	}
 }
 
-// Labels and buttons in the demo hug their text; the style still wins over these.
 demo_label :: proc(text: string, style := ui.Style{}) {
 	ui.style_next({width = ui.text_dim()})
 	ui.label(text, style)
@@ -480,7 +477,6 @@ demo_button :: proc(label: string, style := ui.Style{}) -> ui.Signal {
 	return ui.button(label, style)
 }
 
-// A checkbox is a row of boxes, so it fits its children rather than a text.
 demo_checkbox :: proc(label: string, value: ^bool, style := ui.Style{}) -> ui.Signal {
 	ui.style_next({width = ui.fit(), padding = [2]f32{10, 0}})
 	return ui.checkbox(label, value, style)

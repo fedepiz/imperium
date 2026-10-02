@@ -6,33 +6,28 @@ import "core:math/linalg"
 import "../sim"
 import "../span"
 
-// Lines through the world, in cells: ways, coasts and arrows, and later borders. Each is added as a run of points,
-// read from a scenario or traced from cell to cell; each run is smoothed as it ends, then read out run by run.
+// Polyline builder (in cells) for ways, coasts and arrows: add points, end a run (smoothed), read runs back.
 
-// The most points a run is traced with, and the most runs
 POLYLINE_POINTS_MAX :: 1 << 16
 POLYLINE_RUNS_MAX :: 1 << 13
-// The most times a run's corners can be cut. Each cut doubles its points, so this sizes the smoothed points.
+// Each corner cut doubles the points
 POLYLINE_CORNER_ITER_MAX :: 3
-// Room for the smoothed points of all the runs
 POLYLINE_SMOOTHED_MAX :: POLYLINE_POINTS_MAX << POLYLINE_CORNER_ITER_MAX
-// Runs of up to this many points are not softened, which would shrink them to specks.
+// Runs this short aren't softened (it would shrink them to specks)
 POLYLINE_SHORT :: 8
 
-// How a run is smoothed. Softening moves each point toward the average of its neighbours, soften_iter times, by
-// softness from 0 to 1: it rounds whole stretches of line, drawing in capes and filling bays, over more of the line the
-// more times it is done. Then every corner is cut cut_iter times, Chaikin's way: each segment becomes two points
-// cut_ratio of the way in from its ends, but never more than cut_max cells in if cut_max is above 0, which rounds only
-// the corners. A ratio near 0 cuts little, keeping corners crisp; 0.5 cuts the most.
+// Neighbour averaging (soften), then Chaikin corner cutting
 Polyline_Smoothing :: struct {
+	// 0..1, pull toward neighbours' average per iteration
 	softness:    f32,
 	soften_iter: int,
 	cut_iter:    int,
+	// 0..0.5: near 0 keeps corners crisp, 0.5 cuts most
 	cut_ratio:   f32,
+	// Max cut distance in cells, 0 = unlimited
 	cut_max:     f32,
 }
 
-// A smoothed run, as polylines_get reads it out: its points, and whether they close from the last back to the first
 Polyline :: struct {
 	points: [][2]f32,
 	closed: bool,
@@ -40,14 +35,13 @@ Polyline :: struct {
 
 @(private = "file")
 POLYLINES: struct {
-	// The points of the run being traced
+	// Current run
 	tracing: [dynamic; POLYLINE_POINTS_MAX][2]f32,
-	// The runs ended since the last clear, smoothed
+	// Finished runs, smoothed
 	points:  [dynamic; POLYLINE_SMOOTHED_MAX][2]f32,
 	runs:    [dynamic; POLYLINE_RUNS_MAX]Polyline_Run,
 }
 
-// A smoothed run: a span of the points, and whether it closes from its last point back to its first
 @(private = "file")
 Polyline_Run :: struct {
 	points: span.Span,
@@ -61,15 +55,13 @@ polylines_clear :: proc() {
 	clear(&lines.runs)
 }
 
-// Adds a point to the run being traced. A full run takes no more.
+// Ignored when full
 polylines_add :: proc(point: [2]f32) {
 	lines := &POLYLINES
 	if len(lines.tracing) < POLYLINE_POINTS_MAX do append(&lines.tracing, point)
 }
 
-// Ends the run being traced, the points added since the last run ended, and smooths it as it asks: see
-// Polyline_Smoothing. An open run keeps its ends where they are. Runs of fewer than two points are dropped, as are runs
-// past the room there is.
+// Smooths and stores the current run. Open runs keep their ends. Runs < 2 points, or that don't fit, are dropped.
 polylines_end :: proc(closed: bool, smoothing: Polyline_Smoothing) {
 	lines := &POLYLINES
 	defer clear(&lines.tracing)
@@ -99,22 +91,17 @@ polylines_end :: proc(closed: bool, smoothing: Polyline_Smoothing) {
 	append(&lines.runs, Polyline_Run{points = {begin, n}, closed = closed})
 }
 
-// How many runs have been ended since the last clear
 polylines_count :: proc() -> int {
 	return len(POLYLINES.runs)
 }
 
-// A run, smoothed
 polylines_get :: proc(run: int) -> Polyline {
 	lines := &POLYLINES
 	r := lines.runs[run]
 	return {points = lines.points[r.points.begin:][:r.points.len], closed = r.closed}
 }
 
-// Cuts every corner of the first n points of p, in place, and returns how many points there are now: twice as many.
-// Each segment becomes the two points ratio of the way in from its ends, but no more than cut_max cells in if cut_max
-// is above 0; an open line keeps its end points. The points are written from the last back, so each is read before
-// anything is written over it.
+// One Chaikin pass in place over the first n points; returns the new count (2n). Open lines keep their ends.
 @(private = "file")
 polyline_cut_corners :: proc(p: [][2]f32, n: int, closed: bool, ratio, cut_max: f32) -> int {
 	cut :: proc(a, b: [2]f32, ratio, cut_max: f32) -> (near_a, near_b: [2]f32) {
@@ -135,9 +122,8 @@ polyline_cut_corners :: proc(p: [][2]f32, n: int, closed: bool, ratio, cut_max: 
 	return 2 * n
 }
 
-// Records a line as the nearest one of every cell within reach cells of it, where it is nearer than what the cell
-// holds: nearest gets the offset from the cell's middle to the nearest point of the line, and side, if given, which
-// side of the line the middle lies on, 1 to the left of its direction and -1 to the right.
+// For cells within reach where this line is nearer than what's stored: nearest = offset from cell centre to the
+// line; side (optional) = 1 left of the line's direction, -1 right.
 polyline_stamp :: proc(line: Polyline, reach: f32, nearest: [][2]f32, side: []f32) {
 	n := len(line.points)
 	segments := line.closed ? n : n - 1
@@ -157,7 +143,7 @@ polyline_stamp :: proc(line: Polyline, reach: f32, nearest: [][2]f32, side: []f3
 				i := y * sim.WORLD_WIDTH + x
 				if linalg.dot(offset, offset) >= linalg.dot(nearest[i], nearest[i]) do continue
 				nearest[i] = offset
-				// With y down the map, the left of a direction (dx, dy) is (dy, -dx).
+				// +y down: left of (dx, dy) is (dy, -dx)
 				if side != nil do side[i] = linalg.dot(middle - a, [2]f32{ab.y, -ab.x}) >= 0 ? 1 : -1
 			}
 		}

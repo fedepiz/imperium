@@ -9,11 +9,8 @@ import stbi "vendor:stb/image"
 
 import "../sim"
 
-// Reads a scenario from its folder: one greyscale PNG per layer, WORLD_WIDTH by WORLD_HEIGHT; the ways, from
-// rivers.txt and roads.txt: see ways_load; the regions, from regions.txt and regions.png: see regions_read; and the
-// factions and pieces, from pieces.txt: see pieces_load. surface.png is black for land, grey for lake and white for
-// sea; elevation.png, trees.png and moisture.png run from 0 to 255 on land. The layers live in the temp allocator. If a
-// layer is missing or the wrong size, or the ways, regions or pieces cannot be read, every layer is left empty.
+// Layers are WORLD_WIDTH x WORLD_HEIGHT greyscale PNGs, in the temp allocator. surface.png: black land, grey lake,
+// white sea. On any failure every layer is left empty.
 scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 	Layer :: enum {
 		Surface,
@@ -61,16 +58,14 @@ scenario_read :: proc(folder: string) -> (scenario: sim.Scenario) {
 	return
 }
 
-// Where caches are kept, apart from the scenarios they are derived from
 CACHE_FOLDER :: "cache"
 
-// Where a scenario's cache is kept: in CACHE_FOLDER, named after the scenario's folder and the cache. Each file is its
-// fingerprint, then its data.
+// File layout: fingerprint, then data
 cache_path :: proc(folder: string, id: sim.Cached_File_Id) -> string {
 	return fmt.tprintf("%s/%s_%v.cache", CACHE_FOLDER, os.base(folder), id)
 }
 
-// A cache as last written, in the temp allocator, or empty if there is none or it is cut short
+// Temp allocator. Empty if missing or truncated.
 cache_read :: proc(path: string) -> (file: sim.Cached_File) {
 	data, err := os.read_entire_file(path, context.temp_allocator)
 	if err != nil || len(data) < size_of(file.fingerprint) do return
@@ -79,9 +74,8 @@ cache_read :: proc(path: string) -> (file: sim.Cached_File) {
 	return
 }
 
-// Writes a cache, to be read back by cache_read; true if it was written whole
 cache_write :: proc(path: string, file: sim.Cached_File) -> bool {
-	// Made on the first write; if it cannot be, creating the file says so.
+	// Errors surface when creating the file
 	_ = os.make_directory(CACHE_FOLDER)
 	f, err := os.create(path)
 	if err != nil {
@@ -99,8 +93,7 @@ cache_write :: proc(path: string, file: sim.Cached_File) -> bool {
 	return true
 }
 
-// One greyscale layer, WORLD_WIDTH by WORLD_HEIGHT, in 16 bits: an 8-bit image's values are widened, so their high
-// byte is the value. The pixels live in the temp allocator.
+// 16-bit greyscale (8-bit images widened, value in the high byte), temp allocator
 @(private = "file")
 scenario_read_layer :: proc(path: string) -> (pixels: []u16, ok: bool) {
 	data, err := os.read_entire_file(path, context.temp_allocator)

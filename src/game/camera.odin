@@ -7,40 +7,34 @@ import "core:math"
 import "core:math/linalg"
 
 Camera :: struct {
-	// The cell at the middle of the view, and pixels per cell
+	// center: in cells. zoom: pixels per cell.
 	center:    [2]f32,
 	zoom:      f32,
-	// Keyboard panning velocity, in cells per second
+	// Keyboard pan velocity, in cells per second
 	dv:        [2]f32,
-	// A drag is in progress, and where the cursor was last frame
 	grabbing:  bool,
 	grab_last: [2]f32,
 }
 
-// Pixels per second the keyboard pans at, whatever the zoom
+// Screen pixels per second, at any zoom
 CAMERA_PAN_SPEED :: 900
-// Zoom factor per wheel notch
 CAMERA_ZOOM_STEP :: 1.15
-// Closest zoom, in pixels per cell
+// In pixels per cell
 CAMERA_ZOOM_MAX :: 24
-// Farthest zoom, in pixels per cell
 CAMERA_ZOOM_MIN :: 2
 
-// The camera starts over the middle of the world, at its farthest zoom.
 camera_init :: proc() {
 	GAME.camera.center = {sim.WORLD_WIDTH, sim.WORLD_HEIGHT} / 2
 	GAME.camera.zoom = CAMERA_ZOOM_MIN
 }
 
-// Moves the camera by the input: the wheel zooms about the cursor, a drag on the map pulls it along, and the keyboard
-// pans it.
 camera_tick :: proc(input: Input, dt: f32) {
 	camera := &GAME.camera
 	world_size := [2]f32{sim.WORLD_WIDTH, sim.WORLD_HEIGHT}
-	// Never so far out that the world is smaller than the view
+	// Don't zoom out past the world filling the view
 	zoom_min := min(input.viewport.x / world_size.x, input.viewport.y / world_size.y)
 
-	// Zooming keeps the cell under the cursor in place.
+	// Wheel zoom around the cursor
 	if input.wheel != 0 && input.on_map {
 		offset := input.cursor - input.viewport / 2
 		anchor := camera.center + offset / camera.zoom
@@ -52,7 +46,7 @@ camera_tick :: proc(input: Input, dt: f32) {
 		camera.center = anchor - offset / camera.zoom
 	}
 
-	// A drag starts only on the map, and the grabbed point stays under the cursor until the button is released.
+	// Drag (must start on the map)
 	if input.grab && (camera.grabbing || input.on_map) {
 		if camera.grabbing {
 			camera.center -= (input.cursor - camera.grab_last) / camera.zoom
@@ -63,7 +57,7 @@ camera_tick :: proc(input: Input, dt: f32) {
 		camera.grabbing = false
 	}
 
-	// Keyboard panning eases in and out, at a constant speed on screen.
+	// Keyboard pan, eased
 	target := input.pan * CAMERA_PAN_SPEED / camera.zoom
 	camera.dv += (target - camera.dv) * (1 - math.exp(-6 * dt))
 	camera.center += camera.dv * dt
@@ -78,13 +72,11 @@ camera_world_to_screen :: proc {
 	camera_world_to_screen_rect,
 }
 
-// The point on screen, in pixels, that a point in the world, in cells, is seen at.
 camera_world_to_screen_point :: proc(camera: Camera, viewport: [2]f32, pos: [2]f32) -> [2]f32 {
 	return (pos - camera.center) * camera.zoom + viewport / 2
 }
 
-// The rect on screen, in pixels, that a rect in the world, in cells, is seen at, and whether any of it falls within
-// the view. The view is widened by the tolerance, as a fraction of its size, on every side.
+// visible: overlaps the view widened by tolerance (fraction of view size) on each side
 camera_world_to_screen_rect :: proc(
 	camera: Camera,
 	viewport: [2]f32,

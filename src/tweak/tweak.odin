@@ -5,14 +5,12 @@ import "core:strings"
 
 import "../span"
 
-// Named values the game declares every frame, which a palette can show and change. Each declaration passes the
-// value in and takes it back: the tweak keeps a copy, and a change made to the copy comes back from the next one.
-// A label is shown up to any "##", and is also the key: from "###" on when there is one, so the shown text can change.
+// Immediate-mode tweakables: declare every frame, passing the value in and getting it (possibly edited) back.
+// Label: shown up to "##". Key: the whole label, or the part after "###" if present.
 
-// Most tweaks ever declared, and declarations in one frame
 TWEAK_MAX :: 1024
 SHOWN_MAX :: 1024
-// Room for one frame's labels and choice names, copied in as they are declared
+// Per-frame storage for labels and choice names
 BLOB_SIZE :: 1 << 16
 NAMES_MAX :: 4096
 
@@ -27,14 +25,14 @@ Kind :: enum {
 	Choice,
 }
 
-// Where a tweak's value lives. Id 0 is none.
+// 0 = none
 Id :: distinct u16
 
-// A tweak's copy of its value, kept from the first frame it is declared on for as long as the game runs
+// Persists for the whole run once declared
 Tweak :: struct {
 	key:       u64,
 	kind:      Kind,
-	// The copy was changed since the last declaration, which returns it
+	// Changed since last declaration
 	edited:    bool,
 	// Toggle
 	flag:      bool,
@@ -44,13 +42,12 @@ Tweak :: struct {
 	selection: int,
 }
 
-// A declaration this frame: what to show, and the tweak it shows
 Shown :: struct {
 	kind:    Kind,
 	id:      Id,
 	// In the blob
 	label:   span.Span,
-	// Label: the text shown; Button and Toggle: the text on the widget. In the blob.
+	// Label: shown text. Button/Toggle: widget text. In the blob.
 	text:    span.Span,
 	// Slider
 	lo:      f32,
@@ -68,17 +65,14 @@ TWEAKS: struct {
 	ids:       [HASH_CAPACITY]Id,
 	// This frame's declarations, in order
 	shown:     [dynamic; SHOWN_MAX]Shown,
-	// This frame's labels and choice names, and the spans of the names in the blob
 	blob:      [dynamic; BLOB_SIZE]u8,
 	names:     [dynamic; NAMES_MAX]span.Span,
-	// The button fire named last frame, which button returns true for this frame
+	// Fired last frame; button() returns true for it this frame
 	fired:     Id,
 	fire_next: Id,
-	// The palette is showing
 	open:      bool,
 }
 
-// Starts a frame: forgets the last frame's declarations, and makes the last fire this frame's.
 begin :: proc() {
 	if len(TWEAKS.tweaks) == 0 {
 		append(&TWEAKS.tweaks, Tweak{})
@@ -98,20 +92,20 @@ set_open :: proc(open: bool) {
 	TWEAKS.open = open
 }
 
-// Text shown beside the label, which changes nothing.
+// Read-only text
 label :: proc(label, text: string) {
 	id, _ := declare(label, .Label)
 	show({kind = .Label, id = id, label = store(label), text = store(text)})
 }
 
-// True the frame after fire named it.
+// True the frame after fire()
 button :: proc(label, text: string) -> bool {
 	id, _ := declare(label, .Button)
 	show({kind = .Button, id = id, label = store(label), text = store(text)})
 	return id == TWEAKS.fired
 }
 
-// Each declaration takes the value, or a pointer to it, which it writes back to at once.
+// By value, or by pointer (written back immediately)
 toggle :: proc {
 	toggle_value,
 	toggle_in_place,
@@ -125,7 +119,6 @@ choice :: proc {
 	choice_in_place,
 }
 
-// On or off.
 toggle_value :: proc(label, text: string, flag: bool) -> bool {
 	id, t := declare(label, .Toggle)
 	if !t.edited {
@@ -140,7 +133,6 @@ toggle_in_place :: proc(label, text: string, flag: ^bool) {
 	flag^ = toggle_value(label, text, flag^)
 }
 
-// A number between lo and hi.
 slider_value :: proc(label: string, value, lo, hi: f32) -> f32 {
 	id, t := declare(label, .Slider)
 	if !t.edited {
@@ -156,7 +148,6 @@ slider_in_place :: proc(label: string, value: ^f32, lo, hi: f32) {
 	value^ = slider_value(label, value^, lo, hi)
 }
 
-// One of choices, by index.
 choice_value :: proc(label: string, selection: int, choices: []string) -> int {
 	assert(len(choices) > 0, "a choice needs something to choose")
 	id, t := declare(label, .Choice)
@@ -179,32 +170,27 @@ choice_in_place :: proc(label: string, selection: ^int, choices: []string) {
 	selection^ = choice_value(label, selection^, choices)
 }
 
-// This frame's declarations, in the order they came.
 shown :: proc() -> []Shown {
 	return TWEAKS.shown[:]
 }
 
-// A declaration's label, as declared.
 shown_label :: proc(s: Shown) -> string {
 	return span.to_string(TWEAKS.blob[:], s.label)
 }
 
-// A declaration's text.
 shown_text :: proc(s: Shown) -> string {
 	return span.to_string(TWEAKS.blob[:], s.text)
 }
 
-// The name of a choice declaration's choice i.
 shown_choice :: proc(s: Shown, i: int) -> string {
 	return span.to_string(TWEAKS.blob[:], TWEAKS.names[s.choices.begin + i])
 }
 
-// The tweak's copy of its value.
 get :: proc(id: Id) -> Tweak {
 	return TWEAKS.tweaks[id]
 }
 
-// Change the copy, which the next declaration returns.
+// Returned by the next declaration
 set_flag :: proc(id: Id, flag: bool) {
 	TWEAKS.tweaks[id].flag = flag
 	TWEAKS.tweaks[id].edited = true
@@ -220,18 +206,16 @@ set_selection :: proc(id: Id, selection: int) {
 	TWEAKS.tweaks[id].edited = true
 }
 
-// Makes the button return true next frame.
 fire :: proc(id: Id) {
 	TWEAKS.fire_next = id
 }
 
-// The part of a label that is shown.
 display :: proc(label: string) -> string {
 	head, _, _ := strings.partition(label, "##")
 	return head
 }
 
-// Copies text into the blob. A full blob keeps what fits.
+// Truncates when full
 @(private = "file")
 store :: proc(text: string) -> span.Span {
 	begin := len(TWEAKS.blob)
@@ -240,7 +224,7 @@ store :: proc(text: string) -> span.Span {
 	return span.from_range(begin, len(TWEAKS.blob))
 }
 
-// Adds a declaration this frame. A full list shows no more; the tweaks still work.
+// When full, further tweaks aren't shown but still work
 @(private = "file")
 show :: proc(s: Shown) {
 	if len(TWEAKS.shown) < SHOWN_MAX {
@@ -248,7 +232,7 @@ show :: proc(s: Shown) {
 	}
 }
 
-// The tweak of the label, made the first time it is declared.
+// Created on first declaration
 @(private = "file")
 declare :: proc(label: string, kind: Kind) -> (id: Id, t: ^Tweak) {
 	head, match, tail := strings.partition(label, "###")

@@ -10,189 +10,20 @@ PIECE_MAX :: 1024
 FACTION_MAX :: 256
 CHARACTER_MAX :: 1024
 
-WORLD: struct {
-	atlas:           Atlas,
-	// Each region's name and capital, from region 1
-	region_names:    [dynamic; REGIONS_MAX]Name,
-	region_capitals: [dynamic; REGIONS_MAX]Piece_Id,
-	// Every slot a piece can be in, and each slot's name, set by piece_spawn
-	pieces:          [PIECE_MAX]Piece,
-	piece_names:     [PIECE_MAX]Name,
-	// The slots with no piece in them, the next to be used last
-	pieces_free:     [dynamic; PIECE_MAX]u16,
-	// Every slot a faction can be in, each slot's name, set by faction_spawn, and the slots with no faction in them,
-	// the next to be used last
-	factions:        [FACTION_MAX]Faction,
-	faction_names:   [FACTION_MAX]Name,
-	factions_free:   [dynamic; FACTION_MAX]u16,
-	// Every slot a character can be in, each slot's name, set by character_spawn, and the slots with no character in
-	// them, the next to be used last
-	characters:      [CHARACTER_MAX]Character,
-	character_names: [CHARACTER_MAX]Name,
-	characters_free: [dynamic; CHARACTER_MAX]u16,
-	// The faction whose turn it is, which the player plays, or nil for none
-	player:          Faction_Id,
-	// The faction whose pieces take orders: the player's, nil while an interaction is open
-	ordering:        Faction_Id,
-	// The turn could end as last presented: nothing walked and no interaction was open
-	turn_endable:    bool,
-	interaction:     Interaction,
-	movement:        Movement,
-	// The turn being played, counting from 1: each faction plays once in a turn, in the order of their slots
-	turn:            int,
-}
-
-// How a walk's path is smoothed: passes of softening, then corner cuts, each cut_ratio of the way in from a segment's
-// ends. See walk_smooth.
+// Path smoothing, see walk_smooth
 WALK_SOFTEN_PASSES :: 2
 WALK_CUTS :: 2
 WALK_CUT_RATIO :: 0.25
-// The most points a walk's path holds: where it starts and up to PATH_MAX_LEN cells, doubled by each cut
+// Start point plus PATH_MAX_LEN cells, doubled by each cut
 WALK_POINTS_MAX :: (PATH_MAX_LEN + 1) << WALK_CUTS
 
-// A scene's arrow holds where the walker stands and the rest of its path.
+// Arrow = walker position + remaining path
 #assert(WALK_POINTS_MAX + 1 <= ARROW_POINTS_MAX)
 
-// A meeting waiting on the player: the piece that walked to meet another, and the one of another faction it met. Nil
-// actor while none is open.
-Interaction :: struct {
-	actor, target: Piece_Id,
-	// The actor can conquer the target, as when it opened
-	conquerable:   bool,
-}
+// In cells, regardless of terrain
+WALK_PER_STEP :: 10 * STEP_SECONDS
 
-// The piece walking, and where the focus can walk
-Movement :: struct {
-	// The piece walking, nil when none
-	subject:       Piece_Id,
-	// Its path, from where it stood, smoothed from the cell middles it crosses: see walk_smooth. The cost of walking
-	// to each point from the one before, and the next point it walks to.
-	path:          [dynamic; WALK_POINTS_MAX][2]f32,
-	cost:          [dynamic; WALK_POINTS_MAX]f32,
-	next:          int,
-	// The piece it walks to meet, or nil
-	target:        Piece_Id,
-	// Where the focus can walk: nil subject and 0 key when none. The key hashes the flood's inputs, zones and bodies
-	// among them, rebuilt every tick.
-	flood:         Pathfind_Flood,
-	enemy_zones:   [dynamic; PIECE_MAX]Disc,
-	friend_zones:  [dynamic; PIECE_MAX]Disc,
-	bodies:        [dynamic; PIECE_MAX]Disc,
-	flood_subject: Piece_Id,
-	flood_key:     u64,
-}
-
-// Floods where the focus can walk. Runs once per tick, first in present; the next step's orders use it.
-movement_flood :: proc(mov: ^Movement, focus: Piece_Id) {
-	zones, bodies := &mov.enemy_zones, &mov.bodies
-	clear(zones)
-	clear(bodies)
-	clear(&mov.friend_zones)
-	subject := piece_get(focus)
-	if subject == nil || subject.movement_domain == nil {
-		mov.flood_subject, mov.flood_key = {}, 0
-		return
-	}
-	domain := subject.movement_domain.(Pathfind_Domain)
-
-	// No stopping on bodies; enemy contacts are zones, stopping it once entered, and friends' are kept apart. Only
-	// discs near the flood count.
-	for other, index in WORLD.pieces {
-		if !piece_alive(other) || piece_id(index) == focus do continue
-		near := PATHFIND_FLOOD_SIZE / 2 + max(other.contact.radius, subject.body + other.body) + 1
-		if abs(other.pos.x - subject.pos.x) > near || abs(other.pos.y - subject.pos.y) > near do continue
-		append(bodies, Disc{other.pos, subject.body + other.body})
-		if other.contact.radius == 0 || domain not_in other.contact.domains do continue
-		contact := Disc{other.pos, other.contact.radius}
-		if pieces_friendly(subject^, other) {
-			append(&mov.friend_zones, contact)
-		} else {
-			append(zones, contact)
-		}
-	}
-
-	focus, pos, budget := focus, subject.pos, subject.movement_budget
-	counts := [2]int{len(zones), len(bodies)}
-	key := hash.fnv64a(mem.ptr_to_bytes(&focus))
-	key = hash.fnv64a(mem.ptr_to_bytes(&pos), key)
-	key = hash.fnv64a(mem.ptr_to_bytes(&budget), key)
-	key = hash.fnv64a(mem.ptr_to_bytes(&domain), key)
-	key = hash.fnv64a(mem.ptr_to_bytes(&counts), key)
-	key = hash.fnv64a(mem.slice_to_bytes(zones[:]), key)
-	key = hash.fnv64a(mem.slice_to_bytes(bodies[:]), key)
-	if key == mov.flood_key do return
-	pathfind_flood(pos, domain, budget, zones[:], bodies[:], &mov.flood)
-	mov.flood_subject, mov.flood_key = focus, key
-}
-
-// Walks the subject walk_distance cells along its path, paying from its budget. At the end it reaches its target: both
-// are returned then, and nil otherwise.
-movement_advance :: proc(mov: ^Movement, walk_distance: f32) -> (walker, met: Piece_Id) {
-	if mov.subject == {} do return
-	subject := piece_get(mov.subject)
-	is_over: bool
-	if subject == nil {
-		is_over = true
-	} else {
-		step := walk_distance
-		for step > 0 && mov.next < len(mov.path) {
-			target, cost := mov.path[mov.next], mov.cost[mov.next]
-			distance := linalg.distance(subject.pos, target)
-			if step < distance {
-				subject.pos += linalg.normalize(target - subject.pos) * step
-				movement_spend(subject, step * cost, cost == ROAD_COST)
-				break
-			}
-			step -= distance
-			movement_spend(subject, distance * cost, cost == ROAD_COST)
-			subject.pos = target
-			mov.next += 1
-		}
-
-		is_over = mov.next >= len(mov.path)
-	}
-
-	if is_over {
-		if subject != nil do walker, met = mov.subject, mov.target
-		mov.subject, mov.target, mov.next = {}, {}, 0
-	}
-	return
-}
-
-// Readiness an army loses per movement point it spends, in percent: on roads, and off them
-ROAD_READINESS_PER_MOVEMENT :: 0.1
-READINESS_PER_MOVEMENT :: 1
-
-// Pays cost from a piece's movement budget, as far as it lasts, and wears down its army's readiness by what was paid,
-// less on a road
-@(private = "file")
-movement_spend :: proc(piece: ^Piece, cost: f32, on_road: bool) {
-	spent := min(cost, piece.movement_budget)
-	piece.movement_budget -= spent
-	rate: f32 = on_road ? ROAD_READINESS_PER_MOVEMENT : READINESS_PER_MOVEMENT
-	piece.army.readiness = max(0, piece.army.readiness - spent * rate)
-}
-
-Atlas :: struct {
-	// Bumped whenever the terrain changes, so what is derived from it can be rebuilt
-	revision: u32,
-	terrain:  [CELLS_MAX]Terrain,
-}
-
-Terrain :: struct {
-	surface:       Surface,
-	elevation:     u8,
-	trees:         u8,
-	moisture:      u8,
-	// For each way kind, which way is this cell assigned to. (Way_Id = 0 is nil)
-	way:           [Way_Kind]Way_Id,
-	// Worked out from the land around it at load
-	type:          Terrain_Type,
-	type_strength: u8,
-	region:        Region_Id,
-}
-
-// Land movement cost per cell walked, by terrain type, 0 for impassable; a road costs ROAD_COST whatever its type
+// Movement cost per cell, 0 = impassable. Roads override with ROAD_COST.
 TERRAIN_COSTS := [Terrain_Type]f32 {
 	.Open      = 1,
 	.Forest    = 2,
@@ -206,24 +37,103 @@ TERRAIN_COSTS := [Terrain_Type]f32 {
 }
 ROAD_COST :: 0.4
 
-// Over elevation: mountain country, and from where it is too high to cross
+// Normalized elevation
 HIGHLAND_ELEVATION :: Ramp{0.55, 1.0}
 MOUNTAINS_ELEVATION :: 0.85
 
-// How far from a road, in cells either way, mountains open into a pass, and the fewest cells a patch of mountains
-// holds: smaller patches are highland.
+// Mountains within PASS_REACH cells of a road become highland. Smaller patches than MOUNTAINS_PATCH_MIN too.
 PASS_REACH :: 1
 MOUNTAINS_PATCH_MIN :: 12
 
-// How far around a cell, in cells either way, the land it is compared with to find basins reaches
+// Radius in cells for basin detection
 BASIN_REACH :: 24
 
-// What the terrain types need beyond the cells, in the temp allocator: cells to the nearest river and to the sea, and
-// how far each land cell lies below the land around it.
+// Readiness lost per movement point spent, in percent
+ROAD_READINESS_PER_MOVEMENT :: 0.1
+READINESS_PER_MOVEMENT :: 1
+
+// Readiness recovered at end of turn, scaled by the fraction of movement left
+READINESS_RECOVERY :: 20
+
+WORLD: struct {
+	atlas:           Atlas,
+	// Index 0 = region 1
+	region_names:    [dynamic; REGIONS_MAX]Name,
+	region_capitals: [dynamic; REGIONS_MAX]Piece_Id,
+	// Pieces, names and armies are parallel arrays indexed by slot
+	pieces:          [PIECE_MAX]Piece,
+	piece_names:     [PIECE_MAX]Name,
+	armies:          [PIECE_MAX]Army,
+	// Free slots; the last is used next
+	pieces_free:     [dynamic; PIECE_MAX]u16,
+	factions:        [FACTION_MAX]Faction,
+	faction_names:   [FACTION_MAX]Name,
+	factions_free:   [dynamic; FACTION_MAX]u16,
+	characters:      [CHARACTER_MAX]Character,
+	character_names: [CHARACTER_MAX]Name,
+	characters_free: [dynamic; CHARACTER_MAX]u16,
+	// Faction whose turn it is (played by the player), nil = none
+	player:          Faction_Id,
+	interaction:     Interaction,
+	movement:        Movement,
+	// From 1. Each faction plays once per turn, in slot order.
+	turn:            int,
+}
+
+// Nil actor = none open
+Interaction :: struct {
+	actor, target: Piece_Id,
+	// Computed when opened
+	conquerable:   bool,
+}
+
+Movement :: struct {
+	// Walking piece, nil = none
+	subject:       Piece_Id,
+	// Smoothed path. cost[i] = cost per cell from point i-1 to i. next = point being walked to.
+	path:          [dynamic; WALK_POINTS_MAX][2]f32,
+	cost:          [dynamic; WALK_POINTS_MAX]f32,
+	next:          int,
+	target:        Piece_Id,
+	// Reach of the focus. Nil subject and 0 key = none. Key hashes all flood inputs; recomputed only on change.
+	flood:         Pathfind_Flood,
+	enemy_zones:   [dynamic; PIECE_MAX]Disc,
+	friend_zones:  [dynamic; PIECE_MAX]Disc,
+	bodies:        [dynamic; PIECE_MAX]Disc,
+	flood_subject: Piece_Id,
+	flood_key:     u64,
+}
+
+// Full again once WORLD.turn moves past movement_turn
+movement_budget :: proc(piece: Piece) -> f32 {
+	if piece.movement_turn != WORLD.turn do return piece.movement_per_turn
+	return max(0, piece.movement_per_turn - piece.movement_spent)
+}
+
+Atlas :: struct {
+	// Incremented on terrain change
+	revision: u32,
+	terrain:  [CELLS_MAX]Terrain,
+}
+
+Terrain :: struct {
+	surface:       Surface,
+	elevation:     u8,
+	trees:         u8,
+	moisture:      u8,
+	// 0 = none
+	way:           [Way_Kind]Way_Id,
+	// Derived at load
+	type:          Terrain_Type,
+	type_strength: u8,
+	region:        Region_Id,
+}
+
+// Per-cell inputs for terrain classification, in the temp allocator
 Land :: struct {
+	// Distance in cells
 	to_river, to_sea: []f32,
-	// The mean elevation of the land within BASIN_REACH cells, less the cell's own: above 0 in basins and valleys.
-	// Elevation has no fixed sea level, so this, not elevation, tells lowland.
+	// Mean surrounding elevation minus own; > 0 in basins and valleys. Used for lowland since there's no sea level.
 	basin:            []f32,
 }
 
@@ -257,11 +167,8 @@ measure_land :: proc(terrain: []Terrain) -> (land: Land) {
 	return
 }
 
-// Cell i's terrain type: whichever suits it best, how well being its strength, unless none suits it by at least a
-// sixth; mountains above MOUNTAINS_ELEVATION, fully. Desert, steppe and fields follow the moisture, forest the trees. Land along a river is fertile: close along it
-// in dry country, and farther out where a wet river valley or basin lies below the land around it. Low, level ground is
-// marsh where it is very wet or where a river meets the sea; fertile land and marsh win over the rest. Highland follows
-// the mountains, and wins over forest, desert and steppe where they are at their fullest.
+// Best-suited type and its strength; Open if nothing scores at least 1/6.
+// Priority: mountains > fertile/marsh > highland > forest/desert/steppe/fields.
 terrain_type_of :: proc(
 	terrain: []Terrain,
 	land: ^Land,
@@ -302,19 +209,16 @@ terrain_type_of :: proc(
 	return
 }
 
-// How well highland suits a cell of an elevation, normalized
 highland_suit :: proc(elevation: f32) -> f32 {
 	return 1.2 * ramp(HIGHLAND_ELEVATION, elevation)
 }
 
-// Makes a cell highland, as strongly as its elevation suits it
 terrain_to_highland :: proc(cell: ^Terrain) {
 	cell.type = .Highland
 	cell.type_strength = u8(min(highland_suit(normalized(cell.elevation)), 1) * f32(max(u8)) + 0.5)
 }
 
-// Mountains within PASS_REACH cells of a road are highland: a road through the mountains runs along a pass, which can
-// be crossed off the road too.
+// Mountains near roads become highland (passes)
 terrain_open_passes :: proc(terrain: []Terrain) {
 	for y in 0 ..< WORLD_HEIGHT {
 		for x in 0 ..< WORLD_WIDTH {
@@ -331,14 +235,13 @@ terrain_open_passes :: proc(terrain: []Terrain) {
 	}
 }
 
-// Patches of mountains too small to stand as a range are highland: cells that cannot be crossed, touching at a side
-// or a corner, fewer than MOUNTAINS_PATCH_MIN. A road's cells can be crossed, so they are in no patch.
+// Mountain patches (8-connected) smaller than MOUNTAINS_PATCH_MIN become highland
 terrain_drop_specks :: proc(terrain: []Terrain) {
 	impassable :: proc(cell: Terrain) -> bool {
 		return cell.type == .Mountains && cell.way[.Road] == 0
 	}
 	seen := make([]bool, CELLS_MAX, context.temp_allocator)
-	// The cells of the patch being found, which are also the queue of cells to look around
+	// Also the flood-fill queue
 	patch := make([dynamic]int, 0, 64, context.temp_allocator)
 	for start in 0 ..< CELLS_MAX {
 		if seen[start] || !impassable(terrain[start]) do continue
@@ -364,7 +267,7 @@ terrain_drop_specks :: proc(terrain: []Terrain) {
 	}
 }
 
-// Which way of its kind runs through a cell. Id 0 is none.
+// 0 = none
 Way_Id :: distinct u16
 
 world_init :: proc() {
@@ -398,11 +301,11 @@ world_load :: proc(scenario: Scenario) -> bool {
 			surface = .Sea,
 		}
 	}
-	// Water cells carry nothing else.
+	// Clear everything but surface on water
 	for &cell in terrain do if cell.surface in WATER do cell = {
 		surface = cell.surface,
 	}
-	// Roads step only across cell sides: where one steps diagonally, the lower of the corners beside the step joins it
+	// Make roads 4-connected: fill diagonal steps with the lower corner cell
 	for y in 0 ..< WORLD_HEIGHT - 1 {
 		for x in 0 ..< WORLD_WIDTH {
 			at := &terrain[y * WORLD_WIDTH + x]
@@ -418,14 +321,14 @@ world_load :: proc(scenario: Scenario) -> bool {
 			}
 		}
 	}
-	// Each land cell's type
+	// Terrain types
 	{
 		land := measure_land(terrain[:])
 		for &cell, i in terrain do cell.type, cell.type_strength = terrain_type_of(terrain[:], &land, i)
 		terrain_open_passes(terrain[:])
 		terrain_drop_specks(terrain[:])
 	}
-	// Land, by terrain type, roads whatever their type
+	// Land pathfinding grid
 	{
 		grid := pathfind_build_begin(.Land)
 		for cell, i in WORLD.atlas.terrain {
@@ -434,7 +337,7 @@ world_load :: proc(scenario: Scenario) -> bool {
 		}
 		pathfind_build_end(.Land, scenario.cached_files[.Pathfind_Land])
 	}
-	// Sea
+	// Sea pathfinding grid
 	{
 		grid := pathfind_build_begin(.Sea)
 		for cell, i in WORLD.atlas.terrain {
@@ -451,260 +354,307 @@ world_load :: proc(scenario: Scenario) -> bool {
 	}
 	WORLD.atlas.revision += 1
 	WORLD.interaction = {}
-	world_load_pieces(scenario)
-	turns_begin()
-	return ok
-}
 
-world_step :: proc(commands: []Command, walk_distance: f32) {
-	mov := &WORLD.movement
-	for command in commands {
-		// A walk of the focus, from the flood the last present made for it, nil when it cannot walk or does not take
-		// orders: where it stops, and whom it meets there
-		walker := mov.flood_subject
-		if piece := piece_get(walker);
-		   piece == nil || WORLD.ordering == {} || piece.owner != WORLD.ordering {
-			walker = {}
+	// Factions, characters, pieces
+	{
+		factions: [dynamic; FACTION_MAX]Faction_Id
+		for faction in scenario.factions {
+			append(
+				&factions,
+				faction_spawn({culture = faction.culture, color = faction.color}, faction.name),
+			)
 		}
-		target: Piece_Id
-		stop: [2]int
-		ok: bool
-		switch c in command {
-		case Move_Focus_To_Point:
-			if walker != {} do stop, ok = pathfind_flood_stop(&mov.flood, c.destination, c.snap)
-		case Move_Focus_To_Piece:
-			target = c.target
-			other := piece_get(target)
-			if walker != {} && other != nil && mov.flood.domain in other.contact.domains {
-				stop, ok = pathfind_flood_stop_within(&mov.flood, other.pos, other.contact.radius)
-			}
-		case End_Turn:
-			if WORLD.turn_endable {
-				turn_end()
-				// What was presented no longer holds, so a second End_Turn in the same step is rejected
-				WORLD.turn_endable = false
-			}
-			continue
-		case Conquer:
-			open := &WORLD.interaction
-			if open.actor != {} && open.conquerable {
-				actor, conquered := piece_get(open.actor), piece_get(open.target)
-				if actor != nil && conquered != nil do conquered.owner = actor.owner
-				interaction_close()
-			}
-			continue
-		case Leave_Interaction:
-			if WORLD.interaction.actor != {} do interaction_close()
-			continue
+		characters: [dynamic; CHARACTER_MAX]Character_Id
+		for name in scenario.character_names {
+			append(&characters, character_spawn({}, name))
 		}
-		path: [dynamic; PATH_MAX_LEN][2]f32
-		cost: [dynamic; PATH_MAX_LEN]f32
-		mover := piece_get(walker)
-		if !ok ||
-		   mover == nil ||
-		   !pathfind_flood_trace(
-				   &mov.flood,
-				   [2]f32{f32(stop.x), f32(stop.y)} + 0.5,
-				   &path,
-				   &cost,
-			   ) {
-			fmt.eprintfln("No way for %v to %v", walker, command)
-			continue
-		}
-		mov.subject, mov.target = walker, target
-		clear(&mov.path)
-		clear(&mov.cost)
-		append(&mov.path, mover.pos)
-		append(&mov.cost, 0)
-		append(&mov.path, ..path[:])
-		append(&mov.cost, ..cost[:])
-		walk_smooth(&mov.path, &mov.cost)
-		mov.next = 1
-	}
-	// A walk that reaches a piece of another faction opens an interaction there, and orders wait on it
-	if walker, met := movement_advance(mov, walk_distance); met != {} {
-		actor, other := piece_get(walker), piece_get(met)
-		if actor != nil && other != nil && !pieces_friendly(actor^, other^) {
-			WORLD.interaction = {
-				actor       = walker,
-				target      = met,
-				conquerable = .Captures in actor.traits && .Capturable in other.traits,
+		for piece in scenario.pieces {
+			owner: Faction_Id
+			if piece.owner >= 0 && piece.owner < len(factions) do owner = factions[piece.owner]
+			general: Character_Id
+			if piece.general > 0 && piece.general <= len(characters) do general = characters[piece.general - 1]
+			id := piece_spawn(
+				{
+					pos = piece.pos,
+					icon = piece.icon,
+					owner = owner,
+					culture = piece.culture,
+					movement_domain = piece.movement_domain,
+					movement_per_turn = piece.movement_per_turn,
+					contact = piece.contact,
+					body = piece.body,
+					traits = piece.traits,
+					general = general,
+				},
+				piece.army,
+				piece.name,
+			)
+			if piece.capital_of > 0 && int(piece.capital_of) <= len(WORLD.region_capitals) {
+				WORLD.region_capitals[piece.capital_of - 1] = id
 			}
-			WORLD.ordering = {}
 		}
 	}
-}
 
-// Closes the open interaction, and the player's pieces take orders again
-@(private = "file")
-interaction_close :: proc() {
-	WORLD.interaction = {}
-	WORLD.ordering = WORLD.player
-}
-
-// Both belong to one faction
-pieces_friendly :: proc(a, b: Piece) -> bool {
-	return faction_get(a.owner) != nil && a.owner == b.owner
-}
-
-// Smooths a walk's path in place, keeping its ends where they are. Softening moves each point toward the average of its
-// neighbours, which straightens the steps from cell to cell; then each cut rounds every corner, Chaikin's way, making
-// each segment the two points WALK_CUT_RATIO of the way in from its ends. A point's cost is that of walking to it from
-// the one before, so both points cut from a segment take its cost, and the walk costs what its cells do.
-@(private = "file")
-walk_smooth :: proc(
-	path: ^[dynamic; WALK_POINTS_MAX][2]f32,
-	cost: ^[dynamic; WALK_POINTS_MAX]f32,
-) {
-	n := len(path)
-	if n < 3 do return
-	for _ in 0 ..< WALK_SOFTEN_PASSES {
-		prev := path[0]
-		for i in 1 ..< n - 1 {
-			here := path[i]
-			path[i] = (prev + 2 * here + path[i + 1]) / 4
-			prev = here
-		}
-	}
-	// Written from the last back, so each point is read before anything is written over it
-	for _ in 0 ..< WALK_CUTS {
-		resize(path, 2 * n)
-		resize(cost, 2 * n)
-		path[2 * n - 1] = path[n - 1]
-		cost[2 * n - 1] = cost[n - 1]
-		for i := n - 2; i >= 0; i -= 1 {
-			a, b := path[i], path[i + 1]
-			segment := cost[i + 1]
-			path[2 * i + 1] = a + (b - a) * WALK_CUT_RATIO
-			path[2 * i + 2] = b + (a - b) * WALK_CUT_RATIO
-			cost[2 * i + 1] = segment
-			cost[2 * i + 2] = segment
-		}
-		n *= 2
-	}
-}
-
-// Starts turn 1, played first by the faction in the first slot with one, whose pieces take orders, every piece's
-// movement budget full
-@(private = "file")
-turns_begin :: proc() {
+	// First turn: first faction plays
 	WORLD.turn = 1
 	WORLD.player = {}
-	for &piece in WORLD.pieces {
-		if piece_alive(piece) && piece.movement_domain != nil do piece.movement_budget = piece.movement_per_turn
-	}
 	for faction, index in WORLD.factions {
 		if faction_alive(faction) {
 			WORLD.player = faction_id(index)
 			break
 		}
 	}
-	WORLD.ordering = WORLD.player
+	return ok
 }
 
-// Readiness an army recovers at the end of its faction's turn with all its movement budget left, in percent; with
-// part of it left, as much less
-READINESS_RECOVERY :: 20
+world_step :: proc(input: Step_Input) {
+	mov := &WORLD.movement
 
-// Ends the player's faction's part of the turn, its armies recovering readiness by the share of movement budget they
-// have left, and refilling its pieces' movement budgets: the faction in the next slot with one plays, and its pieces
-// take orders, and once past the last slot, the next turn begins. Nil when there is no faction.
-@(private = "file")
-turn_end :: proc() {
-	for &piece in WORLD.pieces {
-		if piece_alive(piece) && piece.owner == WORLD.player && piece.movement_domain != nil {
-			if piece.army.strength_max > 0 && piece.movement_per_turn > 0 {
-				left := piece.movement_budget / piece.movement_per_turn
-				piece.army.readiness = min(100, piece.army.readiness + left * READINESS_RECOVERY)
+	// Step: Decide
+	turn_ending := input.end_turn && turn_endable()
+
+	// Step: Movemnt Flood
+	{
+		zones, bodies := &mov.enemy_zones, &mov.bodies
+		clear(zones)
+		clear(bodies)
+		clear(&mov.friend_zones)
+		subject := piece_get(input.focus)
+		if subject == nil || subject.movement_domain == nil {
+			mov.flood_subject, mov.flood_key = {}, 0
+		} else {
+			domain := subject.movement_domain.(Pathfind_Domain)
+
+			// Gather nearby bodies (can't stop on), enemy zones (stop on entering) and friendly contacts
+			for other, index in WORLD.pieces {
+				if !piece_alive(other) || piece_id(index) == input.focus do continue
+				near :=
+					PATHFIND_FLOOD_SIZE / 2 +
+					max(other.contact.radius, subject.body + other.body) +
+					1
+				if abs(other.pos.x - subject.pos.x) > near || abs(other.pos.y - subject.pos.y) > near do continue
+				append(bodies, Disc{other.pos, subject.body + other.body})
+				if other.contact.radius == 0 || domain not_in other.contact.domains do continue
+				contact := Disc{other.pos, other.contact.radius}
+				if pieces_friendly(subject^, other) {
+					append(&mov.friend_zones, contact)
+				} else {
+					append(zones, contact)
+				}
 			}
-			piece.movement_budget = piece.movement_per_turn
+
+			// Reflood only when an input changed
+			focus, pos, budget := input.focus, subject.pos, movement_budget(subject^)
+			counts := [2]int{len(zones), len(bodies)}
+			key := hash.fnv64a(mem.ptr_to_bytes(&focus))
+			key = hash.fnv64a(mem.ptr_to_bytes(&pos), key)
+			key = hash.fnv64a(mem.ptr_to_bytes(&budget), key)
+			key = hash.fnv64a(mem.ptr_to_bytes(&domain), key)
+			key = hash.fnv64a(mem.ptr_to_bytes(&counts), key)
+			key = hash.fnv64a(mem.slice_to_bytes(zones[:]), key)
+			key = hash.fnv64a(mem.slice_to_bytes(bodies[:]), key)
+			if key != mov.flood_key {
+				pathfind_flood(pos, domain, budget, zones[:], bodies[:], &mov.flood)
+				mov.flood_subject, mov.flood_key = focus, key
+			}
 		}
 	}
-	from := int(WORLD.player.index)
-	next: Faction_Id
-	for step in 1 ..= FACTION_MAX {
-		index := from + step
-		if index == FACTION_MAX do WORLD.turn += 1
-		index %= FACTION_MAX
-		if faction_alive(WORLD.factions[index]) {
-			next = faction_id(index)
-			break
+
+	// Step: Orders
+	if input.order != nil {
+		walker := mov.flood_subject
+		ordering := ordering()
+		if piece := piece_get(walker); piece == nil || ordering == {} || piece.owner != ordering do walker = {}
+		target: Piece_Id
+		stop: [2]int
+		ok: bool
+		switch order in input.order {
+		case Move_Focus_To_Point:
+			if walker != {} do stop, ok = pathfind_flood_stop(&mov.flood, order.destination, order.snap)
+		case Move_Focus_To_Piece:
+			target = order.target
+			other := piece_get(target)
+			if walker != {} && other != nil && mov.flood.domain in other.contact.domains {
+				stop, ok = pathfind_flood_stop_within(&mov.flood, other.pos, other.contact.radius)
+			}
+		}
+		path: [dynamic; PATH_MAX_LEN][2]f32
+		cost: [dynamic; PATH_MAX_LEN]f32
+		mover := piece_get(walker)
+		if ok &&
+		   mover != nil &&
+		   pathfind_flood_trace(&mov.flood, [2]f32{f32(stop.x), f32(stop.y)} + 0.5, &path, &cost) {
+			mov.subject, mov.target = walker, target
+			clear(&mov.path)
+			clear(&mov.cost)
+			append(&mov.path, mover.pos)
+			append(&mov.cost, 0)
+			append(&mov.path, ..path[:])
+			append(&mov.cost, ..cost[:])
+			mov.next = 1
+
+			// Smooth: neighbour averaging, then Chaikin corner cutting. Ends stay fixed; cut points keep their
+			// segment's cost.
+			n := len(mov.path)
+			if n >= 3 {
+				for _ in 0 ..< WALK_SOFTEN_PASSES {
+					prev := mov.path[0]
+					for i in 1 ..< n - 1 {
+						here := mov.path[i]
+						mov.path[i] = (prev + 2 * here + mov.path[i + 1]) / 4
+						prev = here
+					}
+				}
+				// Backwards, so reads happen before overwrites
+				for _ in 0 ..< WALK_CUTS {
+					resize(&mov.path, 2 * n)
+					resize(&mov.cost, 2 * n)
+					mov.path[2 * n - 1] = mov.path[n - 1]
+					mov.cost[2 * n - 1] = mov.cost[n - 1]
+					for i := n - 2; i >= 0; i -= 1 {
+						a, b := mov.path[i], mov.path[i + 1]
+						segment := mov.cost[i + 1]
+						mov.path[2 * i + 1] = a + (b - a) * WALK_CUT_RATIO
+						mov.path[2 * i + 2] = b + (a - b) * WALK_CUT_RATIO
+						mov.cost[2 * i + 1] = segment
+						mov.cost[2 * i + 2] = segment
+					}
+					n *= 2
+				}
+			}
+		} else {
+			fmt.eprintfln("No way for %v to %v", walker, input.order)
 		}
 	}
-	WORLD.player = next
-	WORLD.ordering = next
+
+	// Step: Walk
+	// What the walker did this step. Nil piece = nobody walked.
+	walk: struct {
+		piece:          Piece_Id,
+		spent_road:     f32,
+		spent_off_road: f32,
+		met:            Piece_Id,
+	}
+	if subject := piece_get(mov.subject); subject != nil {
+		walk.piece = mov.subject
+		step: f32 = WALK_PER_STEP
+		for step > 0 && mov.next < len(mov.path) {
+			target, cost := mov.path[mov.next], mov.cost[mov.next]
+			distance := linalg.distance(subject.pos, target)
+			walked := min(step, distance)
+			subject.pos =
+				walked < distance ? subject.pos + linalg.normalize(target - subject.pos) * walked : target
+			step -= walked
+			if walked == distance do mov.next += 1
+
+			// Pay from the budget, as far as it lasts
+			spent := min(walked * cost, movement_budget(subject^))
+			if subject.movement_turn != WORLD.turn {
+				subject.movement_turn = WORLD.turn
+				subject.movement_spent = 0
+			}
+			subject.movement_spent += spent
+			// Road cells always cost exactly ROAD_COST
+			if cost == ROAD_COST do walk.spent_road += spent
+			else do walk.spent_off_road += spent
+		}
+		if mov.next >= len(mov.path) {
+			walk.met = mov.target
+			mov.subject, mov.target, mov.next = {}, {}, 0
+		}
+	} else {
+		// Walker gone
+		mov.subject, mov.target, mov.next = {}, {}, 0
+	}
+
+	// Step: Interaction
+	open := &WORLD.interaction
+	if open.actor != {} {
+		if input.conquer && open.conquerable {
+			actor, conquered := piece_get(open.actor), piece_get(open.target)
+			if actor != nil && conquered != nil do conquered.owner = actor.owner
+			open^ = {}
+		} else if input.leave {
+			open^ = {}
+		}
+	} else if actor, other := piece_get(walk.piece), piece_get(walk.met);
+	   actor != nil && other != nil && !pieces_friendly(actor^, other^) {
+		open^ = {
+			actor       = walk.piece,
+			target      = walk.met,
+			conquerable = .Captures in actor.traits && .Capturable in other.traits,
+		}
+	}
+
+	// Step: Armies
+	for &army, index in WORLD.armies {
+		if !army.active do continue
+		piece := WORLD.pieces[index]
+		readiness := army.readiness
+		if walk.piece != {} && int(walk.piece.index) == index {
+			readiness -= walk.spent_road * ROAD_READINESS_PER_MOVEMENT
+			readiness -= walk.spent_off_road * READINESS_PER_MOVEMENT
+		}
+		if turn_ending && piece.owner == WORLD.player && piece.movement_per_turn > 0 {
+			readiness += movement_budget(piece) / piece.movement_per_turn * READINESS_RECOVERY
+		}
+		army.readiness = clamp(readiness, 0, 100)
+	}
+
+	// Step: Turn End
+	// Next faction plays; wrapping past the last slot starts a new turn
+	if turn_ending {
+		from := int(WORLD.player.index)
+		next: Faction_Id
+		for step in 1 ..= FACTION_MAX {
+			index := from + step
+			if index == FACTION_MAX do WORLD.turn += 1
+			index %= FACTION_MAX
+			if faction_alive(WORLD.factions[index]) {
+				next = faction_id(index)
+				break
+			}
+		}
+		WORLD.player = next
+	}
 }
 
-// Spawns the scenario's factions, in the order they play, its characters, and its pieces, each led by its general and
-// the capital of its region if it has them
-@(private = "file")
-world_load_pieces :: proc(scenario: Scenario) {
-	factions: [dynamic; FACTION_MAX]Faction_Id
-	for faction in scenario.factions {
-		append(
-			&factions,
-			faction_spawn({culture = faction.culture, color = faction.color}, faction.name),
-		)
-	}
-	characters: [dynamic; CHARACTER_MAX]Character_Id
-	for name in scenario.character_names {
-		append(&characters, character_spawn({}, name))
-	}
-	for piece in scenario.pieces {
-		owner: Faction_Id
-		if piece.owner >= 0 && piece.owner < len(factions) do owner = factions[piece.owner]
-		general: Character_Id
-		if piece.general > 0 && piece.general <= len(characters) do general = characters[piece.general - 1]
-		id := piece_spawn(
-			{
-				pos = piece.pos,
-				icon = piece.icon,
-				owner = owner,
-				culture = piece.culture,
-				movement_domain = piece.movement_domain,
-				movement_per_turn = piece.movement_per_turn,
-				contact = piece.contact,
-				body = piece.body,
-				traits = piece.traits,
-				general = general,
-				army = piece.army,
-			},
-			piece.name,
-		)
-		if piece.capital_of > 0 && int(piece.capital_of) <= len(WORLD.region_capitals) {
-			WORLD.region_capitals[piece.capital_of - 1] = id
-		}
-	}
+// The player, or nil while an interaction is open
+ordering :: proc() -> Faction_Id {
+	return WORLD.interaction.actor == {} ? WORLD.player : {}
 }
 
-// A thing of the game's that stands on the map, drawn as a pawn
+turn_endable :: proc() -> bool {
+	return WORLD.movement.subject == {} && WORLD.interaction.actor == {}
+}
+
+pieces_friendly :: proc(a, b: Piece) -> bool {
+	return faction_get(a.owner) != nil && a.owner == b.owner
+}
+
 Piece :: struct {
-	// Bumped as the slot takes a piece and as it frees it: odd while there is a piece in the slot, even while it is
-	// free. Ids to earlier pieces go stale. Set by piece_spawn.
+	// Incremented on spawn and despawn: odd = occupied, even = free
 	generation:        u16,
-	// Where it stands, in cells
+	// In cells
 	pos:               [2]f32,
 	icon:              Icon,
-	// The faction it belongs to
 	owner:             Faction_Id,
 	culture:           Culture,
 	movement_domain:   Maybe(Pathfind_Domain),
-	// The cost it can still spend walking this turn
-	movement_budget:   f32,
-	// What its movement budget is recharged to at the start of each turn
+	// See movement_budget
 	movement_per_turn: f32,
-	// Where others touch it; for enemies, a zone they stop in once entered
+	movement_spent:    f32,
+	movement_turn:     int,
+	// Enemies entering it must stop
 	contact:           Contact,
-	// Radius in cells; no other piece stops overlapping it
+	// Radius in cells; other pieces can't stop overlapping it
 	body:              f32,
 	traits:            bit_set[Piece_Trait;u8],
-	// The character leading it, nil for none
 	general:           Character_Id,
-	army:              Army,
 }
 
-// Puts a piece in a free slot under a name, which may be empty, returning its id, or nil when every slot is full
-piece_spawn :: proc(piece: Piece, name: string) -> Piece_Id {
+// Returns nil if all slots are full. Pass an inactive army for none.
+piece_spawn :: proc(piece: Piece, army: Army, name: string) -> Piece_Id {
 	index, ok := pop_safe(&WORLD.pieces_free)
 	if !ok do return {}
 	slot := &WORLD.pieces[index]
@@ -712,73 +662,66 @@ piece_spawn :: proc(piece: Piece, name: string) -> Piece_Id {
 	slot^ = piece
 	slot.generation = generation
 	name_set(&WORLD.piece_names[index], name)
+	WORLD.armies[index] = army
 	return {index, generation}
 }
 
-// Frees a piece's slot. A stale or nil id does nothing.
+// Stale or nil id: no-op
 piece_despawn :: proc(id: Piece_Id) {
 	piece := piece_get(id)
 	if piece == nil do return
 	piece.generation += 1
 	clear(&WORLD.piece_names[id.index])
+	WORLD.armies[id.index] = {}
 	append(&WORLD.pieces_free, id.index)
 }
 
-// The piece an id is to, or nil when the id is stale or nil
+// Nil if the id is stale or nil
 piece_get :: proc(id: Piece_Id) -> ^Piece {
 	piece := &WORLD.pieces[id.index]
 	if id.generation & 1 == 0 || piece.generation != id.generation do return nil
 	return piece
 }
 
-// There is a piece in the slot
 piece_alive :: proc(piece: Piece) -> bool {
 	return piece.generation & 1 == 1
 }
 
-// The id of the piece in a slot
 piece_id :: proc(index: int) -> Piece_Id {
 	return {u16(index), WORLD.pieces[index].generation}
 }
 
-// A people with its own name, holding pieces
 Faction :: struct {
-	// Bumped as the slot takes a faction and as it frees it: odd while there is a faction in the slot, even while it is
-	// free. Ids to earlier factions go stale. Set by faction_spawn.
+	// Odd = occupied, even = free
 	generation: u16,
-	// Its people's culture
 	culture:    Culture,
-	// What it holds is shown in
 	color:      [4]f32,
 }
 
-// A proper name, held by value: up to 56 bytes of UTF-8, 64 in all. Its text is string(name[:]), a view that lasts as
-// long as the name is not set again.
+// Up to 56 bytes of UTF-8, by value. string(name[:]) is valid until the name is set again.
 Name :: [dynamic; 56]u8
 
-// Sets a name to text, cut to fit on a character boundary
+// Truncates on a UTF-8 boundary
 name_set :: proc(name: ^Name, text: string) {
 	clear(name)
 	if append(name, ..transmute([]u8)text) == len(text) do return
-	// Cut short: if the cut went through a character, drop what was kept of it, from its first byte on
+	// Truncated: drop a partial trailing character
 	first := len(name) - 1
 	for first > 0 && name[first] & 0xC0 == 0x80 do first -= 1
 	if name[first] >= 0xC0 && first + utf8_length(name[first]) > len(name) do resize(name, first)
 
-	// How many bytes the character a UTF-8 first byte begins takes
 	utf8_length :: proc(first: u8) -> int {
 		return first >= 0xF0 ? 4 : first >= 0xE0 ? 3 : 2
 	}
 }
 
-// Which faction: its slot, and the slot's generation while the faction is in it. An id with an even generation, like
-// the zero id, is nil: no faction.
+// Even generation (including the zero id) = nil
 Faction_Id :: struct {
 	index:      u16,
 	generation: u16,
 }
 
-// Puts a faction in a free slot under a name, returning its id, or nil when every slot is full
+// Returns nil if all slots are full
 faction_spawn :: proc(faction: Faction, name: string) -> Faction_Id {
 	index, ok := pop_safe(&WORLD.factions_free)
 	if !ok do return {}
@@ -790,7 +733,7 @@ faction_spawn :: proc(faction: Faction, name: string) -> Faction_Id {
 	return {index, generation}
 }
 
-// Frees a faction's slot. A stale or nil id does nothing; the pieces it held are left with no faction.
+// Stale or nil id: no-op. Its pieces are left with no faction.
 faction_despawn :: proc(id: Faction_Id) {
 	faction := faction_get(id)
 	if faction == nil do return
@@ -799,38 +742,33 @@ faction_despawn :: proc(id: Faction_Id) {
 	append(&WORLD.factions_free, id.index)
 }
 
-// The faction an id is to, or nil when the id is stale or nil
+// Nil if the id is stale or nil
 faction_get :: proc(id: Faction_Id) -> ^Faction {
 	faction := &WORLD.factions[id.index]
 	if id.generation & 1 == 0 || faction.generation != id.generation do return nil
 	return faction
 }
 
-// There is a faction in the slot
 faction_alive :: proc(faction: Faction) -> bool {
 	return faction.generation & 1 == 1
 }
 
-// The id of the faction in a slot
 faction_id :: proc(index: int) -> Faction_Id {
 	return {u16(index), WORLD.factions[index].generation}
 }
 
-// A person of the world, with a name
 Character :: struct {
-	// Bumped as the slot takes a character and as it frees it: odd while there is a character in the slot, even while
-	// it is free. Ids to earlier characters go stale. Set by character_spawn.
+	// Odd = occupied, even = free
 	generation: u16,
 }
 
-// Which character: its slot, and the slot's generation while the character is in it. An id with an even generation,
-// like the zero id, is nil: no character.
+// Even generation (including the zero id) = nil
 Character_Id :: struct {
 	index:      u16,
 	generation: u16,
 }
 
-// Puts a character in a free slot under a name, returning its id, or nil when every slot is full
+// Returns nil if all slots are full
 character_spawn :: proc(character: Character, name: string) -> Character_Id {
 	index, ok := pop_safe(&WORLD.characters_free)
 	if !ok do return {}
@@ -842,7 +780,7 @@ character_spawn :: proc(character: Character, name: string) -> Character_Id {
 	return {index, generation}
 }
 
-// Frees a character's slot. A stale or nil id does nothing; the pieces it led are left with no general.
+// Stale or nil id: no-op. Pieces it led are left with no general.
 character_despawn :: proc(id: Character_Id) {
 	character := character_get(id)
 	if character == nil do return
@@ -851,20 +789,17 @@ character_despawn :: proc(id: Character_Id) {
 	append(&WORLD.characters_free, id.index)
 }
 
-// The character an id is to, or nil when the id is stale or nil
+// Nil if the id is stale or nil
 character_get :: proc(id: Character_Id) -> ^Character {
 	character := &WORLD.characters[id.index]
 	if id.generation & 1 == 0 || character.generation != id.generation do return nil
 	return character
 }
 
-// There is a character in the slot
 character_alive :: proc(character: Character) -> bool {
 	return character.generation & 1 == 1
 }
 
-// The id of the character in a slot
 character_id :: proc(index: int) -> Character_Id {
 	return {u16(index), WORLD.characters[index].generation}
 }
-
