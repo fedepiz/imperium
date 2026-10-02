@@ -61,7 +61,7 @@ READINESS_PER_MOVEMENT :: 1
 READINESS_RECOVERY :: 20
 SUPPLY_DRAG :: 5
 
-// Resupply per turn = min(fed, 1 + SUPPLY_REFILL_MAX) − 1, in turns of food, where fed = what the place can feed
+// Resupply per turn = min(fed, 1 + SUPPLY_REFILL_MAX) − 1, in turns of supply, where fed = what the place can feed
 // (supply map or foraging, whichever is more) / nearby friendly men
 SUPPLY_REFILL_MAX :: 1
 // Stock used per movement point spent, in turns: on roads, and off them
@@ -72,6 +72,12 @@ STOCK_PER_MOVEMENT :: 0.01
 SUPPLY_DECAY :: 2
 // Men a cell's supply point feeds
 MEN_PER_SUPPLY :: 200
+// Engagements: an army sent at an enemy attacks this much more readily; falling back and pursuit walk within
+// these movement budgets
+ORDERED_ATTACK_BONUS :: 2
+FALL_BACK_BUDGET :: 10
+PURSUIT_BUDGET :: 15
+
 // Armies within this many cells share supply (network: friendly ones; forage: all), weighted by
 // 1 − distance / FORAGE_RADIUS
 FORAGE_RADIUS :: 12
@@ -109,12 +115,51 @@ WORLD: struct {
 	// Faction whose turn it is (played by the player), nil = none
 	player:              Faction_Id,
 	interaction:         Interaction,
+	engagement:          Engagement,
+	// Detected contacts waiting to be resolved, oldest first
+	contacts:            [dynamic; CONTACTS_MAX]Contact_Event,
+	// Per piece slot: the turn its army last attacked; each attacks at most once per turn
+	attacked_turn:       [PIECE_MAX]int,
+	// The player asked to end the turn; it ends once contacts are resolved and nothing is open
+	ending:              bool,
 	movement:            Movement,
 	// From 1. Each faction plays once per turn, in slot order.
 	turn:                int,
 	// The player's supply map, 0..100 per cell, rebuilt at the start of each faction's turn
 	supply_map:          [CELLS_MAX]u8,
 	supply_map_revision: u32,
+}
+
+CONTACTS_MAX :: 256
+
+// Two enemy pieces touching: the initiator (the one that moved in, or the player's army at a turn's end), and whether
+// it was sent at the other
+Contact_Event :: struct {
+	initiator, other: Piece_Id,
+	targeted:         bool,
+}
+
+// An engagement waiting on the player, advanced by Next: announced, then fought and reported, then falling back,
+// then pursuit. Nil attacker = none open.
+Engagement :: struct {
+	attacker, defender: Piece_Id,
+	// Both sides as they stood when it was announced; fought on the first Next
+	battle:             Battle,
+	result:             Battle_Result,
+	stage:              Engagement_Stage,
+	// Where the loser stood before falling back; a pursuer walks there
+	loser_start:        [2]f32,
+}
+
+Engagement_Stage :: enum u8 {
+	// Who attacks whom, before it's fought
+	Announce,
+	// What happened in the battle
+	Report,
+	// What it cost each side
+	Outcome,
+	Fall_Back,
+	Pursuit,
 }
 
 // Nil actor = none open
@@ -435,27 +480,210 @@ world_load :: proc(scenario: Scenario) -> bool {
 world_step :: proc(input: Step_Input) {
 	mov := &WORLD.movement
 
-	// Step: Decide
-	turn_ending := input.end_turn && turn_endable()
+	// Step: End Turn Request
+	// Ending the turn is a request: the player's armies sitting in an enemy army's zone make contact, then the turn
+	// ends once every contact is resolved and nothing is open
+	if input.end_turn && turn_endable() {
+		WORLD.ending = true
+		for piece, index in WORLD.pieces {
+			if !piece_alive(piece) || piece.owner != WORLD.player || !WORLD.armies[index].active do continue
+			for other, other_index in WORLD.pieces {
+				if !piece_alive(other) || pieces_friendly(piece, other) || !WORLD.armies[other_index].active do continue
+				if linalg.distance(piece.pos, other.pos) >= other.contact.radius do continue
+				append(
+					&WORLD.contacts,
+					Contact_Event{piece_id(index), piece_id(other_index), false},
+				)
+			}
+		}
+	}
 
-	// Step: Movemnt Flood
+	// This tick's order, if any: at most one piece is sent to walk per tick
+	order: struct {
+		piece:       Piece_Id,
+		// Toward the target's contact zone when set, else toward destination (snapped within a square of snap cells)
+		destination: [2]f32,
+		snap:        int,
+		target:      Piece_Id,
+		// Movement points the walk may use; 0 = the piece's movement budget left
+		budget:      f32,
+	}
+
+	// Step: Interaction
+	// Conquer or leave the open interaction
+	if WORLD.interaction.actor != {} {
+		if input.conquer && WORLD.interaction.conquerable {
+			actor, conquered :=
+				piece_get(WORLD.interaction.actor), piece_get(WORLD.interaction.target)
+			if actor != nil && conquered != nil do conquered.owner = actor.owner
+			WORLD.interaction = {}
+		} else if input.leave {
+			WORLD.interaction = {}
+		}
+	}
+
+	// Step: Contacts
+	// Resolve contacts, oldest first, until one opens an engagement or an interaction. A contact holds while both
+	// pieces live, are enemies and touch. Between armies the initiator attacks (more readily when sent at the enemy),
+	// else the other may; each army attacks at most once per turn; otherwise nothing happens. Any other enemy piece (a
+	// town) opens an interaction.
+	engagement := &WORLD.engagement
+	for len(WORLD.contacts) > 0 && engagement.attacker == {} && WORLD.interaction.actor == {} {
+		contact := WORLD.contacts[0]
+		ordered_remove(&WORLD.contacts, 0)
+		initiator, other := piece_get(contact.initiator), piece_get(contact.other)
+		if initiator == nil || other == nil || pieces_friendly(initiator^, other^) do continue
+		reach := max(initiator.contact.radius, other.contact.radius)
+		if linalg.distance(initiator.pos, other.pos) >= reach do continue
+
+		if !WORLD.armies[contact.initiator.index].active ||
+		   !WORLD.armies[contact.other.index].active {
+			WORLD.interaction = {
+				actor       = contact.initiator,
+				target      = contact.other,
+				conquerable = .Captures in initiator.traits && .Capturable in other.traits,
+			}
+			continue
+		}
+
+		ids := [2]Piece_Id{contact.initiator, contact.other}
+		sides: [2]Battle_Side
+		for id, i in ids {
+			army := WORLD.armies[id.index]
+			sides[i] = {
+				men         = f32(army.men),
+				men_max     = f32(army.men_max),
+				proficiency = army.proficiency,
+				readiness   = army.readiness,
+				stock       = army.stock,
+				baggage     = army.baggage,
+				mobility    = army.mobility,
+				temperament = army.temperament,
+			}
+		}
+		gap := battle_strength(sides[0], sides[1]) - battle_strength(sides[1], sides[0])
+		eagerness: f32 = contact.targeted ? ORDERED_ATTACK_BONUS : 0
+		fresh := [2]bool {
+			WORLD.attacked_turn[ids[0].index] != WORLD.turn,
+			WORLD.attacked_turn[ids[1].index] != WORLD.turn,
+		}
+		switch {
+		case fresh[0] && gap + eagerness >= TEMPERAMENT_ATTACK_THRESHOLD[sides[0].temperament]:
+		case fresh[1] && -gap >= TEMPERAMENT_ATTACK_THRESHOLD[sides[1].temperament]:
+			ids[0], ids[1] = ids[1], ids[0]
+			sides[0], sides[1] = sides[1], sides[0]
+		case:
+			continue
+		}
+		WORLD.attacked_turn[ids[0].index] = WORLD.turn
+		engagement.attacker = ids[0]
+		engagement.defender = ids[1]
+		engagement.stage = .Announce
+		engagement.battle = {
+			sides = {.Attacker = sides[0], .Defender = sides[1]},
+			can_avoid = true,
+			seed = util.hash_contents(WORLD.turn, ids[0], ids[1]),
+		}
+	}
+
+	// Step: Battle Next
+	// The open engagement advances on Next, once nothing walks: fight, fall back, pursue, close
+	// Battle losses this tick, for the Armies step to apply
+	fought: struct {
+		armies: [Battle_Role]Piece_Id,
+		result: Battle_Result,
+	}
+	if engagement.attacker != {} && input.battle_next && mov.subject == {} {
+		result := engagement.result
+		roles := [Battle_Role]Piece_Id {
+			.Attacker = engagement.attacker,
+			.Defender = engagement.defender,
+		}
+		loser := roles[OTHER_ROLE[result.winner]]
+		winner := roles[result.winner]
+		close := true
+		switch engagement.stage {
+		case .Announce:
+			engagement.result = combat_resolve(engagement.battle)
+			fought.armies = roles
+			fought.result = engagement.result
+			engagement.stage = .Report
+			close = false
+		case .Report:
+			engagement.stage = .Outcome
+			close = false
+		case .Outcome:
+			// Dissolved armies leave the map
+			for side, role in result.sides do if side.dissolved do piece_despawn(roles[role])
+
+			// Fall back: away from the winner
+			beaten, victor := piece_get(loser), piece_get(winner)
+			if !result.sides[OTHER_ROLE[result.winner]].falls_back || beaten == nil || victor == nil do break
+			engagement.loser_start = beaten.pos
+			order = {
+				piece       = loser,
+				destination = beaten.pos + linalg.normalize0(beaten.pos - victor.pos) * FALL_BACK_BUDGET,
+				snap        = 2 * FALL_BACK_BUDGET + 1,
+				budget      = FALL_BACK_BUDGET,
+			}
+			engagement.stage = .Fall_Back
+			close = false
+		case .Fall_Back:
+			// Pursuit: the winner walks to where the loser stood
+			if !result.pursued || piece_get(winner) == nil || piece_get(loser) == nil do break
+			order = {
+				piece       = winner,
+				destination = engagement.loser_start,
+				snap        = 9,
+				budget      = PURSUIT_BUDGET,
+			}
+			engagement.stage = .Pursuit
+			close = false
+		case .Pursuit:
+		}
+		if close do engagement^ = {}
+	}
+
+	// Step: Player Order
+	// Unless the battle sent someone this tick; only for a piece the player controls
+	if order.piece == {} && input.order != nil {
+		player_piece: Piece_Id
+		switch player_order in input.order {
+		case Move_To_Point:
+			player_piece = player_order.piece
+			order.destination, order.snap = player_order.destination, player_order.snap
+		case Move_To_Piece:
+			player_piece = player_order.piece
+			order.target = player_order.target
+		}
+		if piece := piece_get(player_piece);
+		   piece != nil && ordering() != {} && piece.owner == ordering() {
+			order.piece = player_piece
+		}
+	}
+
+	// Step: Movement Flood
+	// Where this tick's ordered piece can walk, else the focus (for showing its reach)
 	{
+		flooded := order.piece != {} ? order.piece : input.focus
 		zones, bodies := &mov.enemy_zones, &mov.bodies
 		clear(zones)
 		clear(bodies)
 		clear(&mov.friend_zones)
-		subject := piece_get(input.focus)
+		subject := piece_get(flooded)
 		if subject == nil || subject.movement_domain == nil {
 			mov.flood_subject, mov.flood_key = {}, 0
 		} else {
 			domain := subject.movement_domain.(Pathfind_Domain)
+			budget :=
+				order.piece != {} && order.budget > 0 ? order.budget : movement_budget(subject^)
 
 			// Gather bodies (can't stop on), enemy zones (slow, no roads) and friendly contacts touching the flood
 			// square, padded a cell for rounding
 			half: f32 = PATHFIND_FLOOD_SIZE / 2 + 1
 			square := [4]f32{subject.pos.x - half, subject.pos.y - half, 2 * half, 2 * half}
 			for other, index in WORLD.pieces {
-				if !piece_alive(other) || piece_id(index) == input.focus do continue
+				if !piece_alive(other) || piece_id(index) == flooded do continue
 				body := util.Disc{other.pos, subject.body + other.body}
 				if util.disc_overlaps_rect(body, square) do append(bodies, body)
 				if other.contact.radius == 0 || domain not_in other.contact.domains do continue
@@ -469,53 +697,36 @@ world_step :: proc(input: Step_Input) {
 			}
 
 			// Reflood only when an input changed
-			budget := movement_budget(subject^)
-			key := util.hash_contents(
-				input.focus,
-				subject.pos,
-				budget,
-				domain,
-				zones[:],
-				bodies[:],
-			)
+			key := util.hash_contents(flooded, subject.pos, budget, domain, zones[:], bodies[:])
 			if key != mov.flood_key {
 				pathfind_flood(subject.pos, domain, budget, zones[:], bodies[:], &mov.flood)
-				mov.flood_subject, mov.flood_key = input.focus, key
+				mov.flood_subject, mov.flood_key = flooded, key
 			}
 		}
 	}
 
 	// Step: Orders
-	if input.order != nil {
-		walker := mov.flood_subject
-		ordering := ordering()
-		if piece := piece_get(walker); piece == nil || ordering == {} || piece.owner != ordering do walker = {}
-		target: Piece_Id
+	// Start this tick's walk along the flood's cheapest path, smoothed
+	if order.piece != {} && mov.flood_subject == order.piece {
 		stop: [2]int
 		ok: bool
-		switch order in input.order {
-		case Move_Focus_To_Point:
-			if walker != {} do stop, ok = pathfind_flood_stop(&mov.flood, order.destination, order.snap)
-		case Move_Focus_To_Piece:
-			target = order.target
-			other := piece_get(target)
-			if walker != {} && other != nil && mov.flood.domain in other.contact.domains {
+		if target := piece_get(order.target); target != nil {
+			if mov.flood.domain in target.contact.domains {
 				stop, ok = pathfind_flood_stop_within(
 					&mov.flood,
-					util.Disc{other.pos, other.contact.radius},
+					util.Disc{target.pos, target.contact.radius},
 				)
 			}
+		} else {
+			stop, ok = pathfind_flood_stop(&mov.flood, order.destination, order.snap)
 		}
 		path: [dynamic; PATH_MAX_LEN][2]f32
 		cost: [dynamic; PATH_MAX_LEN]f32
-		mover := piece_get(walker)
-		if ok &&
-		   mover != nil &&
-		   pathfind_flood_trace(&mov.flood, util.cell_center(stop), &path, &cost) {
-			mov.subject, mov.target = walker, target
+		if ok && pathfind_flood_trace(&mov.flood, util.cell_center(stop), &path, &cost) {
+			mov.subject, mov.target = order.piece, order.target
 			clear(&mov.path)
 			clear(&mov.cost)
-			append(&mov.path, mover.pos)
+			append(&mov.path, piece_get(order.piece).pos)
 			append(&mov.cost, 0)
 			append(&mov.path, ..path[:])
 			append(&mov.cost, ..cost[:])
@@ -529,7 +740,7 @@ world_step :: proc(input: Step_Input) {
 			resize(&mov.path, n)
 			resize(&mov.cost, n)
 		} else {
-			fmt.eprintfln("No way for %v to %v", walker, input.order)
+			fmt.eprintfln("No way for %v", order.piece)
 		}
 	}
 
@@ -539,7 +750,6 @@ world_step :: proc(input: Step_Input) {
 		piece:          Piece_Id,
 		spent_road:     f32,
 		spent_off_road: f32,
-		met:            Piece_Id,
 	}
 	if subject := piece_get(mov.subject); subject != nil {
 		walk.piece = mov.subject
@@ -566,20 +776,22 @@ world_step :: proc(input: Step_Input) {
 			else do walk.spent_off_road += spent
 		}
 
-		// Contact: entering an enemy zone ends the walk
+		// Contact: entering an enemy zone ends the walk (not while an engagement plays out its walks)
+		met: Piece_Id
 		domain := subject.movement_domain.(Pathfind_Domain)
-		for other, index in WORLD.pieces {
+		if WORLD.engagement.attacker == {} do for other, index in WORLD.pieces {
 			if !piece_alive(other) || piece_id(index) == walk.piece || pieces_friendly(subject^, other) do continue
 			if other.contact.radius == 0 || domain not_in other.contact.domains do continue
 			zone := util.Disc{other.pos, other.contact.radius}
 			if util.disc_contains(zone, subject.pos) && !util.disc_contains(zone, before) {
-				walk.met = piece_id(index)
+				met = piece_id(index)
 				break
 			}
 		}
 
-		if walk.met != {} || mov.next >= len(mov.path) {
-			if walk.met == {} do walk.met = mov.target
+		if met != {} || mov.next >= len(mov.path) {
+			if met == {} do met = mov.target
+			if met != {} do append(&WORLD.contacts, Contact_Event{walk.piece, met, met == mov.target})
 			mov.subject, mov.target, mov.next = {}, {}, 0
 		}
 	} else {
@@ -587,24 +799,13 @@ world_step :: proc(input: Step_Input) {
 		mov.subject, mov.target, mov.next = {}, {}, 0
 	}
 
-	// Step: Interaction
-	if WORLD.interaction.actor != {} {
-		if input.conquer && WORLD.interaction.conquerable {
-			actor, conquered :=
-				piece_get(WORLD.interaction.actor), piece_get(WORLD.interaction.target)
-			if actor != nil && conquered != nil do conquered.owner = actor.owner
-			WORLD.interaction = {}
-		} else if input.leave {
-			WORLD.interaction = {}
-		}
-	} else if actor, other := piece_get(walk.piece), piece_get(walk.met);
-	   actor != nil && other != nil && !pieces_friendly(actor^, other^) {
-		WORLD.interaction = {
-			actor       = walk.piece,
-			target      = walk.met,
-			conquerable = .Captures in actor.traits && .Capturable in other.traits,
-		}
-	}
+	// The turn ends now if it was asked to and everything is settled
+	turn_ending :=
+		WORLD.ending &&
+		len(WORLD.contacts) == 0 &&
+		engagement.attacker == {} &&
+		WORLD.interaction.actor == {} &&
+		mov.subject == {}
 
 	// Step: Armies
 	for &army, index in WORLD.armies {
@@ -613,10 +814,19 @@ world_step :: proc(input: Step_Input) {
 		readiness := army.readiness
 		stock := army.stock
 
+		// Battle losses
+		for id, role in fought.armies {
+			if id == {} || int(id.index) != index do continue
+			side := fought.result.sides[role]
+			army.men = max(0, army.men + int(math.round(side.men)))
+			readiness += side.readiness
+			stock += side.stock
+		}
+
 		// Resupply, live for the player's armies: the better of network and foraging, each as men fed over own men,
 		// times that source's efficiency. The supply map is the player's.
 		if piece.owner == WORLD.player {
-			men := f32(army.strength_current)
+			men := f32(army.men)
 			cell := util.cell_of(piece.pos)
 			network, network_efficiency, forage, forage_efficiency: f32
 			if util.grid_contains(cell, WORLD_SIZE) && men > 0 {
@@ -629,7 +839,7 @@ world_step :: proc(input: Step_Input) {
 					other_piece := WORLD.pieces[other_index]
 					distance := linalg.distance(piece.pos, other_piece.pos)
 					if distance >= FORAGE_RADIUS do continue
-					weighted := f32(other.strength_current) * (1 - distance / FORAGE_RADIUS)
+					weighted := f32(other.men) * (1 - distance / FORAGE_RADIUS)
 					all_men += weighted
 					if other_piece.owner == piece.owner do friendly_men += weighted
 				}
@@ -690,6 +900,7 @@ world_step :: proc(input: Step_Input) {
 	// Step: Turn End
 	// Next faction plays; wrapping past the last slot starts a new turn
 	if turn_ending {
+		WORLD.ending = false
 		from := int(WORLD.player.index)
 		next: Faction_Id
 		for step in 1 ..= FACTION_MAX {
@@ -728,11 +939,19 @@ supply_map_build :: proc(faction: Faction_Id) {
 
 // The player, or nil while an interaction is open
 ordering :: proc() -> Faction_Id {
-	return WORLD.interaction.actor == {} ? WORLD.player : {}
+	return(
+		WORLD.interaction.actor == {} && WORLD.engagement.attacker == {} && !WORLD.ending ? WORLD.player : {} \
+	)
 }
 
 turn_endable :: proc() -> bool {
-	return WORLD.movement.subject == {} && WORLD.interaction.actor == {}
+	return(
+		!WORLD.ending &&
+		WORLD.movement.subject == {} &&
+		len(WORLD.contacts) == 0 &&
+		WORLD.interaction.actor == {} &&
+		WORLD.engagement.attacker == {} \
+	)
 }
 
 pieces_friendly :: proc(a, b: Piece) -> bool {

@@ -75,16 +75,20 @@ Piece_Trait :: enum u8 {
 Army :: struct {
 	// False = no army
 	active:           bool,
-	// Men
-	strength_current: int,
-	strength_max:     int,
+	// Men now, and at full strength
+	men:              int,
+	men_max:          int,
 	// Troop quality, 0..100
 	proficiency:      f32,
 	// Fatigue, 0..100 (100 = fully rested)
 	readiness:        f32,
 	// Skill at living off the land, 0..100; times the terrain's yield, it's what foraging brings in
 	foraging:         f32,
-	// Food carried, in turns of the army's needs, 0..baggage. Supply level = stock / baggage; readiness can't
+	// Its commander's temperament
+	temperament:         Temperament,
+	// 1..4: avoiding battle and pursuing
+	mobility:            f32,
+	// Supply carried, in turns of the army's needs, 0..baggage. Supply level = stock / baggage; readiness can't
 	// exceed it.
 	stock:            f32,
 	baggage:          f32,
@@ -187,17 +191,18 @@ STEP_SECONDS :: 1.0 / f32(STEPS_PER_SECOND)
 
 // Each field is read by one phase of world_step, in fixed order
 Step_Input :: struct {
-	// Selected piece: its reach is flooded, and order moves it
-	focus:    Piece_Id,
-	order:    Order,
-	conquer:  bool,
-	leave:    bool,
-	end_turn: bool,
+	// Selected piece: its reach is flooded, for showing
+	focus:       Piece_Id,
+	order:       Order,
+	conquer:     bool,
+	leave:       bool,
+	end_turn:    bool,
+	battle_next: bool,
 }
 
 Order :: union {
-	Move_Focus_To_Point,
-	Move_Focus_To_Piece,
+	Move_To_Point,
+	Move_To_Piece,
 }
 
 Card_Ask :: enum u8 {
@@ -206,18 +211,22 @@ Card_Ask :: enum u8 {
 	// Ignored unless the open interaction is conquerable
 	Conquer,
 	Leave_Interaction,
+	// Advances the open engagement: falling back, pursuit, then closing. Ignored while something walks.
+	Battle_Next,
 }
 
-// If destination is out of reach, walks to the nearest reachable cell within a snap-sized square (see
-// pathfind_flood_stop). Ignored if there is none, or the focus can't take orders.
-Move_Focus_To_Point :: struct {
+// The piece walks toward destination; if it's out of reach, to the nearest reachable cell within a snap-sized square
+// (see pathfind_flood_stop). Ignored if there is none, or the player doesn't control the piece.
+Move_To_Point :: struct {
+	piece:       Piece_Id,
 	// In cells
 	destination: [2]f32,
 	snap:        int,
 }
 
-// Reaching a piece of another faction opens an interaction, which blocks orders until closed
-Move_Focus_To_Piece :: struct {
+// The piece walks to the target's contact zone. Reaching a piece of another faction makes contact.
+Move_To_Piece :: struct {
+	piece:  Piece_Id,
 	target: Piece_Id,
 }
 
@@ -231,6 +240,7 @@ CIRCLES_MAX :: 512
 CARDS_MAX :: 8
 CARD_FIELDS_MAX :: 16
 CARD_ACTIONS_MAX :: 4
+CARD_LINES_MAX :: 16
 // Side of an area's square, in cells
 AREA_SIZE :: PATHFIND_FLOOD_SIZE
 
@@ -303,6 +313,8 @@ Pawn_Flag :: enum u8 {
 	Focused,
 	// Player's piece, and no interaction open
 	Controlled,
+	// In the open engagement
+	Engaged,
 }
 
 // Cells in an AREA_SIZE square at corner, plus exact circles. Drawn in slot order; circles over all cells.
@@ -329,12 +341,16 @@ Card_Place :: enum u8 {
 	Status,
 	Focus,
 	Interaction,
+	// An engagement between two armies, advanced by Next
+	Battle,
 }
 
 Card :: struct {
 	place:   Card_Place,
 	title:   string,
 	picture: Maybe(Picture),
+	// Paragraphs of text under the title
+	lines:   [dynamic; CARD_LINES_MAX]string,
 	// Facts that rarely change
 	fields:  [dynamic; CARD_FIELDS_MAX]Field,
 	// Values that change from turn to turn; shown beside fields

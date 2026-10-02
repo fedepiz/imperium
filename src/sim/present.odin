@@ -30,6 +30,49 @@ REGION_SATURATION :: 0.55
 REGION_VALUE :: 0.75
 
 @(private = "file", rodata)
+OUTCOME_TITLES := [Battle_Outcome]string {
+	.Avoided      = "Avoided",
+	.Stalemate    = "Stalemate",
+	.Probed       = "Probed",
+	.Withdrew     = "Withdrew",
+	.Repulsed     = "Repulsed",
+	.Defeat       = "Defeat",
+	.Heavy_Defeat = "Heavy defeat",
+	.Rout         = "Rout",
+}
+
+// Report wording
+@(private = "file", rodata)
+POSTURE_WORDS := [Posture]string {
+	.Press    = "presses",
+	.Standard = "stands",
+	.Probe    = "probes",
+}
+@(private = "file", rodata)
+CHOICE_WORDS := [Crisis_Choice]string {
+	.Hold      = "holds",
+	.Commit    = "commits",
+	.Break_Off = "breaks off",
+}
+@(private = "file", rodata)
+OUTCOME_LOSER_WORDS := [Battle_Outcome]string {
+	.Avoided      = "gets away",
+	.Stalemate    = "holds its ground",
+	.Probed       = "pulls out",
+	.Withdrew     = "withdraws",
+	.Repulsed     = "is repulsed",
+	.Defeat       = "is defeated",
+	.Heavy_Defeat = "is heavily defeated",
+	.Rout         = "is routed",
+}
+
+@(private = "file", rodata)
+ROLE_TITLES := [Battle_Role]string {
+	.Attacker = "Attacker",
+	.Defender = "Defender",
+}
+
+@(private = "file", rodata)
 ICON_TITLES := [Icon]string {
 	.Village    = "Village",
 	.Town       = "Town",
@@ -85,6 +128,7 @@ world_present :: proc(
 		}
 		if id == focus do pawn.flags += {.Focused}
 		if ordering != {} && piece.owner == ordering do pawn.flags += {.Controlled}
+		if id == WORLD.engagement.attacker || id == WORLD.engagement.defender do pawn.flags += {.Engaged}
 		append(&out.pawns, pawn)
 	}
 
@@ -100,7 +144,7 @@ world_present :: proc(
 
 	// Reach and zones of the focus (hidden while it walks)
 	flood := &mov.flood
-	shown := mov.flood_subject != {} && mov.flood_subject != mov.subject
+	shown := mov.flood_subject != {} && mov.flood_subject == focus && mov.flood_subject != mov.subject
 	// Flood key doubles as the areas' revision
 	revision := shown ? mov.flood_key : 0
 	reach := &out.areas[REACH_AREA]
@@ -188,12 +232,12 @@ world_present :: proc(
 			append(&card.stats, Field{label = "Movement", value = budget})
 		}
 		if army.active {
-			strength := fmt.tprintf(
+			men := fmt.tprintf(
 				"%s of %s",
-				util.format_compact(f64(army.strength_current)),
-				util.format_compact(f64(army.strength_max)),
+				util.format_compact(f64(army.men)),
+				util.format_compact(f64(army.men_max)),
 			)
-			append(&card.stats, Field{label = "Strength", value = strength})
+			append(&card.stats, Field{label = "Men", value = men})
 			append(&card.stats, Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
 			append(&card.stats, Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
 			supply: f32 = army.baggage > 0 ? 100 * army.stock / army.baggage : 0
@@ -224,6 +268,173 @@ world_present :: proc(
 			&card.actions,
 			Action{label = "Back", ask = .Leave_Interaction, enabled = true},
 		)
+		append(&out.cards, card)
+	}
+
+	// Engagement: the attacker's side on the left, the defender's on the right. Announced with both sides as they
+	// stand, then the result.
+	if engagement := &WORLD.engagement; engagement.attacker != {} {
+		result := engagement.result
+		roles := [Battle_Role]Piece_Id {
+			.Attacker = engagement.attacker,
+			.Defender = engagement.defender,
+		}
+		names := [Battle_Role]string {
+			.Attacker = piece_title(roles[.Attacker]),
+			.Defender = piece_title(roles[.Defender]),
+		}
+		winner, loser := names[result.winner], names[OTHER_ROLE[result.winner]]
+		card := Card {
+			place = .Battle,
+		}
+		switch engagement.stage {
+		case .Announce:
+			card.title = fmt.tprintf("%s attacks %s", names[.Attacker], names[.Defender])
+		case .Report:
+			card.title = "Battle report"
+			a, d := result.sides[.Attacker], result.sides[.Defender]
+			lines := &card.lines
+			append(
+				lines,
+				fmt.tprintf(
+					"%s attacks %s, power %.1f against %.1f.",
+					names[.Attacker], names[.Defender], a.power, d.power,
+				),
+			)
+
+			// Avoiding battle
+			if roll := result.avoid; roll.rolled {
+				got_away := result.outcome == .Avoided ? "gets away" : "is caught"
+				append(
+					lines,
+					fmt.tprintf(
+						"%s tries to avoid battle: rolls %.0f, total %.0f against %.0f, and %s.",
+						names[.Defender], roll.dice, roll.total, roll.target, got_away,
+					),
+				)
+			}
+			if result.outcome == .Avoided do break
+
+			// Postures and onset
+			append(
+				lines,
+				fmt.tprintf(
+					"%s %s; %s %s.",
+					names[.Attacker], POSTURE_WORDS[a.posture], names[.Defender], POSTURE_WORDS[d.posture],
+				),
+			)
+			if a.onset.rolled {
+				append(
+					lines,
+					fmt.tprintf(
+						"Onset: %s rolls %.0f for %.1f, %s rolls %.0f for %.1f.",
+						names[.Attacker], a.onset.dice, a.onset.total, names[.Defender], d.onset.dice, d.onset.total,
+					),
+				)
+				ahead: Battle_Role = a.onset.total > d.onset.total ? .Attacker : .Defender
+				switch {
+				case a.onset.total == d.onset.total:
+					append(lines, "Neither gains the upper hand.")
+				case !result.crisis_chosen && !result.pulled_out:
+					append(
+						lines,
+						fmt.tprintf(
+							"%s wins by %.1f, and %s %s.",
+							names[ahead], result.onset_margin, names[OTHER_ROLE[ahead]],
+							OUTCOME_LOSER_WORDS[result.outcome],
+						),
+					)
+				case result.sides[ahead].edge == 0:
+					append(lines, fmt.tprintf("%s wins by %.1f but gains no edge.", names[ahead], result.onset_margin))
+				case:
+					append(
+						lines,
+						fmt.tprintf(
+							"%s wins by %.1f and gains an edge of %.0f.",
+							names[ahead], result.onset_margin, result.sides[ahead].edge,
+						),
+					)
+				}
+			}
+			if result.pulled_out do append(lines, fmt.tprintf("%s, probing and behind, pulls out.", loser))
+
+			// Crisis
+			if result.crisis_chosen {
+				append(
+					lines,
+					fmt.tprintf(
+						"%s %s; %s %s.",
+						names[.Attacker], CHOICE_WORDS[a.choice], names[.Defender], CHOICE_WORDS[d.choice],
+					),
+				)
+				if a.crisis.rolled {
+					append(
+						lines,
+						fmt.tprintf(
+							"Crisis: %s rolls %.0f for %.1f, %s rolls %.0f for %.1f, a margin of %.1f.",
+							names[.Attacker], a.crisis.dice, a.crisis.total, names[.Defender], d.crisis.dice,
+							d.crisis.total, result.crisis_margin,
+						),
+					)
+				}
+				if result.outcome == .Stalemate {
+					append(lines, "Stalemate.")
+				} else {
+					append(lines, fmt.tprintf("%s %s.", loser, OUTCOME_LOSER_WORDS[result.outcome]))
+				}
+				if result.worsened do append(lines, fmt.tprintf("Having pressed or committed, %s fares worse.", loser))
+			}
+
+			// Pursuit and holding together
+			if roll := result.pursuit; roll.rolled {
+				caught := result.pursued ? "catches them" : "they get away"
+				append(
+					lines,
+					fmt.tprintf(
+						"%s pursues: rolls %.0f, total %.0f against %.0f, and %s.",
+						winner, roll.dice, roll.total, roll.target, caught,
+					),
+				)
+			}
+			for side, role in result.sides {
+				if !side.hold.rolled do continue
+				fate := side.dissolved ? "it dissolves" : "it holds"
+				append(
+					lines,
+					fmt.tprintf(
+						"%s rolls %.0f to hold together, total %.1f against %.1f: %s.",
+						names[role], side.hold.dice, side.hold.total, side.hold.target, fate,
+					),
+				)
+			}
+		case .Outcome:
+			card.title = fmt.tprintf("Battle: %s", OUTCOME_TITLES[result.outcome])
+		case .Fall_Back:
+			card.title = fmt.tprintf("%s falls back", loser)
+		case .Pursuit:
+			card.title = fmt.tprintf("%s pursues", winner)
+		}
+		if engagement.stage != .Report do for role in Battle_Role {
+			column := role == .Attacker ? &card.fields : &card.stats
+			append(column, Field{label = ROLE_TITLES[role], value = piece_title(roles[role])})
+			if engagement.stage == .Announce {
+				side := engagement.battle.sides[role]
+				other := engagement.battle.sides[OTHER_ROLE[role]]
+				append(column, Field{label = "Commander", value = fmt.tprintf("%v", side.temperament)})
+				append(column, Field{label = "Men", value = util.format_compact(f64(side.men))})
+				append(column, Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", side.proficiency)})
+				append(column, Field{label = "Readiness", value = fmt.tprintf("%.0f%%", side.readiness)})
+				append(column, Field{label = "Power", value = fmt.tprintf("%.1f", battle_strength(side, other))})
+				continue
+			}
+			side := result.sides[role]
+			append(column, Field{label = "Posture", value = fmt.tprintf("%v", side.posture)})
+			append(column, Field{label = "Men", value = util.format_compact(f64(side.men))})
+			append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.readiness)})
+			append(column, Field{label = "Supply", value = fmt.tprintf("%+.1f", side.stock)})
+			if side.dissolved do append(column, Field{label = "Fate", value = "Dissolved"})
+		}
+		append(&card.actions, Action{label = "Next", ask = .Battle_Next, enabled = WORLD.movement.subject == {}})
 		append(&out.cards, card)
 	}
 

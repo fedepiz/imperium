@@ -6,9 +6,10 @@
 #       Capturable)
 # faction: name, culture, colour [r, g, b] 0..255. Factions play in file order. Then one piece row per piece:
 #   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
-#   region), general (creates a character), strength + proficiency 0..100 (optional; makes it an army, starting at
+#   region), general (creates a character), men + proficiency 0..100 (optional; makes it an army, starting at
 #   full strength and 100% readiness), foraging 0..100 (army skill at living off the land, default 40), baggage
-#   (turns of food carried at most, default 4; starts full)
+#   (turns of supply carried at most, default 4; starts full), mobility (1..4, default 2), temperament (the general's:
+#   Bold, Steady, Cautious or Cunning; default Steady)
 
 kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    hindrance = 2    supply = 50  traits = [Capturable] }
 kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  hindrance = 2.5  supply = 65  traits = [Capturable] }
@@ -36,8 +37,8 @@ faction = {
 	piece = { kind = town        name = "Siscia"      at = [419, 374]  capital_of = siscia }
 	piece = { kind = town        name = "Domavia"     at = [470, 396]  capital_of = domavia }
 	piece = { kind = city        name = "Salona"      at = [421, 405]  capital_of = salona }
-	piece = { kind = army    at = [334, 419]  general = "Flavius Aetius"  strength = 20000  proficiency = 70 }
-	piece = { kind = army    at = [338, 410]  general = "Bonifacius"      strength = 15000  proficiency = 50 }
+	piece = { kind = army        name = "Legio I"     at = [334, 419]  general = "Flavius Aetius"  men = 20000  proficiency = 70  temperament = Cunning }
+	piece = { kind = army        name = "Legio II"    at = [338, 410]  general = "Bonifacius"      men = 15000  proficiency = 50 }
 	piece = { kind = fleet   at = [353, 455] }
 	piece = { kind = fleet   at = [355, 393] }
 }
@@ -51,5 +52,5 @@ faction = {
 	piece = { kind = city        name = "Virunum"               at = [385, 354]  capital_of = virunum }
 	piece = { kind = town        name = "Octodurum"             at = [253, 367]  capital_of = octodurum }
 	piece = { kind = town        name = "Iuvavum"               at = [362, 336]  capital_of = iuvavum }
-	piece = { kind = army   at = [316, 342]  general = "Gibuld"  strength = 12000  proficiency = 55  foraging = 60 }
+	piece = { kind = army        name = "Cuneus Gibuldi"        at = [316, 342]  general = "Gibuld"  men = 12000  proficiency = 55  foraging = 60  temperament = Bold  mobility = 3 }
 }

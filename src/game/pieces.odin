@@ -10,9 +10,11 @@ import "../tabula"
 
 // Pieces --------------------------------------------------------------------------------------------------------------
 PIECES_FILE :: "pieces.txt"
-// Defaults for armies that don't set them: foraging skill (0..100), and turns of food carried at most
+// Defaults for armies that don't set them: foraging skill (0..100), and turns of supply carried at most
 ARMY_FORAGING_DEFAULT :: 40
 ARMY_BAGGAGE_DEFAULT :: 4
+ARMY_MOBILITY_DEFAULT :: 2
+ARMY_TEMPERAMENT_DEFAULT :: sim.Temperament.Steady
 
 // Results in the temp allocator. Prints the error and returns false on failure. File format: see pieces.txt.
 pieces_load :: proc(
@@ -146,9 +148,9 @@ pieces_load :: proc(
 					append(&character_list, general)
 					piece.general = len(character_list)
 				}
-				if strength, has_strength := tabula.get_num(piece_row, "strength"); has_strength {
-					if strength < 1 || strength != f32(int(strength)) {
-						return nil, nil, nil, fail(path, row.key, n, "its piece's strength must be a whole number of men")
+				if men, has_men := tabula.get_num(piece_row, "men"); has_men {
+					if men < 1 || men != f32(int(men)) {
+						return nil, nil, nil, fail(path, row.key, n, "its piece's men must be a whole number")
 					}
 					proficiency, has_proficiency := tabula.get_num(piece_row, "proficiency")
 					if !has_proficiency || proficiency < 0 || proficiency > 100 {
@@ -156,12 +158,19 @@ pieces_load :: proc(
 					}
 					piece.army = {
 						active           = true,
-						strength_current = int(strength),
-						strength_max     = int(strength),
+						men              = int(men),
+						men_max          = int(men),
 						proficiency      = proficiency,
 						readiness        = 100,
 						foraging         = tabula.get_num(piece_row, "foraging", ARMY_FORAGING_DEFAULT),
 						baggage          = tabula.get_num(piece_row, "baggage", ARMY_BAGGAGE_DEFAULT),
+						mobility         = tabula.get_num(piece_row, "mobility", ARMY_MOBILITY_DEFAULT),
+						temperament      = ARMY_TEMPERAMENT_DEFAULT,
+					}
+					if _, has_temperament := tabula.get_text(piece_row, "temperament"); has_temperament {
+						temperament, is_temperament := enum_get(piece_row, "temperament", sim.Temperament)
+						if !is_temperament do return nil, nil, nil, fail(path, row.key, n, "its piece's temperament is not a temperament")
+						piece.army.temperament = temperament
 					}
 					piece.army.stock = piece.army.baggage
 				}

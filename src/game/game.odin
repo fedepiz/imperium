@@ -19,6 +19,8 @@ CARD_FADED_INK :: [4]f32{MAP_INK.r, MAP_INK.g, MAP_INK.b, 0.6}
 CARD_LABEL_EM :: 7
 CARD_VALUE_EM :: 9
 CARD_STAT_EM :: 8
+// Width of a card's paragraphs, in em; they wrap
+CARD_LINES_EM :: 26
 // Between the fields and stats columns, in pixels
 CARD_COLUMN_GAP :: 24
 
@@ -118,12 +120,14 @@ game_tick :: proc(input: Input, dt: f32) {
 	if focus, ok := scene_pawn(GAME.focus); ok && input.right_click && .Controlled in focus.flags {
 		target := pawns_pick(pawns, GAME.camera, input.viewport, input.cursor, GAME.focus)
 		if target != {} {
-			GAME.input.order = sim.Move_Focus_To_Piece {
+			GAME.input.order = sim.Move_To_Piece {
+				piece  = GAME.focus,
 				target = target,
 			}
 		} else {
 			destination := camera_screen_to_world_point(GAME.camera, input.viewport, input.cursor)
-			GAME.input.order = sim.Move_Focus_To_Point {
+			GAME.input.order = sim.Move_To_Point {
+				piece       = GAME.focus,
 				destination = destination,
 				snap        = CLICK_MOVE_SNAP,
 			}
@@ -193,6 +197,8 @@ ask :: proc(what: sim.Card_Ask) {
 		GAME.input.conquer = true
 	case .Leave_Interaction:
 		GAME.input.leave = true
+	case .Battle_Next:
+		GAME.input.battle_next = true
 	}
 }
 
@@ -223,7 +229,9 @@ game_ui :: proc() {
 			cards_build(.Status)
 		}
 		ui.spacer(ui.grow())
+		// Battle reports on the left, interactions in the middle
 		if ui.row({width = ui.grow(), height = ui.fit()}) {
+			cards_build(.Battle)
 			ui.spacer(ui.grow())
 			cards_build(.Interaction)
 			ui.spacer(ui.grow())
@@ -272,6 +280,7 @@ cards_build :: proc(place: sim.Card_Place) {
 			} else {
 				ui.label(card.title, {font = font_id(.Title)})
 			}
+			for line in card.lines do ui.label(line, {width = ui.em(CARD_LINES_EM)})
 			// Fields, and stats beside them
 			if ui.row({width = ui.fit(), height = ui.fit(), gap = CARD_COLUMN_GAP}) {
 				columns := [2][]sim.Field{card.fields[:], card.stats[:]}

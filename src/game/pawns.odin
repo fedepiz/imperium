@@ -48,6 +48,8 @@ PAWN_SIZES := [sim.Icon]f32 {
 PAWN_FOCUSED_TINT :: [4]f32{1.000, 0.700, 0.350, 1}
 @(private = "file")
 PAWN_FOCUSED_PULSE :: 1.2
+// Armies in the open engagement
+PAWN_ENGAGED_TINT :: [4]f32{0.900, 0.350, 0.300, 1}
 
 // One scale per set keeps pen line weight consistent across the set
 @(private = "file")
@@ -131,6 +133,7 @@ pawns_draw :: proc(
 	for pawn, index in pawns {
 		tint := [4]f32{1, 1, 1, 1}
 		picture := pawn.picture
+		if .Engaged in pawn.flags do tint = PAWN_ENGAGED_TINT
 		if .Focused in pawn.flags {
 			focused_time := visuals[pawn.handle.index].focused_time
 			pulse := 0.5 - 0.5 * math.cos(2 * math.PI * focused_time / PAWN_FOCUSED_PULSE)
