@@ -52,9 +52,10 @@ MOUNTAINS_PATCH_MIN :: 12
 // Radius in cells for basin detection
 BASIN_REACH :: 24
 
-// Readiness lost per movement point spent, in percent
+// Readiness lost per movement point marched, in percent; and on top, per point marched beyond the turn's budget
 ROAD_READINESS_PER_MOVEMENT :: 0.1
 READINESS_PER_MOVEMENT :: 1
+OVERDRAW_READINESS :: 2
 
 // End of turn: readiness rises toward stock / baggage by up to READINESS_RECOVERY, scaled by
 // rest = (1 − exertion)², and drops by SUPPLY_DRAG when above it
@@ -64,7 +65,7 @@ SUPPLY_DRAG :: 5
 // Resupply per turn = min(fed, 1 + SUPPLY_REFILL_MAX) − 1, in turns of supply, where fed = what the place can feed
 // (supply map or foraging, whichever is more) / nearby friendly men
 SUPPLY_REFILL_MAX :: 1
-// Stock used per movement point spent, in turns: on roads, and off them
+// Stock used per movement point marched, in turns: on roads, and off them
 ROAD_STOCK_PER_MOVEMENT :: 0.002
 STOCK_PER_MOVEMENT :: 0.01
 
@@ -755,9 +756,12 @@ world_step :: proc(input: Step_Input) {
 	// Step: Walk
 	// What the walker did this step. Nil piece = nobody walked.
 	walk: struct {
-		piece:          Piece_Id,
-		spent_road:     f32,
-		spent_off_road: f32,
+		piece:            Piece_Id,
+		// Movement points, all of the walk
+		marched_road:     f32,
+		marched_off_road: f32,
+		// Movement points beyond the budget
+		overdrawn:        f32,
 	}
 	if subject := piece_get(mov.subject); subject != nil {
 		walk.piece = mov.subject
@@ -772,12 +776,14 @@ world_step :: proc(input: Step_Input) {
 			step -= walked
 			if walked == distance do mov.next += 1
 
-			// Pay from the budget, as far as it lasts
-			spent := min(walked * cost, movement_budget(walk.piece))
+			// Pay from the budget, as far as it lasts; the rest is overdrawn
+			due := walked * cost
+			spent := min(due, movement_budget(walk.piece))
 			WORLD.piece_turns[walk.piece.index].movement_spent += spent
+			walk.overdrawn += due - spent
 			// Road cells always cost exactly ROAD_COST
-			if cost == ROAD_COST do walk.spent_road += spent
-			else do walk.spent_off_road += spent
+			if cost == ROAD_COST do walk.marched_road += due
+			else do walk.marched_off_road += due
 		}
 
 		// Contact: entering an enemy zone ends the walk (not while an engagement plays out its walks)
@@ -878,10 +884,11 @@ world_step :: proc(input: Step_Input) {
 
 		// Marching
 		if walk.piece != {} && int(walk.piece.index) == index {
-			readiness -= walk.spent_road * ROAD_READINESS_PER_MOVEMENT
-			readiness -= walk.spent_off_road * READINESS_PER_MOVEMENT
-			stock -= walk.spent_road * ROAD_STOCK_PER_MOVEMENT
-			stock -= walk.spent_off_road * STOCK_PER_MOVEMENT
+			readiness -= walk.marched_road * ROAD_READINESS_PER_MOVEMENT
+			readiness -= walk.marched_off_road * READINESS_PER_MOVEMENT
+			readiness -= walk.overdrawn * OVERDRAW_READINESS
+			stock -= walk.marched_road * ROAD_STOCK_PER_MOVEMENT
+			stock -= walk.marched_off_road * STOCK_PER_MOVEMENT
 		}
 		// End of its faction's turn: supplies in and out, then rest toward what the stock allows
 		if turn_ending && piece.owner == WORLD.player {
