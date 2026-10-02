@@ -1,11 +1,9 @@
 package game
 
 import "core:fmt"
-import "core:reflect"
 
 import "../gfx"
 import "../sim"
-import "../tweak"
 import "../ui"
 import "../util"
 
@@ -24,6 +22,31 @@ CARD_STAT_EM :: 8
 // Between the fields and stats columns, in pixels
 CARD_COLUMN_GAP :: 24
 
+Map_Mode :: enum u8 {
+	// Regions in their owner's colour
+	Control,
+	// Muted regions, and the player's supply map
+	Supply,
+	// Muted regions
+	Plain,
+}
+
+// Width of each map mode button, in em
+MAP_MODE_BUTTON_EM :: 5
+
+// What each map mode shows
+MAP_MODE_LABELS := [Map_Mode]string {
+	.Control = "Control",
+	.Supply  = "Supply",
+	.Plain   = "Plain",
+}
+MAP_MODE_REGIONS := [Map_Mode]sim.Region_Colouring_Mode {
+	.Control = .Owner,
+	.Supply  = .Muted,
+	.Plain   = .Muted,
+}
+MAP_MODE_SUPPLY :: bit_set[Map_Mode]{.Supply}
+
 // Card button: hovered, pressed
 CARD_BUTTON_HOT_PAPER :: [4]f32{0.760, 0.690, 0.545, 1}
 CARD_BUTTON_ACTIVE_PAPER :: [4]f32{0.680, 0.610, 0.475, 1}
@@ -32,8 +55,7 @@ GAME: struct {
 	camera:           Camera,
 	// Selected piece: highlighted, reach shown, card shown
 	focus:            sim.Piece_Id,
-	region_colouring: sim.Region_Colouring_Mode,
-	supply_shown:     bool,
+	map_mode:         Map_Mode,
 	// Input for the next sim step
 	input:            sim.Step_Input,
 	// Time not yet simulated, in seconds
@@ -125,11 +147,10 @@ game_tick :: proc(input: Input, dt: f32) {
 		sim.step(GAME.input)
 		GAME.input = {}
 	}
-	colourings := reflect.enum_field_names(sim.Region_Colouring_Mode)
-	colouring := tweak.choice("Map/Region colouring", int(GAME.region_colouring), colourings)
-	GAME.region_colouring = sim.Region_Colouring_Mode(colouring)
-	tweak.toggle("Map/Supply", "Shown", &GAME.supply_shown)
-	sim.present(GAME.focus, pointed, GAME.region_colouring, &GAME.scene)
+	// Map mode
+	region_colouring := MAP_MODE_REGIONS[GAME.map_mode]
+	supply_shown := GAME.map_mode in MAP_MODE_SUPPLY
+	sim.present(GAME.focus, pointed, region_colouring, &GAME.scene)
 	for file, id in GAME.scene.caches {
 		if file.fingerprint == GAME.saved[id] do continue
 		// Once per fingerprint, so an unwritable folder isn't retried every frame
@@ -139,8 +160,8 @@ game_tick :: proc(input: Input, dt: f32) {
 
 	map_draw_tick(
 		&GAME.scene,
-		GAME.region_colouring,
-		GAME.supply_shown,
+		region_colouring,
+		supply_shown,
 		GAME.camera,
 		input.viewport,
 		input.pixel_density,
@@ -270,6 +291,26 @@ cards_build :: proc(place: sim.Card_Place) {
 			for action in card.actions {
 				action_style.disabled = !action.enabled
 				if ui.button(action.label, action_style).pressed do ask(action.ask)
+			}
+			// Map modes, on the status card: the selected one looks pressed
+			if card.place == .Status {
+				ui.label("Map Mode", {text_color = CARD_FADED_INK})
+				if ui.row({width = ui.fit(), height = ui.fit(), gap = 0}) {
+					font := font_id(.Text)
+					width := MAP_MODE_BUTTON_EM * gfx.font_size(font)
+					mode_style := action_style
+					mode_style.disabled = false
+					mode_style.width = ui.px(width)
+					for label, mode in MAP_MODE_LABELS {
+						style := mode_style
+						style.padding = [2]f32{max(0, (width - gfx.text_advance(label, font)) / 2), 2}
+						if mode == GAME.map_mode {
+							style.background = CARD_BUTTON_ACTIVE_PAPER
+							style.hot_background = CARD_BUTTON_ACTIVE_PAPER
+						}
+						if ui.button(fmt.tprintf("%s##map mode", label), style).pressed do GAME.map_mode = mode
+					}
+				}
 			}
 		}
 	}

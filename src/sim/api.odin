@@ -91,9 +91,16 @@ Army :: struct {
 	// Stock change at the end of its faction's turn, before marching, in turns. Live for the player's armies;
 	// others keep the value from their own last turn.
 	resupply:            f32,
-	// Share of what the place can deliver that reaches this army, 0..1: own men / nearby friendly men. Updated
-	// with resupply.
+	// Where resupply comes from (the better of the two), and that source's efficiency, 0..1. Updated with resupply.
+	resupply_source:     Resupply_Source,
 	resupply_efficiency: f32,
+}
+
+Resupply_Source :: enum u8 {
+	// The supply map; shared with friendly armies nearby
+	Network,
+	// The land, times the army's foraging skill; shared by every army nearby
+	Foraging,
 }
 
 // 0 = none, 1 = scenario's first region

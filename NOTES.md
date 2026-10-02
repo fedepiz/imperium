@@ -17,6 +17,9 @@ odin build src -o:minimal (a healthy full build takes under a second; check with
 - Functions are for code called from several places, or for module-sized boundaries. Don't extract small
   single-use helpers: write the code inline, in a `{ }` scope if its locals aren't needed after, and bind
   intermediate results to well-named locals. A function is fine to cut down deep rightward nesting.
+- Writes must be visible where they happen. A proc that mutates state hides what changes from its call site:
+  inline the mutating code so the writes sit in context, or make the proc pure (it returns values and the
+  caller writes them). Don't add code paths (e.g. at load) just to pre-fill values nothing needs yet.
 - Label sections of a long proc with short comments: `// Step: Walk`, `// Fixed-step update`. No numbering,
   and no header comment listing the sections (it goes stale).
 - Group a file's constants and tuning tables together at the top of the file.

@@ -72,7 +72,8 @@ STOCK_PER_MOVEMENT :: 0.01
 SUPPLY_DECAY :: 2
 // Men a cell's supply point feeds
 MEN_PER_SUPPLY :: 200
-// Friendly men within this many cells share the supply, weighted by 1 − distance / FORAGE_RADIUS
+// Armies within this many cells share supply (network: friendly ones; forage: all), weighted by
+// 1 − distance / FORAGE_RADIUS
 FORAGE_RADIUS :: 12
 
 // What the land yields to foragers, 0..1, by terrain type; blended from Open by the type's strength
@@ -427,16 +428,6 @@ world_load :: proc(scenario: Scenario) -> bool {
 			break
 		}
 	}
-	// Supply: every faction's armies, then the first player's map
-	for faction, index in WORLD.factions {
-		if !faction_alive(faction) do continue
-		supply_map_build(faction_id(index))
-		for &army, slot in WORLD.armies {
-			if army.active && WORLD.pieces[slot].owner == faction_id(index) {
-				army.resupply, army.resupply_efficiency = army_resupply(slot)
-			}
-		}
-	}
 	supply_map_build(WORLD.player)
 	return ok
 }
@@ -597,18 +588,18 @@ world_step :: proc(input: Step_Input) {
 	}
 
 	// Step: Interaction
-	open := &WORLD.interaction
-	if open.actor != {} {
-		if input.conquer && open.conquerable {
-			actor, conquered := piece_get(open.actor), piece_get(open.target)
+	if WORLD.interaction.actor != {} {
+		if input.conquer && WORLD.interaction.conquerable {
+			actor, conquered :=
+				piece_get(WORLD.interaction.actor), piece_get(WORLD.interaction.target)
 			if actor != nil && conquered != nil do conquered.owner = actor.owner
-			open^ = {}
+			WORLD.interaction = {}
 		} else if input.leave {
-			open^ = {}
+			WORLD.interaction = {}
 		}
 	} else if actor, other := piece_get(walk.piece), piece_get(walk.met);
 	   actor != nil && other != nil && !pieces_friendly(actor^, other^) {
-		open^ = {
+		WORLD.interaction = {
 			actor       = walk.piece,
 			target      = walk.met,
 			conquerable = .Captures in actor.traits && .Capturable in other.traits,
@@ -621,7 +612,56 @@ world_step :: proc(input: Step_Input) {
 		piece := WORLD.pieces[index]
 		readiness := army.readiness
 		stock := army.stock
-		if piece.owner == WORLD.player do army.resupply, army.resupply_efficiency = army_resupply(index)
+
+		// Resupply, live for the player's armies: the better of network and foraging, each as men fed over own men,
+		// times that source's efficiency. The supply map is the player's.
+		if piece.owner == WORLD.player {
+			men := f32(army.strength_current)
+			cell := util.cell_of(piece.pos)
+			network, network_efficiency, forage, forage_efficiency: f32
+			if util.grid_contains(cell, WORLD_SIZE) && men > 0 {
+				at := util.grid_index(cell, WORLD_SIZE)
+
+				// Men nearby, weighted by distance: friendly ones, and everyone (any faction)
+				friendly_men, all_men: f32
+				for other, other_index in WORLD.armies {
+					if !other.active do continue
+					other_piece := WORLD.pieces[other_index]
+					distance := linalg.distance(piece.pos, other_piece.pos)
+					if distance >= FORAGE_RADIUS do continue
+					weighted := f32(other.strength_current) * (1 - distance / FORAGE_RADIUS)
+					all_men += weighted
+					if other_piece.owner == piece.owner do friendly_men += weighted
+				}
+
+				// Network: the supply map here, shared with friendly armies nearby
+				network_efficiency = men / friendly_men
+				network = f32(WORLD.supply_map[at]) * MEN_PER_SUPPLY / men * network_efficiency
+
+				// Foraging: the land's yield times the army's skill, shared with every army nearby
+				land := WORLD.atlas.terrain[at]
+				yield: f32
+				if land.surface == .Land {
+					yield = math.lerp(
+						FORAGE_YIELD[.Open],
+						FORAGE_YIELD[land.type],
+						util.normalized(land.type_strength),
+					)
+				}
+				forage_efficiency = men / all_men
+				forage = army.foraging * yield * MEN_PER_SUPPLY / men * forage_efficiency
+			}
+			fed := network
+			army.resupply_source = .Network
+			army.resupply_efficiency = network_efficiency
+			if forage > network {
+				fed = forage
+				army.resupply_source = .Foraging
+				army.resupply_efficiency = forage_efficiency
+			}
+			army.resupply = min(fed, 1 + SUPPLY_REFILL_MAX) - 1
+		}
+
 		// Marching
 		if walk.piece != {} && int(walk.piece.index) == index {
 			readiness -= walk.spent_road * ROAD_READINESS_PER_MOVEMENT
@@ -684,39 +724,6 @@ supply_map_build :: proc(faction: Faction_Id) {
 	pathfind_spread(.Land, sources[:], zones[:], SUPPLY_DECAY, spread)
 	for value, i in spread do WORLD.supply_map[i] = u8(clamp(value, 0, 100) + 0.5)
 	WORLD.supply_map_revision += 1
-}
-
-// Resupply of the army in a slot at its current position, and its resupply efficiency. The supply map must be its
-// faction's.
-army_resupply :: proc(index: int) -> (resupply, efficiency: f32) {
-	army := WORLD.armies[index]
-	piece := WORLD.pieces[index]
-	// Friendly men nearby, weighted by distance
-	local_men: f32
-	for other, other_index in WORLD.armies {
-		if !other.active || WORLD.pieces[other_index].owner != piece.owner do continue
-		distance := linalg.distance(piece.pos, WORLD.pieces[other_index].pos)
-		if distance < FORAGE_RADIUS do local_men += f32(other.strength_current) * (1 - distance / FORAGE_RADIUS)
-	}
-	cell := util.cell_of(piece.pos)
-	if !util.grid_contains(cell, WORLD_SIZE) || local_men <= 0 do return -1, 0
-	index := util.grid_index(cell, WORLD_SIZE)
-
-	// The supply map, and foraging: the army's skill times what the land yields
-	supplied := f32(WORLD.supply_map[index])
-	land := WORLD.atlas.terrain[index]
-	yield: f32
-	if land.surface == .Land {
-		yield = math.lerp(FORAGE_YIELD[.Open], FORAGE_YIELD[land.type], util.normalized(land.type_strength))
-	}
-	foraged := army.foraging * yield
-
-	// Men the place can feed; this army's share of it, by its men among everyone nearby
-	feeds := max(supplied, foraged) * MEN_PER_SUPPLY
-	men := f32(army.strength_current)
-	efficiency = men / local_men
-	fed: f32 = men > 0 ? feeds * efficiency / men : 0
-	return min(fed, 1 + SUPPLY_REFILL_MAX) - 1, efficiency
 }
 
 // The player, or nil while an interaction is open

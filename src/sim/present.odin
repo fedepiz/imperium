@@ -200,6 +200,7 @@ world_present :: proc(
 			append(&card.stats, Field{label = "Supply", value = fmt.tprintf("%.0f%%", supply)})
 			stock := fmt.tprintf("%.1f (%+.1f)", army.stock, army.resupply)
 			append(&card.stats, Field{label = "Stock", value = stock})
+			append(&card.stats, Field{label = "Source", value = fmt.tprintf("%v", army.resupply_source)})
 			efficiency := fmt.tprintf("%.0f%%", 100 * army.resupply_efficiency)
 			append(&card.stats, Field{label = "Efficiency", value = efficiency})
 		}
