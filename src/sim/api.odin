@@ -249,6 +249,8 @@ CARDS_MAX :: 8
 CARD_FIELDS_MAX :: 16
 CARD_ACTIONS_MAX :: 4
 CARD_LINES_MAX :: 16
+CARD_PARTS_MAX :: 96
+CARD_BREAKDOWNS_MAX :: 16
 // Side of an area's square, in cells
 AREA_SIZE :: PATHFIND_FLOOD_SIZE
 
@@ -355,8 +357,10 @@ Card :: struct {
 	place:   Card_Place,
 	title:   string,
 	picture: Maybe(Picture),
-	// Paragraphs of text under the title
-	lines:   [dynamic; CARD_LINES_MAX]string,
+	// Paragraphs under the title: ranges of parts
+	lines:      [dynamic; CARD_LINES_MAX]span.Span,
+	parts:      [dynamic; CARD_PARTS_MAX]Line_Part,
+	breakdowns: [dynamic; CARD_BREAKDOWNS_MAX]Breakdown,
 	// Facts that rarely change
 	fields:  [dynamic; CARD_FIELDS_MAX]Field,
 	// Values that change from turn to turn; shown beside fields
@@ -365,8 +369,23 @@ Card :: struct {
 }
 
 Field :: struct {
-	label: string,
-	value: string,
+	label:     string,
+	value:     string,
+	// Shown on hover: index + 1 into the card's breakdowns, 0 = none
+	breakdown: int,
+}
+
+// A run of a paragraph
+Line_Part :: struct {
+	text:      string,
+	// Shown on hover: index + 1 into the card's breakdowns, 0 = none
+	breakdown: int,
+}
+
+// A number's terms and their total
+Breakdown :: struct {
+	terms: [dynamic; TALLY_FACTORS_MAX]Field,
+	total: string,
 }
 
 Action :: struct {

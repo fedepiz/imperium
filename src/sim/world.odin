@@ -592,7 +592,7 @@ world_step :: proc(input: Step_Input) {
 				open.result = combat_resolve(open.battle)
 				for id, role in roles {
 					side := open.result.sides[role]
-					losses[role] = {id, side.men, side.readiness, side.stock}
+					losses[role] = {id, side.men.total, side.readiness, side.stock.total}
 				}
 				open.stage = .Report
 				close = false
@@ -623,7 +623,7 @@ world_step :: proc(input: Step_Input) {
 					order.chaser_budget = movement_budget(winner) + TEMPERAMENT_FOLLOW_OVERDRAW[temperament]
 				}
 				side := result.sides[loser_role]
-				if result.caught do losses[loser_role] = {loser, side.pursuit_men, side.pursuit_readiness, 0}
+				if result.caught do losses[loser_role] = {loser, side.pursuit_men.total, side.pursuit_readiness, 0}
 				open.stage = .Fall_Back
 				close = false
 			}

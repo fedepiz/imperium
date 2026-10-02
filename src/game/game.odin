@@ -21,6 +21,8 @@ CARD_VALUE_EM :: 9
 CARD_STAT_EM :: 8
 // Width of a card's paragraphs, in em; they wrap
 CARD_LINES_EM :: 26
+// Numbers with a breakdown, while hovered
+CARD_HOVER_INK :: [4]f32{0.62, 0.24, 0.16, 1}
 // Between the fields and stats columns, in pixels
 CARD_COLUMN_GAP :: 24
 
@@ -188,6 +190,26 @@ scene_pawn :: proc(handle: sim.Piece_Id) -> (sim.Pawn, bool) {
 	return {}, false
 }
 
+// While the run keyed by the breakdown is hovered, a tooltip of its terms, a rule, then the total. 0 = none.
+@(private = "file")
+breakdown_hover :: proc(card: ^sim.Card, breakdown: int, style: ui.Style) {
+	if breakdown == 0 || !ui.signal(fmt.tprintf("breakdown %d", breakdown)).hovered do return
+	shown := &card.breakdowns[breakdown - 1]
+	if ui.tooltip(style) {
+		for term in shown.terms {
+			if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
+				ui.label(term.label, {width = ui.em(CARD_LABEL_EM), text_color = CARD_FADED_INK})
+				ui.label(term.value, {width = ui.em(CARD_STAT_EM)})
+			}
+		}
+		ui.panel("rule", {width = ui.grow(), height = ui.px(1), background = MAP_INK, thickness = 0})
+		if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
+			ui.label("Total", {width = ui.em(CARD_LABEL_EM), text_color = CARD_FADED_INK})
+			ui.label(shown.total, {width = ui.em(CARD_STAT_EM)})
+		}
+	}
+}
+
 @(private = "file")
 ask :: proc(what: sim.Card_Ask) {
 	switch what {
@@ -259,6 +281,16 @@ cards_build :: proc(place: sim.Card_Place) {
 		focus_border      = MAP_INK,
 		hot_text_color    = MAP_INK,
 	}
+	tooltip_style := ui.Style {
+		width      = ui.fit(),
+		height     = ui.fit(),
+		padding    = [2]f32{12, 8},
+		gap        = 4,
+		background = MAP_PAPER,
+		border     = MAP_INK,
+		thickness  = 1.5,
+		radius     = 3,
+	}
 	count := 0
 	for &card in GAME.scene.cards {
 		if card.place != place do continue
@@ -277,7 +309,24 @@ cards_build :: proc(place: sim.Card_Place) {
 			} else {
 				ui.label(card.title, {font = font_id(.Title)})
 			}
-			for line in card.lines do ui.label(line, {width = ui.em(CARD_LINES_EM)})
+			// Paragraphs; a number with a breakdown shows it on hover
+			for line in card.lines {
+				parts := card.parts[line.begin:][:line.len]
+				texts: [dynamic; sim.CARD_PARTS_MAX]ui.Text
+				for part in parts {
+					text := ui.Text {
+						text = part.text,
+					}
+					if part.breakdown > 0 {
+						text.key = fmt.tprintf("breakdown %d", part.breakdown)
+						text.hot_color = CARD_HOVER_INK
+						text.underline = true
+					}
+					append(&texts, text)
+				}
+				ui.label_text(texts[:], {width = ui.em(CARD_LINES_EM)})
+				for part in parts do breakdown_hover(&card, part.breakdown, tooltip_style)
+			}
 			// Fields, and stats beside them
 			if ui.row({width = ui.fit(), height = ui.fit(), gap = CARD_COLUMN_GAP}) {
 				columns := [2][]sim.Field{card.fields[:], card.stats[:]}
@@ -288,7 +337,16 @@ cards_build :: proc(place: sim.Card_Place) {
 						for field in fields {
 							if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
 								ui.label(field.label, {width = ui.em(CARD_LABEL_EM), text_color = CARD_FADED_INK})
-								ui.label(field.value, {width = ui.em(value_em[column])})
+								value := ui.Text {
+									text = field.value,
+								}
+								if field.breakdown > 0 {
+									value.key = fmt.tprintf("breakdown %d", field.breakdown)
+									value.hot_color = CARD_HOVER_INK
+									value.underline = true
+								}
+								ui.label_text({value}, {width = ui.em(value_em[column])})
+								breakdown_hover(&card, field.breakdown, tooltip_style)
 							}
 						}
 					}

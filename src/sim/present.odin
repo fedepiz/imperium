@@ -67,6 +67,46 @@ OUTCOME_LOSER_WORDS := [Battle_Outcome]string {
 }
 
 @(private = "file", rodata)
+FACTOR_TITLES := [Factor_Kind]string {
+	.Dice        = "Roll",
+	.Proficiency = "Proficiency",
+	.Readiness   = "Readiness",
+	.Numbers     = "Numbers",
+	.Posture     = "Posture",
+	.Ground      = "Ground",
+	.Edge        = "Edge",
+	.Commit      = "Committed",
+	.Mobility    = "Mobility",
+	.Losses      = "Losses",
+	.Attacker    = "Attacker",
+	.Defender    = "Defender",
+	.Margin      = "Margin",
+	.Engaged     = "Engaged",
+	.Share       = "Share",
+	.Lost        = "Lost",
+	.Carried     = "Not carried",
+	.Men_Ratio   = "Men ratio",
+	.Baggage     = "Baggage full",
+	.Men_Left    = "Men left",
+}
+
+@(private = "file")
+Factor_Unit :: enum u8 {
+	Points,
+	Men,
+	Percent,
+	Ratio,
+}
+
+@(private = "file", rodata)
+FACTOR_UNITS := #partial [Factor_Kind]Factor_Unit {
+	.Engaged   = .Men,
+	.Men_Left  = .Men,
+	.Share     = .Percent,
+	.Men_Ratio = .Ratio,
+}
+
+@(private = "file", rodata)
 ROLE_TITLES := [Battle_Role]string {
 	.Attacker = "Attacker",
 	.Defender = "Defender",
@@ -275,7 +315,7 @@ world_present :: proc(
 
 	// Battle: attacker's side left, defender's right
 	if open.actor != {} && open.stage != .Meet_Town {
-		result := open.result
+		result := &open.result
 		roles := [Battle_Role]Piece_Id {
 			.Attacker = open.actor,
 			.Defender = open.target,
@@ -294,120 +334,121 @@ world_present :: proc(
 		case .Refused:
 			card.title = fmt.tprintf("%s won't attack %s", names[.Attacker], names[.Defender])
 			attacked := WORLD.piece_turns[open.actor.index].attacked
-			append(&card.lines, attacked ? "It has already attacked this turn." : "Its commander judges the odds too poor.")
+			reason := attacked ? "It has already attacked this turn." : "Its commander judges the odds too poor."
+			card_line(&card, {text = reason})
 		case .Report:
 			card.title = "Battle report"
-			a, d := result.sides[.Attacker], result.sides[.Defender]
-			lines := &card.lines
-			append(
-				lines,
-				fmt.tprintf(
-					"%s attacks %s, power %.1f against %.1f.",
-					names[.Attacker], names[.Defender], a.power, d.power,
-				),
+			a := &result.sides[.Attacker]
+			d := &result.sides[.Defender]
+			card_line(
+				&card,
+				{text = fmt.tprintf("%s attacks %s, power ", names[.Attacker], names[.Defender])},
+				tally_part(&card, a.power),
+				{text = " against "},
+				tally_part(&card, d.power),
+				{text = "."},
 			)
 
 			// Avoiding battle
-			if roll := result.avoid; roll.rolled {
+			if len(result.avoid.factors) > 0 {
 				got_away := result.outcome == .Avoided ? "gets away" : "is caught"
-				append(
-					lines,
-					fmt.tprintf(
-						"%s tries to avoid battle: rolls %.0f, total %.0f against %.0f, and %s.",
-						names[.Defender], roll.dice, roll.total, roll.target, got_away,
-					),
+				card_line(
+					&card,
+					{text = fmt.tprintf("%s tries to avoid battle: ", names[.Defender])},
+					tally_part(&card, result.avoid),
+					{text = fmt.tprintf(" against %.0f, and %s.", MOBILITY_TARGET, got_away)},
 				)
 			}
-			if result.outcome == .Avoided do break
 
-			// Postures and onset
-			append(
-				lines,
-				fmt.tprintf(
+			// The battle, then its outcome
+			if result.outcome != .Avoided {
+				postures := fmt.tprintf(
 					"%s %s; %s %s.",
 					names[.Attacker], POSTURE_WORDS[a.posture], names[.Defender], POSTURE_WORDS[d.posture],
-				),
-			)
-			if a.onset.rolled {
-				append(
-					lines,
-					fmt.tprintf(
-						"Onset: %s rolls %.0f for %.1f, %s rolls %.0f for %.1f.",
-						names[.Attacker], a.onset.dice, a.onset.total, names[.Defender], d.onset.dice, d.onset.total,
-					),
 				)
-				ahead: Battle_Role = a.onset.total > d.onset.total ? .Attacker : .Defender
-				switch {
-				case result.onset_margin < ONSET_TIE:
-					append(lines, "Neither gains the upper hand.")
-				case !result.crisis_chosen && !result.pulled_out:
-					append(
-						lines,
-						fmt.tprintf(
-							"%s wins by %.1f, and %s %s.",
-							names[ahead], result.onset_margin, names[OTHER_ROLE[ahead]],
-							OUTCOME_LOSER_WORDS[result.outcome],
-						),
+				card_line(&card, {text = postures})
+				if len(a.onset.factors) > 0 {
+					card_line(
+						&card,
+						{text = fmt.tprintf("Onset: %s ", names[.Attacker])},
+						tally_part(&card, a.onset),
+						{text = fmt.tprintf(", %s ", names[.Defender])},
+						tally_part(&card, d.onset),
+						{text = "."},
 					)
-				case:
-					append(
-						lines,
-						fmt.tprintf(
-							"%s wins by %.1f and gains an edge of %.1f.",
-							names[ahead], result.onset_margin, result.sides[ahead].edge,
-						),
-					)
+					ahead: Battle_Role = a.onset.total > d.onset.total ? .Attacker : .Defender
+					edge := &result.sides[ahead].edge
+					switch {
+					case result.onset_margin.total < ONSET_TIE:
+						card_line(&card, {text = "Neither gains the upper hand."})
+					case len(edge.factors) == 0:
+						card_line(
+							&card,
+							{text = fmt.tprintf("%s wins by ", names[ahead])},
+							tally_part(&card, result.onset_margin),
+							{text = "."},
+						)
+					case:
+						card_line(
+							&card,
+							{text = fmt.tprintf("%s wins by ", names[ahead])},
+							tally_part(&card, result.onset_margin),
+							{text = " and gains an edge of "},
+							tally_part(&card, edge^),
+							{text = "."},
+						)
+					}
 				}
-			}
-			if result.pulled_out do append(lines, fmt.tprintf("%s, probing and behind, pulls out.", loser))
-
-			// Crisis
-			if result.crisis_chosen {
-				append(
-					lines,
-					fmt.tprintf(
+				if result.pulled_out do card_line(&card, {text = fmt.tprintf("%s is probing and falls behind.", loser)})
+				if result.crisis_chosen {
+					choices := fmt.tprintf(
 						"%s %s; %s %s.",
 						names[.Attacker], CHOICE_WORDS[a.choice], names[.Defender], CHOICE_WORDS[d.choice],
-					),
-				)
-				if a.crisis.rolled {
-					append(
-						lines,
-						fmt.tprintf(
-							"Crisis: %s rolls %.0f for %.1f, %s rolls %.0f for %.1f, a margin of %.1f.",
-							names[.Attacker], a.crisis.dice, a.crisis.total, names[.Defender], d.crisis.dice,
-							d.crisis.total, result.crisis_margin,
-						),
 					)
+					card_line(&card, {text = choices})
+					if len(a.crisis.factors) > 0 {
+						card_line(
+							&card,
+							{text = fmt.tprintf("Crisis: %s ", names[.Attacker])},
+							tally_part(&card, a.crisis),
+							{text = fmt.tprintf(", %s ", names[.Defender])},
+							tally_part(&card, d.crisis),
+							{text = ", a margin of "},
+							tally_part(&card, result.crisis_margin),
+							{text = "."},
+						)
+					}
 				}
 				if result.outcome == .Stalemate {
-					append(lines, "Stalemate.")
+					card_line(&card, {text = "Stalemate."})
 				} else {
-					append(lines, fmt.tprintf("%s %s.", loser, OUTCOME_LOSER_WORDS[result.outcome]))
+					card_line(&card, {text = fmt.tprintf("%s %s.", loser, OUTCOME_LOSER_WORDS[result.outcome])})
 				}
-				if result.worsened do append(lines, fmt.tprintf("Having pressed or committed, %s fares worse.", loser))
+				if result.worsened {
+					card_line(&card, {text = fmt.tprintf("Having pressed or committed, %s fares worse.", loser)})
+				}
 			}
 
-			// Pursuit and holding together
-			if roll := result.pursuit; roll.rolled {
-				caught := result.caught ? "catches them" : "they get away"
-				append(
-					lines,
-					fmt.tprintf(
-						"%s pursues: rolls %.0f, total %.0f against %.0f, and %s.",
-						winner, roll.dice, roll.total, roll.target, caught,
-					),
+			// Cohesion
+			for &side, role in result.sides {
+				if len(side.cohesion.factors) == 0 do continue
+				fate := side.dissolved ? "dissolves" : "holds together"
+				card_line(
+					&card,
+					{text = fmt.tprintf("%s checks cohesion: ", names[role])},
+					tally_part(&card, side.cohesion),
+					{text = fmt.tprintf(" against %.0f, and %s.", COHESION_TARGET, fate)},
 				)
 			}
-			for side, role in result.sides {
-				if !side.hold.rolled do continue
-				fate := side.dissolved ? "it dissolves" : "it holds"
-				append(
-					lines,
-					fmt.tprintf(
-						"%s rolls %.0f to hold together, total %.1f against %.1f: %s.",
-						names[role], side.hold.dice, side.hold.total, side.hold.target, fate,
-					),
+
+			// Pursuit
+			if len(result.pursuit.factors) > 0 {
+				caught := result.caught ? "catches them" : "they get away"
+				card_line(
+					&card,
+					{text = fmt.tprintf("%s pursues: ", winner)},
+					tally_part(&card, result.pursuit),
+					{text = fmt.tprintf(" against %.0f, and %s.", MOBILITY_TARGET, caught)},
 				)
 			}
 		case .Outcome:
@@ -431,26 +472,27 @@ world_present :: proc(
 			append(column, Field{label = ROLE_TITLES[role], value = piece_title(roles[role])})
 			if open.stage == .Announce || open.stage == .Refused {
 				side := open.battle.sides[role]
-				other := open.battle.sides[OTHER_ROLE[role]]
+				power := battle_power(side, open.battle.sides[OTHER_ROLE[role]])
 				append(column, Field{label = "Commander", value = fmt.tprintf("%v", side.temperament)})
 				append(column, Field{label = "Men", value = util.format_compact(f64(side.men))})
 				append(column, Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", side.proficiency)})
 				append(column, Field{label = "Readiness", value = fmt.tprintf("%.0f%%", side.readiness)})
-				append(column, Field{label = "Power", value = fmt.tprintf("%.1f", battle_strength(side, other))})
+				append(column, tally_field(&card, "Power", power, fmt.tprintf("%.1f", power.total)))
 				continue
 			}
-			side := result.sides[role]
+			side := &result.sides[role]
 			// The chase's losses alone
 			if open.stage == .Fall_Back {
 				if !result.caught || role == result.winner do continue
-				append(column, Field{label = "Men", value = util.format_compact(f64(side.pursuit_men))})
+				men := util.format_compact(f64(side.pursuit_men.total))
+				append(column, tally_field(&card, "Men", side.pursuit_men, men))
 				append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.pursuit_readiness)})
 				continue
 			}
 			append(column, Field{label = "Posture", value = fmt.tprintf("%v", side.posture)})
-			append(column, Field{label = "Men", value = util.format_compact(f64(side.men))})
+			append(column, tally_field(&card, "Men", side.men, util.format_compact(f64(side.men.total))))
 			append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.readiness)})
-			append(column, Field{label = "Supply", value = fmt.tprintf("%+.1f", side.stock)})
+			append(column, tally_field(&card, "Supply", side.stock, fmt.tprintf("%+.1f", side.stock.total)))
 			if side.dissolved do append(column, Field{label = "Fate", value = "Dissolved"})
 		}
 		append(&card.actions, Action{label = "Next", ask = .Next, enabled = WORLD.movement.subject == {}})
@@ -461,6 +503,53 @@ world_present :: proc(
 	out.caches = {}
 	pathfind_cache_get(&out.caches[.Pathfind_Land], .Land)
 	pathfind_cache_get(&out.caches[.Pathfind_Sea], .Sea)
+}
+
+// Adds a paragraph made of parts
+@(private = "file")
+card_line :: proc(card: ^Card, parts: ..Line_Part) {
+	begin := len(card.parts)
+	append(&card.parts, ..parts)
+	append(&card.lines, span.from_range(begin, len(card.parts)))
+}
+
+// Adds the tally's factors as a breakdown under total; returns its index + 1
+@(private = "file")
+card_breakdown :: proc(card: ^Card, tally: Tally, total: string) -> int {
+	breakdown := Breakdown {
+		total = total,
+	}
+	for factor, i in tally.factors {
+		value: string
+		switch FACTOR_UNITS[factor.kind] {
+		case .Points:
+			value = i == 0 ? fmt.tprintf("%.1f", factor.value) : fmt.tprintf("%+.1f", factor.value)
+		case .Men:
+			value = util.format_compact(f64(factor.value))
+		case .Percent:
+			value = fmt.tprintf("%.0f%%", 100 * factor.value)
+		case .Ratio:
+			value = fmt.tprintf("%.2f", factor.value)
+		}
+		if factor.op == .Scale do value = fmt.tprintf("× %s", value)
+		append(&breakdown.terms, Field{label = FACTOR_TITLES[factor.kind], value = value})
+	}
+	append(&card.breakdowns, breakdown)
+	return len(card.breakdowns)
+}
+
+// The tally's total, its factors on hover
+@(private = "file")
+tally_part :: proc(card: ^Card, tally: Tally) -> Line_Part {
+	total := fmt.tprintf("%.1f", tally.total)
+	return {text = total, breakdown = card_breakdown(card, tally, total)}
+}
+
+// A field showing total, the tally's factors on hover
+@(private = "file")
+tally_field :: proc(card: ^Card, label: string, tally: Tally, total: string) -> Field {
+	if len(tally.factors) == 0 do return {label = label, value = total}
+	return {label = label, value = total, breakdown = card_breakdown(card, tally, total)}
 }
 
 @(private = "file")

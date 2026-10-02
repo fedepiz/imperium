@@ -15,11 +15,13 @@ NUMBERS_MAX :: 2
 
 // Avoiding battle and pursuing: 2d6 + MOBILITY_BONUS × (own mobility − other's) ≥ MOBILITY_TARGET
 MOBILITY_BONUS :: 2
-MOBILITY_TARGET :: 7.5
+MOBILITY_TARGET :: 8
 
-// Onset margin: below ONSET_TIE a tie, from ONSET_ROUT_MARGIN a rout, else the winner's edge is margin / 2
+// Onset margin: below ONSET_TIE a tie, from ONSET_ROUT_MARGIN a rout, else the winner's edge is margin ×
+// EDGE_PER_MARGIN
 ONSET_TIE :: 0.5
 ONSET_ROUT_MARGIN :: 7
+EDGE_PER_MARGIN :: 0.5
 // A probing side pulls out after the onset when its edge is this far behind or worse
 PROBE_PULL_OUT :: -2
 // Added to a crisis roll when committing
@@ -29,12 +31,12 @@ CRISIS_STALEMATE :: 2
 CRISIS_DEFEAT :: 5
 CRISIS_HEAVY :: 8
 
-// Holding together: only when readiness < HOLD_READINESS or men < HOLD_MEN % of men_max.
-// Holds when 2d6 + proficiency / 10 ≥ HOLD_TARGET + penalty, penalty = (HOLD_READINESS − readiness) / 10 +
-// (HOLD_MEN − men %) / 10, each part from 0.
-HOLD_READINESS :: 25
-HOLD_MEN :: 30
-HOLD_TARGET :: 9.5
+// Cohesion check: only when readiness < COHESION_READINESS or men < COHESION_MEN % of men_max. Passes when 2d6 +
+// proficiency / 10 − (COHESION_READINESS − readiness) / 10 − (COHESION_MEN − men %) / 10 ≥ COHESION_TARGET, each
+// subtracted part from 0. Before any pursuit.
+COHESION_READINESS :: 25
+COHESION_MEN :: 30
+COHESION_TARGET :: 10
 
 // Readiness lost by a defender that avoids battle
 AVOID_READINESS :: 5
@@ -283,6 +285,12 @@ OTHER_ROLE := [Battle_Role]Battle_Role {
 	.Defender = .Attacker,
 }
 
+// A side's roll, in a margin
+ROLE_FACTORS := [Battle_Role]Factor_Kind {
+	.Attacker = .Attacker,
+	.Defender = .Defender,
+}
+
 Battle_Role_Result :: enum u8 {
 	Loser,
 	Winner,
@@ -324,30 +332,80 @@ Battle :: struct {
 Battle_Side_Result :: struct {
 	posture:           Posture,
 	choice:            Crisis_Choice,
-	edge:              f32,
-	men:               f32,
+	// Won at the onset; empty for the other side
+	edge:              Tally,
+	// Changes to apply to its army
+	men:               Tally,
 	readiness:         f32,
-	stock:             f32,
+	stock:             Tally,
 	// Caught by pursuit: further losses
-	pursuit_men:       f32,
+	pursuit_men:       Tally,
 	pursuit_readiness: f32,
-	// Failed the holding-together roll: the army is gone
+	// Failed the cohesion check: the army is gone
 	dissolved:         bool,
 	// Falls back or retreats after the battle
 	falls_back:        bool,
-	// Power going in
-	power:             f32,
-	onset:             Battle_Roll,
-	crisis:            Battle_Roll,
-	hold:              Battle_Roll,
+	// Going in
+	power:             Tally,
+	// Rolls; cohesion is against COHESION_TARGET
+	onset:             Tally,
+	crisis:            Tally,
+	cohesion:          Tally,
 }
 
-// A roll as it happened: 2d6, the total with modifiers, and what it had to reach (threshold rolls only)
-Battle_Roll :: struct {
-	rolled: bool,
-	dice:   f32,
-	total:  f32,
-	target: f32,
+TALLY_FACTORS_MAX :: 20
+
+// What a derived number is made of
+Factor_Kind :: enum u8 {
+	// The 2d6
+	Dice,
+	Proficiency,
+	// What low readiness costs
+	Readiness,
+	Numbers,
+	Posture,
+	Ground,
+	Edge,
+	Commit,
+	// MOBILITY_BONUS × (own mobility − the other's)
+	Mobility,
+	// Men below COHESION_MEN %
+	Losses,
+	// A side's roll, in a margin
+	Attacker,
+	Defender,
+	Margin,
+	// The smaller side's men
+	Engaged,
+	Share,
+	// Supply lost by the outcome, and what wasn't carried of it
+	Lost,
+	Carried,
+	// The loser's men over the winner's
+	Men_Ratio,
+	// Room left in the winner's baggage
+	Baggage,
+	// The loser's men after the battle
+	Men_Left,
+}
+
+Factor_Op :: enum u8 {
+	Add,
+	// Multiplies the total so far
+	Scale,
+}
+
+Factor :: struct {
+	kind:  Factor_Kind,
+	op:    Factor_Op,
+	value: f32,
+}
+
+// A derived number and what it is made of. A roll is a tally starting with the dice; empty = not rolled.
+Tally :: struct {
+	// Added zeros left out, other than the dice
+	factors: [dynamic; TALLY_FACTORS_MAX]Factor,
+	total:   f32,
 }
 
 Battle_Result :: struct {
@@ -355,14 +413,15 @@ Battle_Result :: struct {
 	// Valid when outcome in OUTCOME_RETREATS
 	winner:        Battle_Role,
 	sides:         [Battle_Role]Battle_Side_Result,
-	onset_margin:  f32,
-	crisis_margin: f32,
+	// The side ahead's total minus the other's
+	onset_margin:  Tally,
+	crisis_margin: Tally,
 	follow:        Follow,
 	// The pursuit caught the loser
 	caught:        bool,
-	// The defender's attempt to get away, and the winner's chase
-	avoid:         Battle_Roll,
-	pursuit:       Battle_Roll,
+	// Rolls against MOBILITY_TARGET: the defender's attempt to get away, and the winner's chase
+	avoid:         Tally,
+	pursuit:       Tally,
 	// A prober pulled out after the onset
 	pulled_out:    bool,
 	// Both chose in the crisis (it wasn't decided before)
@@ -373,12 +432,39 @@ Battle_Result :: struct {
 
 // Resolve ------------------------------------------------------------------------------------------------------------
 
-// Quality (proficiency, worn by low readiness) plus the numbers bonus against other. Commanders weigh battles by it.
-battle_strength :: proc(side, other: Battle_Side) -> f32 {
-	quality := side.proficiency / 10 * (0.5 + side.readiness / 200)
+// Proficiency, minus what low readiness costs it, plus the bonus for outnumbering other. Commanders weigh battles by
+// its total.
+battle_power :: proc(side, other: Battle_Side) -> (power: Tally) {
+	proficiency := side.proficiency / 10
+	tally_add(&power, .Proficiency, proficiency)
+	tally_add(&power, .Readiness, -proficiency * (0.5 - side.readiness / 200))
 	ratio := other.men > 0 ? side.men / other.men : 1
-	numbers := clamp(NUMBERS_SCALE * math.log2(max(ratio, 1e-6)), 0, NUMBERS_MAX)
-	return quality + numbers
+	tally_add(&power, .Numbers, clamp(NUMBERS_SCALE * math.log2(max(ratio, 1e-6)), 0, NUMBERS_MAX))
+	return
+}
+
+battle_strength :: proc(side, other: Battle_Side) -> f32 {
+	power := battle_power(side, other)
+	return power.total
+}
+
+tally_add :: proc(tally: ^Tally, kind: Factor_Kind, value: f32) {
+	tally.total += value
+	if value != 0 || kind == .Dice do append(&tally.factors, Factor{kind, .Add, value})
+}
+
+tally_scale :: proc(tally: ^Tally, kind: Factor_Kind, value: f32) {
+	tally.total *= value
+	append(&tally.factors, Factor{kind, .Scale, value})
+}
+
+// The ahead side's total minus the other's
+@(private = "file")
+margin_of :: proc(totals: [Battle_Role]f32, ahead: Battle_Role) -> (margin: Tally) {
+	behind := OTHER_ROLE[ahead]
+	tally_add(&margin, ROLE_FACTORS[ahead], totals[ahead])
+	tally_add(&margin, ROLE_FACTORS[behind], -totals[behind])
+	return
 }
 
 combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
@@ -397,10 +483,8 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		return die(rng) + die(rng)
 	}
 
-	// Step: Strength
-	strength: [Battle_Role]f32
-	for side, role in battle.sides do strength[role] = battle_strength(side, battle.sides[OTHER_ROLE[role]])
-	for role in Battle_Role do result.sides[role].power = strength[role]
+	// Step: Power
+	for side, role in battle.sides do result.sides[role].power = battle_power(side, battle.sides[OTHER_ROLE[role]])
 	ground := [Battle_Role]f32 {
 		.Attacker = 0,
 		.Defender = battle.ground,
@@ -412,12 +496,12 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		// Step: Avoid
 		defender := battle.sides[.Defender]
 		attacker := battle.sides[.Attacker]
-		gap := strength[.Defender] - strength[.Attacker]
+		gap := result.sides[.Defender].power.total - result.sides[.Attacker].power.total
 		if battle.can_avoid && gap < TEMPERAMENT_AVOID_BELOW[defender.temperament] {
-			dice := roll_2d6(&rng)
-			escape := dice + MOBILITY_BONUS * (defender.mobility - attacker.mobility)
-			result.avoid = {true, dice, escape, MOBILITY_TARGET}
-			if escape >= MOBILITY_TARGET {
+			roll := &result.avoid
+			tally_add(roll, .Dice, roll_2d6(&rng))
+			tally_add(roll, .Mobility, MOBILITY_BONUS * (defender.mobility - attacker.mobility))
+			if roll.total >= MOBILITY_TARGET {
 				result.outcome = .Avoided
 				loser = .Defender
 				decided = true
@@ -432,26 +516,27 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	if !decided {
 		totals: [Battle_Role]f32
 		for role in Battle_Role {
-			dice := roll_2d6(&rng)
-			totals[role] =
-				dice + strength[role] + POSTURE_ONSET[result.sides[role].posture] + ground[role]
-			result.sides[role].onset = {
-				rolled = true,
-				dice   = dice,
-				total  = totals[role],
-			}
+			side := &result.sides[role]
+			roll := &side.onset
+			tally_add(roll, .Dice, roll_2d6(&rng))
+			for factor in side.power.factors do tally_add(roll, factor.kind, factor.value)
+			tally_add(roll, .Posture, POSTURE_ONSET[side.posture])
+			tally_add(roll, .Ground, ground[role])
+			totals[role] = roll.total
 		}
-		margin := abs(totals[.Attacker] - totals[.Defender])
-		result.onset_margin = margin
+		ahead: Battle_Role = totals[.Attacker] > totals[.Defender] ? .Attacker : .Defender
+		result.onset_margin = margin_of(totals, ahead)
+		margin := result.onset_margin.total
 		if margin >= ONSET_TIE {
-			winner: Battle_Role = totals[.Attacker] > totals[.Defender] ? .Attacker : .Defender
-			beaten := OTHER_ROLE[winner]
+			beaten := OTHER_ROLE[ahead]
 			if margin >= ONSET_ROUT_MARGIN {
 				result.outcome = result.sides[beaten].posture in POSTURE_PROBES ? .Probed : .Rout
 				loser = beaten
 				decided = true
 			} else {
-				result.sides[winner].edge = margin / 2
+				edge := &result.sides[ahead].edge
+				tally_add(edge, .Margin, margin)
+				tally_scale(edge, .Share, EDGE_PER_MARGIN)
 			}
 		}
 	}
@@ -459,7 +544,7 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	// Step: Probe pull-out (the attacker first if both)
 	if !decided {
 		for role in Battle_Role {
-			behind := result.sides[role].edge - result.sides[OTHER_ROLE[role]].edge
+			behind := result.sides[role].edge.total - result.sides[OTHER_ROLE[role]].edge.total
 			if result.sides[role].posture in POSTURE_PROBES && behind <= PROBE_PULL_OUT {
 				result.outcome = .Probed
 				result.pulled_out = true
@@ -474,7 +559,7 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	if !decided {
 		result.crisis_chosen = true
 		for side, role in battle.sides {
-			e := result.sides[role].edge - result.sides[OTHER_ROLE[role]].edge
+			e := result.sides[role].edge.total - result.sides[OTHER_ROLE[role]].edge.total
 			choice := Crisis_Choice.Hold
 			if e > TEMPERAMENT_COMMIT_ABOVE[side.temperament] do choice = .Commit
 			if e <= TEMPERAMENT_BREAK_OFF_AT[side.temperament] do choice = .Break_Off
@@ -496,25 +581,20 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		case:
 			totals: [Battle_Role]f32
 			for role in Battle_Role {
-				side := result.sides[role]
-				commit: f32 = side.choice == .Commit ? COMMIT_BONUS : 0
-				dice := roll_2d6(&rng)
-				totals[role] =
-					dice +
-					strength[role] +
-					side.edge +
-					commit +
-					POSTURE_CRISIS[side.posture] +
-					ground[role]
-				result.sides[role].crisis = {
-					rolled = true,
-					dice   = dice,
-					total  = totals[role],
-				}
+				side := &result.sides[role]
+				roll := &side.crisis
+				tally_add(roll, .Dice, roll_2d6(&rng))
+				for factor in side.power.factors do tally_add(roll, factor.kind, factor.value)
+				tally_add(roll, .Edge, side.edge.total)
+				tally_add(roll, .Commit, side.choice == .Commit ? COMMIT_BONUS : 0)
+				tally_add(roll, .Posture, POSTURE_CRISIS[side.posture])
+				tally_add(roll, .Ground, ground[role])
+				totals[role] = roll.total
 			}
-			margin := abs(totals[.Attacker] - totals[.Defender])
-			result.crisis_margin = margin
-			loser = totals[.Attacker] < totals[.Defender] ? .Attacker : .Defender
+			ahead: Battle_Role = totals[.Attacker] < totals[.Defender] ? .Defender : .Attacker
+			result.crisis_margin = margin_of(totals, ahead)
+			margin := result.crisis_margin.total
+			loser = OTHER_ROLE[ahead]
 			switch {
 			case margin <= CRISIS_STALEMATE:
 				result.outcome = .Stalemate
@@ -525,7 +605,7 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			case:
 				result.outcome = .Rout
 			}
-			beaten := result.sides[loser]
+			beaten := &result.sides[loser]
 			if beaten.choice == .Commit || beaten.posture in POSTURE_WORSENS {
 				result.worsened = OUTCOME_WORSE[result.outcome] != result.outcome
 				result.outcome = OUTCOME_WORSE[result.outcome]
@@ -545,56 +625,69 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		for role in Battle_Role {
 			row: Battle_Role_Result = as_loser[role] ? .Loser : .Winner
 			out := &result.sides[role]
-			out.men = -engaged * OUTCOME_MEN_LOST[row][outcome]
+			if share := OUTCOME_MEN_LOST[row][outcome]; share > 0 {
+				tally_add(&out.men, .Engaged, -engaged)
+				tally_scale(&out.men, .Share, share)
+			}
 			out.readiness = OUTCOME_READINESS[row][outcome]
 			out.falls_back = as_loser[role] && outcome in OUTCOME_RETREATS
 		}
 		// Supply: the loser loses some; the winner captures a share, converted to its own men's turns
 		beaten := battle.sides[loser]
 		victor := battle.sides[result.winner]
-		lost := min(beaten.stock, OUTCOME_STOCK_LOST[outcome])
-		result.sides[loser].stock = -lost
-		if outcome in OUTCOME_DECIDED && victor.men > 0 {
-			captured := lost * beaten.men / victor.men * OUTCOME_STOCK_CAPTURED[outcome]
-			result.sides[result.winner].stock = min(captured, victor.baggage - victor.stock)
+		lost := &result.sides[loser].stock
+		if table := OUTCOME_STOCK_LOST[outcome]; table > 0 {
+			tally_add(lost, .Lost, -table)
+			if beaten.stock < table do tally_add(lost, .Carried, table - beaten.stock)
+		}
+		if share := OUTCOME_STOCK_CAPTURED[outcome]; share > 0 && lost.total < 0 && victor.men > 0 {
+			captured := &result.sides[result.winner].stock
+			tally_add(captured, .Lost, -lost.total)
+			tally_scale(captured, .Men_Ratio, beaten.men / victor.men)
+			tally_scale(captured, .Share, share)
+			room := victor.baggage - victor.stock
+			if captured.total > room do tally_add(captured, .Baggage, room - captured.total)
 		}
 	}
 
-	// Step: Follow
+	// Step: Cohesion
+	for side, role in battle.sides {
+		out := &result.sides[role]
+		men := side.men + out.men.total
+		readiness := clamp(side.readiness + out.readiness, 0, 100)
+		men_percent: f32 = side.men_max > 0 ? 100 * men / side.men_max : 100
+		if readiness >= COHESION_READINESS && men_percent >= COHESION_MEN do continue
+		roll := &out.cohesion
+		tally_add(roll, .Dice, roll_2d6(&rng))
+		tally_add(roll, .Proficiency, side.proficiency / 10)
+		tally_add(roll, .Readiness, -max(0, (COHESION_READINESS - readiness) / 10))
+		tally_add(roll, .Losses, -max(0, (COHESION_MEN - men_percent) / 10))
+		out.dissolved = roll.total < COHESION_TARGET
+	}
+
+	// Step: Follow. Nothing to follow when either side dissolved.
 	{
 		outcome := result.outcome
-		can_advance := outcome in OUTCOME_RETREATS
-		can_pursue := outcome in OUTCOME_PURSUABLE
+		standing := !result.sides[loser].dissolved && !result.sides[result.winner].dissolved
+		can_advance := standing && outcome in OUTCOME_RETREATS
+		can_pursue := standing && outcome in OUTCOME_PURSUABLE
 		victor := battle.sides[result.winner]
 		beaten := battle.sides[loser]
 		severity := OUTCOME_SEVERITY[outcome]
 		if can_advance && severity >= TEMPERAMENT_ADVANCE_FROM[victor.temperament] do result.follow = .Advance
 		if can_pursue && severity >= TEMPERAMENT_PURSUE_FROM[victor.temperament] do result.follow = .Pursue
 		if result.follow == .Pursue {
-			dice := roll_2d6(&rng)
-			catch := dice + MOBILITY_BONUS * (victor.mobility - beaten.mobility)
-			result.pursuit = {true, dice, catch, MOBILITY_TARGET}
-			if catch >= MOBILITY_TARGET {
+			roll := &result.pursuit
+			tally_add(roll, .Dice, roll_2d6(&rng))
+			tally_add(roll, .Mobility, MOBILITY_BONUS * (victor.mobility - beaten.mobility))
+			if roll.total >= MOBILITY_TARGET {
 				result.caught = true
 				out := &result.sides[loser]
-				out.pursuit_men = -(beaten.men + out.men) * OUTCOME_PURSUIT_MEN[outcome]
+				tally_add(&out.pursuit_men, .Men_Left, -(beaten.men + out.men.total))
+				tally_scale(&out.pursuit_men, .Share, OUTCOME_PURSUIT_MEN[outcome])
 				out.pursuit_readiness = PURSUIT_READINESS
 			}
 		}
-	}
-
-	// Step: Holding together
-	for side, role in battle.sides {
-		out := &result.sides[role]
-		men := side.men + out.men + out.pursuit_men
-		readiness := clamp(side.readiness + out.readiness + out.pursuit_readiness, 0, 100)
-		men_percent: f32 = side.men_max > 0 ? 100 * men / side.men_max : 100
-		if readiness >= HOLD_READINESS && men_percent >= HOLD_MEN do continue
-		penalty :=
-			max(0, (HOLD_READINESS - readiness) / 10) + max(0, (HOLD_MEN - men_percent) / 10)
-		dice := roll_2d6(&rng)
-		out.hold = {true, dice, dice + side.proficiency / 10, HOLD_TARGET + penalty}
-		out.dissolved = out.hold.total < out.hold.target
 	}
 	return
 }
