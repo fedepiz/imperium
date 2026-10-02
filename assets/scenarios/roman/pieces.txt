@@ -1,18 +1,19 @@
 # Starting factions and pieces. Distances in cells; enum values written as declared (Large_City, Land).
 #
 # kind: name, icon, moves (domain; omit = static), per_turn (movement points), contact (radius), contact_on (domains),
-#       body (radius), traits (Captures can conquer Capturable)
+#       body (radius), hindrance (enemy movement cost multiplier inside its contact zone, default 1; roads don't
+#       count there), traits (Captures can conquer Capturable)
 # faction: name, culture, colour [r, g, b] 0..255. Factions play in file order. Then one piece row per piece:
 #   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
 #   region), general (creates a character), strength + proficiency 0..100 (optional; makes it an army, starting at
 #   full strength and 100% readiness)
 
-kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    traits = [Capturable] }
-kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  traits = [Capturable] }
-kind = { name = city        icon = City                                  contact = 8  contact_on = [Land]  body = 3    traits = [Capturable] }
-kind = { name = large_city  icon = Large_City                            contact = 9  contact_on = [Land]  body = 3.5  traits = [Capturable] }
-kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 8  contact_on = [Land]  body = 2    traits = [Captures] }
-kind = { name = fleet       icon = Fleet       moves = Sea   per_turn = 80  contact = 8  contact_on = [Sea]   body = 2 }
+kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    hindrance = 2    traits = [Capturable] }
+kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  hindrance = 2.5  traits = [Capturable] }
+kind = { name = city        icon = City                                  contact = 8  contact_on = [Land]  body = 3    hindrance = 3    traits = [Capturable] }
+kind = { name = large_city  icon = Large_City                            contact = 9  contact_on = [Land]  body = 3.5  hindrance = 3.5  traits = [Capturable] }
+kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 8  contact_on = [Land]  body = 2    hindrance = 3    traits = [Captures] }
+kind = { name = fleet       icon = Fleet       moves = Sea   per_turn = 80  contact = 8  contact_on = [Sea]   body = 2    hindrance = 2 }
 
 faction = {
 	name = "Rome"

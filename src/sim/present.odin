@@ -5,7 +5,6 @@ import "core:fmt"
 import "core:math"
 
 import "../span"
-import "../util"
 
 // Area slots, in drawing order
 REACH_AREA :: 0
@@ -108,13 +107,15 @@ world_present :: proc(
 		reach.look = REACH_LOOK
 	}
 	clear(&out.circles)
-	for discs, slot in ([2][]util.Disc{mov.friend_zones[:], mov.enemy_zones[:]}) {
+	for slot in 0 ..< 2 {
 		area := &out.areas[FRIEND_AREA + slot]
 		area.revision = revision
 		area.look = slot == 0 ? FRIEND_LOOK : ZONE_LOOK
 		area.on_water = flood.domain != .Land
 		begin := len(out.circles)
-		for disc in discs {
+		count := slot == 0 ? len(mov.friend_zones) : len(mov.enemy_zones)
+		for i in 0 ..< count {
+			disc := slot == 0 ? mov.friend_zones[i] : mov.enemy_zones[i].disc
 			if shown && len(out.circles) < CIRCLES_MAX do append(&out.circles, Circle{disc.center, disc.radius})
 		}
 		area.circles = span.from_range(begin, len(out.circles))

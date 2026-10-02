@@ -126,10 +126,12 @@ heap_entry_less :: proc(a, b: Heap_Entry) -> bool {
 @(private = "file")
 Pathfind_Table :: struct {
 	// Input cost grid
-	grid:    [CELLS_FINE_MAX]f32,
+	grid:     [CELLS_FINE_MAX]f32,
+	// Same, ignoring roads. Used inside enemy zones; not part of derived.
+	off_road: [CELLS_FINE_MAX]f32,
 	// Key of the grid `derived` was built from, see pathfind_key
-	key:     u64,
-	derived: Derived,
+	key:      u64,
+	derived:  Derived,
 }
 
 @(private = "file")
@@ -289,8 +291,9 @@ octile :: proc(a, b: [2]int) -> f32 {
 	return max(d.x, d.y) + (math.SQRT_TWO - 1) * min(d.x, d.y)
 }
 
-pathfind_build_begin :: proc(domain: Pathfind_Domain) -> []f32 {
-	return TABLE[domain].grid[:]
+// Fill both grids, then call pathfind_build_end
+pathfind_build_begin :: proc(domain: Pathfind_Domain) -> (grid, off_road: []f32) {
+	return TABLE[domain].grid[:], TABLE[domain].off_road[:]
 }
 
 // Hash of the grid and of this file's source. Derived layout changes are caught by the size check instead.
@@ -483,6 +486,12 @@ pathfind_trace :: proc(
 
 
 // Cells reachable within a budget, and the cheapest way to each
+// Entering costs the cell's off-road cost × hindrance
+Pathfind_Zone :: struct {
+	disc:      util.Disc,
+	hindrance: f32,
+}
+
 Pathfind_Flood :: struct {
 	src:     [2]f32,
 	domain:  Pathfind_Domain,
@@ -493,18 +502,19 @@ Pathfind_Flood :: struct {
 	// Infinite = not reached
 	cost:    [PATHFIND_FLOOD_CELLS]f32,
 	back:    [PATHFIND_FLOOD_CELLS]Dir,
-	// Zone cells can be entered but not left; no_stop cells can be passed but not stopped on
-	zone:    [PATHFIND_FLOOD_CELLS]bool,
+	// Enemy zone hindrance, 0 = none; overlaps take the max
+	zone:    [PATHFIND_FLOOD_CELLS]f32,
+	// Can be passed but not stopped on
 	no_stop: [PATHFIND_FLOOD_CELLS]bool,
 }
 
-// Dijkstra within budget over the square. Never leaves a zone cell (src's included). Empty if src is out of bounds
-// or impassable.
+// Dijkstra within budget over the square. Empty if src is out of bounds or impassable.
 pathfind_flood :: proc(
 	src: [2]f32,
 	domain: Pathfind_Domain,
 	budget: f32,
-	zones, no_stop: []util.Disc,
+	zones: []Pathfind_Zone,
+	no_stop: []util.Disc,
 	flood: ^Pathfind_Flood,
 ) {
 	table := &TABLE[domain]
@@ -512,8 +522,10 @@ pathfind_flood :: proc(
 	flood.start = {int(math.floor(src.x)), int(math.floor(src.y))}
 	flood.corner = flood.start - PATHFIND_FLOOD_SIZE / 2
 	slice.fill(flood.cost[:], math.INF_F32)
-	stamp(flood, flood.zone[:], zones)
-	stamp(flood, flood.no_stop[:], no_stop)
+	slice.fill(flood.zone[:], 0)
+	slice.fill(flood.no_stop[:], false)
+	for zone in zones do stamp(flood, flood.zone[:], zone.disc, zone.hindrance)
+	for disc in no_stop do stamp(flood, flood.no_stop[:], disc, true)
 	if !util.grid_contains(flood.start, WORLD_SIZE) || table.grid[util.grid_index(flood.start, WORLD_SIZE)] == 0 do return
 
 	scratch := &SCRATCH.search[.Fine]
@@ -525,15 +537,18 @@ pathfind_flood :: proc(
 		entry := heap_pop(scratch)
 		// Skip stale heap entries
 		if entry.priority > flood.cost[entry.index] do continue
-		if flood.zone[entry.index] do continue
 		at := util.grid_pos(int(entry.index), FLOOD_SQUARE)
 		for dir in Dir {
 			next := at + DIR_OFFSET[dir]
 			if !util.grid_contains(next, FLOOD_SQUARE) do continue
 			move := step_cost(table, flood.corner + at, dir)
 			if move == 0 do continue
-			cost := entry.priority + move
 			next_index := util.grid_index(next, FLOOD_SQUARE)
+			// Inside an enemy zone: no roads, and hindered
+			if hindrance := flood.zone[next_index]; hindrance > 0 {
+				move = table.off_road[util.grid_index(flood.corner + next, WORLD_SIZE)] * DIR_LENGTH[dir] * hindrance
+			}
+			cost := entry.priority + move
 			if cost > budget || cost >= flood.cost[next_index] do continue
 			flood.cost[next_index] = cost
 			flood.back[next_index] = DIR_OPPOSITE[dir]
@@ -542,14 +557,18 @@ pathfind_flood :: proc(
 	}
 }
 
+// Writes value into the flood-square cells whose centres are inside disc; f32 masks keep the max
 @(private = "file")
-stamp :: proc(flood: ^Pathfind_Flood, mask: []bool, discs: []util.Disc) {
-	slice.fill(mask, false)
-	for disc in discs {
-		covered := util.cell_rect_covering(disc.center - disc.radius, disc.center + disc.radius)
-		local := util.cell_rect_clip({covered.min - flood.corner, covered.max - flood.corner}, FLOOD_SQUARE)
-		for y in local.min.y ..< local.max.y do for x in local.min.x ..< local.max.x {
-			if util.disc_contains(disc, util.cell_center(flood.corner + {x, y})) do mask[util.grid_index({x, y}, FLOOD_SQUARE)] = true
+stamp :: proc(flood: ^Pathfind_Flood, mask: []$T, disc: util.Disc, value: T) {
+	covered := util.cell_rect_covering(disc.center - disc.radius, disc.center + disc.radius)
+	local := util.cell_rect_clip({covered.min - flood.corner, covered.max - flood.corner}, FLOOD_SQUARE)
+	for y in local.min.y ..< local.max.y do for x in local.min.x ..< local.max.x {
+		if !util.disc_contains(disc, util.cell_center(flood.corner + {x, y})) do continue
+		cell := &mask[util.grid_index({x, y}, FLOOD_SQUARE)]
+		when T == bool {
+			cell^ = value
+		} else {
+			cell^ = max(cell^, value)
 		}
 	}
 }
@@ -627,9 +646,13 @@ pathfind_flood_trace :: proc(
 			clear(costs)
 			return false
 		}
+		index := util.grid_index(cell, WORLD_SIZE)
+		local := util.grid_index(cell - flood.corner, FLOOD_SQUARE)
+		cost := table.grid[index]
+		if hindrance := flood.zone[local]; hindrance > 0 do cost = table.off_road[index] * hindrance
 		append(out, util.cell_center(cell))
-		append(costs, table.grid[util.grid_index(cell, WORLD_SIZE)])
-		cell += DIR_OFFSET[flood.back[util.grid_index(cell - flood.corner, FLOOD_SQUARE)]]
+		append(costs, cost)
+		cell += DIR_OFFSET[flood.back[local]]
 	}
 	slice.reverse(out[:])
 	slice.reverse(costs[:])

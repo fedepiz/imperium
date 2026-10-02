@@ -100,7 +100,7 @@ Movement :: struct {
 	target:        Piece_Id,
 	// Reach of the focus. Nil subject and 0 key = none. Key hashes all flood inputs; recomputed only on change.
 	flood:         Pathfind_Flood,
-	enemy_zones:   [dynamic; PIECE_MAX]util.Disc,
+	enemy_zones:   [dynamic; PIECE_MAX]Pathfind_Zone,
 	friend_zones:  [dynamic; PIECE_MAX]util.Disc,
 	bodies:        [dynamic; PIECE_MAX]util.Disc,
 	flood_subject: Piece_Id,
@@ -312,18 +312,21 @@ world_load :: proc(scenario: Scenario) -> bool {
 	}
 	// Land pathfinding grid
 	{
-		grid := pathfind_build_begin(.Land)
+		grid, off_road := pathfind_build_begin(.Land)
 		for cell, i in WORLD.atlas.terrain {
 			grid[i] =
 				cell.surface != .Land ? 0 : cell.way[.Road] != 0 ? ROAD_COST : TERRAIN_COSTS[cell.type]
+			// A road cell over impassable terrain keeps its road cost
+			off_road[i] = cell.surface != .Land ? 0 : max(TERRAIN_COSTS[cell.type], grid[i])
 		}
 		pathfind_build_end(.Land, scenario.cached_files[.Pathfind_Land])
 	}
 	// Sea pathfinding grid
 	{
-		grid := pathfind_build_begin(.Sea)
+		grid, off_road := pathfind_build_begin(.Sea)
 		for cell, i in WORLD.atlas.terrain {
 			grid[i] = cell.surface == .Land ? 0 : 1
+			off_road[i] = grid[i]
 		}
 		pathfind_build_end(.Sea, scenario.cached_files[.Pathfind_Sea])
 	}
@@ -365,6 +368,7 @@ world_load :: proc(scenario: Scenario) -> bool {
 					movement_per_turn = piece.movement_per_turn,
 					contact = piece.contact,
 					body = piece.body,
+				hindrance = piece.hindrance,
 					traits = piece.traits,
 					general = general,
 				},
@@ -407,7 +411,7 @@ world_step :: proc(input: Step_Input) {
 		} else {
 			domain := subject.movement_domain.(Pathfind_Domain)
 
-			// Gather bodies (can't stop on), enemy zones (stop on entering) and friendly contacts touching the flood
+			// Gather bodies (can't stop on), enemy zones (slow, no roads) and friendly contacts touching the flood
 			// square, padded a cell for rounding
 			half: f32 = PATHFIND_FLOOD_SIZE / 2 + 1
 			square := [4]f32{subject.pos.x - half, subject.pos.y - half, 2 * half, 2 * half}
@@ -421,7 +425,7 @@ world_step :: proc(input: Step_Input) {
 				if pieces_friendly(subject^, other) {
 					append(&mov.friend_zones, contact)
 				} else {
-					append(zones, contact)
+					append(zones, Pathfind_Zone{contact, other.hindrance})
 				}
 			}
 
@@ -490,6 +494,7 @@ world_step :: proc(input: Step_Input) {
 	}
 	if subject := piece_get(mov.subject); subject != nil {
 		walk.piece = mov.subject
+		before := subject.pos
 		step: f32 = WALK_PER_STEP
 		for step > 0 && mov.next < len(mov.path) {
 			target, cost := mov.path[mov.next], mov.cost[mov.next]
@@ -511,8 +516,21 @@ world_step :: proc(input: Step_Input) {
 			if cost == ROAD_COST do walk.spent_road += spent
 			else do walk.spent_off_road += spent
 		}
-		if mov.next >= len(mov.path) {
-			walk.met = mov.target
+
+		// Contact: entering an enemy zone ends the walk
+		domain := subject.movement_domain.(Pathfind_Domain)
+		for other, index in WORLD.pieces {
+			if !piece_alive(other) || piece_id(index) == walk.piece || pieces_friendly(subject^, other) do continue
+			if other.contact.radius == 0 || domain not_in other.contact.domains do continue
+			zone := util.Disc{other.pos, other.contact.radius}
+			if util.disc_contains(zone, subject.pos) && !util.disc_contains(zone, before) {
+				walk.met = piece_id(index)
+				break
+			}
+		}
+
+		if walk.met != {} || mov.next >= len(mov.path) {
+			if walk.met == {} do walk.met = mov.target
 			mov.subject, mov.target, mov.next = {}, {}, 0
 		}
 	} else {
@@ -602,6 +620,8 @@ Piece :: struct {
 	contact:           Contact,
 	// Radius in cells; other pieces can't stop overlapping it
 	body:              f32,
+	// Enemy movement cost multiplier inside its contact zone
+	hindrance:         f32,
 	traits:            bit_set[Piece_Trait;u8],
 	general:           Character_Id,
 }

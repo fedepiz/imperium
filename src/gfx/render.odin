@@ -161,11 +161,14 @@ Render_Highlight_Area :: struct {
 	inside:    f32,
 }
 
+// Drawn separately, so they can overlap
 Render_Highlight_Layer :: enum u8 {
 	// Over cover, under rivers and roads
 	Regions,
-	// Over everything but arrows; only this layer draws circles
-	Areas,
+	// The rest: over the coast and marks, under arrows, in this order
+	Zones,
+	Contacts,
+	Reach,
 }
 
 // Cells get smooth edges; neighbouring areas share one edge. Circles are exact, drawn over all cells, clipped at

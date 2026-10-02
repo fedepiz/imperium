@@ -138,6 +138,8 @@ Scenario_Piece :: struct {
 	contact:           Contact,
 	// Radius in cells; other pieces can't stop overlapping it
 	body:              f32,
+	// Movement cost multiplier inside its contact zone for enemies (off-road cost × hindrance)
+	hindrance:         f32,
 	traits:            bit_set[Piece_Trait;u8],
 	// 0 = none. At most one capital per region.
 	capital_of:        Region_Id,

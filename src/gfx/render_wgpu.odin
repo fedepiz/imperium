@@ -69,11 +69,14 @@ Terrain_Uniforms :: struct {
 	road_stroke, arrow_width:                       f32,
 	road_fill, arrow_fill:                          [4]f32,
 	head_length, head_width:                        f32,
-	circle_count:                                   i32,
+	_unused:                                        i32,
 	border_width:                                   f32,
 	border_ink:                                     [4]f32,
+	// Per highlight layer
+	circle_counts:                                  [4]i32,
 }
-#assert(size_of(Terrain_Uniforms) == 224)
+#assert(size_of(Terrain_Uniforms) == 240)
+#assert(len(Render_Highlight_Layer) <= 4, "circle_counts has one slot per highlight layer")
 
 Renderer :: struct {
 	window:                              ^sdl.Window,
@@ -124,9 +127,10 @@ Renderer :: struct {
 	terrain_uploaded, cover_uploaded:    bool,
 	// Coast as f16, for upload
 	coast_half:                          [RENDER_TERRAIN_CELLS]f16,
-	// Circles texel: center, radius, area
+	// Arrays with one slice per layer: cells, field, palette. Circles: one row per layer, texel = center, radius, area.
 	highlight_layers:                    [Render_Highlight_Layer]Highlight_Layer,
-	highlight_circles:                   Texture,
+	highlight_cells, highlight_field:    Texture,
+	highlight_palette, highlight_circles: Texture,
 	// Lines pass: one pipeline per line kind, each writing its own channel of the line field
 	line_pipelines:                      [Render_Line_Kind]wgpu.RenderPipeline,
 	line_layout:                         wgpu.BindGroupLayout,
@@ -136,12 +140,13 @@ Renderer :: struct {
 	lines_uploaded:                      [Render_Line_Kind]bool,
 	// Per pixel: distance in cells to the nearest line of each kind (one channel each). Recreated with the surface.
 	line_field:                          Texture,
+	// Marks, premultiplied, composited by the map shader under the highlights. Recreated with the surface.
+	marks_layer:                         Texture,
 }
 
-// Per cell and surface: which area's field the cell holds, and that field. Plus each area's look.
+// CPU side of a highlight layer: per cell and surface, which area's field the cell holds, and that field
 @(private = "file")
 Highlight_Layer :: struct {
-	cells, field, palette: Texture,
 	// Per area: uploaded revision, and the bounds and surface last uploaded
 	revisions:             [RENDER_HIGHLIGHT_AREAS]u32,
 	bounds:                [RENDER_HIGHLIGHT_AREAS]util.Cell_Rect,
@@ -331,13 +336,12 @@ render_destroy :: proc(renderer: ^Renderer) {
 	texture_release(renderer.terrain_cells)
 	texture_release(renderer.terrain_coast)
 	texture_release(renderer.line_field)
+	texture_release(renderer.marks_layer)
 	texture_release(renderer.cover_cells)
 	texture_release(renderer.cover_palette)
-	for layer in renderer.highlight_layers {
-		texture_release(layer.cells)
-		texture_release(layer.field)
-		texture_release(layer.palette)
-	}
+	texture_release(renderer.highlight_cells)
+	texture_release(renderer.highlight_field)
+	texture_release(renderer.highlight_palette)
 	texture_release(renderer.highlight_circles)
 	if renderer.terrain_group != nil do wgpu.BindGroupRelease(renderer.terrain_group)
 	if renderer.terrain_layout != nil do wgpu.BindGroupLayoutRelease(renderer.terrain_layout)
@@ -460,31 +464,36 @@ surface_configure :: proc(renderer: ^Renderer, size: [2]u32) {
 		},
 	)
 	renderer.surface_size = size
-	line_field_create(renderer, size)
+	frame_targets_create(renderer, size)
 }
 
-// Recreates the line field and the map bind group that reads it
+// Recreates the surface-sized targets (line field, marks layer) and the map bind group that reads them
 @(private = "file")
-line_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
+frame_targets_create :: proc(renderer: ^Renderer, size: [2]u32) {
 	if renderer.terrain_group != nil do wgpu.BindGroupRelease(renderer.terrain_group)
-	if renderer.line_field.view != nil do wgpu.TextureViewRelease(renderer.line_field.view)
-	if renderer.line_field.texture != nil do wgpu.TextureRelease(renderer.line_field.texture)
-	renderer.line_field.texture = wgpu.DeviceCreateTexture(
-		renderer.device,
-		&{
-			usage = {.RenderAttachment, .TextureBinding},
-			dimension = ._2D,
-			size = {size.x, size.y, 1},
-			format = LINE_FIELD_FORMAT,
-			mipLevelCount = 1,
-			sampleCount = 1,
-		},
-	)
-	renderer.line_field.view = wgpu.TextureCreateView(renderer.line_field.texture, nil)
+	for target in ([2]^Texture{&renderer.line_field, &renderer.marks_layer}) {
+		if target.view != nil do wgpu.TextureViewRelease(target.view)
+		if target.texture != nil do wgpu.TextureRelease(target.texture)
+	}
+	target_create :: proc(renderer: ^Renderer, format: wgpu.TextureFormat, size: [2]u32) -> (target: Texture) {
+		target.texture = wgpu.DeviceCreateTexture(
+			renderer.device,
+			&{
+				usage = {.RenderAttachment, .TextureBinding},
+				dimension = ._2D,
+				size = {size.x, size.y, 1},
+				format = format,
+				mipLevelCount = 1,
+				sampleCount = 1,
+			},
+		)
+		target.view = wgpu.TextureCreateView(target.texture, nil)
+		return
+	}
+	renderer.line_field = target_create(renderer, LINE_FIELD_FORMAT, size)
+	renderer.marks_layer = target_create(renderer, renderer.surface_format, size)
 
-	areas := &renderer.highlight_layers[.Areas]
-	regions := &renderer.highlight_layers[.Regions]
-	group_entries := [14]wgpu.BindGroupEntry {
+	group_entries := [12]wgpu.BindGroupEntry {
 		{binding = 0, buffer = renderer.terrain_uniforms, size = size_of(Terrain_Uniforms)},
 		{binding = 1, textureView = renderer.terrain_cells.view},
 		{binding = 2, textureView = renderer.terrain_coast.view},
@@ -492,13 +501,11 @@ line_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
 		{binding = 4, textureView = renderer.cover_cells.view},
 		{binding = 5, textureView = renderer.cover_palette.view},
 		{binding = 6, sampler = renderer.linear_sampler},
-		{binding = 7, textureView = areas.cells.view},
-		{binding = 8, textureView = areas.field.view},
-		{binding = 9, textureView = areas.palette.view},
+		{binding = 7, textureView = renderer.highlight_cells.view},
+		{binding = 8, textureView = renderer.highlight_field.view},
+		{binding = 9, textureView = renderer.highlight_palette.view},
 		{binding = 10, textureView = renderer.highlight_circles.view},
-		{binding = 11, textureView = regions.cells.view},
-		{binding = 12, textureView = regions.field.view},
-		{binding = 13, textureView = regions.palette.view},
+		{binding = 11, textureView = renderer.marks_layer.view},
 	}
 	renderer.terrain_group = wgpu.DeviceCreateBindGroup(
 		renderer.device,
@@ -510,8 +517,9 @@ line_field_create :: proc(renderer: ^Renderer, size: [2]u32) {
 	)
 }
 
-// Uploads changed data (by revision), draws lines into the line field in their own pass, then the map.
-render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
+// Uploads changed data (by revision), draws lines into the line field and marks into the marks layer, each in their
+// own pass, then the map, which composites both.
+render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain, marks: ^Render_List) {
 	if renderer.view_size.x <= 0 || renderer.view_size.y <= 0 || terrain.zoom <= 0 {
 		return
 	}
@@ -567,14 +575,16 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		renderer.cover_uploaded = true
 	}
 
+	circle_counts: [4]i32
 	for &highlights, kind in terrain.highlights {
 		layer := &renderer.highlight_layers[kind]
+		slice := u32(kind)
 		// Re-upload changed areas, around old and new positions
 		for &area, index in highlights.areas {
 			if layer.revisions[index] == area.revision do continue
 			rect := highlight_take_up(layer, terrain, &highlights, u8(index))
-			texture_write_rect(renderer, layer.cells.texture, raw_data(layer.owners[:]), 2, rect)
-			texture_write_rect(renderer, layer.field.texture, raw_data(layer.fields[:]), 4, rect)
+			texture_write_rect(renderer, renderer.highlight_cells.texture, slice, raw_data(layer.owners[:]), 2, rect)
+			texture_write_rect(renderer, renderer.highlight_field.texture, slice, raw_data(layer.fields[:]), 4, rect)
 			layer.revisions[index] = area.revision
 			layer.bounds[index] = area.bounds
 		}
@@ -586,24 +596,23 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		}
 		wgpu.QueueWriteTexture(
 			renderer.queue,
-			&{texture = layer.palette.texture, aspect = .All},
+			&{texture = renderer.highlight_palette.texture, origin = {0, 0, slice}, aspect = .All},
 			&palette,
 			size_of(palette),
 			&{bytesPerRow = RENDER_HIGHLIGHT_AREAS * size_of([4]f32), rowsPerImage = 2},
 			&{RENDER_HIGHLIGHT_AREAS, 2, 1},
 		)
-	}
-	highlights := &terrain.highlights[.Areas]
 
-	// Circles, every frame
-	if len(highlights.circles) > 0 {
+		// Circles, every frame
+		circle_counts[kind] = i32(len(highlights.circles))
+		if len(highlights.circles) == 0 do continue
 		circles: [RENDER_HIGHLIGHT_CIRCLES_MAX][4]f32
 		for circle, i in highlights.circles {
 			circles[i] = {circle.center.x, circle.center.y, circle.radius, f32(circle.area)}
 		}
 		wgpu.QueueWriteTexture(
 			renderer.queue,
-			&{texture = renderer.highlight_circles.texture, aspect = .All},
+			&{texture = renderer.highlight_circles.texture, origin = {0, slice, 0}, aspect = .All},
 			&circles,
 			uint(len(highlights.circles) * size_of([4]f32)),
 			&{bytesPerRow = RENDER_HIGHLIGHT_CIRCLES_MAX * size_of([4]f32), rowsPerImage = 1},
@@ -639,9 +648,9 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 		paper_stain_amount = style.paper_stain_amount,
 		sea_depth_from     = style.sea_depth_from,
 		sea_depth_full     = style.sea_depth_full,
-		circle_count       = i32(len(highlights.circles)),
 		border_width       = style.border_width,
 		border_ink         = style.border_ink,
+		circle_counts      = circle_counts,
 	}
 	wgpu.QueueWriteBuffer(
 		renderer.queue,
@@ -675,6 +684,13 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 	}
 	wgpu.RenderPassEncoderEnd(lines_pass)
 	wgpu.RenderPassEncoderRelease(lines_pass)
+
+	// Marks pass
+	marks_pass := pass_begin(renderer, renderer.marks_layer.view, .Clear, {0, 0, 0, 0})
+	list_draw(renderer, marks_pass, marks)
+	wgpu.RenderPassEncoderEnd(marks_pass)
+	wgpu.RenderPassEncoderRelease(marks_pass)
+
 	renderer.frame_pass = pass_begin(renderer, renderer.frame_view, .Load)
 
 	pass := renderer.frame_pass
@@ -688,6 +704,11 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 // Textures should have their top row at v=0. Colors use straight alpha.
 // Instances draw in the order they sit in the list.
 render_list :: proc(renderer: ^Renderer, list: ^Render_List) {
+	list_draw(renderer, renderer.frame_pass, list)
+}
+
+@(private = "file")
+list_draw :: proc(renderer: ^Renderer, pass: wgpu.RenderPassEncoder, list: ^Render_List) {
 	if renderer.view_size.x <= 0 || renderer.view_size.y <= 0 {
 		return
 	}
@@ -707,7 +728,6 @@ render_list :: proc(renderer: ^Renderer, list: ^Render_List) {
 	view := [4]f32{renderer.view_size.x, renderer.view_size.y, 0, 0}
 	wgpu.QueueWriteBuffer(renderer.queue, renderer.list_view_buffer, 0, &view, size_of(view))
 
-	pass := renderer.frame_pass
 	wgpu.RenderPassEncoderSetPipeline(pass, renderer.list_pipeline)
 	wgpu.RenderPassEncoderSetBindGroup(pass, 0, renderer.list_view_group)
 	wgpu.RenderPassEncoderSetVertexBuffer(
@@ -774,11 +794,13 @@ image_create :: proc(renderer: ^Renderer, bitmap: Bitmap) -> (image: Image) {
 	return
 }
 
+// layers > 0 makes a 2D array texture
 @(private = "file")
 texture_create :: proc(
 	renderer: ^Renderer,
 	format: wgpu.TextureFormat,
 	size: [2]u32,
+	layers: u32 = 0,
 ) -> (
 	texture: Texture,
 ) {
@@ -787,13 +809,20 @@ texture_create :: proc(
 		&{
 			usage = {.TextureBinding, .CopyDst},
 			dimension = ._2D,
-			size = {size.x, size.y, 1},
+			size = {size.x, size.y, max(layers, 1)},
 			format = format,
 			mipLevelCount = 1,
 			sampleCount = 1,
 		},
 	)
-	texture.view = wgpu.TextureCreateView(texture.texture, nil)
+	view := wgpu.TextureViewDescriptor {
+		format          = format,
+		dimension       = layers > 0 ? ._2DArray : ._2D,
+		mipLevelCount   = 1,
+		arrayLayerCount = max(layers, 1),
+		aspect          = .All,
+	}
+	texture.view = wgpu.TextureCreateView(texture.texture, &view)
 	return
 }
 
@@ -815,6 +844,7 @@ texture_write :: proc(renderer: ^Renderer, texture: wgpu.Texture, data: rawptr, 
 texture_write_rect :: proc(
 	renderer: ^Renderer,
 	texture: wgpu.Texture,
+	slice: u32,
 	data: rawptr,
 	texel_size: u32,
 	rect: util.Cell_Rect,
@@ -823,7 +853,7 @@ texture_write_rect :: proc(
 	size := rect.max - rect.min
 	wgpu.QueueWriteTexture(
 		renderer.queue,
-		&{texture = texture, origin = {u32(rect.min.x), u32(rect.min.y), 0}, aspect = .All},
+		&{texture = texture, origin = {u32(rect.min.x), u32(rect.min.y), slice}, aspect = .All},
 		data,
 		uint(RENDER_TERRAIN_CELLS * texel_size),
 		&{
@@ -1130,16 +1160,11 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 		{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
 	)
 	renderer.cover_palette = texture_create(renderer, .RGBA8Unorm, {RENDER_LAYER_CATEGORIES, 2})
-	for &layer in renderer.highlight_layers {
-		layer.cells = texture_create(renderer, .RG8Unorm, {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT})
-		layer.field = texture_create(renderer, .RG16Float, {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT})
-		layer.palette = texture_create(renderer, .RGBA32Float, {RENDER_HIGHLIGHT_AREAS, 2})
-	}
-	renderer.highlight_circles = texture_create(
-		renderer,
-		.RGBA32Float,
-		{RENDER_HIGHLIGHT_CIRCLES_MAX, 1},
-	)
+	layers :: u32(len(Render_Highlight_Layer))
+	renderer.highlight_cells = texture_create(renderer, .RG8Unorm, {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}, layers)
+	renderer.highlight_field = texture_create(renderer, .RG16Float, {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}, layers)
+	renderer.highlight_palette = texture_create(renderer, .RGBA32Float, {RENDER_HIGHLIGHT_AREAS, 2}, layers)
+	renderer.highlight_circles = texture_create(renderer, .RGBA32Float, {RENDER_HIGHLIGHT_CIRCLES_MAX, layers})
 	renderer.terrain_uniforms = wgpu.DeviceCreateBuffer(
 		device,
 		&{usage = {.Uniform, .CopyDst}, size = size_of(Terrain_Uniforms)},
@@ -1148,14 +1173,15 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 	texture_entry :: proc(
 		binding: u32,
 		sample: wgpu.TextureSampleType,
+		dimension: wgpu.TextureViewDimension = ._2D,
 	) -> wgpu.BindGroupLayoutEntry {
 		return {
 			binding = binding,
 			visibility = {.Fragment},
-			texture = {sampleType = sample, viewDimension = ._2D},
+			texture = {sampleType = sample, viewDimension = dimension},
 		}
 	}
-	layout_entries := [14]wgpu.BindGroupLayoutEntry {
+	layout_entries := [12]wgpu.BindGroupLayoutEntry {
 		{
 			binding = 0,
 			visibility = {.Fragment},
@@ -1167,13 +1193,11 @@ terrain_init :: proc(renderer: ^Renderer) -> bool {
 		texture_entry(4, .Float),
 		texture_entry(5, .Float),
 		{binding = 6, visibility = {.Fragment}, sampler = {type = .Filtering}},
-		texture_entry(7, .Float),
-		texture_entry(8, .Float),
-		texture_entry(9, .UnfilterableFloat),
+		texture_entry(7, .Float, ._2DArray),
+		texture_entry(8, .Float, ._2DArray),
+		texture_entry(9, .UnfilterableFloat, ._2DArray),
 		texture_entry(10, .UnfilterableFloat),
 		texture_entry(11, .Float),
-		texture_entry(12, .Float),
-		texture_entry(13, .UnfilterableFloat),
 	}
 	renderer.terrain_layout = wgpu.DeviceCreateBindGroupLayout(
 		device,
@@ -1423,9 +1447,10 @@ struct Terrain {
     arrow_fill: vec4f,
     head_length: f32,
     head_width: f32,
-    circle_count: i32,
+    _unused: i32,
     border_width: f32,
     border_ink: vec4f,
+    circle_counts: vec4i,
 }
 `
 
@@ -1526,13 +1551,19 @@ MAP_SOURCE ::
 @group(0) @binding(4) var cover_cells: texture_2d<f32>;
 @group(0) @binding(5) var cover_palette: texture_2d<f32>;
 @group(0) @binding(6) var linear_sampler: sampler;
-@group(0) @binding(7) var highlight_cells: texture_2d<f32>;
-@group(0) @binding(8) var highlight_field: texture_2d<f32>;
-@group(0) @binding(9) var highlight_palette: texture_2d<f32>;
+// Highlights: one array slice (circles: one row) per Render_Highlight_Layer
+@group(0) @binding(7) var highlight_cells: texture_2d_array<f32>;
+@group(0) @binding(8) var highlight_field: texture_2d_array<f32>;
+@group(0) @binding(9) var highlight_palette: texture_2d_array<f32>;
 @group(0) @binding(10) var highlight_circles: texture_2d<f32>;
-@group(0) @binding(11) var region_cells: texture_2d<f32>;
-@group(0) @binding(12) var region_field: texture_2d<f32>;
-@group(0) @binding(13) var region_palette: texture_2d<f32>;
+// Premultiplied
+@group(0) @binding(11) var marks: texture_2d<f32>;
+
+// Render_Highlight_Layer
+const REGIONS = 0;
+const ZONES = 1;
+const CONTACTS = 2;
+const REACH = 3;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4f {
@@ -1666,8 +1697,8 @@ const EDGE_STEEPNESS_MIN = 0.25;
 const EDGE_STEEPNESS_MAX = 4.0;
 
 // A layer of highlight areas over col at p, d being the signed distance to the coast there, positive on land, and px
-// device pixels per cell. area_cells holds, per cell and surface (0 land, 1 water), the area of that surface whose
-// field the cell holds, 0 for none; area_field holds that field: how far the cell's middle is in from the area's edge,
+// device pixels per cell. highlight_cells holds, per cell and surface (0 land, 1 water), the area of that surface whose
+// field the cell holds, 0 for none; highlight_field holds that field: how far the cell's middle is in from the area's edge,
 // in cells, negative outside it. A cell is at least as far outside any other area as it is from the edge of the one
 // whose field it holds, and it is in no area by as much as it is outside the one whose field it holds.
 //
@@ -1676,17 +1707,9 @@ const EDGE_STEEPNESS_MAX = 4.0;
 // short of the edge, and where more meet, the greatest is never short of it: no gap opens between them. A land area's
 // depth is never past the coast, nor a water area's short of it. Each area is washed over as far as its depth reaches,
 // fading in over a device pixel across its edge: the map multiplied toward its color, as strongly as its border at its
-// edge, easing to its inside at its thickness in from it. area_palette holds each area's color and border in row 0,
+// edge, easing to its inside at its thickness in from it. highlight_palette holds each area's color and border in row 0,
 // and its thickness, inside and surface in row 1.
-fn areas_over(
-    col: vec3f,
-    p: vec2f,
-    d: f32,
-    px: f32,
-    area_cells: texture_2d<f32>,
-    area_field: texture_2d<f32>,
-    area_palette: texture_2d<f32>,
-) -> Areas_Shown {
+fn areas_over(col: vec3f, p: vec2f, d: f32, px: f32, layer: i32) -> Areas_Shown {
     let q = p - 0.5;
     let base = vec2i(floor(q));
     let f = q - floor(q);
@@ -1705,8 +1728,8 @@ fn areas_over(
         for (var j = 0; j < 4; j++) {
             let corner = vec2i(j & 1, j >> 1u);
             let at = clamp(base + corner, vec2i(0), vec2i(u.grid) - 1);
-            owners[j] = i32(textureLoad(area_cells, at, 0)[surface] * 255.0 + 0.5);
-            values[j] = textureLoad(area_field, at, 0)[surface];
+            owners[j] = i32(textureLoad(highlight_cells, at, layer, 0)[surface] * 255.0 + 0.5);
+            values[j] = textureLoad(highlight_field, at, layer, 0)[surface];
             let wx = mix(1.0 - f.x, f.x, f32(corner.x));
             let wy = mix(1.0 - f.y, f.y, f32(corner.y));
             weights[j] = wx * wy;
@@ -1769,8 +1792,8 @@ fn areas_over(
             let coverage = smoothstep(-0.5, 0.5, depth * px);
             if (coverage <= 0.0) { continue; }
             let area = owners[k];
-            let look = textureLoad(area_palette, vec2i(area, 0), 0);
-            let fade = textureLoad(area_palette, vec2i(area, 1), 0);
+            let look = textureLoad(highlight_palette, vec2i(area, 0), layer, 0);
+            let fade = textureLoad(highlight_palette, vec2i(area, 1), layer, 0);
             let strength = mix(look.a, fade.y, smoothstep(0.0, max(fade.x, 1e-3), depth));
             tint += coverage * mix(vec3f(1.0), look.rgb, strength);
             covered += coverage;
@@ -1785,19 +1808,20 @@ fn areas_over(
     return Areas_Shown(col * (tint + (1.0 - covered)), edge);
 }
 
-// The areas' highlights over col at p, as areas_over has them, and then each area's circles washed over that, as one
-// shape: see circles_over. highlight_circles holds circle_count circles, each its center, radius and area.
-fn highlights_over(col: vec3f, p: vec2f, d: f32, px: f32) -> vec3f {
+// A highlight layer's areas over col at p, as areas_over has them, and then each area's circles washed over that, as
+// one shape: see circles_over. Row layer of highlight_circles holds circle_counts[layer] circles: center, radius, area.
+fn highlights_over(col: vec3f, p: vec2f, d: f32, px: f32, layer: i32) -> vec3f {
     // Each area's circles, as one shape, over the areas' cells: its depth is the farthest in of its circles
-    var shown = areas_over(col, p, d, px, highlight_cells, highlight_field, highlight_palette).col;
+    var shown = areas_over(col, p, d, px, layer).col;
+    let count = u.circle_counts[layer];
     var area = -1;
     var depth = -1e9;
-    for (var i = 0; i <= u.circle_count; i++) {
+    for (var i = 0; i <= count; i++) {
         var circle = vec4f(0.0, 0.0, 0.0, -1.0);
-        if (i < u.circle_count) { circle = textureLoad(highlight_circles, vec2i(i, 0), 0); }
+        if (i < count) { circle = textureLoad(highlight_circles, vec2i(i, layer), 0); }
         let next = i32(round(circle.w));
         if (next != area && area >= 0) {
-            shown = circles_over(shown, col, area, depth, d, px);
+            shown = circles_over(shown, col, layer, area, depth, d, px);
             depth = -1e9;
         }
         area = next;
@@ -1808,9 +1832,9 @@ fn highlights_over(col: vec3f, p: vec2f, d: f32, px: f32) -> vec3f {
 
 // An area's circles over shown, depth being how far in p is from their edge, in cells: washed over col as far as the
 // depth reaches, stopping at the coast as the area's cells do, and replacing what is under them.
-fn circles_over(shown: vec3f, col: vec3f, area: i32, field: f32, d: f32, px: f32) -> vec3f {
-    let look = textureLoad(highlight_palette, vec2i(area, 0), 0);
-    let fade = textureLoad(highlight_palette, vec2i(area, 1), 0);
+fn circles_over(shown: vec3f, col: vec3f, layer: i32, area: i32, field: f32, d: f32, px: f32) -> vec3f {
+    let look = textureLoad(highlight_palette, vec2i(area, 0), layer, 0);
+    let fade = textureLoad(highlight_palette, vec2i(area, 1), layer, 0);
     let depth = min(field, select(-d, d, fade.z < 0.5));
     let coverage = smoothstep(-0.5, 0.5, depth * px);
     let strength = mix(look.a, fade.y, smoothstep(0.0, max(fade.x, 1e-3), depth));
@@ -1880,7 +1904,7 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         col = mix(sea, ground, land);
 
         // The regions, washed in their colours from their edges, under the rivers and roads
-        let regions = areas_over(col, wander(p, u.wobble * 1.6, 5.7), d, px, region_cells, region_field, region_palette);
+        let regions = areas_over(col, wander(p, u.wobble * 1.6, 5.7), d, px, REGIONS);
         col = regions.col;
 
         // Borders: a hairline over the land where two regions meet, on the edge their washes share
@@ -1911,8 +1935,15 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         let width = u.coast_width * 0.5 * u.pixel_density * (0.8 + 0.4 * value_noise(p * 0.8));
         col = mix(col, u.ink.rgb, line_aa(abs(d) * px, width));
 
+        // Marks (trees, hills...), premultiplied
+        let mark = textureLoad(marks, vec2i(frag.xy), 0);
+        col = col * (1.0 - mark.a) + mark.rgb;
+
         // Highlights, their edges wandering as the coast does
-        col = highlights_over(col, wander(p, u.wobble * 1.6, 5.7), d, px);
+        let wandered = wander(p, u.wobble * 1.6, 5.7);
+        col = highlights_over(col, wandered, d, px, ZONES);
+        col = highlights_over(col, wandered, d, px, CONTACTS);
+        col = highlights_over(col, wandered, d, px, REACH);
 
         // Arrows, over everything else on land and sea: their fill between two ink edges, the same width however far
         // the map zooms, and their heads as wide again as the triangles they are drawn from

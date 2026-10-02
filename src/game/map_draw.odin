@@ -22,10 +22,14 @@ TERRAIN_VIEW_NAMES := []string{"Map", "Surface", "Elevation", "Trees", "Moisture
 // Indexed by the look ids from sim/present.odin; unset = invisible. Reaches are widened so roads read as bands.
 @(private = "file")
 AREA_LOOKS := [256]Area_Look {
-	1 = {color = {0.300, 0.450, 0.650, 1}, border = 0.6, thickness = 2, inside = 0.2, widen = 1},
-	2 = {color = {0.700, 0.250, 0.160, 1}, border = 0.6, thickness = 2, inside = 0.2},
-	3 = {color = {0.450, 0.420, 0.380, 1}, border = 0.6, thickness = 2, inside = 0.2, widen = 1},
-	4 = {color = {0.850, 0.700, 0.200, 1}, border = 0.6, thickness = 2, inside = 0.2},
+	// Reach: mostly outline, so zones show through
+	1 = {layer = .Reach, color = {0.300, 0.450, 0.650, 1}, border = 0.7, thickness = 1.5, inside = 0.1, widen = 1},
+	// Enemy zone
+	2 = {layer = .Zones, color = {0.700, 0.250, 0.160, 1}, border = 0.6, thickness = 2, inside = 0.25},
+	// Reach of a piece the player doesn't control
+	3 = {layer = .Reach, color = {0.450, 0.420, 0.380, 1}, border = 0.7, thickness = 1.5, inside = 0.1, widen = 1},
+	// Friendly contact
+	4 = {layer = .Contacts, color = {0.850, 0.700, 0.200, 1}, border = 0.6, thickness = 2, inside = 0.2},
 }
 
 // Per second, see util.ease_step
@@ -289,8 +293,10 @@ MAP_DRAW: struct {
 	marks:          Map_Marks,
 	render_terrain: gfx.Render_Terrain,
 	render_list:    gfx.Render_List,
-	// Last uploaded revision per scene area
+	// Per scene area: last uploaded revision, and the highlight layer it was last drawn in (if placed)
 	area_revisions: [sim.AREAS_MAX]u64,
+	area_layers:    [sim.AREAS_MAX]gfx.Render_Highlight_Layer,
+	area_placed:    [sim.AREAS_MAX]bool,
 }
 
 // Call before sprites_load: defines the marks' images.
@@ -344,8 +350,7 @@ map_draw_tick :: proc(
 }
 
 map_draw_render :: proc(renderer: ^gfx.Renderer) {
-	gfx.render_terrain(renderer, &MAP_DRAW.render_terrain)
-	gfx.render_list(renderer, &MAP_DRAW.render_list)
+	gfx.render_terrain(renderer, &MAP_DRAW.render_terrain, &MAP_DRAW.render_list)
 }
 
 // Cycles the map view: normal, then each raw terrain layer
@@ -459,6 +464,7 @@ map_arrows :: proc(scene: ^sim.Scene) {
 // Highlights ----------------------------------------------------------------------------------------------------------
 @(private = "file")
 Area_Look :: struct {
+	layer:     gfx.Render_Highlight_Layer,
 	color:     [4]f32,
 	border:    f32,
 	thickness: f32,
@@ -475,19 +481,31 @@ highlight_ease :: proc(drawn: ^gfx.Render_Highlight_Area, color: [4]f32, border,
 	drawn.inside += (inside - drawn.inside) * step
 }
 
-// Scene area slot i -> highlight area i+1. Cells re-uploaded only on revision change, fading in.
+// Scene area slot i -> highlight area i+1, in its look's layer. Cells re-uploaded only on revision change, fading in.
 @(private = "file")
 map_areas :: proc(scene: ^sim.Scene, dt: f32) {
 	#assert(sim.AREAS_MAX < gfx.RENDER_HIGHLIGHT_AREAS)
 	#assert(sim.CIRCLES_MAX <= gfx.RENDER_HIGHLIGHT_CIRCLES_MAX)
-	highlights := &MAP_DRAW.render_terrain.highlights[.Areas]
-	clear(&highlights.circles)
+	layers := &MAP_DRAW.render_terrain.highlights
+	for layer in ([3]gfx.Render_Highlight_Layer{.Zones, .Contacts, .Reach}) do clear(&layers[layer].circles)
 	step := util.ease_step(HIGHLIGHT_EASE, dt)
 	for &area, slot in scene.areas {
 		highlight := u8(slot + 1)
 		look := AREA_LOOKS[area.look]
-		drawn := &highlights.areas[highlight]
 		changed := MAP_DRAW.area_revisions[slot] != area.revision
+
+		// Moved layer, or no look: clear it from where it was
+		if MAP_DRAW.area_placed[slot] && (look == {} || MAP_DRAW.area_layers[slot] != look.layer) {
+			gfx.render_highlight_clear(&layers[MAP_DRAW.area_layers[slot]], highlight)
+			MAP_DRAW.area_placed[slot] = false
+			changed = true
+		}
+		if look == {} do continue
+		MAP_DRAW.area_layers[slot] = look.layer
+		MAP_DRAW.area_placed[slot] = true
+		highlights := &layers[look.layer]
+
+		drawn := &highlights.areas[highlight]
 		if changed {
 			drawn.border = 0
 			drawn.inside = 0

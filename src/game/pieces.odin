@@ -70,6 +70,7 @@ pieces_load :: proc(
 				kind.piece.contact.domains += {domain}
 			}
 			kind.piece.body = tabula.get_num(row, "body")
+			kind.piece.hindrance = tabula.get_num(row, "hindrance", 1)
 			for value in tabula.find(row, "traits").children {
 				trait, is_trait := reflect.enum_from_name(sim.Piece_Trait, value.text)
 				if !is_trait do return nil, nil, nil, fail(path, row.key, n, "traits must list traits")
