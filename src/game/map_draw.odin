@@ -8,6 +8,7 @@ import "core:slice"
 import "../gfx"
 import "../sim"
 import "../span"
+import "../util"
 
 // Constants -----------------------------------------------------------------------------------------------------------
 // Also used for pawns and labels
@@ -27,7 +28,7 @@ AREA_LOOKS := [256]Area_Look {
 	4 = {color = {0.850, 0.700, 0.200, 1}, border = 0.6, thickness = 2, inside = 0.2},
 }
 
-// Exponential ease rate, per second
+// Per second, see util.ease_step
 @(private = "file")
 HIGHLIGHT_EASE :: 10
 
@@ -69,6 +70,8 @@ REGION_LOOKS := [sim.Region_Colouring_Mode][Region_Range]Region_Looks {
 	},
 }
 
+AREA_SQUARE :: [2]int{sim.AREA_SIZE, sim.AREA_SIZE}
+
 // Min area cells in the disc for a cell to be added by widening (a straight 1-cell thread gives 3)
 @(private = "file")
 WIDEN_SUPPORT :: 3
@@ -105,7 +108,7 @@ COAST_REACH :: f32(3)
 
 // Light smoothing: removes cell steps, keeps the shape
 @(private = "file")
-COAST_SMOOTHING :: Polyline_Smoothing {
+COAST_SMOOTHING :: util.Smoothing {
 	softness    = 0.3,
 	soften_iter = 2,
 	cut_iter    = 2,
@@ -415,7 +418,7 @@ map_derive :: proc(terrain: []sim.Ground) {
 	for area in 1 ..< gfx.RENDER_HIGHLIGHT_AREAS do gfx.render_highlight_clear(regions, u8(area))
 	for cell, i in terrain {
 		if cell.surface in sim.WATER || cell.region == 0 || int(cell.region) >= gfx.RENDER_HIGHLIGHT_AREAS do continue
-		gfx.render_highlight_add(regions, u8(cell.region), {i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH})
+		gfx.render_highlight_add(regions, u8(cell.region), util.grid_pos(i, sim.WORLD_SIZE))
 	}
 
 	// Preclaim near-shore water so marks don't spill into it
@@ -479,7 +482,7 @@ map_areas :: proc(scene: ^sim.Scene, dt: f32) {
 	#assert(sim.CIRCLES_MAX <= gfx.RENDER_HIGHLIGHT_CIRCLES_MAX)
 	highlights := &MAP_DRAW.render_terrain.highlights[.Areas]
 	clear(&highlights.circles)
-	step := 1 - math.exp(-HIGHLIGHT_EASE * dt)
+	step := util.ease_step(HIGHLIGHT_EASE, dt)
 	for &area, slot in scene.areas {
 		highlight := u8(slot + 1)
 		look := AREA_LOOKS[area.look]
@@ -504,10 +507,10 @@ map_areas :: proc(scene: ^sim.Scene, dt: f32) {
 		if look.widen > 0 do cells = area_widen(cells, look.widen)
 		for inside, i in cells {
 			if !inside do continue
-			cell := area.corner + {i % sim.AREA_SIZE, i / sim.AREA_SIZE}
-			if cell.x < 0 || cell.y < 0 || cell.x >= sim.WORLD_WIDTH || cell.y >= sim.WORLD_HEIGHT do continue
+			cell := area.corner + util.grid_pos(i, AREA_SQUARE)
+			if !util.grid_contains(cell, sim.WORLD_SIZE) do continue
 			// Cells added by widening don't steal from other areas
-			owner := highlights.cells[cell.y * sim.WORLD_WIDTH + cell.x]
+			owner := highlights.cells[util.grid_index(cell, sim.WORLD_SIZE)]
 			if !area.cells[i] && owner != 0 && owner != highlight do continue
 			gfx.render_highlight_add(highlights, highlight, cell)
 		}
@@ -540,7 +543,7 @@ Region_Range :: enum u8 {
 @(private = "file")
 map_regions :: proc(scene: ^sim.Scene, colouring: sim.Region_Colouring_Mode, zoom: f32, dt: f32) {
 	regions := &MAP_DRAW.render_terrain.highlights[.Regions]
-	step := 1 - math.exp(-HIGHLIGHT_EASE * dt)
+	step := util.ease_step(HIGHLIGHT_EASE, dt)
 	looks := REGION_LOOKS[colouring][zoom < REGION_FAR_ZOOM ? .Far : .Near]
 	for &drawn, area in regions.areas {
 		if area == 0 || area > len(scene.regions) do continue
@@ -570,10 +573,9 @@ area_widen :: proc(cells: []bool, widen: int) -> []bool {
 				held := 0
 				for offset in disc {
 					at := [2]int{x, y} + offset
-					if at.x < 0 || at.y < 0 || at.x >= sim.AREA_SIZE || at.y >= sim.AREA_SIZE do continue
-					if from[at.y * sim.AREA_SIZE + at.x] do held += 1
+					if util.grid_contains(at, AREA_SQUARE) && from[util.grid_index(at, AREA_SQUARE)] do held += 1
 				}
-				to[y * sim.AREA_SIZE + x] = held >= need
+				to[util.grid_index({x, y}, AREA_SQUARE)] = held >= need
 			}
 		}
 		return to
@@ -608,14 +610,14 @@ Way_Look :: struct {
 ways_claim_ground :: proc(claimed: []u8, to_way: [][2]f32, band: f32) {
 	for offset, i in to_way {
 		if linalg.length(offset) > band + 1 do continue
-		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
+		cell := util.grid_pos(i, sim.WORLD_SIZE)
 		way := [2]f32{f32(cell.x), f32(cell.y)} + 0.5 + offset
 		for y in 0 ..< FOOTPRINT_RES {
 			for x in 0 ..< FOOTPRINT_RES {
 				square := cell * FOOTPRINT_RES + {x, y}
 				middle := ([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES
 				if linalg.length(middle - way) >= band do continue
-				claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
+				claimed[util.grid_index(square, FOOTPRINT_SIZE)] = PRECLAIMED
 			}
 		}
 	}
@@ -625,31 +627,31 @@ ways_claim_ground :: proc(claimed: []u8, to_way: [][2]f32, band: f32) {
 // Traces edges between different labels into polylines, larger label on the left. Label 0 is ignored. Lines end
 // at corners where 1, 3 or 4 edges meet; the rest are closed loops.
 @(private = "file")
-trace_boundaries :: proc(labels: []u16, smoothing: Polyline_Smoothing) {
-	// Per corner (y * ACROSS + x): unwalked outgoing edges, and how many edges meet there
-	ACROSS :: sim.WORLD_WIDTH + 1
-	out := make([]bit_set[Step], ACROSS * (sim.WORLD_HEIGHT + 1), context.temp_allocator)
+trace_boundaries :: proc(labels: []u16, smoothing: util.Smoothing) {
+	// Per corner: unwalked outgoing edges, and how many edges meet there
+	CORNERS :: [2]int{sim.WORLD_WIDTH + 1, sim.WORLD_HEIGHT + 1}
+	out := make([]bit_set[Step], CORNERS.x * CORNERS.y, context.temp_allocator)
 	meeting := make([]u8, len(out), context.temp_allocator)
 	edge :: proc(out: []bit_set[Step], meeting: []u8, from: [2]int, step: Step) {
 		to := from + STEPS[step]
-		out[from.y * ACROSS + from.x] += {step}
-		meeting[from.y * ACROSS + from.x] += 1
-		meeting[to.y * ACROSS + to.x] += 1
+		out[util.grid_index(from, CORNERS)] += {step}
+		meeting[util.grid_index(from, CORNERS)] += 1
+		meeting[util.grid_index(to, CORNERS)] += 1
 	}
 	for y in 0 ..< sim.WORLD_HEIGHT {
 		for x in 0 ..< sim.WORLD_WIDTH {
-			here := labels[y * sim.WORLD_WIDTH + x]
+			here := labels[util.grid_index({x, y}, sim.WORLD_SIZE)]
 			if here == 0 do continue
 			// Top and left edges
 			if y > 0 {
-				above := labels[(y - 1) * sim.WORLD_WIDTH + x]
+				above := labels[util.grid_index({x, y - 1}, sim.WORLD_SIZE)]
 				if above != 0 && above != here {
 					if here > above do edge(out, meeting, {x + 1, y}, .West)
 					else do edge(out, meeting, {x, y}, .East)
 				}
 			}
 			if x > 0 {
-				left := labels[y * sim.WORLD_WIDTH + x - 1]
+				left := labels[util.grid_index({x - 1, y}, sim.WORLD_SIZE)]
 				if left != 0 && left != here {
 					if here > left do edge(out, meeting, {x, y}, .South)
 					else do edge(out, meeting, {x, y + 1}, .North)
@@ -664,14 +666,14 @@ trace_boundaries :: proc(labels: []u16, smoothing: Polyline_Smoothing) {
 		meeting: []u8,
 		start: [2]int,
 		step: Step,
-		smoothing: Polyline_Smoothing,
+		smoothing: util.Smoothing,
 	) {
 		at, heading := start, step
 		polylines_add({f32(at.x), f32(at.y)})
 		for {
-			out[at.y * ACROSS + at.x] -= {heading}
+			out[util.grid_index(at, CORNERS)] -= {heading}
 			at += STEPS[heading]
-			c := at.y * ACROSS + at.x
+			c := util.grid_index(at, CORNERS)
 			if at == start && meeting[c] == 2 {
 				polylines_end(true, smoothing)
 				return
@@ -687,10 +689,10 @@ trace_boundaries :: proc(labels: []u16, smoothing: Polyline_Smoothing) {
 	// Open lines first, then closed loops
 	for c in 0 ..< len(out) {
 		if meeting[c] == 2 do continue
-		for s in Step do if s in out[c] do walk(out, meeting, {c % ACROSS, c / ACROSS}, s, smoothing)
+		for s in Step do if s in out[c] do walk(out, meeting, util.grid_pos(c, CORNERS), s, smoothing)
 	}
 	for c in 0 ..< len(out) {
-		for s in Step do if s in out[c] do walk(out, meeting, {c % ACROSS, c / ACROSS}, s, smoothing)
+		for s in Step do if s in out[c] do walk(out, meeting, util.grid_pos(c, CORNERS), s, smoothing)
 	}
 }
 
@@ -716,7 +718,7 @@ STEPS := [Step][2]int {
 distance_to :: proc(out: []f32, terrain: []sim.Ground, water: bool) {
 	source := make([]bool, sim.CELLS_MAX, context.temp_allocator)
 	for cell, i in terrain do source[i] = (cell.surface in sim.WATER) == water
-	distance_from(out, source, sim.WORLD_SIZE)
+	util.distance_from(out, source, sim.WORLD_SIZE)
 }
 
 // Preclaims squares where -reach < coast < 0 (bilinear)
@@ -725,16 +727,16 @@ preclaim_coast_water :: proc(claimed: []u8, coast: []f32, reach: f32) {
 	for distance, i in coast {
 		// Skip cells too far from the band to have squares in it
 		if distance >= 1 || distance <= -reach - 1 do continue
-		cell := [2]int{i % sim.WORLD_WIDTH, i / sim.WORLD_WIDTH}
+		cell := util.grid_pos(i, sim.WORLD_SIZE)
 		for y in 0 ..< FOOTPRINT_RES {
 			for x in 0 ..< FOOTPRINT_RES {
 				square := cell * FOOTPRINT_RES + {x, y}
-				at := bilinear(
+				at := util.bilinear(
 					coast,
 					sim.WORLD_SIZE,
 					([2]f32{f32(square.x), f32(square.y)} + 0.5) / FOOTPRINT_RES,
 				)
-				if at < 0 && at > -reach do claimed[square.y * FOOTPRINT_SIZE.x + square.x] = PRECLAIMED
+				if at < 0 && at > -reach do claimed[util.grid_index(square, FOOTPRINT_SIZE)] = PRECLAIMED
 			}
 		}
 	}
@@ -824,7 +826,7 @@ Marking :: struct {
 	// Width multiplier at the top of the elevation range
 	grow:        f32,
 	// Opacity over coast distance; unset = opaque
-	fade:        Ramp,
+	fade:        util.Ramp,
 }
 
 // [lo, hi). lo == hi = any value.
@@ -878,27 +880,27 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 			for col in 0 ..< cols {
 				wander :=
 					[2]f32 {
-						random_xy(col, row, stream(layer, 0)),
-						random_xy(col, row, stream(layer, 1)),
+						util.random_xy(col, row, stream(layer, 0)),
+						util.random_xy(col, row, stream(layer, 1)),
 					} -
 					0.5
 				shift := [2]f32{f32(row % 2) * 0.5, 0}
 				pos := ([2]f32{f32(col), f32(row)} + shift + 0.5 + wander * def.jitter) * step
-				if pos.x < 0 || pos.y < 0 || pos.x >= sim.WORLD_WIDTH || pos.y >= sim.WORLD_HEIGHT do continue
+				if !util.grid_contains(util.cell_of(pos), sim.WORLD_SIZE) do continue
 				point := Point {
 					layer = layer,
 					col   = col,
 					row   = row,
 					pos   = pos,
-					cell  = int(pos.y) * sim.WORLD_WIDTH + int(pos.x),
+					cell  = util.grid_index(util.cell_of(pos), sim.WORLD_SIZE),
 				}
 				cell := terrain[point.cell]
-				elevation := normalized(cell.elevation)
-				moisture := normalized(cell.moisture)
-				north := 1 - (f32(point.cell / sim.WORLD_WIDTH) + 0.5) / f32(sim.WORLD_HEIGHT)
+				elevation := util.normalized(cell.elevation)
+				moisture := util.normalized(cell.moisture)
+				north := 1 - util.cell_center(util.grid_pos(point.cell, sim.WORLD_SIZE)).y / f32(sim.WORLD_HEIGHT)
 				temperature := 1 - north - 0.47 * elevation + 0.5 * (0.6 - moisture)
 				values := [3]f32{coast[point.cell], elevation, temperature}
-				values += (random_xy(col, row, stream(layer, 2)) - 0.5) * 2 * BLUR
+				values += (util.random_xy(col, row, stream(layer, 2)) - 0.5) * 2 * BLUR
 				here := terrain[point.cell]
 				marking: for m, k in MARKINGS {
 					if m.layer != layer do continue
@@ -906,7 +908,7 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 					for r, q in ranges do if r.lo != r.hi && (values[q] < r.lo || values[q] >= r.hi) do continue marking
 					point.scores[k] = 1
 					for density in m.cover do if density != 0 {
-						point.scores[k] = m.cover[here.type] * normalized(here.type_strength)
+						point.scores[k] = m.cover[here.type] * util.normalized(here.type_strength)
 						break
 					}
 				}
@@ -921,16 +923,16 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 		col, row, layer := point.col, point.row, point.layer
 		total: f32
 		for s in point.scores do total += s
-		if random_xy(col, row, stream(layer, 3)) >= total do continue
-		k, _ := pick_weighted(point.scores[:], random_xy(col, row, stream(layer, 4)))
+		if util.random_xy(col, row, stream(layer, 3)) >= total do continue
+		k, _ := util.pick_weighted(point.scores[:], util.random_xy(col, row, stream(layer, 4)))
 		marking, def := MARKINGS[k], LAYERS[layer]
 
 		width :=
 			def.width *
-			math.lerp(1 - def.vary, 1 + def.vary, random_xy(col, row, stream(layer, 5)))
+			math.lerp(1 - def.vary, 1 + def.vary, util.random_xy(col, row, stream(layer, 5)))
 		if marking.grow != 0 {
 			band := marking.elevation
-			up := (normalized(terrain[point.cell].elevation) - band.lo) / (band.hi - band.lo)
+			up := (util.normalized(terrain[point.cell].elevation) - band.lo) / (band.hi - band.lo)
 			up = clamp(up, 0, 1)
 			width *= 1 + marking.grow * up
 		}
@@ -939,11 +941,11 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 			layer   = layer,
 			width   = width,
 			marking = u8(k),
-			variant = u8(random_xy(col, row, stream(layer, 6)) * f32(mm.variants[k])),
+			variant = u8(util.random_xy(col, row, stream(layer, 6)) * f32(mm.variants[k])),
 			alpha   = max(u8),
 		}
 		if marking.fade.from != marking.fade.full {
-			mark.alpha = u8(ramp(marking.fade, coast[point.cell]) * f32(max(u8)))
+			mark.alpha = util.to_u8(util.ramp(marking.fade, coast[point.cell]))
 		}
 		// Skip missing images
 		aspect := aspects[mark.marking][mark.variant]
@@ -958,17 +960,16 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 		def := LAYERS[mark.layer]
 		foot := footprint_square({mark.pos.x, mark_foot(mark)})
 		if foot.y < FOOTPRINT_SIZE.y {
-			by := int(claimed[foot.y * FOOTPRINT_SIZE.x + foot.x])
+			by := int(claimed[util.grid_index(foot, FOOTPRINT_SIZE)])
 			if by != 0 && (by - 2 < int(mark.layer) || def.claims_own) do continue
 		}
 		{
 			half := mark.width * MARK_DRAWN_WIDTH / 2
 			first := footprint_square({mark.pos.x - half, mark_foot(mark) - mark.height})
 			last := footprint_square({mark.pos.x + half, mark_foot(mark)})
-			for y in max(first.y, 0) ..= min(last.y, FOOTPRINT_SIZE.y - 1) {
-				for x in max(first.x, 0) ..= min(last.x, FOOTPRINT_SIZE.x - 1) {
-					if claimed[y * FOOTPRINT_SIZE.x + x] == PRECLAIMED do continue candidate
-				}
+			drawn := util.cell_rect_clip({first, last + 1}, FOOTPRINT_SIZE)
+			for y in drawn.min.y ..< drawn.max.y do for x in drawn.min.x ..< drawn.max.x {
+				if claimed[util.grid_index({x, y}, FOOTPRINT_SIZE)] == PRECLAIMED do continue candidate
 			}
 		}
 		assert(len(mm.marks) < MARKS_MAX, "more marks than MARKS_MAX")
@@ -981,11 +982,10 @@ marks_place :: proc(mm: ^Map_Marks, terrain: []sim.Ground, coast: []f32, claimed
 		last := footprint_square(
 			{mark.pos.x + half, mark_foot(mark) + def.footprint.below * mark.height},
 		)
-		for y in max(first.y, 0) ..= min(last.y, FOOTPRINT_SIZE.y - 1) {
-			for x in max(first.x, 0) ..= min(last.x, FOOTPRINT_SIZE.x - 1) {
-				square := &claimed[y * FOOTPRINT_SIZE.x + x]
-				if square^ == 0 do square^ = u8(mark.layer) + 2
-			}
+		footprint := util.cell_rect_clip({first, last + 1}, FOOTPRINT_SIZE)
+		for y in footprint.min.y ..< footprint.max.y do for x in footprint.min.x ..< footprint.max.x {
+			square := &claimed[util.grid_index({x, y}, FOOTPRINT_SIZE)]
+			if square^ == 0 do square^ = u8(mark.layer) + 2
 		}
 	}
 	slice.sort_by(mm.marks[:], proc(a, b: Mark) -> bool {return mark_foot(a) < mark_foot(b)})
@@ -1010,6 +1010,6 @@ marks_draw :: proc(
 		proj, visible := camera_world_to_screen(camera, viewport, rect)
 		if !visible do continue
 		image := mm.images[mark.marking][mark.variant]
-		gfx.draw_image(&draw, image, proj, {1, 1, 1, normalized(mark.alpha)})
+		gfx.draw_image(&draw, image, proj, {1, 1, 1, util.normalized(mark.alpha)})
 	}
 }

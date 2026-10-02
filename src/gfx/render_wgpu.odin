@@ -7,6 +7,8 @@ import sdl "vendor:sdl3"
 import "vendor:wgpu"
 import "vendor:wgpu/sdl3glue"
 
+import "../util"
+
 // Each list gets its own slice of the instance buffer, since all uploads land before any drawing
 RENDER_LISTS_PER_FRAME :: 4
 
@@ -142,7 +144,7 @@ Highlight_Layer :: struct {
 	cells, field, palette: Texture,
 	// Per area: uploaded revision, and the bounds and surface last uploaded
 	revisions:             [RENDER_HIGHLIGHT_AREAS]u32,
-	bounds:                [RENDER_HIGHLIGHT_AREAS]Render_Cell_Rect,
+	bounds:                [RENDER_HIGHLIGHT_AREAS]util.Cell_Rect,
 	surfaces:              [RENDER_HIGHLIGHT_AREAS]Render_Highlight_Surface,
 	// CPU copy of the cell textures, uploaded by rectangle
 	owners:                [RENDER_TERRAIN_CELLS][Render_Highlight_Surface]u8,
@@ -546,12 +548,11 @@ render_terrain :: proc(renderer: ^Renderer, terrain: ^Render_Terrain) {
 
 	cover := &terrain.cover
 	if !renderer.cover_uploaded || renderer.cover_revision != cover.revision {
-		byte :: proc(v: f32) -> u8 {return u8(clamp(v, 0, 1) * 255 + 0.5)}
 		palette: [2][RENDER_LAYER_CATEGORIES][4]u8
 		for category, i in cover.palette {
 			c := category.color
-			palette[0][i] = {byte(c.r), byte(c.g), byte(c.b), byte(category.wash)}
-			palette[1][i] = {u8(category.pattern), byte(category.pattern_ink), 0, 0}
+			palette[0][i] = {util.to_u8(c.r), util.to_u8(c.g), util.to_u8(c.b), util.to_u8(category.wash)}
+			palette[1][i] = {u8(category.pattern), util.to_u8(category.pattern_ink), 0, 0}
 		}
 		texture_write(renderer, renderer.cover_cells.texture, raw_data(cover.cells[:]), 2)
 		wgpu.QueueWriteTexture(
@@ -816,9 +817,9 @@ texture_write_rect :: proc(
 	texture: wgpu.Texture,
 	data: rawptr,
 	texel_size: u32,
-	rect: Render_Cell_Rect,
+	rect: util.Cell_Rect,
 ) {
-	if cell_rect_empty(rect) do return
+	if util.cell_rect_empty(rect) do return
 	size := rect.max - rect.min
 	wgpu.QueueWriteTexture(
 		renderer.queue,
@@ -826,7 +827,7 @@ texture_write_rect :: proc(
 		data,
 		uint(RENDER_TERRAIN_CELLS * texel_size),
 		&{
-			offset = u64((int(rect.min.y) * RENDER_TERRAIN_WIDTH + int(rect.min.x)) * int(texel_size)),
+			offset = u64(util.grid_index(rect.min, RENDER_TERRAIN_SIZE) * int(texel_size)),
 			bytesPerRow = RENDER_TERRAIN_WIDTH * texel_size,
 			rowsPerImage = u32(size.y),
 		},
@@ -842,17 +843,17 @@ highlight_take_up :: proc(
 	terrain: ^Render_Terrain,
 	highlights: ^Render_Highlights,
 	area: u8,
-) -> Render_Cell_Rect {
+) -> util.Cell_Rect {
 	look := &highlights.areas[area]
-	around := cell_rect_union(layer.bounds[area], look.bounds)
-	if area == 0 || cell_rect_empty(around) do return {}
+	around := util.cell_rect_union(layer.bounds[area], look.bounds)
+	if area == 0 || util.cell_rect_empty(around) do return {}
 	around = {around.min - HIGHLIGHT_MARGIN, around.max + HIGHLIGHT_MARGIN}
 	if before := layer.surfaces[area]; before != look.surface {
 		highlight_take_up_on(layer, terrain, highlights, area, before, around, false)
 	}
 	highlight_take_up_on(layer, terrain, highlights, area, look.surface, around, true)
 	layer.surfaces[area] = look.surface
-	return cell_rect_clip(around)
+	return util.cell_rect_clip(around, RENDER_TERRAIN_SIZE)
 }
 
 // Computes an area's field over rect for one surface (or removes it if !present).
@@ -866,13 +867,13 @@ highlight_take_up_on :: proc(
 	highlights: ^Render_Highlights,
 	area: u8,
 	surface: Render_Highlight_Surface,
-	around: Render_Cell_Rect,
+	around: util.Cell_Rect,
 	present: bool,
 ) {
-	clipped := cell_rect_clip(around)
-	if !present || cell_rect_empty(highlights.areas[area].bounds) {
+	clipped := util.cell_rect_clip(around, RENDER_TERRAIN_SIZE)
+	if !present || util.cell_rect_empty(highlights.areas[area].bounds) {
 		for y in clipped.min.y ..< clipped.max.y do for x in clipped.min.x ..< clipped.max.x {
-			index := int(y) * RENDER_TERRAIN_WIDTH + int(x)
+			index := util.grid_index({x, y}, RENDER_TERRAIN_SIZE)
 			if layer.owners[index][surface] == area {
 				layer.owners[index][surface] = 0
 				layer.fields[index][surface] = 0
@@ -882,40 +883,37 @@ highlight_take_up_on :: proc(
 	}
 
 	// On terrain and of this surface (land = 0)
-	on_surface :: proc(terrain: ^Render_Terrain, surface: Render_Highlight_Surface, cell: [2]i32) -> bool {
-		if cell.x < 0 || cell.y < 0 || cell.x >= RENDER_TERRAIN_WIDTH || cell.y >= RENDER_TERRAIN_HEIGHT do return false
-		land := terrain.cells[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)].r == 0
+	on_surface :: proc(terrain: ^Render_Terrain, surface: Render_Highlight_Surface, cell: [2]int) -> bool {
+		if !util.grid_contains(cell, RENDER_TERRAIN_SIZE) do return false
+		land := terrain.cells[util.grid_index(cell, RENDER_TERRAIN_SIZE)].r == 0
 		return land == (surface == .Land)
-	}
-	on_terrain :: proc(cell: [2]i32) -> bool {
-		return cell.x >= 0 && cell.y >= 0 && cell.x < RENDER_TERRAIN_WIDTH && cell.y < RENDER_TERRAIN_HEIGHT
 	}
 	in_area :: proc(
 		terrain: ^Render_Terrain,
 		highlights: ^Render_Highlights,
 		area: u8,
 		surface: Render_Highlight_Surface,
-		cell: [2]i32,
+		cell: [2]int,
 	) -> bool {
 		if !on_surface(terrain, surface, cell) do return false
-		return highlights.cells[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)] == area
+		return highlights.cells[util.grid_index(cell, RENDER_TERRAIN_SIZE)] == area
 	}
 
 	// Exact squared distances to nearest outside / inside cell
-	FAR :: 1e12
 	origin := around.min
-	size := [2]int{int(around.max.x - around.min.x), int(around.max.y - around.min.y)}
+	size := around.max - around.min
 	to_out := make([]f64, size.x * size.y, context.temp_allocator)
 	to_in := make([]f64, size.x * size.y, context.temp_allocator)
 	for y in 0 ..< size.y do for x in 0 ..< size.x {
-		cell := origin + {i32(x), i32(y)}
+		cell := origin + {x, y}
+		i := util.grid_index({x, y}, size)
 		inside := in_area(terrain, highlights, area, surface, cell)
-		out := !inside && (on_surface(terrain, surface, cell) || !on_terrain(cell))
-		to_out[y * size.x + x] = out ? 0 : FAR
-		to_in[y * size.x + x] = inside ? 0 : FAR
+		out := !inside && (on_surface(terrain, surface, cell) || !util.grid_contains(cell, RENDER_TERRAIN_SIZE))
+		to_out[i] = out ? 0 : util.DISTANCE_FAR
+		to_in[i] = inside ? 0 : util.DISTANCE_FAR
 	}
-	distance_transform_2d(to_out, size)
-	distance_transform_2d(to_in, size)
+	util.distance_squared(to_out, size)
+	util.distance_squared(to_in, size)
 	field := make([]f32, size.x * size.y, context.temp_allocator)
 	for &value, i in field {
 		out_by, in_by := f32(math.sqrt(to_out[i])), f32(math.sqrt(to_in[i]))
@@ -932,8 +930,8 @@ highlight_take_up_on :: proc(
 	blur(field, size)
 
 	for y in clipped.min.y ..< clipped.max.y do for x in clipped.min.x ..< clipped.max.x {
-		index := int(y) * RENDER_TERRAIN_WIDTH + int(x)
-		value := field[int(y - origin.y) * size.x + int(x - origin.x)]
+		index := util.grid_index({x, y}, RENDER_TERRAIN_SIZE)
+		value := field[util.grid_index([2]int{x, y} - origin, size)]
 		if in_area(terrain, highlights, area, surface, {x, y}) do value = max(value, HIGHLIGHT_OWN_MIN)
 		// Cells of other areas are written by those areas' own updates
 		member := highlights.cells[index]
@@ -946,23 +944,6 @@ highlight_take_up_on :: proc(
 			owner^ = area
 			held^ = f16(value)
 		}
-	}
-}
-
-// In place: 0 at sources -> squared distance to nearest source. Separable.
-@(private = "file")
-distance_transform_2d :: proc(squared: []f64, size: [2]int) {
-	longest := max(size.x, size.y)
-	line := make([]f64, longest, context.temp_allocator)
-	parabolas := make([]int, longest, context.temp_allocator)
-	bounds := make([]f64, longest + 1, context.temp_allocator)
-	for x in 0 ..< size.x {
-		for y in 0 ..< size.y do line[y] = squared[y * size.x + x]
-		distance_transform(line[:size.y], parabolas, bounds)
-		for y in 0 ..< size.y do squared[y * size.x + x] = line[y]
-	}
-	for y in 0 ..< size.y {
-		distance_transform(squared[y * size.x:][:size.x], parabolas, bounds)
 	}
 }
 
@@ -979,7 +960,7 @@ blur :: proc(values: []f32, size: [2]int) {
 	for &weight in weights do weight /= total
 	// Index of position i along line `line` of axis
 	at :: proc(axis, along, across: int, size: [2]int) -> int {
-		return axis == 0 ? across * size.x + along : along * size.x + across
+		return util.grid_index(axis == 0 ? [2]int{along, across} : [2]int{across, along}, size)
 	}
 	line := make([]f32, max(size.x, size.y), context.temp_allocator)
 	for axis in 0 ..< 2 {
@@ -995,40 +976,6 @@ blur :: proc(values: []f32, size: [2]int) {
 			}
 		}
 	}
-}
-
-// 1D squared distance transform (Felzenszwalb-Huttenlocher lower envelope). Scratch: parabolas len(f),
-// bounds len(f)+1.
-@(private = "file")
-distance_transform :: proc(f: []f64, parabolas: []int, bounds: []f64) {
-	n := len(f)
-	if n == 0 do return
-	result := make([]f64, n, context.temp_allocator)
-	k := 0
-	parabolas[0] = 0
-	bounds[0], bounds[1] = math.inf_f64(-1), math.inf_f64(1)
-	// Intersection of parabolas q and p
-	crossing :: proc(f: []f64, q, p: int) -> f64 {
-		return ((f[q] + f64(q * q)) - (f[p] + f64(p * p))) / f64(2 * q - 2 * p)
-	}
-	for q in 1 ..< n {
-		s := crossing(f, q, parabolas[k])
-		// bounds[0] = -inf, so this terminates
-		for s <= bounds[k] {
-			k -= 1
-			s = crossing(f, q, parabolas[k])
-		}
-		k += 1
-		parabolas[k] = q
-		bounds[k], bounds[k + 1] = s, math.inf_f64(1)
-	}
-	k = 0
-	for q in 0 ..< n {
-		for bounds[k + 1] < f64(q) do k += 1
-		p := parabolas[k]
-		result[q] = f64((q - p) * (q - p)) + f[p]
-	}
-	copy(f, result)
 }
 
 @(private = "file")

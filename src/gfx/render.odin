@@ -1,11 +1,14 @@
 package gfx
 
+import "../util"
+
 RENDER_MAX_INSTANCES :: 8192 * 2
 
 // Max terrain size, in cells
 RENDER_TERRAIN_WIDTH :: 1024
 RENDER_TERRAIN_HEIGHT :: 1024
 RENDER_TERRAIN_CELLS :: RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT
+RENDER_TERRAIN_SIZE :: [2]int{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}
 RENDER_LAYER_CATEGORIES :: 256
 
 // Per line kind
@@ -140,11 +143,6 @@ Render_Lines :: struct {
 	segments: [dynamic; RENDER_LINE_SEGMENTS_MAX]Render_Segment,
 }
 
-// [min, max)
-Render_Cell_Rect :: struct {
-	min, max: [2]i32,
-}
-
 // Areas are clipped at the coast to their surface
 Render_Highlight_Surface :: enum u8 {
 	Land,
@@ -154,7 +152,7 @@ Render_Highlight_Surface :: enum u8 {
 Render_Highlight_Area :: struct {
 	// Bump when cells or surface change
 	revision:  u32,
-	bounds:    Render_Cell_Rect,
+	bounds:    util.Cell_Rect,
 	surface:   Render_Highlight_Surface,
 	// Map is multiplied toward color: border strength at the edge, easing to inside over thickness cells
 	color:     [4]f32,
@@ -190,7 +188,7 @@ Render_Highlight_Circle :: struct {
 render_highlight_clear :: proc(highlights: ^Render_Highlights, area: u8) {
 	bounds := &highlights.areas[area].bounds
 	for y in bounds.min.y ..< bounds.max.y do for x in bounds.min.x ..< bounds.max.x {
-		cell := &highlights.cells[int(y) * RENDER_TERRAIN_WIDTH + int(x)]
+		cell := &highlights.cells[util.grid_index({x, y}, RENDER_TERRAIN_SIZE)]
 		if cell^ == area do cell^ = 0
 	}
 	bounds^ = {}
@@ -200,36 +198,14 @@ render_highlight_clear :: proc(highlights: ^Render_Highlights, area: u8) {
 // Removes the cell from its previous area
 render_highlight_add :: proc(highlights: ^Render_Highlights, area: u8, cell: [2]int) {
 	assert(area != 0, "Highlight area 0 is none")
-	index := cell.y * RENDER_TERRAIN_WIDTH + cell.x
+	index := util.grid_index(cell, RENDER_TERRAIN_SIZE)
 	if was := highlights.cells[index]; was != area {
 		if was != 0 do highlights.areas[was].revision += 1
 		highlights.cells[index] = area
 	}
-	at := [2]i32{i32(cell.x), i32(cell.y)}
 	bounds := &highlights.areas[area].bounds
-	bounds^ = cell_rect_union(bounds^, {at, at + 1})
+	bounds^ = util.cell_rect_union(bounds^, {cell, cell + 1})
 	highlights.areas[area].revision += 1
-}
-
-@(private)
-cell_rect_empty :: proc(rect: Render_Cell_Rect) -> bool {
-	return rect.max.x <= rect.min.x || rect.max.y <= rect.min.y
-}
-
-@(private)
-cell_rect_union :: proc(a, b: Render_Cell_Rect) -> Render_Cell_Rect {
-	if cell_rect_empty(a) do return b
-	if cell_rect_empty(b) do return a
-	return {{min(a.min.x, b.min.x), min(a.min.y, b.min.y)}, {max(a.max.x, b.max.x), max(a.max.y, b.max.y)}}
-}
-
-@(private)
-cell_rect_clip :: proc(rect: Render_Cell_Rect) -> Render_Cell_Rect {
-	grid := [2]i32{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}
-	return {
-		{clamp(rect.min.x, 0, grid.x), clamp(rect.min.y, 0, grid.y)},
-		{clamp(rect.max.x, 0, grid.x), clamp(rect.max.y, 0, grid.y)},
-	}
 }
 
 // Cell index = y * RENDER_TERRAIN_WIDTH + x, (0, 0) top left

@@ -10,6 +10,8 @@ import "core:slice"
 import "core:slice/heap"
 import "core:time"
 
+import "../util"
+
 PATH_MAX_LEN :: 1_000
 
 // Changes with any edit to this file, invalidating caches built by older code
@@ -49,12 +51,6 @@ LANDMARKS_MAX :: 16
 
 @(private = "file")
 BLOCKS_SIZE :: [2]int{WORLD_WIDTH / BLOCKING_FACTOR, WORLD_HEIGHT / BLOCKING_FACTOR}
-
-// Cells whose centres are within radius of center. In cells.
-Disc :: struct {
-	center: [2]f32,
-	radius: f32,
-}
 
 @(private = "file")
 Dir :: enum u8 {
@@ -197,7 +193,7 @@ heap_pop :: proc(scratch: ^Search_Scratch) -> Heap_Entry {
 
 @(private = "file")
 corridor_mark :: proc(block: [2]int) {
-	if grid_contains(block, BLOCKS_SIZE) do SCRATCH.corridor[grid_index(block, BLOCKS_SIZE)] = SCRATCH.corridor_stamp
+	if util.grid_contains(block, BLOCKS_SIZE) do SCRATCH.corridor[util.grid_index(block, BLOCKS_SIZE)] = SCRATCH.corridor_stamp
 }
 
 // A* over cells or blocks. Results (cost, back direction) are left in SCRATCH. The fine level stays inside the
@@ -214,8 +210,8 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 		when level == .Fine {
 			h := octile(node, goal) * table.derived.min_cost
 		} else {
-			a := grid_index(node, BLOCKS_SIZE)
-			b := grid_index(goal, BLOCKS_SIZE)
+			a := util.grid_index(node, BLOCKS_SIZE)
+			b := util.grid_index(goal, BLOCKS_SIZE)
 			h :=
 				octile(
 					table.derived.coarse.representative[a],
@@ -231,9 +227,9 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 		}
 		return h * HEURISTIC_TIE_BREAK
 	}
-	goal := u32(grid_index(to, size))
+	goal := u32(util.grid_index(to, size))
 
-	start := u32(grid_index(from, size))
+	start := u32(util.grid_index(from, size))
 	scratch.node[start] = {
 		g     = 0,
 		stamp = scratch.stamp,
@@ -248,15 +244,15 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 		node.closed = true
 		if index == goal do return node.g, true
 
-		at := grid_pos(int(index), size)
+		at := util.grid_pos(int(index), size)
 		for dir in Dir {
 			next := at + DIR_OFFSET[dir]
-			if !grid_contains(next, size) do continue
-			next_index := grid_index(next, size)
+			if !util.grid_contains(next, size) do continue
+			next_index := util.grid_index(next, size)
 			when level == .Fine {
 				move := step_cost(table, at, dir)
 				if move == 0 do continue
-				if SCRATCH.corridor[grid_index(next / BLOCKING_FACTOR, BLOCKS_SIZE)] != SCRATCH.corridor_stamp do continue
+				if SCRATCH.corridor[util.grid_index(next / BLOCKING_FACTOR, BLOCKS_SIZE)] != SCRATCH.corridor_stamp do continue
 			} else {
 				move := table.derived.coarse.move[index][dir]
 				if move == 0 do continue
@@ -279,33 +275,18 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 @(private = "file")
 step_cost :: proc(table: ^Pathfind_Table, at: [2]int, dir: Dir) -> f32 {
 	next := at + DIR_OFFSET[dir]
-	if !grid_contains(next, WORLD_SIZE) do return 0
+	if !util.grid_contains(next, WORLD_SIZE) do return 0
 	if DIR_OFFSET[dir].x != 0 && DIR_OFFSET[dir].y != 0 {
-		if table.grid[grid_index({next.x, at.y}, WORLD_SIZE)] == 0 do return 0
-		if table.grid[grid_index({at.x, next.y}, WORLD_SIZE)] == 0 do return 0
+		if table.grid[util.grid_index({next.x, at.y}, WORLD_SIZE)] == 0 do return 0
+		if table.grid[util.grid_index({at.x, next.y}, WORLD_SIZE)] == 0 do return 0
 	}
-	return table.grid[grid_index(next, WORLD_SIZE)] * DIR_LENGTH[dir]
+	return table.grid[util.grid_index(next, WORLD_SIZE)] * DIR_LENGTH[dir]
 }
 
 @(private = "file")
 octile :: proc(a, b: [2]int) -> f32 {
 	d := [2]f32{f32(abs(a.x - b.x)), f32(abs(a.y - b.y))}
 	return max(d.x, d.y) + (math.SQRT_TWO - 1) * min(d.x, d.y)
-}
-
-@(private = "file")
-grid_index :: proc(pos, size: [2]int) -> int {
-	return pos.y * size.x + pos.x
-}
-
-@(private = "file")
-grid_pos :: proc(index: int, size: [2]int) -> [2]int {
-	return {index % size.x, index / size.x}
-}
-
-@(private = "file")
-grid_contains :: proc(pos, size: [2]int) -> bool {
-	return pos.x >= 0 && pos.y >= 0 && pos.x < size.x && pos.y < size.y
 }
 
 pathfind_build_begin :: proc(domain: Pathfind_Domain) -> []f32 {
@@ -343,40 +324,19 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 	if table.derived.min_cost == math.INF_F32 do table.derived.min_cost = 1
 
 	// Components (4-connected flood fill is enough, since moves can't cut corners)
-	table.derived.component = {}
-	queue := make([]u32, CELLS_FINE_MAX, context.temp_allocator)
-	count: u16 = 0
-	for cost, start in table.grid {
-		if cost == 0 || table.derived.component[start] != 0 do continue
-		assert(count < max(u16), "Too many pathfinding components")
-		count += 1
-		table.derived.component[start] = count
-		queue[0] = u32(start)
-		head, tail := 0, 1
-		for head < tail {
-			cell := grid_pos(int(queue[head]), WORLD_SIZE)
-			head += 1
-			for dir in ([4]Dir{.N, .W, .E, .S}) {
-				next := cell + DIR_OFFSET[dir]
-				if !grid_contains(next, WORLD_SIZE) do continue
-				next_index := grid_index(next, WORLD_SIZE)
-				if table.grid[next_index] == 0 || table.derived.component[next_index] != 0 do continue
-				table.derived.component[next_index] = count
-				queue[tail] = u32(next_index)
-				tail += 1
-			}
-		}
-	}
+	passable := make([]bool, CELLS_FINE_MAX, context.temp_allocator)
+	for cost, i in table.grid do passable[i] = cost > 0
+	util.grid_components(table.derived.component[:], passable, WORLD_SIZE, false)
 
 	// Representatives: cheapest cell, nearest the block centre on ties
 	for &representative, block_index in table.derived.coarse.representative {
-		corner := grid_pos(block_index, BLOCKS_SIZE) * BLOCKING_FACTOR
+		corner := util.grid_pos(block_index, BLOCKS_SIZE) * BLOCKING_FACTOR
 		representative = corner
 		best_cost: f32 = 0
 		best_distance := 0
 		for y in 0 ..< BLOCKING_FACTOR do for x in 0 ..< BLOCKING_FACTOR {
 			cell := corner + {x, y}
-			cost := table.grid[grid_index(cell, WORLD_SIZE)]
+			cost := table.grid[util.grid_index(cell, WORLD_SIZE)]
 			if cost == 0 do continue
 			// Doubled to stay integer
 			offset := 2 * [2]int{x, y} + 1 - BLOCKING_FACTOR
@@ -390,15 +350,15 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 	// Coarse moves
 	for &moves, block_index in table.derived.coarse.move {
 		moves = {}
-		block := grid_pos(block_index, BLOCKS_SIZE)
+		block := util.grid_pos(block_index, BLOCKS_SIZE)
 		from := table.derived.coarse.representative[block_index]
-		from_index := grid_index(from, WORLD_SIZE)
+		from_index := util.grid_index(from, WORLD_SIZE)
 		if table.grid[from_index] == 0 do continue
 		for &move, dir in moves {
 			next := block + DIR_OFFSET[dir]
-			if !grid_contains(next, BLOCKS_SIZE) do continue
-			to := table.derived.coarse.representative[grid_index(next, BLOCKS_SIZE)]
-			to_index := grid_index(to, WORLD_SIZE)
+			if !util.grid_contains(next, BLOCKS_SIZE) do continue
+			to := table.derived.coarse.representative[util.grid_index(next, BLOCKS_SIZE)]
+			to_index := util.grid_index(to, WORLD_SIZE)
 			if table.grid[to_index] == 0 || table.derived.component[to_index] != table.derived.component[from_index] do continue
 			// Corridor: the blocks around the shared corner
 			SCRATCH.corridor_stamp += 1
@@ -415,7 +375,7 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 	in_largest := make([]bool, CELLS_COARSE_MAX, context.temp_allocator)
 	first := -1
 	for representative, block_index in table.derived.coarse.representative {
-		cell_index := grid_index(representative, WORLD_SIZE)
+		cell_index := util.grid_index(representative, WORLD_SIZE)
 		in_largest[block_index] =
 			table.grid[cell_index] != 0 && int(table.derived.component[cell_index]) == largest
 		if in_largest[block_index] && first < 0 do first = block_index
@@ -451,11 +411,11 @@ blocks_dijkstra :: proc(table: ^Pathfind_Table, start: int, reverse: bool, cost:
 		entry := heap_pop(scratch)
 		// Skip stale heap entries
 		if entry.priority > cost[entry.index] do continue
-		at := grid_pos(int(entry.index), BLOCKS_SIZE)
+		at := util.grid_pos(int(entry.index), BLOCKS_SIZE)
 		for dir in Dir {
 			next := at + DIR_OFFSET[dir]
-			if !grid_contains(next, BLOCKS_SIZE) do continue
-			next_index := grid_index(next, BLOCKS_SIZE)
+			if !util.grid_contains(next, BLOCKS_SIZE) do continue
+			next_index := util.grid_index(next, BLOCKS_SIZE)
 			move :=
 				reverse ? table.derived.coarse.move[next_index][DIR_OPPOSITE[dir]] : table.derived.coarse.move[entry.index][dir]
 			if move == 0 do continue
@@ -474,7 +434,7 @@ pathfind_trace :: proc(
 	domain: Pathfind_Domain,
 	dst: [2]f32,
 	// Enemy zones of control
-	zones: []Disc,
+	zones: []util.Disc,
 	out: ^[dynamic; PATH_MAX_LEN][2]f32,
 	costs: ^[dynamic; PATH_MAX_LEN]f32,
 ) -> (
@@ -485,10 +445,10 @@ pathfind_trace :: proc(
 	table := &TABLE[domain]
 	from := [2]int{int(math.floor(src.x)), int(math.floor(src.y))}
 	to := [2]int{int(math.floor(dst.x)), int(math.floor(dst.y))}
-	if !grid_contains(from, WORLD_SIZE) || !grid_contains(to, WORLD_SIZE) do return false
+	if !util.grid_contains(from, WORLD_SIZE) || !util.grid_contains(to, WORLD_SIZE) do return false
 	// Different components (or component 0, impassable) can't connect
-	component := table.derived.component[grid_index(from, WORLD_SIZE)]
-	if component == 0 || component != table.derived.component[grid_index(to, WORLD_SIZE)] do return false
+	component := table.derived.component[util.grid_index(from, WORLD_SIZE)]
+	if component == 0 || component != table.derived.component[util.grid_index(to, WORLD_SIZE)] do return false
 
 	// Coarse path, then corridor around it
 	from_block := from / BLOCKING_FACTOR
@@ -499,7 +459,7 @@ pathfind_trace :: proc(
 	for {
 		for dy in -1 ..= 1 do for dx in -1 ..= 1 do corridor_mark(block + {dx, dy})
 		if block == from_block do break
-		block += DIR_OFFSET[SCRATCH.search[.Coarse].node[grid_index(block, BLOCKS_SIZE)].parent]
+		block += DIR_OFFSET[SCRATCH.search[.Coarse].node[util.grid_index(block, BLOCKS_SIZE)].parent]
 	}
 
 	_ = search(table, .Fine, from, to) or_return
@@ -510,8 +470,8 @@ pathfind_trace :: proc(
 			clear(costs)
 			return false
 		}
-		index := grid_index(cell, WORLD_SIZE)
-		append(out, [2]f32{f32(cell.x), f32(cell.y)} + 0.5)
+		index := util.grid_index(cell, WORLD_SIZE)
+		append(out, util.cell_center(cell))
 		append(costs, table.grid[index])
 		cell += DIR_OFFSET[SCRATCH.search[.Fine].node[index].parent]
 	}
@@ -544,7 +504,7 @@ pathfind_flood :: proc(
 	src: [2]f32,
 	domain: Pathfind_Domain,
 	budget: f32,
-	zones, no_stop: []Disc,
+	zones, no_stop: []util.Disc,
 	flood: ^Pathfind_Flood,
 ) {
 	table := &TABLE[domain]
@@ -554,11 +514,11 @@ pathfind_flood :: proc(
 	slice.fill(flood.cost[:], math.INF_F32)
 	stamp(flood, flood.zone[:], zones)
 	stamp(flood, flood.no_stop[:], no_stop)
-	if !grid_contains(flood.start, WORLD_SIZE) || table.grid[grid_index(flood.start, WORLD_SIZE)] == 0 do return
+	if !util.grid_contains(flood.start, WORLD_SIZE) || table.grid[util.grid_index(flood.start, WORLD_SIZE)] == 0 do return
 
 	scratch := &SCRATCH.search[.Fine]
 	clear(&scratch.heap)
-	start := grid_index(flood.start - flood.corner, FLOOD_SQUARE)
+	start := util.grid_index(flood.start - flood.corner, FLOOD_SQUARE)
 	flood.cost[start] = 0
 	heap_push(scratch, {0, u32(start)})
 	for len(scratch.heap) > 0 {
@@ -566,14 +526,14 @@ pathfind_flood :: proc(
 		// Skip stale heap entries
 		if entry.priority > flood.cost[entry.index] do continue
 		if flood.zone[entry.index] do continue
-		at := grid_pos(int(entry.index), FLOOD_SQUARE)
+		at := util.grid_pos(int(entry.index), FLOOD_SQUARE)
 		for dir in Dir {
 			next := at + DIR_OFFSET[dir]
-			if !grid_contains(next, FLOOD_SQUARE) do continue
+			if !util.grid_contains(next, FLOOD_SQUARE) do continue
 			move := step_cost(table, flood.corner + at, dir)
 			if move == 0 do continue
 			cost := entry.priority + move
-			next_index := grid_index(next, FLOOD_SQUARE)
+			next_index := util.grid_index(next, FLOOD_SQUARE)
 			if cost > budget || cost >= flood.cost[next_index] do continue
 			flood.cost[next_index] = cost
 			flood.back[next_index] = DIR_OPPOSITE[dir]
@@ -583,15 +543,13 @@ pathfind_flood :: proc(
 }
 
 @(private = "file")
-stamp :: proc(flood: ^Pathfind_Flood, mask: []bool, discs: []Disc) {
+stamp :: proc(flood: ^Pathfind_Flood, mask: []bool, discs: []util.Disc) {
 	slice.fill(mask, false)
 	for disc in discs {
-		lo, hi := linalg.floor(disc.center - disc.radius), linalg.floor(disc.center + disc.radius)
-		first := linalg.max([2]int{int(lo.x), int(lo.y)} - flood.corner, 0)
-		last := linalg.min([2]int{int(hi.x), int(hi.y)} - flood.corner, PATHFIND_FLOOD_SIZE - 1)
-		for y in first.y ..= last.y do for x in first.x ..= last.x {
-			middle := [2]f32{f32(flood.corner.x + x), f32(flood.corner.y + y)} + 0.5
-			if linalg.distance(middle, disc.center) < disc.radius do mask[grid_index({x, y}, FLOOD_SQUARE)] = true
+		covered := util.cell_rect_covering(disc.center - disc.radius, disc.center + disc.radius)
+		local := util.cell_rect_clip({covered.min - flood.corner, covered.max - flood.corner}, FLOOD_SQUARE)
+		for y in local.min.y ..< local.max.y do for x in local.min.x ..< local.max.x {
+			if util.disc_contains(disc, util.cell_center(flood.corner + {x, y})) do mask[util.grid_index({x, y}, FLOOD_SQUARE)] = true
 		}
 	}
 }
@@ -600,22 +558,22 @@ stamp :: proc(flood: ^Pathfind_Flood, mask: []bool, discs: []Disc) {
 flood_reaches :: proc(flood: ^Pathfind_Flood, cell: [2]int) -> bool {
 	local := cell - flood.corner
 	return(
-		grid_contains(local, FLOOD_SQUARE) &&
-		flood.cost[grid_index(local, FLOOD_SQUARE)] < math.INF_F32 \
+		util.grid_contains(local, FLOOD_SQUARE) &&
+		flood.cost[util.grid_index(local, FLOOD_SQUARE)] < math.INF_F32 \
 	)
 }
 
 // Cell to stop at for dst: dst's own if possible, else the nearest reached stoppable cell within a snap-sized square
 // (none with snap 0)
 pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32, snap: int) -> (cell: [2]int, ok: bool) {
-	to := [2]int{int(math.floor(dst.x)), int(math.floor(dst.y))}
+	to := util.cell_of(dst)
 	nearest := math.INF_F32
 	if !flood_reaches(flood, to) {
 		for y in 0 ..< snap {
 			for x in 0 ..< snap {
 				at := to - snap / 2 + {x, y}
-				if !flood_reaches(flood, at) || flood.no_stop[grid_index(at - flood.corner, FLOOD_SQUARE)] do continue
-				distance := linalg.distance([2]f32{f32(at.x), f32(at.y)} + 0.5, dst)
+				if !flood_reaches(flood, at) || flood.no_stop[util.grid_index(at - flood.corner, FLOOD_SQUARE)] do continue
+				distance := linalg.distance(util.cell_center(at), dst)
 				if distance < nearest do cell, ok, nearest = at, true, distance
 			}
 		}
@@ -623,8 +581,8 @@ pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32, snap: int) -> (
 	}
 	for cost, i in flood.cost {
 		if cost == math.INF_F32 || flood.no_stop[i] do continue
-		at := flood.corner + grid_pos(i, FLOOD_SQUARE)
-		distance := linalg.distance([2]f32{f32(at.x), f32(at.y)} + 0.5, dst)
+		at := flood.corner + util.grid_pos(i, FLOOD_SQUARE)
+		distance := linalg.distance(util.cell_center(at), dst)
 		if distance < nearest do cell, ok, nearest = at, true, distance
 	}
 	return
@@ -633,8 +591,7 @@ pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32, snap: int) -> (
 // Cheapest stoppable cell inside the disc
 pathfind_flood_stop_within :: proc(
 	flood: ^Pathfind_Flood,
-	center: [2]f32,
-	radius: f32,
+	disc: util.Disc,
 ) -> (
 	cell: [2]int,
 	ok: bool,
@@ -642,8 +599,8 @@ pathfind_flood_stop_within :: proc(
 	cheapest := math.INF_F32
 	for cost, i in flood.cost {
 		if cost >= cheapest || flood.no_stop[i] do continue
-		at := flood.corner + grid_pos(i, FLOOD_SQUARE)
-		if linalg.distance([2]f32{f32(at.x), f32(at.y)} + 0.5, center) >= radius do continue
+		at := flood.corner + util.grid_pos(i, FLOOD_SQUARE)
+		if !util.disc_contains(disc, util.cell_center(at)) do continue
 		cell, ok, cheapest = at, true, cost
 	}
 	return
@@ -670,9 +627,9 @@ pathfind_flood_trace :: proc(
 			clear(costs)
 			return false
 		}
-		append(out, [2]f32{f32(cell.x), f32(cell.y)} + 0.5)
-		append(costs, table.grid[grid_index(cell, WORLD_SIZE)])
-		cell += DIR_OFFSET[flood.back[grid_index(cell - flood.corner, FLOOD_SQUARE)]]
+		append(out, util.cell_center(cell))
+		append(costs, table.grid[util.grid_index(cell, WORLD_SIZE)])
+		cell += DIR_OFFSET[flood.back[util.grid_index(cell - flood.corner, FLOOD_SQUARE)]]
 	}
 	slice.reverse(out[:])
 	slice.reverse(costs[:])

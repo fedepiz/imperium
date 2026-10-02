@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:math"
 
 import "../span"
+import "../util"
 
 // Area slots, in drawing order
 REACH_AREA :: 0
@@ -107,7 +108,7 @@ world_present :: proc(
 		reach.look = REACH_LOOK
 	}
 	clear(&out.circles)
-	for discs, slot in ([2][]Disc{mov.friend_zones[:], mov.enemy_zones[:]}) {
+	for discs, slot in ([2][]util.Disc{mov.friend_zones[:], mov.enemy_zones[:]}) {
 		area := &out.areas[FRIEND_AREA + slot]
 		area.revision = revision
 		area.look = slot == 0 ? FRIEND_LOOK : ZONE_LOOK

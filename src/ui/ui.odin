@@ -5,6 +5,7 @@ import "core:math"
 import "core:strings"
 import "core:unicode/utf8"
 import "../gfx"
+import "../util"
 import "vendor:sdl3"
 
 // Maximum number of ui boxes supported by the system
@@ -571,7 +572,7 @@ end :: proc(input: Input, draw_ctx: ^gfx.Draw_Ctx, dt: f32) {
 	update_interaction(input)
 
 	// Ease the persistent state of every keyed box built this frame, and every live anim
-	rate := 1 - math.exp(-16 * dt)
+	rate := util.ease_step(16, dt)
 	for i := 0; i < UI.box_order_count; i += 1 {
 		box := &UI.boxes[UI.box_order[i]]
 		key := box.key

@@ -2,18 +2,21 @@
 package sim
 
 import "core:fmt"
-import "core:hash"
 import "core:math/linalg"
-import "core:mem"
+
+import "../util"
 
 PIECE_MAX :: 1024
 FACTION_MAX :: 256
 CHARACTER_MAX :: 1024
 
-// Path smoothing, see walk_smooth
-WALK_SOFTEN_PASSES :: 2
 WALK_CUTS :: 2
-WALK_CUT_RATIO :: 0.25
+WALK_SMOOTHING :: util.Smoothing {
+	softness    = 1,
+	soften_iter = 2,
+	cut_iter    = WALK_CUTS,
+	cut_ratio   = 0.25,
+}
 // Start point plus PATH_MAX_LEN cells, doubled by each cut
 WALK_POINTS_MAX :: (PATH_MAX_LEN + 1) << WALK_CUTS
 
@@ -38,7 +41,7 @@ TERRAIN_COSTS := [Terrain_Type]f32 {
 ROAD_COST :: 0.4
 
 // Normalized elevation
-HIGHLAND_ELEVATION :: Ramp{0.55, 1.0}
+HIGHLAND_ELEVATION :: util.Ramp{0.55, 1.0}
 MOUNTAINS_ELEVATION :: 0.85
 
 // Mountains within PASS_REACH cells of a road become highland. Smaller patches than MOUNTAINS_PATCH_MIN too.
@@ -97,9 +100,9 @@ Movement :: struct {
 	target:        Piece_Id,
 	// Reach of the focus. Nil subject and 0 key = none. Key hashes all flood inputs; recomputed only on change.
 	flood:         Pathfind_Flood,
-	enemy_zones:   [dynamic; PIECE_MAX]Disc,
-	friend_zones:  [dynamic; PIECE_MAX]Disc,
-	bodies:        [dynamic; PIECE_MAX]Disc,
+	enemy_zones:   [dynamic; PIECE_MAX]util.Disc,
+	friend_zones:  [dynamic; PIECE_MAX]util.Disc,
+	bodies:        [dynamic; PIECE_MAX]util.Disc,
 	flood_subject: Piece_Id,
 	flood_key:     u64,
 }
@@ -146,20 +149,20 @@ measure_land :: proc(terrain: []Terrain) -> (land: Land) {
 	}
 	land.to_river = make([]f32, CELLS_MAX, context.temp_allocator)
 	land.to_sea = make([]f32, CELLS_MAX, context.temp_allocator)
-	distance_from(land.to_river, is_river, WORLD_SIZE)
-	distance_from(land.to_sea, is_sea, WORLD_SIZE)
+	util.distance_from(land.to_river, is_river, WORLD_SIZE)
+	util.distance_from(land.to_sea, is_sea, WORLD_SIZE)
 
 	elevation := make([]f32, CELLS_MAX, context.temp_allocator)
 	is_land := make([]f32, CELLS_MAX, context.temp_allocator)
 	for cell, i in terrain {
 		if cell.surface in WATER do continue
-		elevation[i] = normalized(cell.elevation)
+		elevation[i] = util.normalized(cell.elevation)
 		is_land[i] = 1
 	}
 	around := make([]f32, CELLS_MAX, context.temp_allocator)
 	count := make([]f32, CELLS_MAX, context.temp_allocator)
-	box_sum(around, elevation, WORLD_SIZE, BASIN_REACH)
-	box_sum(count, is_land, WORLD_SIZE, BASIN_REACH)
+	util.box_sum(around, elevation, WORLD_SIZE, BASIN_REACH)
+	util.box_sum(count, is_land, WORLD_SIZE, BASIN_REACH)
 	land.basin = make([]f32, CELLS_MAX, context.temp_allocator)
 	for i in 0 ..< CELLS_MAX {
 		if is_land[i] > 0 do land.basin[i] = around[i] / count[i] - elevation[i]
@@ -179,91 +182,67 @@ terrain_type_of :: proc(
 ) {
 	if terrain[i].surface in WATER do return
 	cell := terrain[i]
-	elevation := normalized(cell.elevation)
+	elevation := util.normalized(cell.elevation)
 	if elevation >= MOUNTAINS_ELEVATION do return .Mountains, max(u8)
-	trees := normalized(cell.trees)
-	moisture := normalized(cell.moisture)
-	low := ramp(0.22, 0.12, elevation)
-	delta := ramp(6, 2, land.to_river[i]) * ramp(16, 6, land.to_sea[i])
-	dry_river := ramp(0.62, 0.52, moisture) * ramp(5, 1.5, land.to_river[i])
+	trees := util.normalized(cell.trees)
+	moisture := util.normalized(cell.moisture)
+	low := util.ramp(0.22, 0.12, elevation)
+	delta := util.ramp(6, 2, land.to_river[i]) * util.ramp(16, 6, land.to_sea[i])
+	dry_river := util.ramp(0.62, 0.52, moisture) * util.ramp(5, 1.5, land.to_river[i])
 	valley :=
-		ramp(0.55, 0.65, moisture) *
-		ramp(12, 4, land.to_river[i]) *
-		ramp(0.02, 0.07, land.basin[i])
+		util.ramp(0.55, 0.65, moisture) *
+		util.ramp(12, 4, land.to_river[i]) *
+		util.ramp(0.02, 0.07, land.basin[i])
 	suits := [Terrain_Type]f32 {
 		.Open      = 1.0 / 6,
-		.Forest    = ramp(0.05, 0.75, trees),
-		.Desert    = ramp(0.47, 0.35, moisture),
-		.Steppe    = ramp(0.40, 0.47, moisture) * ramp(0.58, 0.48, moisture),
+		.Forest    = util.ramp(0.05, 0.75, trees),
+		.Desert    = util.ramp(0.47, 0.35, moisture),
+		.Steppe    = util.ramp(0.40, 0.47, moisture) * util.ramp(0.58, 0.48, moisture),
 		.Fertile   = 1.3 * max(dry_river, valley),
-		.Marsh     = 1.5 * low * max(delta, ramp(0.80, 0.88, moisture)),
+		.Marsh     = 1.5 * low * max(delta, util.ramp(0.80, 0.88, moisture)),
 		.Highland  = highland_suit(elevation),
 		.Mountains = 0,
-		.Fields    = 0.6 * ramp(0.52, 0.62, moisture) * ramp(0.3, 0.1, trees),
+		.Fields    = 0.6 * util.ramp(0.52, 0.62, moisture) * util.ramp(0.3, 0.1, trees),
 	}
 	most: f32
 	for s, type in suits {
-		if s > most do best, strength, most = type, u8(min(s, 1) * f32(max(u8)) + 0.5), s
+		if s > most do best, strength, most = type, util.to_u8(s), s
 	}
 	if best == .Open do strength = 0
 	return
 }
 
 highland_suit :: proc(elevation: f32) -> f32 {
-	return 1.2 * ramp(HIGHLAND_ELEVATION, elevation)
+	return 1.2 * util.ramp(HIGHLAND_ELEVATION, elevation)
 }
 
 terrain_to_highland :: proc(cell: ^Terrain) {
 	cell.type = .Highland
-	cell.type_strength = u8(min(highland_suit(normalized(cell.elevation)), 1) * f32(max(u8)) + 0.5)
+	cell.type_strength = util.to_u8(highland_suit(util.normalized(cell.elevation)))
 }
 
 // Mountains near roads become highland (passes)
 terrain_open_passes :: proc(terrain: []Terrain) {
-	for y in 0 ..< WORLD_HEIGHT {
-		for x in 0 ..< WORLD_WIDTH {
-			if terrain[y * WORLD_WIDTH + x].way[.Road] == 0 do continue
-			for dy in -PASS_REACH ..= PASS_REACH {
-				for dx in -PASS_REACH ..= PASS_REACH {
-					at := [2]int{x + dx, y + dy}
-					if at.x < 0 || at.y < 0 || at.x >= WORLD_WIDTH || at.y >= WORLD_HEIGHT do continue
-					cell := &terrain[at.y * WORLD_WIDTH + at.x]
-					if cell.type == .Mountains do terrain_to_highland(cell)
-				}
-			}
+	for road, i in terrain {
+		if road.way[.Road] == 0 do continue
+		around := util.cell_rect_clip(util.cell_rect_around(util.grid_pos(i, WORLD_SIZE), PASS_REACH), WORLD_SIZE)
+		for y in around.min.y ..< around.max.y do for x in around.min.x ..< around.max.x {
+			cell := &terrain[util.grid_index({x, y}, WORLD_SIZE)]
+			if cell.type == .Mountains do terrain_to_highland(cell)
 		}
 	}
 }
 
 // Mountain patches (8-connected) smaller than MOUNTAINS_PATCH_MIN become highland
 terrain_drop_specks :: proc(terrain: []Terrain) {
-	impassable :: proc(cell: Terrain) -> bool {
-		return cell.type == .Mountains && cell.way[.Road] == 0
-	}
-	seen := make([]bool, CELLS_MAX, context.temp_allocator)
-	// Also the flood-fill queue
-	patch := make([dynamic]int, 0, 64, context.temp_allocator)
-	for start in 0 ..< CELLS_MAX {
-		if seen[start] || !impassable(terrain[start]) do continue
-		clear(&patch)
-		append(&patch, start)
-		seen[start] = true
-		for next := 0; next < len(patch); next += 1 {
-			x := patch[next] % WORLD_WIDTH
-			y := patch[next] / WORLD_WIDTH
-			for dy in -1 ..= 1 {
-				for dx in -1 ..= 1 {
-					at := [2]int{x + dx, y + dy}
-					if at.x < 0 || at.y < 0 || at.x >= WORLD_WIDTH || at.y >= WORLD_HEIGHT do continue
-					i := at.y * WORLD_WIDTH + at.x
-					if seen[i] || !impassable(terrain[i]) do continue
-					seen[i] = true
-					append(&patch, i)
-				}
-			}
-		}
-		if len(patch) >= MOUNTAINS_PATCH_MIN do continue
-		for i in patch do terrain_to_highland(&terrain[i])
+	impassable := make([]bool, CELLS_MAX, context.temp_allocator)
+	for cell, i in terrain do impassable[i] = cell.type == .Mountains && cell.way[.Road] == 0
+	patches := make([]u16, CELLS_MAX, context.temp_allocator)
+	count := util.grid_components(patches, impassable, WORLD_SIZE, true)
+	sizes := make([]int, count + 1, context.temp_allocator)
+	for patch in patches do sizes[patch] += 1
+	for patch, i in patches {
+		if patch != 0 && sizes[patch] < MOUNTAINS_PATCH_MIN do terrain_to_highland(&terrain[i])
 	}
 }
 
@@ -308,12 +287,15 @@ world_load :: proc(scenario: Scenario) -> bool {
 	// Make roads 4-connected: fill diagonal steps with the lower corner cell
 	for y in 0 ..< WORLD_HEIGHT - 1 {
 		for x in 0 ..< WORLD_WIDTH {
-			at := &terrain[y * WORLD_WIDTH + x]
+			pos := [2]int{x, y}
+			at := &terrain[util.grid_index(pos, WORLD_SIZE)]
 			if at.way[.Road] == 0 do continue
 			for dx in ([2]int{-1, 1}) {
-				if x + dx < 0 || x + dx >= WORLD_WIDTH do continue
-				if terrain[(y + 1) * WORLD_WIDTH + x + dx].way[.Road] == 0 do continue
-				a, b := &terrain[y * WORLD_WIDTH + x + dx], &terrain[(y + 1) * WORLD_WIDTH + x]
+				diagonal := pos + {dx, 1}
+				if !util.grid_contains(diagonal, WORLD_SIZE) do continue
+				if terrain[util.grid_index(diagonal, WORLD_SIZE)].way[.Road] == 0 do continue
+				a := &terrain[util.grid_index(pos + {dx, 0}, WORLD_SIZE)]
+				b := &terrain[util.grid_index(pos + {0, 1}, WORLD_SIZE)]
 				if a.way[.Road] != 0 || b.way[.Road] != 0 do continue
 				corner := a.elevation <= b.elevation ? a : b
 				if corner.surface in WATER do corner = corner == a ? b : a
@@ -425,17 +407,17 @@ world_step :: proc(input: Step_Input) {
 		} else {
 			domain := subject.movement_domain.(Pathfind_Domain)
 
-			// Gather nearby bodies (can't stop on), enemy zones (stop on entering) and friendly contacts
+			// Gather bodies (can't stop on), enemy zones (stop on entering) and friendly contacts touching the flood
+			// square, padded a cell for rounding
+			half: f32 = PATHFIND_FLOOD_SIZE / 2 + 1
+			square := [4]f32{subject.pos.x - half, subject.pos.y - half, 2 * half, 2 * half}
 			for other, index in WORLD.pieces {
 				if !piece_alive(other) || piece_id(index) == input.focus do continue
-				near :=
-					PATHFIND_FLOOD_SIZE / 2 +
-					max(other.contact.radius, subject.body + other.body) +
-					1
-				if abs(other.pos.x - subject.pos.x) > near || abs(other.pos.y - subject.pos.y) > near do continue
-				append(bodies, Disc{other.pos, subject.body + other.body})
+				body := util.Disc{other.pos, subject.body + other.body}
+				if util.disc_overlaps_rect(body, square) do append(bodies, body)
 				if other.contact.radius == 0 || domain not_in other.contact.domains do continue
-				contact := Disc{other.pos, other.contact.radius}
+				contact := util.Disc{other.pos, other.contact.radius}
+				if !util.disc_overlaps_rect(contact, square) do continue
 				if pieces_friendly(subject^, other) {
 					append(&mov.friend_zones, contact)
 				} else {
@@ -444,18 +426,11 @@ world_step :: proc(input: Step_Input) {
 			}
 
 			// Reflood only when an input changed
-			focus, pos, budget := input.focus, subject.pos, movement_budget(subject^)
-			counts := [2]int{len(zones), len(bodies)}
-			key := hash.fnv64a(mem.ptr_to_bytes(&focus))
-			key = hash.fnv64a(mem.ptr_to_bytes(&pos), key)
-			key = hash.fnv64a(mem.ptr_to_bytes(&budget), key)
-			key = hash.fnv64a(mem.ptr_to_bytes(&domain), key)
-			key = hash.fnv64a(mem.ptr_to_bytes(&counts), key)
-			key = hash.fnv64a(mem.slice_to_bytes(zones[:]), key)
-			key = hash.fnv64a(mem.slice_to_bytes(bodies[:]), key)
+			budget := movement_budget(subject^)
+			key := util.hash_contents(input.focus, subject.pos, budget, domain, zones[:], bodies[:])
 			if key != mov.flood_key {
-				pathfind_flood(pos, domain, budget, zones[:], bodies[:], &mov.flood)
-				mov.flood_subject, mov.flood_key = focus, key
+				pathfind_flood(subject.pos, domain, budget, zones[:], bodies[:], &mov.flood)
+				mov.flood_subject, mov.flood_key = input.focus, key
 			}
 		}
 	}
@@ -475,7 +450,7 @@ world_step :: proc(input: Step_Input) {
 			target = order.target
 			other := piece_get(target)
 			if walker != {} && other != nil && mov.flood.domain in other.contact.domains {
-				stop, ok = pathfind_flood_stop_within(&mov.flood, other.pos, other.contact.radius)
+				stop, ok = pathfind_flood_stop_within(&mov.flood, util.Disc{other.pos, other.contact.radius})
 			}
 		}
 		path: [dynamic; PATH_MAX_LEN][2]f32
@@ -483,7 +458,7 @@ world_step :: proc(input: Step_Input) {
 		mover := piece_get(walker)
 		if ok &&
 		   mover != nil &&
-		   pathfind_flood_trace(&mov.flood, [2]f32{f32(stop.x), f32(stop.y)} + 0.5, &path, &cost) {
+		   pathfind_flood_trace(&mov.flood, util.cell_center(stop), &path, &cost) {
 			mov.subject, mov.target = walker, target
 			clear(&mov.path)
 			clear(&mov.cost)
@@ -493,35 +468,13 @@ world_step :: proc(input: Step_Input) {
 			append(&mov.cost, ..cost[:])
 			mov.next = 1
 
-			// Smooth: neighbour averaging, then Chaikin corner cutting. Ends stay fixed; cut points keep their
-			// segment's cost.
+			// Smooth; cut points keep their segment's cost
 			n := len(mov.path)
-			if n >= 3 {
-				for _ in 0 ..< WALK_SOFTEN_PASSES {
-					prev := mov.path[0]
-					for i in 1 ..< n - 1 {
-						here := mov.path[i]
-						mov.path[i] = (prev + 2 * here + mov.path[i + 1]) / 4
-						prev = here
-					}
-				}
-				// Backwards, so reads happen before overwrites
-				for _ in 0 ..< WALK_CUTS {
-					resize(&mov.path, 2 * n)
-					resize(&mov.cost, 2 * n)
-					mov.path[2 * n - 1] = mov.path[n - 1]
-					mov.cost[2 * n - 1] = mov.cost[n - 1]
-					for i := n - 2; i >= 0; i -= 1 {
-						a, b := mov.path[i], mov.path[i + 1]
-						segment := mov.cost[i + 1]
-						mov.path[2 * i + 1] = a + (b - a) * WALK_CUT_RATIO
-						mov.path[2 * i + 2] = b + (a - b) * WALK_CUT_RATIO
-						mov.cost[2 * i + 1] = segment
-						mov.cost[2 * i + 2] = segment
-					}
-					n *= 2
-				}
-			}
+			resize(&mov.path, n << WALK_CUTS)
+			resize(&mov.cost, n << WALK_CUTS)
+			n = util.smooth_polyline(mov.path[:], n, false, WALK_SMOOTHING, mov.cost[:])
+			resize(&mov.path, n)
+			resize(&mov.cost, n)
 		} else {
 			fmt.eprintfln("No way for %v to %v", walker, input.order)
 		}

@@ -3,6 +3,7 @@ package game
 
 import "../sim"
 import "../tweak"
+import "../util"
 import "core:math"
 import "core:math/linalg"
 
@@ -18,6 +19,8 @@ Camera :: struct {
 
 // Screen pixels per second, at any zoom
 CAMERA_PAN_SPEED :: 900
+// Per second, see util.ease_step
+CAMERA_PAN_EASE :: 6
 CAMERA_ZOOM_STEP :: 1.15
 // In pixels per cell
 CAMERA_ZOOM_MAX :: 24
@@ -59,7 +62,7 @@ camera_tick :: proc(input: Input, dt: f32) {
 
 	// Keyboard pan, eased
 	target := input.pan * CAMERA_PAN_SPEED / camera.zoom
-	camera.dv += (target - camera.dv) * (1 - math.exp(-6 * dt))
+	camera.dv += (target - camera.dv) * util.ease_step(CAMERA_PAN_EASE, dt)
 	camera.center += camera.dv * dt
 
 	camera.center = linalg.clamp(camera.center, 0, world_size)

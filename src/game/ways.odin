@@ -8,6 +8,7 @@ import "core:os"
 import "../sim"
 import "../span"
 import "../tabula"
+import "../util"
 
 // Ways ----------------------------------------------------------------------------------------------------------------
 // Rivers and roads. Loaded as cell lists, smoothed into lines; the sim's way cells are the cells the smoothed line
@@ -24,7 +25,7 @@ WAY_FILES := [sim.Way_Kind]string {
 
 // Rivers: wide curves. Roads: straight, tight bends.
 @(rodata)
-WAY_SMOOTHING := [sim.Way_Kind]Polyline_Smoothing {
+WAY_SMOOTHING := [sim.Way_Kind]util.Smoothing {
 	.River = {cut_iter = 3, cut_ratio = 0.25},
 	.Road = {cut_iter = 2, cut_ratio = 0.25, cut_max = 1.5},
 }
@@ -107,8 +108,7 @@ ways_read :: proc(path: string, kind: sim.Way_Kind, layer: []u16) -> bool {
 @(private = "file")
 way_mark :: proc(layer: []u16, points: [][2]f32, id: u16) {
 	mark :: proc(layer: []u16, cell: [2]int, id: u16) {
-		if cell.x < 0 || cell.y < 0 || cell.x >= sim.WORLD_WIDTH || cell.y >= sim.WORLD_HEIGHT do return
-		layer[cell.y * sim.WORLD_WIDTH + cell.x] = id
+		if util.grid_contains(cell, sim.WORLD_SIZE) do layer[util.grid_index(cell, sim.WORLD_SIZE)] = id
 	}
 	for s in 1 ..< len(points) {
 		a, b := points[s - 1], points[s]

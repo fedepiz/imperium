@@ -1,13 +1,13 @@
 package game
 
 import "core:fmt"
-import "core:math"
 import "core:reflect"
 
 import "../gfx"
 import "../sim"
 import "../tweak"
 import "../ui"
+import "../util"
 
 // Maximum simulation steps in a frame. Excess time is dropped to avoid slowing down the game.
 STEPS_PER_FRAME_MAX :: 4
@@ -103,10 +103,9 @@ game_tick :: proc(input: Input, dt: f32) {
 	// Region under the cursor
 	pointed: sim.Region_Id
 	if input.on_map {
-		cell := camera_screen_to_world_point(GAME.camera, input.viewport, input.cursor)
-		x, y := int(math.floor(cell.x)), int(math.floor(cell.y))
-		if x >= 0 && y >= 0 && x < sim.WORLD_WIDTH && y < sim.WORLD_HEIGHT {
-			pointed = GAME.scene.ground[y * sim.WORLD_WIDTH + x].region
+		cell := util.cell_of(camera_screen_to_world_point(GAME.camera, input.viewport, input.cursor))
+		if util.grid_contains(cell, sim.WORLD_SIZE) {
+			pointed = GAME.scene.ground[util.grid_index(cell, sim.WORLD_SIZE)].region
 		}
 	}
 
