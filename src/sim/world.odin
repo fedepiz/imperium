@@ -100,10 +100,12 @@ WORLD: struct {
 	// Index 0 = region 1
 	region_names:        [dynamic; REGIONS_MAX]Name,
 	region_capitals:     [dynamic; REGIONS_MAX]Piece_Id,
-	// Pieces, names and armies are parallel arrays indexed by slot
+	// Pieces, names, armies and turn data are parallel arrays indexed by slot
 	pieces:              [PIECE_MAX]Piece,
 	piece_names:         [PIECE_MAX]Name,
 	armies:              [PIECE_MAX]Army,
+	// Cleared at each faction's turn start
+	piece_turns:         [PIECE_MAX]Piece_Turn,
 	// Free slots; the last is used next
 	pieces_free:         [dynamic; PIECE_MAX]u16,
 	factions:            [FACTION_MAX]Faction,
@@ -118,8 +120,6 @@ WORLD: struct {
 	engagement:          Engagement,
 	// Detected contacts waiting to be resolved, oldest first
 	contacts:            [dynamic; CONTACTS_MAX]Contact_Event,
-	// Per piece slot: the turn its army last attacked; each attacks at most once per turn
-	attacked_turn:       [PIECE_MAX]int,
 	// The player asked to end the turn; it ends once contacts are resolved and nothing is open
 	ending:              bool,
 	movement:            Movement,
@@ -131,6 +131,13 @@ WORLD: struct {
 }
 
 CONTACTS_MAX :: 256
+
+// What a piece did this turn
+Piece_Turn :: struct {
+	// Its army attacked; each attacks at most once per turn
+	attacked:       bool,
+	movement_spent: f32,
+}
 
 // Two enemy pieces touching: the initiator (the one that moved in, or the player's army at a turn's end), and whether
 // it was sent at the other
@@ -186,10 +193,11 @@ Movement :: struct {
 	flood_key:     u64,
 }
 
-// Full again once WORLD.turn moves past movement_turn
-movement_budget :: proc(piece: Piece) -> f32 {
-	if piece.movement_turn != WORLD.turn do return piece.movement_per_turn
-	return max(0, piece.movement_per_turn - piece.movement_spent)
+// 0 for a stale or nil id
+movement_budget :: proc(id: Piece_Id) -> f32 {
+	piece := piece_get(id)
+	if piece == nil do return 0
+	return max(0, piece.movement_per_turn - WORLD.piece_turns[id.index].movement_spent)
 }
 
 Atlas :: struct {
@@ -564,8 +572,8 @@ world_step :: proc(input: Step_Input) {
 		gap := battle_strength(sides[0], sides[1]) - battle_strength(sides[1], sides[0])
 		eagerness: f32 = contact.targeted ? ORDERED_ATTACK_BONUS : 0
 		fresh := [2]bool {
-			WORLD.attacked_turn[ids[0].index] != WORLD.turn,
-			WORLD.attacked_turn[ids[1].index] != WORLD.turn,
+			!WORLD.piece_turns[ids[0].index].attacked,
+			!WORLD.piece_turns[ids[1].index].attacked,
 		}
 		switch {
 		case fresh[0] && gap + eagerness >= TEMPERAMENT_ATTACK_THRESHOLD[sides[0].temperament]:
@@ -575,14 +583,14 @@ world_step :: proc(input: Step_Input) {
 		case:
 			continue
 		}
-		WORLD.attacked_turn[ids[0].index] = WORLD.turn
+		WORLD.piece_turns[ids[0].index].attacked = true
 		engagement.attacker = ids[0]
 		engagement.defender = ids[1]
 		engagement.stage = .Announce
 		engagement.battle = {
 			sides = {.Attacker = sides[0], .Defender = sides[1]},
 			can_avoid = true,
-			seed = util.hash_contents(WORLD.turn, ids[0], ids[1]),
+			seed = util.hash_contents(WORLD.turn, WORLD.player, ids[0], ids[1]),
 		}
 	}
 
@@ -676,7 +684,7 @@ world_step :: proc(input: Step_Input) {
 		} else {
 			domain := subject.movement_domain.(Pathfind_Domain)
 			budget :=
-				order.piece != {} && order.budget > 0 ? order.budget : movement_budget(subject^)
+				order.piece != {} && order.budget > 0 ? order.budget : movement_budget(flooded)
 
 			// Gather bodies (can't stop on), enemy zones (slow, no roads) and friendly contacts touching the flood
 			// square, padded a cell for rounding
@@ -765,12 +773,8 @@ world_step :: proc(input: Step_Input) {
 			if walked == distance do mov.next += 1
 
 			// Pay from the budget, as far as it lasts
-			spent := min(walked * cost, movement_budget(subject^))
-			if subject.movement_turn != WORLD.turn {
-				subject.movement_turn = WORLD.turn
-				subject.movement_spent = 0
-			}
-			subject.movement_spent += spent
+			spent := min(walked * cost, movement_budget(walk.piece))
+			WORLD.piece_turns[walk.piece.index].movement_spent += spent
 			// Road cells always cost exactly ROAD_COST
 			if cost == ROAD_COST do walk.spent_road += spent
 			else do walk.spent_off_road += spent
@@ -885,7 +889,7 @@ world_step :: proc(input: Step_Input) {
 			stock = clamp(stock, 0, army.baggage)
 			cap: f32 = army.baggage > 0 ? 100 * stock / army.baggage : 0
 			exertion: f32 =
-				piece.movement_per_turn > 0 ? 1 - movement_budget(piece) / piece.movement_per_turn : 0
+				piece.movement_per_turn > 0 ? 1 - movement_budget(piece_id(index)) / piece.movement_per_turn : 0
 			rest := (1 - exertion) * (1 - exertion)
 			if readiness < cap {
 				readiness = min(cap, readiness + READINESS_RECOVERY * rest)
@@ -916,7 +920,10 @@ world_step :: proc(input: Step_Input) {
 	}
 
 	// Step: Turn Start
-	if turn_ending do supply_map_build(WORLD.player)
+	if turn_ending {
+		WORLD.piece_turns = {}
+		supply_map_build(WORLD.player)
+	}
 }
 
 // Rebuilds the supply map for a faction: spread from its sources, slowed by everyone else's zones
@@ -969,8 +976,6 @@ Piece :: struct {
 	movement_domain:   Maybe(Pathfind_Domain),
 	// See movement_budget
 	movement_per_turn: f32,
-	movement_spent:    f32,
-	movement_turn:     int,
 	// Enemies entering it must stop
 	contact:           Contact,
 	// Radius in cells; other pieces can't stop overlapping it
@@ -993,6 +998,7 @@ piece_spawn :: proc(piece: Piece, army: Army, name: string) -> Piece_Id {
 	slot.generation = generation
 	name_set(&WORLD.piece_names[index], name)
 	WORLD.armies[index] = army
+	WORLD.piece_turns[index] = {}
 	return {index, generation}
 }
 

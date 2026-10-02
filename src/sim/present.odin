@@ -226,7 +226,7 @@ world_present :: proc(
 		if piece.movement_domain != nil {
 			budget := fmt.tprintf(
 				"%s of %s",
-				util.format_compact(f64(movement_budget(piece^))),
+				util.format_compact(f64(movement_budget(focus))),
 				util.format_compact(f64(piece.movement_per_turn)),
 			)
 			append(&card.stats, Field{label = "Movement", value = budget})
@@ -333,7 +333,7 @@ world_present :: proc(
 				)
 				ahead: Battle_Role = a.onset.total > d.onset.total ? .Attacker : .Defender
 				switch {
-				case a.onset.total == d.onset.total:
+				case result.onset_margin < ONSET_TIE:
 					append(lines, "Neither gains the upper hand.")
 				case !result.crisis_chosen && !result.pulled_out:
 					append(
@@ -344,13 +344,11 @@ world_present :: proc(
 							OUTCOME_LOSER_WORDS[result.outcome],
 						),
 					)
-				case result.sides[ahead].edge == 0:
-					append(lines, fmt.tprintf("%s wins by %.1f but gains no edge.", names[ahead], result.onset_margin))
 				case:
 					append(
 						lines,
 						fmt.tprintf(
-							"%s wins by %.1f and gains an edge of %.0f.",
+							"%s wins by %.1f and gains an edge of %.1f.",
 							names[ahead], result.onset_margin, result.sides[ahead].edge,
 						),
 					)

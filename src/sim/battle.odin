@@ -7,15 +7,20 @@ import "core:math"
 
 // Constants -----------------------------------------------------------------------------------------------------------
 
+// 2d6 is continuous: each die uniform on [0.5, 6.5), so fractional modifiers count in full. Targets sit half a pip
+// below the whole-dice ones to keep their odds.
+
 // Numbers bonus = clamp(NUMBERS_SCALE × log2(own men / enemy men), 0, NUMBERS_MAX)
 NUMBERS_SCALE :: 1.5
 NUMBERS_MAX :: 2
 
 // Avoiding battle and pursuing: 2d6 + MOBILITY_BONUS × (own mobility − other's) ≥ MOBILITY_TARGET
 MOBILITY_BONUS :: 2
-MOBILITY_TARGET :: 8
+MOBILITY_TARGET :: 7.5
 
-// Onset: a margin this big routs the loser outright; otherwise the winner's edge is floor(margin / 2)
+// Onset: a margin below ONSET_TIE is a tie (no edge); this big routs the loser outright; otherwise the winner's
+// edge is margin / 2
+ONSET_TIE :: 0.5
 ONSET_ROUT_MARGIN :: 7
 // A probing side pulls out after the onset when its edge is this far behind or worse
 PROBE_PULL_OUT :: -2
@@ -31,7 +36,7 @@ CRISIS_HEAVY :: 8
 // (HOLD_MEN − men %) / 10, each part from 0.
 HOLD_READINESS :: 25
 HOLD_MEN :: 30
-HOLD_TARGET :: 10
+HOLD_TARGET :: 9.5
 
 // Readiness lost by a defender that avoids battle
 AVOID_READINESS :: 5
@@ -162,7 +167,7 @@ OUTCOME_DECIDED := bit_set[Battle_Outcome] {
 	.Rout,
 }
 
-// Losses by outcome. Men: share of current men. Readiness: points. Stock: turns of supply. With no winner, the loser
+// Losses by outcome. Men: share of the smaller side's men. Readiness: points. Stock: turns of supply. With no winner, the loser
 // row is the defender (Avoided) or both sides (Stalemate).
 OUTCOME_MEN_LOST := [Battle_Role_Result][Battle_Outcome]f32 {
 	.Loser = {
@@ -230,7 +235,7 @@ OUTCOME_STOCK_CAPTURED := [Battle_Outcome]f32 {
 	.Heavy_Defeat = 0.4,
 	.Rout         = 0.6,
 }
-// Extra losses for a loser caught by pursuit
+// Extra losses for a loser caught by pursuit: share of its own men left
 OUTCOME_PURSUIT_MEN := [Battle_Outcome]f32 {
 	.Avoided      = 0,
 	.Stalemate    = 0,
@@ -350,7 +355,9 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			z = (z ~ (z >> 27)) * 0x94d049bb133111eb
 			return z ~ (z >> 31)
 		}
-		return f32(next(rng) % 6 + 1 + next(rng) % 6 + 1)
+		// Top 24 bits: uniform on [0, 1)
+		die :: proc(rng: ^u64) -> f32 {return 0.5 + 6 * f32(next(rng) >> 40) / (1 << 24)}
+		return die(rng) + die(rng)
 	}
 
 	// Step: Strength
@@ -399,7 +406,7 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		}
 		margin := abs(totals[.Attacker] - totals[.Defender])
 		result.onset_margin = margin
-		if totals[.Attacker] != totals[.Defender] {
+		if margin >= ONSET_TIE {
 			winner: Battle_Role = totals[.Attacker] > totals[.Defender] ? .Attacker : .Defender
 			beaten := OTHER_ROLE[winner]
 			if margin >= ONSET_ROUT_MARGIN {
@@ -407,7 +414,7 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 				loser = beaten
 				decided = true
 			} else {
-				result.sides[winner].edge = math.floor(margin / 2)
+				result.sides[winner].edge = margin / 2
 			}
 		}
 	}
@@ -497,10 +504,11 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		as_loser: [Battle_Role]bool
 		as_loser[loser] = true
 		as_loser[OTHER_ROLE[loser]] = outcome == .Stalemate
-		for side, role in battle.sides {
+		engaged := min(battle.sides[.Attacker].men, battle.sides[.Defender].men)
+		for role in Battle_Role {
 			row: Battle_Role_Result = as_loser[role] ? .Loser : .Winner
 			out := &result.sides[role]
-			out.men = -side.men * OUTCOME_MEN_LOST[row][outcome]
+			out.men = -engaged * OUTCOME_MEN_LOST[row][outcome]
 			out.readiness = OUTCOME_READINESS[row][outcome]
 			out.falls_back = as_loser[role] && outcome != .Stalemate
 		}
