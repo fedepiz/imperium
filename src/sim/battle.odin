@@ -2,8 +2,8 @@ package sim
 
 import "core:math"
 
-// Battle: one attacker against one defender, resolved from a copy of both sides. Pure: reads nothing but the Battle
-// it is given, and its own dice from battle.seed.
+// Battle: two armies in contact, resolved from a copy of both: who attacks, then the fight. Pure: reads nothing but the
+// Battle it is given, and its own dice from battle.seed.
 
 // Constants -----------------------------------------------------------------------------------------------------------
 
@@ -50,13 +50,16 @@ Temperament :: enum u8 {
 	Cunning,
 }
 
-// Attacks when own strength − enemy strength + initiative ≥ 0
+// Attacks when own strength − enemy strength + initiative ≥ 0; ORDERED_INITIATIVE (sent at the enemy) and
+// INTERCEPT_INITIATIVE (the enemy entered its zone) add to the temperament's
 TEMPERAMENT_ATTACK_INITIATIVE := [Temperament]f32 {
 	.Bold     = 1,
 	.Steady   = 0,
 	.Cautious = -2,
 	.Cunning  = 0,
 }
+ORDERED_INITIATIVE :: 2
+INTERCEPT_INITIATIVE :: -1
 // As defender, tries to avoid battle when own strength − enemy strength < this (−inf: never)
 TEMPERAMENT_AVOID_BELOW := [Temperament]f32 {
 	.Bold     = math.NEG_INF_F32,
@@ -317,10 +320,16 @@ Battle_Side :: struct {
 	// 1..4
 	mobility:    f32,
 	temperament: Temperament,
+	// Hasn't attacked this turn
+	can_attack:  bool,
 }
 
 Battle :: struct {
-	sides:     [Battle_Role]Battle_Side,
+	// In contact order: [0] made contact
+	sides:     [2]Battle_Side,
+	// [0] was sent at [1]; forced: it attacks without deciding
+	ordered:   bool,
+	forced:    bool,
 	// Added to the defender's rolls: terrain, a prepared position
 	ground:    f32,
 	can_avoid: bool,
@@ -409,10 +418,14 @@ Tally :: struct {
 }
 
 Battle_Result :: struct {
+	// Sides are in the battle's contact order. Fought: [attacker] attacked. Refused: [0] was sent and won't attack.
+	fought:        bool,
+	refused:       bool,
+	attacker:      int,
 	outcome:       Battle_Outcome,
 	// Valid when outcome in OUTCOME_RETREATS
-	winner:        Battle_Role,
-	sides:         [Battle_Role]Battle_Side_Result,
+	winner:        int,
+	sides:         [2]Battle_Side_Result,
 	// The side ahead's total minus the other's
 	onset_margin:  Tally,
 	crisis_margin: Tally,
@@ -441,11 +454,6 @@ battle_power :: proc(side, other: Battle_Side) -> (power: Tally) {
 	ratio := other.men > 0 ? side.men / other.men : 1
 	tally_add(&power, .Numbers, clamp(NUMBERS_SCALE * math.log2(max(ratio, 1e-6)), 0, NUMBERS_MAX))
 	return
-}
-
-battle_strength :: proc(side, other: Battle_Side) -> f32 {
-	power := battle_power(side, other)
-	return power.total
 }
 
 tally_add :: proc(tally: ^Tally, kind: Factor_Kind, value: f32) {
@@ -483,8 +491,34 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		return die(rng) + die(rng)
 	}
 
+	// Step: Contact. [0] attacks, else [1] may intercept; else nobody does.
+	initiator := battle.sides[0]
+	other := battle.sides[1]
+	gap := battle_power(initiator, other).total - battle_power(other, initiator).total
+	initiative: f32 = TEMPERAMENT_ATTACK_INITIATIVE[initiator.temperament] + (battle.ordered ? ORDERED_INITIATIVE : 0)
+	switch {
+	case battle.forced || (initiator.can_attack && gap + initiative >= 0):
+		result.fought = true
+	case other.can_attack && -gap + TEMPERAMENT_ATTACK_INITIATIVE[other.temperament] + INTERCEPT_INITIATIVE >= 0:
+		result.fought = true
+		result.attacker = 1
+	case:
+		result.refused = battle.ordered
+	}
+
+	// The fight, by role; at: each role's index in the contact order
+	at := [Battle_Role]int {
+		.Attacker = result.attacker,
+		.Defender = 1 - result.attacker,
+	}
+	sides := [Battle_Role]Battle_Side {
+		.Attacker = battle.sides[at[.Attacker]],
+		.Defender = battle.sides[at[.Defender]],
+	}
+
 	// Step: Power
-	for side, role in battle.sides do result.sides[role].power = battle_power(side, battle.sides[OTHER_ROLE[role]])
+	for side, role in sides do result.sides[at[role]].power = battle_power(side, sides[OTHER_ROLE[role]])
+	if !result.fought do return
 	ground := [Battle_Role]f32 {
 		.Attacker = 0,
 		.Defender = battle.ground,
@@ -494,9 +528,9 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	loser: Battle_Role
 	{
 		// Step: Avoid
-		defender := battle.sides[.Defender]
-		attacker := battle.sides[.Attacker]
-		gap := result.sides[.Defender].power.total - result.sides[.Attacker].power.total
+		defender := sides[.Defender]
+		attacker := sides[.Attacker]
+		gap := result.sides[at[.Defender]].power.total - result.sides[at[.Attacker]].power.total
 		if battle.can_avoid && gap < TEMPERAMENT_AVOID_BELOW[defender.temperament] {
 			roll := &result.avoid
 			tally_add(roll, .Dice, roll_2d6(&rng))
@@ -510,13 +544,13 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	}
 
 	// Step: Posture
-	for side, role in battle.sides do result.sides[role].posture = TEMPERAMENT_POSTURE[role][side.temperament]
+	for side, role in sides do result.sides[at[role]].posture = TEMPERAMENT_POSTURE[role][side.temperament]
 
 	// Step: Onset
 	if !decided {
 		totals: [Battle_Role]f32
 		for role in Battle_Role {
-			side := &result.sides[role]
+			side := &result.sides[at[role]]
 			roll := &side.onset
 			tally_add(roll, .Dice, roll_2d6(&rng))
 			for factor in side.power.factors do tally_add(roll, factor.kind, factor.value)
@@ -530,11 +564,11 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		if margin >= ONSET_TIE {
 			beaten := OTHER_ROLE[ahead]
 			if margin >= ONSET_ROUT_MARGIN {
-				result.outcome = result.sides[beaten].posture in POSTURE_PROBES ? .Probed : .Rout
+				result.outcome = result.sides[at[beaten]].posture in POSTURE_PROBES ? .Probed : .Rout
 				loser = beaten
 				decided = true
 			} else {
-				edge := &result.sides[ahead].edge
+				edge := &result.sides[at[ahead]].edge
 				tally_add(edge, .Margin, margin)
 				tally_scale(edge, .Share, EDGE_PER_MARGIN)
 			}
@@ -544,8 +578,8 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	// Step: Probe pull-out (the attacker first if both)
 	if !decided {
 		for role in Battle_Role {
-			behind := result.sides[role].edge.total - result.sides[OTHER_ROLE[role]].edge.total
-			if result.sides[role].posture in POSTURE_PROBES && behind <= PROBE_PULL_OUT {
+			behind := result.sides[at[role]].edge.total - result.sides[at[OTHER_ROLE[role]]].edge.total
+			if result.sides[at[role]].posture in POSTURE_PROBES && behind <= PROBE_PULL_OUT {
 				result.outcome = .Probed
 				result.pulled_out = true
 				loser = role
@@ -558,16 +592,16 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	// Step: Crisis
 	if !decided {
 		result.crisis_chosen = true
-		for side, role in battle.sides {
-			e := result.sides[role].edge.total - result.sides[OTHER_ROLE[role]].edge.total
+		for side, role in sides {
+			e := result.sides[at[role]].edge.total - result.sides[at[OTHER_ROLE[role]]].edge.total
 			choice := Crisis_Choice.Hold
 			if e > TEMPERAMENT_COMMIT_ABOVE[side.temperament] do choice = .Commit
 			if e <= TEMPERAMENT_BREAK_OFF_AT[side.temperament] do choice = .Break_Off
-			result.sides[role].choice = choice
+			result.sides[at[role]].choice = choice
 		}
 		breaking := [Battle_Role]bool {
-			.Attacker = result.sides[.Attacker].choice == .Break_Off,
-			.Defender = result.sides[.Defender].choice == .Break_Off,
+			.Attacker = result.sides[at[.Attacker]].choice == .Break_Off,
+			.Defender = result.sides[at[.Defender]].choice == .Break_Off,
 		}
 		switch {
 		case breaking[.Attacker] && breaking[.Defender]:
@@ -581,7 +615,7 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		case:
 			totals: [Battle_Role]f32
 			for role in Battle_Role {
-				side := &result.sides[role]
+				side := &result.sides[at[role]]
 				roll := &side.crisis
 				tally_add(roll, .Dice, roll_2d6(&rng))
 				for factor in side.power.factors do tally_add(roll, factor.kind, factor.value)
@@ -605,14 +639,15 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			case:
 				result.outcome = .Rout
 			}
-			beaten := &result.sides[loser]
+			beaten := &result.sides[at[loser]]
 			if beaten.choice == .Commit || beaten.posture in POSTURE_WORSENS {
 				result.worsened = OUTCOME_WORSE[result.outcome] != result.outcome
 				result.outcome = OUTCOME_WORSE[result.outcome]
 			}
 		}
 	}
-	result.winner = OTHER_ROLE[loser]
+	winner := OTHER_ROLE[loser]
+	result.winner = at[winner]
 
 	// Step: Aftermath. Without a winner, both sides take the loser row (Stalemate) or only the defender does
 	// (Avoided).
@@ -621,10 +656,10 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		as_loser: [Battle_Role]bool
 		as_loser[loser] = true
 		as_loser[OTHER_ROLE[loser]] = outcome == .Stalemate
-		engaged := min(battle.sides[.Attacker].men, battle.sides[.Defender].men)
+		engaged := min(sides[.Attacker].men, sides[.Defender].men)
 		for role in Battle_Role {
 			row: Battle_Role_Result = as_loser[role] ? .Loser : .Winner
-			out := &result.sides[role]
+			out := &result.sides[at[role]]
 			if share := OUTCOME_MEN_LOST[row][outcome]; share > 0 {
 				tally_add(&out.men, .Engaged, -engaged)
 				tally_scale(&out.men, .Share, share)
@@ -633,15 +668,15 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			out.falls_back = as_loser[role] && outcome in OUTCOME_RETREATS
 		}
 		// Supply: the loser loses some; the winner captures a share, converted to its own men's turns
-		beaten := battle.sides[loser]
-		victor := battle.sides[result.winner]
-		lost := &result.sides[loser].stock
+		beaten := sides[loser]
+		victor := sides[winner]
+		lost := &result.sides[at[loser]].stock
 		if table := OUTCOME_STOCK_LOST[outcome]; table > 0 {
 			tally_add(lost, .Lost, -table)
 			if beaten.stock < table do tally_add(lost, .Carried, table - beaten.stock)
 		}
 		if share := OUTCOME_STOCK_CAPTURED[outcome]; share > 0 && lost.total < 0 && victor.men > 0 {
-			captured := &result.sides[result.winner].stock
+			captured := &result.sides[at[winner]].stock
 			tally_add(captured, .Lost, -lost.total)
 			tally_scale(captured, .Men_Ratio, beaten.men / victor.men)
 			tally_scale(captured, .Share, share)
@@ -651,8 +686,8 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	}
 
 	// Step: Cohesion
-	for side, role in battle.sides {
-		out := &result.sides[role]
+	for side, role in sides {
+		out := &result.sides[at[role]]
 		men := side.men + out.men.total
 		readiness := clamp(side.readiness + out.readiness, 0, 100)
 		men_percent: f32 = side.men_max > 0 ? 100 * men / side.men_max : 100
@@ -668,11 +703,11 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	// Step: Follow. Nothing to follow when either side dissolved.
 	{
 		outcome := result.outcome
-		standing := !result.sides[loser].dissolved && !result.sides[result.winner].dissolved
+		standing := !result.sides[at[loser]].dissolved && !result.sides[at[winner]].dissolved
 		can_advance := standing && outcome in OUTCOME_RETREATS
 		can_pursue := standing && outcome in OUTCOME_PURSUABLE
-		victor := battle.sides[result.winner]
-		beaten := battle.sides[loser]
+		victor := sides[winner]
+		beaten := sides[loser]
 		severity := OUTCOME_SEVERITY[outcome]
 		if can_advance && severity >= TEMPERAMENT_ADVANCE_FROM[victor.temperament] do result.follow = .Advance
 		if can_pursue && severity >= TEMPERAMENT_PURSUE_FROM[victor.temperament] do result.follow = .Pursue
@@ -682,7 +717,7 @@ combat_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			tally_add(roll, .Mobility, MOBILITY_BONUS * (victor.mobility - beaten.mobility))
 			if roll.total >= MOBILITY_TARGET {
 				result.caught = true
-				out := &result.sides[loser]
+				out := &result.sides[at[loser]]
 				tally_add(&out.pursuit_men, .Men_Left, -(beaten.men + out.men.total))
 				tally_scale(&out.pursuit_men, .Share, OUTCOME_PURSUIT_MEN[outcome])
 				out.pursuit_readiness = PURSUIT_READINESS

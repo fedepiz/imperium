@@ -73,9 +73,6 @@ STOCK_PER_MOVEMENT :: 0.01
 SUPPLY_DECAY :: 2
 // Men a cell's supply point feeds
 MEN_PER_SUPPLY :: 250
-// Initiative to attack: sent at the enemy; intercepting one that entered the zone
-ORDERED_INITIATIVE :: 2
-INTERCEPT_INITIATIVE :: -1
 // Falling back, in movement points: at most when getting away; when caught
 FALL_BACK_BUDGET :: 10
 CHASE_BUDGET :: 15
@@ -149,13 +146,12 @@ Contact_Event :: struct {
 
 // Something being resolved, waiting on the player's answer. Nil actor = none open.
 Interaction :: struct {
-	// In a battle: attacker and defender
+	// In a battle: in contact order, the one that made contact first
 	actor, target: Piece_Id,
 	stage:         Interaction_Stage,
 	// Meet_Town: computed when opened
 	conquerable:   bool,
-	// Battle: both sides as they stood when announced; fought on the first Next
-	battle:        Battle,
+	// Battle: what came of the contact
 	result:        Battle_Result,
 }
 
@@ -565,7 +561,7 @@ world_step :: proc(input: Step_Input) {
 	// Step: Interaction
 	// Answers to the open interaction. A battle advances on Next once nothing walks.
 	// Battle and chase losses, for the Armies step
-	losses: [Battle_Role]struct {
+	losses: [2]struct {
 		army:                  Piece_Id,
 		men, readiness, stock: f32,
 	}
@@ -580,21 +576,14 @@ world_step :: proc(input: Step_Input) {
 			}
 		} else if input.answer == .Next && mov.subject == {} {
 			result := open.result
-			roles := [Battle_Role]Piece_Id {
-				.Attacker = open.actor,
-				.Defender = open.target,
-			}
-			loser_role := OTHER_ROLE[result.winner]
-			loser := roles[loser_role]
-			winner := roles[result.winner]
+			ids := [2]Piece_Id{open.actor, open.target}
+			fallen := 1 - result.winner
+			loser := ids[fallen]
+			winner := ids[result.winner]
 			close := true
 			#partial switch open.stage {
 			case .Announce:
-				open.result = combat_resolve(open.battle)
-				for id, role in roles {
-					side := open.result.sides[role]
-					losses[role] = {id, side.men.total, side.readiness, side.stock.total}
-				}
+				for side, i in result.sides do losses[i] = {ids[i], side.men.total, side.readiness, side.stock.total}
 				open.stage = .Report
 				close = false
 			case .Report:
@@ -602,12 +591,12 @@ world_step :: proc(input: Step_Input) {
 				close = false
 			case .Outcome:
 				// Dissolved armies leave the map
-				for side, role in result.sides do if side.dissolved do piece_despawn(roles[role])
+				for side, i in result.sides do if side.dissolved do piece_despawn(ids[i])
 
 				// Fall back away from the winner: the chase's length when caught, else until clear of the winner. The
 				// winner trails within movement left plus the temperament's overdraw. Chase losses land here.
 				beaten, victor := piece_get(loser), piece_get(winner)
-				if !result.sides[loser_role].falls_back || beaten == nil || victor == nil do break
+				if !result.sides[fallen].falls_back || beaten == nil || victor == nil do break
 				reach: f32 = result.caught ? CHASE_BUDGET : FALL_BACK_BUDGET
 				order = {
 					piece         = loser,
@@ -618,14 +607,14 @@ world_step :: proc(input: Step_Input) {
 				}
 				if !result.caught do order.clear_of = winner
 				if result.follow != .Stay {
-					temperament := open.battle.sides[result.winner].temperament
+					temperament := WORLD.armies[winner.index].temperament
 					order.chaser = winner
 					order.chaser_follows = result.caught
 					order.chaser_budget =
 						movement_budget(winner) + TEMPERAMENT_FOLLOW_OVERDRAW[temperament]
 				}
-				side := result.sides[loser_role]
-				if result.caught do losses[loser_role] = {loser, side.pursuit_men.total, side.pursuit_readiness, 0}
+				side := result.sides[fallen]
+				if result.caught do losses[fallen] = {loser, side.pursuit_men.total, side.pursuit_readiness, 0}
 				open.stage = .Fall_Back
 				close = false
 			}
@@ -657,10 +646,14 @@ world_step :: proc(input: Step_Input) {
 		}
 
 		ids := [2]Piece_Id{contact.initiator, contact.other}
-		sides: [2]Battle_Side
+		battle := Battle {
+			ordered   = contact.targeted,
+			can_avoid = true,
+			seed      = util.hash_contents(WORLD.turn, WORLD.player, ids[0], ids[1]),
+		}
 		for id, i in ids {
 			army := WORLD.armies[id.index]
-			sides[i] = {
+			battle.sides[i] = {
 				men         = f32(army.men),
 				men_max     = f32(army.men_max),
 				proficiency = army.proficiency,
@@ -669,44 +662,17 @@ world_step :: proc(input: Step_Input) {
 				baggage     = army.baggage,
 				mobility    = army.mobility,
 				temperament = army.temperament,
+				can_attack  = !WORLD.piece_turns[id.index].attacked,
 			}
 		}
-		gap := battle_strength(sides[0], sides[1]) - battle_strength(sides[1], sides[0])
-		ordered: f32 = contact.targeted ? ORDERED_INITIATIVE : 0
-		initiative := [2]f32 {
-			TEMPERAMENT_ATTACK_INITIATIVE[sides[0].temperament] + ordered,
-			TEMPERAMENT_ATTACK_INITIATIVE[sides[1].temperament] + INTERCEPT_INITIATIVE,
-		}
-		fresh := [2]bool {
-			!WORLD.piece_turns[ids[0].index].attacked,
-			!WORLD.piece_turns[ids[1].index].attacked,
-		}
-		switch {
-		case fresh[0] && gap + initiative[0] >= 0:
-		case fresh[1] && -gap + initiative[1] >= 0:
-			ids[0], ids[1] = ids[1], ids[0]
-			sides[0], sides[1] = sides[1], sides[0]
-		case contact.targeted:
-			WORLD.interaction = {
-				actor = ids[0],
-				target = ids[1],
-				stage = .Refused,
-				battle = {sides = {.Attacker = sides[0], .Defender = sides[1]}},
-			}
-			continue
-		case:
-			continue
-		}
-		WORLD.piece_turns[ids[0].index].attacked = true
+		result := combat_resolve(battle)
+		if !result.fought && !result.refused do continue
+		if result.fought do WORLD.piece_turns[ids[result.attacker].index].attacked = true
 		WORLD.interaction = {
-			actor = ids[0],
+			actor  = ids[0],
 			target = ids[1],
-			stage = .Announce,
-			battle = {
-				sides = {.Attacker = sides[0], .Defender = sides[1]},
-				can_avoid = true,
-				seed = util.hash_contents(WORLD.turn, WORLD.player, ids[0], ids[1]),
-			},
+			stage  = result.fought ? .Announce : .Refused,
+			result = result,
 		}
 	}
 
