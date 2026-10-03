@@ -352,7 +352,7 @@ world_present :: proc(
 					&card,
 					{text = fmt.tprintf("%s tries to avoid battle: ", names[defender])},
 					tally_part(&card, result.avoid),
-					{text = fmt.tprintf(" against %v, and %s.", MOBILITY_TARGET, got_away)},
+					{text = fmt.tprintf(" against %v, and %s.", result.mobility_target, got_away)},
 				)
 			}
 
@@ -372,10 +372,10 @@ world_present :: proc(
 						tally_part(&card, d.onset),
 						{text = "."},
 					)
-					ahead := a.onset.total > d.onset.total ? attacker : defender
+					ahead := result.onset_ahead
 					edge := &result.sides[ahead].edge
 					switch {
-					case result.onset_margin.total < ONSET_TIE:
+					case result.onset_tied:
 						card_line(&card, {text = "Neither gains the upper hand."})
 					case len(edge.factors) == 0:
 						card_line(
@@ -433,7 +433,7 @@ world_present :: proc(
 					&card,
 					{text = fmt.tprintf("%s checks cohesion: ", names[i])},
 					tally_part(&card, side.cohesion),
-					{text = fmt.tprintf(" against %v, and %s.", COHESION_TARGET, fate)},
+					{text = fmt.tprintf(" against %v, and %s.", result.cohesion_target, fate)},
 				)
 			}
 
@@ -444,7 +444,7 @@ world_present :: proc(
 					&card,
 					{text = fmt.tprintf("%s pursues: ", winner)},
 					tally_part(&card, result.pursuit),
-					{text = fmt.tprintf(" against %v, and %s.", MOBILITY_TARGET, caught)},
+					{text = fmt.tprintf(" against %v, and %s.", result.mobility_target, caught)},
 				)
 			}
 		case .Outcome:

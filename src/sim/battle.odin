@@ -349,7 +349,7 @@ Battle_Side_Result :: struct {
 	falls_back:        bool,
 	// Going in
 	power:             Tally,
-	// Rolls; cohesion is against COHESION_TARGET
+	// Rolls; cohesion is against the result's cohesion_target
 	onset:             Tally,
 	crisis:            Tally,
 	cohesion:          Tally,
@@ -367,15 +367,21 @@ Battle_Result :: struct {
 	// The side ahead's total minus the other's
 	onset_margin:    Tally,
 	crisis_margin:   Tally,
+	// After the onset; ahead is valid unless tied
+	onset_ahead:     int,
+	onset_tied:      bool,
 	// The winner trails the loser as it falls back: onto its ground, or all the way when caught
 	follows:         bool,
 	// Movement points the winner marches beyond its budget to follow
 	follow_overdraw: f32,
 	// The pursuit caught the loser
 	caught:          bool,
-	// Rolls against MOBILITY_TARGET: the defender's attempt to get away, and the winner's chase
+	// Rolls against mobility_target: the defender's attempt to get away, and the winner's chase
 	avoid:           Tally,
 	pursuit:         Tally,
+	// What the threshold rolls had to reach
+	mobility_target: f32,
+	cohesion_target: f32,
 	// A prober pulled out after the onset
 	pulled_out:      bool,
 	// Both chose in the crisis (it wasn't decided before)
@@ -408,6 +414,8 @@ margin_of :: proc(totals: [Battle_Role]f32, ahead: Battle_Role) -> (margin: Tall
 
 battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	rng := battle.seed
+	result.mobility_target = MOBILITY_TARGET
+	result.cohesion_target = COHESION_TARGET
 	roll_2d6 :: proc(rng: ^u64) -> f32 {
 		die :: proc(rng: ^u64) -> f32 {return 0.5 + 6 * util.random_unit(rng)}
 		return die(rng) + die(rng)
@@ -486,7 +494,9 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		ahead: Battle_Role = totals[.Attacker] > totals[.Defender] ? .Attacker : .Defender
 		result.onset_margin = margin_of(totals, ahead)
 		margin := result.onset_margin.total
-		if margin >= ONSET_TIE {
+		result.onset_ahead = at[ahead]
+		result.onset_tied = margin < ONSET_TIE
+		if !result.onset_tied {
 			beaten := OTHER_ROLE[ahead]
 			if margin >= ONSET_ROUT_MARGIN {
 				result.outcome =
