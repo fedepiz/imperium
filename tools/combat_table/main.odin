@@ -1,4 +1,4 @@
-// Prints battle odds from sim's combat_resolve, for tuning. Run from the repo root:
+// Prints battle odds from sim's battle_resolve, for tuning. Run from the repo root:
 //   odin run tools/combat_table
 package combat_table
 
@@ -59,7 +59,7 @@ main :: proc() {
 			// Random temperaments, from the seed so runs repeat
 			battle.sides[0].temperament = sim.Temperament(((seed * 2654435761) >> 16) % 4)
 			battle.sides[1].temperament = sim.Temperament(((seed * 0x9e3779b1) >> 20) % 4)
-			result := sim.combat_resolve(battle)
+			result := sim.battle_resolve(battle)
 			outcomes[result.outcome] += 1
 			switch {
 			case result.outcome not_in sim.OUTCOME_DECIDED:

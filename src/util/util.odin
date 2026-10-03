@@ -317,12 +317,29 @@ smooth_polyline :: proc(p: [][2]f32, n: int, closed: bool, smoothing: Smoothing,
 
 // Random --------------------------------------------------------------------------------------------------------------
 
+// splitmix64's mixer: every input bit affects every output bit
+random_mix :: proc(z: u64) -> u64 {
+	z := z
+	z = (z ~ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ~ (z >> 27)) * 0x94d049bb133111eb
+	return z ~ (z >> 31)
+}
+
+// The next number of the sequence; state starts as the seed (splitmix64)
+random_next :: proc(state: ^u64) -> u64 {
+	state^ += 0x9e3779b97f4a7c15
+	return random_mix(state^)
+}
+
+// Uniform on [0, 1)
+random_unit :: proc(state: ^u64) -> f32 {
+	return f32(random_next(state) >> 40) / (1 << 24)
+}
+
 // Deterministic hash to [0, 1)
 random_xy :: proc(x, y: int, stream: u32) -> f32 {
-	h := u32(x) * 374761393 + u32(y) * 668265263 + stream * 2246822519
-	h = (h ~ (h >> 13)) * 1274126177
-	h ~= h >> 16
-	return f32(h >> 8) / f32(1 << 24)
+	key := u64(u32(x)) << 32 | u64(u32(y))
+	return f32(random_mix(key ~ u64(stream) * 0x9e3779b97f4a7c15) >> 40) / (1 << 24)
 }
 
 // roll in 0..1. picked = false if all weights are 0.

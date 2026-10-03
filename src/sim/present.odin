@@ -450,17 +450,15 @@ world_present :: proc(
 		case .Outcome:
 			card.title = fmt.tprintf("Battle: %s", OUTCOME_TITLES[result.outcome])
 		case .Fall_Back:
-			switch result.follow {
-			case .Stay:
+			switch {
+			case !result.follows:
 				card.title = fmt.tprintf("%s falls back", loser)
-			case .Advance:
+			case len(result.pursuit.factors) == 0:
 				card.title = fmt.tprintf("%s falls back; %s advances", loser, winner)
-			case .Pursue:
-				if result.caught {
-					card.title = fmt.tprintf("%s pursues and catches %s", winner, loser)
-				} else {
-					card.title = fmt.tprintf("%s pursues; %s gets away", winner, loser)
-				}
+			case result.caught:
+				card.title = fmt.tprintf("%s pursues and catches %s", winner, loser)
+			case:
+				card.title = fmt.tprintf("%s pursues; %s gets away", winner, loser)
 			}
 		}
 		order := [Battle_Role]int{.Attacker = attacker, .Defender = defender}

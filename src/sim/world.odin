@@ -606,12 +606,10 @@ world_step :: proc(input: Step_Input) {
 					unhindered_by = winner,
 				}
 				if !result.caught do order.clear_of = winner
-				if result.follow != .Stay {
-					temperament := WORLD.armies[winner.index].temperament
+				if result.follows {
 					order.chaser = winner
 					order.chaser_follows = result.caught
-					order.chaser_budget =
-						movement_budget(winner) + TEMPERAMENT_FOLLOW_OVERDRAW[temperament]
+					order.chaser_budget = movement_budget(winner) + result.follow_overdraw
 				}
 				side := result.sides[fallen]
 				if result.caught do losses[fallen] = {loser, side.pursuit_men.total, side.pursuit_readiness, 0}
@@ -665,7 +663,7 @@ world_step :: proc(input: Step_Input) {
 				can_attack  = !WORLD.piece_turns[id.index].attacked,
 			}
 		}
-		result := combat_resolve(battle)
+		result := battle_resolve(battle)
 		if !result.fought && !result.refused do continue
 		if result.fought do WORLD.piece_turns[ids[result.attacker].index].attacked = true
 		WORLD.interaction = {
