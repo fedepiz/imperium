@@ -14,7 +14,8 @@ PIECES_FILE :: "pieces.txt"
 ARMY_FORAGING_DEFAULT :: 40
 ARMY_BAGGAGE_DEFAULT :: 4
 ARMY_MOBILITY_DEFAULT :: 2
-ARMY_TEMPERAMENT_DEFAULT :: sim.Temperament.Steady
+// For generals that don't set one
+GENERAL_TEMPERAMENT_DEFAULT :: sim.Temperament.Steady
 
 // Results in the temp allocator. Prints the error and returns false on failure. File format: see pieces.txt.
 pieces_load :: proc(
@@ -22,7 +23,7 @@ pieces_load :: proc(
 	region_ids: []string,
 ) -> (
 	factions: []sim.Scenario_Faction,
-	character_names: []string,
+	characters: []sim.Scenario_Character,
 	pieces: []sim.Scenario_Piece,
 	ok: bool,
 ) {
@@ -50,7 +51,7 @@ pieces_load :: proc(
 	kinds := make([dynamic]Kind, context.temp_allocator)
 	faction_list := make([dynamic]sim.Scenario_Faction, context.temp_allocator)
 	piece_list := make([dynamic]sim.Scenario_Piece, context.temp_allocator)
-	character_list := make([dynamic]string, context.temp_allocator)
+	character_list := make([dynamic]sim.Scenario_Character, context.temp_allocator)
 	// Per region: already has a capital
 	has_capital := make([]bool, len(region_ids), context.temp_allocator)
 	for row, n in root.children {
@@ -145,7 +146,16 @@ pieces_load :: proc(
 					if general == "" {
 						return nil, nil, nil, fail(path, row.key, n, "its piece's general needs a name")
 					}
-					append(&character_list, general)
+					character := sim.Scenario_Character {
+						name        = general,
+						temperament = GENERAL_TEMPERAMENT_DEFAULT,
+					}
+					if _, has_temperament := tabula.get_text(piece_row, "temperament"); has_temperament {
+						temperament, is_temperament := enum_get(piece_row, "temperament", sim.Temperament)
+						if !is_temperament do return nil, nil, nil, fail(path, row.key, n, "its piece's temperament is not a temperament")
+						character.temperament = temperament
+					}
+					append(&character_list, character)
 					piece.general = len(character_list)
 				}
 				if men, has_men := tabula.get_num(piece_row, "men"); has_men {
@@ -165,12 +175,6 @@ pieces_load :: proc(
 						foraging         = tabula.get_num(piece_row, "foraging", ARMY_FORAGING_DEFAULT),
 						baggage          = tabula.get_num(piece_row, "baggage", ARMY_BAGGAGE_DEFAULT),
 						mobility         = tabula.get_num(piece_row, "mobility", ARMY_MOBILITY_DEFAULT),
-						temperament      = ARMY_TEMPERAMENT_DEFAULT,
-					}
-					if _, has_temperament := tabula.get_text(piece_row, "temperament"); has_temperament {
-						temperament, is_temperament := enum_get(piece_row, "temperament", sim.Temperament)
-						if !is_temperament do return nil, nil, nil, fail(path, row.key, n, "its piece's temperament is not a temperament")
-						piece.army.temperament = temperament
 					}
 					piece.army.stock = piece.army.baggage
 				}

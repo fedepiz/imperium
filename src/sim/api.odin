@@ -72,32 +72,40 @@ Piece_Trait :: enum u8 {
 	Capturable,
 }
 
+// A character's
+Temperament :: enum u8 {
+	Bold,
+	Steady,
+	Cautious,
+	Cunning,
+}
+
 Army :: struct {
 	// False = no army
-	active:           bool,
+	active:                bool,
 	// Men now, and at full strength
-	men:              int,
-	men_max:          int,
+	men:                   int,
+	men_max:               int,
 	// Troop quality, 0..100
-	proficiency:      f32,
+	proficiency:           f32,
 	// Fatigue, 0..100 (100 = fully rested)
-	readiness:        f32,
+	readiness:             f32,
 	// Skill at living off the land, 0..100; times the terrain's yield, it's what foraging brings in
-	foraging:         f32,
-	// Its commander's temperament
-	temperament:         Temperament,
+	foraging:              f32,
+	// Its general's, synced each step
+	commander_temperament: Temperament,
 	// 1..4: avoiding battle and pursuing
-	mobility:            f32,
+	mobility:              f32,
 	// Supply carried, in turns of the army's needs, 0..baggage. Supply level = stock / baggage; readiness can't
 	// exceed it.
-	stock:            f32,
-	baggage:          f32,
+	stock:                 f32,
+	baggage:               f32,
 	// Stock change at the end of its faction's turn, before marching, in turns. Live for the player's armies;
 	// others keep the value from their own last turn.
-	resupply:            f32,
+	resupply:              f32,
 	// Where resupply comes from (the better of the two), and that source's efficiency, 0..1. Updated with resupply.
-	resupply_source:     Resupply_Source,
-	resupply_efficiency: f32,
+	resupply_source:       Resupply_Source,
+	resupply_efficiency:   f32,
 }
 
 Resupply_Source :: enum u8 {
@@ -122,27 +130,32 @@ Piece_Id :: struct {
 
 // Initial world state. A cell layer whose length isn't CELLS_MAX is treated as missing.
 Scenario :: struct {
-	surface:         []Surface,
-	elevation:       []u8,
-	trees:           []u8,
-	moisture:        []u8,
+	surface:      []Surface,
+	elevation:    []u8,
+	trees:        []u8,
+	moisture:     []u8,
 	// Per kind, per cell: way id, 0 = none
-	ways:            [Way_Kind][]u16,
+	ways:         [Way_Kind][]u16,
 	// Per cell, 0 = none (water). Names start at region 1.
-	regions:         []Region_Id,
-	region_names:    []string,
+	regions:      []Region_Id,
+	region_names: []string,
 	// Factions in turn order
-	factions:        []Scenario_Faction,
-	character_names: []string,
-	pieces:          []Scenario_Piece,
+	factions:     []Scenario_Faction,
+	characters:   []Scenario_Character,
+	pieces:       []Scenario_Piece,
 	// From a previous run, or empty. Used only if the fingerprint matches; otherwise rebuilt.
-	cached_files:    [Cached_File_Id]Cached_File,
+	cached_files: [Cached_File_Id]Cached_File,
 }
 
 Scenario_Faction :: struct {
 	name:    string,
 	culture: Culture,
 	color:   [4]f32,
+}
+
+Scenario_Character :: struct {
+	name:        string,
+	temperament: Temperament,
 }
 
 Scenario_Piece :: struct {

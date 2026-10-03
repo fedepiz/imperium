@@ -1,7 +1,6 @@
 package sim
 
 import "core:math"
-import "core:strings"
 
 import "../util"
 
@@ -45,13 +44,6 @@ COHESION_TARGET :: 10
 AVOID_READINESS :: 5
 
 // Temperaments -------------------------------------------------------------------------------------------------------
-
-Temperament :: enum u8 {
-	Bold,
-	Steady,
-	Cautious,
-	Cunning,
-}
 
 // Attacks when own strength − enemy strength + initiative ≥ 0; ORDERED_INITIATIVE (sent at the enemy) and
 // INTERCEPT_INITIATIVE (the enemy entered its zone) add to the temperament's
@@ -330,7 +322,7 @@ OTHER_ROLE := [Battle_Role]Battle_Role {
 }
 
 // A side's roll, in a margin
-ROLE_FACTORS := [Battle_Role]Factor_Kind {
+ROLE_TERMS := [Battle_Role]Report_Term {
 	.Attacker = .Attacker,
 	.Defender = .Defender,
 }
@@ -354,6 +346,8 @@ Battle_Side :: struct {
 	temperament: Temperament,
 	// Hasn't attacked this turn
 	can_attack:  bool,
+	// Shown in the log
+	name:        Name,
 }
 
 Battle :: struct {
@@ -373,7 +367,7 @@ Battle :: struct {
 Battle_Side_Result :: struct {
 	// Going in, and the posture it took
 	power:             Tally,
-	posture:           string,
+	posture:           Name,
 	men:               Tally,
 	readiness:         f32,
 	stock:             Tally,
@@ -392,7 +386,7 @@ Battle_Result :: struct {
 	refused:         bool,
 	attacker:        int,
 	outcome:         Battle_Outcome,
-	outcome_title:   string,
+	outcome_title:   Name,
 	// Valid when outcome in OUTCOME_RETREATS
 	winner:          int,
 	sides:           [2]Battle_Side_Result,
@@ -403,29 +397,8 @@ Battle_Result :: struct {
 	// The winner pursued, and caught the loser
 	pursued:         bool,
 	caught:          bool,
-	log:             Battle_Log,
+	log:             Report,
 }
-
-BATTLE_LINES_MAX :: 24
-BATTLE_LINE_PARTS :: 16
-BATTLE_NUMBERS_MAX :: 24
-
-// What happened, as lines to read
-Battle_Log :: struct {
-	lines:   [dynamic; BATTLE_LINES_MAX][dynamic; BATTLE_LINE_PARTS]Battle_Part,
-	numbers: [dynamic; BATTLE_NUMBERS_MAX]Tally,
-}
-
-// Text; a side's name, by its index in contact order; one of the log's numbers; or a plain number
-Battle_Part :: union {
-	string,
-	Battle_Name,
-	Battle_Number,
-	f32,
-}
-
-Battle_Name :: distinct int
-Battle_Number :: distinct int
 
 // Resolve ------------------------------------------------------------------------------------------------------------
 
@@ -475,6 +448,10 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		.Attacker = battle.sides[at[.Attacker]],
 		.Defender = battle.sides[at[.Defender]],
 	}
+	names := [Battle_Role]string {
+		.Attacker = string(sides[.Attacker].name[:]),
+		.Defender = string(sides[.Defender].name[:]),
+	}
 
 	// Step: Power
 	power: [Battle_Role]Tally
@@ -483,8 +460,8 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		result.sides[at[role]].power = power[role]
 	}
 	if !result.fought do return
-	say(log, "% attacks %.", at[.Attacker], at[.Defender])
-	say(log, "Power: % %, % %.", at[.Attacker], power[.Attacker], at[.Defender], power[.Defender])
+	report_say(log, "% attacks %.", names[.Attacker], names[.Defender])
+	report_say(log, "Power % against %.", power[.Attacker], power[.Defender])
 	ground := [Battle_Role]f32 {
 		.Attacker = 0,
 		.Defender = battle.ground,
@@ -501,7 +478,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			roll: Tally
 			tally_add(&roll, .Dice, roll_2d6(&rng))
 			tally_add(&roll, .Mobility, MOBILITY_BONUS * (defender.mobility - attacker.mobility))
-			if check(log, at[.Defender], roll, MOBILITY_TARGET, "tries to avoid battle") {
+			if check(log, names[.Defender], roll, MOBILITY_TARGET, "tries to avoid battle") {
 				result.outcome = .Avoided
 				loser = .Defender
 				decided = true
@@ -514,10 +491,10 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	words: [Battle_Role]string
 	for side, role in sides {
 		postures[role] = TEMPERAMENT_POSTURE[role][side.temperament]
-		result.sides[at[role]].posture = POSTURE_TITLES[postures[role]]
+		name_set(&result.sides[at[role]].posture, POSTURE_TITLES[postures[role]])
 		words[role] = POSTURE_WORDS[postures[role]]
 	}
-	if !decided do choose(log, at, words)
+	if !decided do choose(log, names, words)
 
 	// Step: Onset
 	edges: [Battle_Role]Tally
@@ -525,14 +502,14 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		rolls: [Battle_Role]Tally
 		for &roll, role in rolls {
 			tally_add(&roll, .Dice, roll_2d6(&rng))
-			for factor in power[role].factors do tally_add(&roll, factor.kind, factor.value)
+			for factor in power[role].factors do tally_add(&roll, factor.term, factor.value)
 			tally_add(&roll, .Posture, POSTURE_ONSET[postures[role]])
 			tally_add(&roll, .Ground, ground[role])
 		}
-		ahead, margin := contest(log, "Onset", at, rolls)
+		ahead, margin := contest(log, "Onset", names, rolls)
 		switch {
 		case margin < ONSET_TIE:
-			say(log, "Neither gains the upper hand.")
+			report_say(log, "Neither gains the upper hand.")
 		case margin >= ONSET_ROUT_MARGIN:
 			loser = OTHER_ROLE[ahead]
 			result.outcome = postures[loser] in POSTURE_PROBES ? .Probed : .Rout
@@ -540,7 +517,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		case:
 			tally_add(&edges[ahead], .Margin, margin)
 			tally_scale(&edges[ahead], .Share, EDGE_PER_MARGIN)
-			say(log, "% gains an edge of %.", at[ahead], edges[ahead])
+			report_say(log, "% gains an edge of %.", names[ahead], edges[ahead])
 		}
 	}
 
@@ -549,7 +526,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		for role in Battle_Role {
 			behind := edges[role].total - edges[OTHER_ROLE[role]].total
 			if postures[role] in POSTURE_PROBES && behind <= PROBE_PULL_OUT {
-				say(log, "% is probing and falls behind.", at[role])
+				report_say(log, "% is probing and falls behind.", names[role])
 				result.outcome = .Probed
 				loser = role
 				decided = true
@@ -568,7 +545,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			if e <= TEMPERAMENT_BREAK_OFF_AT[side.temperament] do choices[role] = .Break_Off
 			words[role] = CHOICE_WORDS[choices[role]]
 		}
-		choose(log, at, words)
+		choose(log, names, words)
 		switch {
 		case choices[.Attacker] == .Break_Off && choices[.Defender] == .Break_Off:
 			result.outcome = .Stalemate
@@ -582,13 +559,13 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			rolls: [Battle_Role]Tally
 			for &roll, role in rolls {
 				tally_add(&roll, .Dice, roll_2d6(&rng))
-				for factor in power[role].factors do tally_add(&roll, factor.kind, factor.value)
+				for factor in power[role].factors do tally_add(&roll, factor.term, factor.value)
 				tally_add(&roll, .Edge, edges[role].total)
 				tally_add(&roll, .Commit, choices[role] == .Commit ? COMMIT_BONUS : 0)
 				tally_add(&roll, .Posture, POSTURE_CRISIS[postures[role]])
 				tally_add(&roll, .Ground, ground[role])
 			}
-			ahead, margin := contest(log, "Crisis", at, rolls)
+			ahead, margin := contest(log, "Crisis", names, rolls)
 			loser = OTHER_ROLE[ahead]
 			switch {
 			case margin <= CRISIS_STALEMATE:
@@ -608,13 +585,13 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	}
 	winner := OTHER_ROLE[loser]
 	result.winner = at[winner]
-	result.outcome_title = OUTCOME_TITLES[result.outcome]
+	name_set(&result.outcome_title, OUTCOME_TITLES[result.outcome])
 	if result.outcome == .Stalemate {
-		say(log, "Stalemate.")
+		report_say(log, "Stalemate.")
 	} else {
-		say(log, "% %.", at[loser], OUTCOME_WORDS[result.outcome])
+		report_say(log, "% %.", names[loser], OUTCOME_WORDS[result.outcome])
 	}
-	if worsened do say(log, "Having pressed or committed, % fares worse.", at[loser])
+	if worsened do report_say(log, "Having pressed or committed, % fares worse.", names[loser])
 
 	// Step: Aftermath. Without a winner, both sides take the loser row (Stalemate) or only the defender does
 	// (Avoided).
@@ -665,7 +642,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		tally_add(&roll, .Proficiency, side.proficiency / 10)
 		tally_add(&roll, .Readiness, -max(0, (COHESION_READINESS - readiness) / 10))
 		tally_add(&roll, .Losses, -max(0, (COHESION_MEN - men_percent) / 10))
-		out.dissolved = !check(log, at[role], roll, COHESION_TARGET, "checks cohesion")
+		out.dissolved = !check(log, names[role], roll, COHESION_TARGET, "checks cohesion")
 	}
 
 	// Step: Follow. Nothing to follow when either side dissolved.
@@ -686,7 +663,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			roll: Tally
 			tally_add(&roll, .Dice, roll_2d6(&rng))
 			tally_add(&roll, .Mobility, MOBILITY_BONUS * (victor.mobility - beaten.mobility))
-			result.caught = check(log, at[winner], roll, MOBILITY_TARGET, "pursues")
+			result.caught = check(log, names[winner], roll, MOBILITY_TARGET, "pursues")
 			if result.caught {
 				out := &result.sides[at[loser]]
 				tally_add(&out.pursuit_men, .Men_Left, -(beaten.men + out.men.total))
@@ -698,50 +675,21 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	return
 }
 
-// Records a line of text; each % takes the next arg. An int is a side, by its index in contact order.
-@(private = "file")
-say :: proc(log: ^Battle_Log, text: string, args: ..union {
-		int,
-		string,
-		Tally,
-		f32,
-	}) {
-	line: [dynamic; BATTLE_LINE_PARTS]Battle_Part
-	rest := text
-	for arg in args {
-		slot := strings.index_byte(rest, '%')
-		append(&line, rest[:slot])
-		rest = rest[slot + 1:]
-		switch value in arg {
-		case int:
-			append(&line, Battle_Name(value))
-		case string:
-			append(&line, value)
-		case Tally:
-			append(&log.numbers, value)
-			append(&line, Battle_Number(len(log.numbers) - 1))
-		case f32:
-			append(&line, value)
-		}
-	}
-	append(&line, rest)
-	append(&log.lines, line)
-}
-
 // The side's roll against target: whether it reached it
 @(private = "file")
-check :: proc(log: ^Battle_Log, side: int, roll: Tally, target: f32, action: string) -> bool {
+check :: proc(log: ^Report, name: string, roll: Tally, target: f32, action: string) -> bool {
 	passed := roll.total >= target
-	say(log, "% %: % against %, and %.", side, action, roll, target, passed ? "succeeds" : "fails")
+	verdict := passed ? "succeeds" : "fails"
+	report_say(log, "% %: % against %, and %.", name, action, roll, target, verdict)
 	return passed
 }
 
 // Both sides' rolls: the side ahead (the attacker on a tie), and its margin
 @(private = "file")
 contest :: proc(
-	log: ^Battle_Log,
+	log: ^Report,
 	label: string,
-	at: [Battle_Role]int,
+	names: [Battle_Role]string,
 	rolls: [Battle_Role]Tally,
 ) -> (
 	ahead: Battle_Role,
@@ -750,17 +698,18 @@ contest :: proc(
 	ahead = rolls[.Attacker].total < rolls[.Defender].total ? .Defender : .Attacker
 	behind := OTHER_ROLE[ahead]
 	by: Tally
-	tally_add(&by, ROLE_FACTORS[ahead], rolls[ahead].total)
-	tally_add(&by, ROLE_FACTORS[behind], -rolls[behind].total)
-	attacker, defender := at[.Attacker], at[.Defender]
-	say(log, "%: % %, % %.", label, attacker, rolls[.Attacker], defender, rolls[.Defender])
-	say(log, "% is ahead by %.", at[ahead], by)
+	tally_add(&by, ROLE_TERMS[ahead], rolls[ahead].total)
+	tally_add(&by, ROLE_TERMS[behind], -rolls[behind].total)
+	attacker, defender := names[.Attacker], names[.Defender]
+	report_say(log, "%: % %, % %.", label, attacker, rolls[.Attacker], defender, rolls[.Defender])
+	report_say(log, "% is ahead by %.", names[ahead], by)
 	return ahead, by.total
 }
 
 // Both sides' choices
 @(private = "file")
-choose :: proc(log: ^Battle_Log, at: [Battle_Role]int, words: [Battle_Role]string) {
-	say(log, "% %; % %.", at[.Attacker], words[.Attacker], at[.Defender], words[.Defender])
+choose :: proc(log: ^Report, names: [Battle_Role]string, words: [Battle_Role]string) {
+	attacker, defender := names[.Attacker], names[.Defender]
+	report_say(log, "% %; % %.", attacker, words[.Attacker], defender, words[.Defender])
 }
 

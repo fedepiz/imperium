@@ -81,6 +81,9 @@ CHASE_BUDGET :: 15
 // 1 − distance / FORAGE_RADIUS
 FORAGE_RADIUS :: 12
 
+// Commander temperament of an army without a general
+NO_GENERAL_TEMPERAMENT :: Temperament.Steady
+
 // What the land yields to foragers, 0..1, by terrain type; blended from Open by the type's strength
 FORAGE_YIELD := [Terrain_Type]f32 {
 	.Open      = 0.7,
@@ -474,8 +477,9 @@ world_load :: proc(scenario: Scenario) -> bool {
 			)
 		}
 		characters: [dynamic; CHARACTER_MAX]Character_Id
-		for name in scenario.character_names {
-			append(&characters, character_spawn({}, name))
+		for character in scenario.characters {
+			id := character_spawn({temperament = character.temperament}, character.name)
+			append(&characters, id)
 		}
 		for piece in scenario.pieces {
 			owner: Faction_Id
@@ -659,9 +663,10 @@ world_step :: proc(input: Step_Input) {
 				stock       = army.stock,
 				baggage     = army.baggage,
 				mobility    = army.mobility,
-				temperament = army.temperament,
+				temperament = army.commander_temperament,
 				can_attack  = !WORLD.piece_turns[id.index].attacked,
 			}
+			name_set(&battle.sides[i].name, piece_title(id))
 		}
 		result := battle_resolve(battle)
 		if !result.fought && !result.refused do continue
@@ -883,6 +888,8 @@ world_step :: proc(input: Step_Input) {
 		piece := WORLD.pieces[index]
 		readiness := army.readiness
 		stock := army.stock
+		general := character_get(piece.general)
+		army.commander_temperament = general != nil ? general.temperament : NO_GENERAL_TEMPERAMENT
 
 		// Battle and chase losses
 		for loss in losses {
@@ -1083,6 +1090,12 @@ piece_get :: proc(id: Piece_Id) -> ^Piece {
 	return piece
 }
 
+// Name, or "???" if unnamed. Piece must be alive.
+piece_title :: proc(id: Piece_Id) -> string {
+	name := WORLD.piece_names[id.index][:]
+	return len(name) > 0 ? string(name) : "???"
+}
+
 piece_alive :: proc(piece: Piece) -> bool {
 	return piece.generation & 1 == 1
 }
@@ -1159,7 +1172,8 @@ faction_id :: proc(index: int) -> Faction_Id {
 
 Character :: struct {
 	// Odd = occupied, even = free
-	generation: u16,
+	generation:  u16,
+	temperament: Temperament,
 }
 
 // Even generation (including the zero id) = nil

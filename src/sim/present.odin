@@ -30,46 +30,6 @@ REGION_SATURATION :: 0.55
 REGION_VALUE :: 0.75
 
 @(private = "file", rodata)
-FACTOR_TITLES := [Factor_Kind]string {
-	.Dice        = "Roll",
-	.Proficiency = "Proficiency",
-	.Readiness   = "Readiness",
-	.Numbers     = "Numbers",
-	.Posture     = "Posture",
-	.Ground      = "Ground",
-	.Edge        = "Edge",
-	.Commit      = "Committed",
-	.Mobility    = "Mobility",
-	.Losses      = "Losses",
-	.Attacker    = "Attacker",
-	.Defender    = "Defender",
-	.Margin      = "Margin",
-	.Engaged     = "Engaged",
-	.Share       = "Share",
-	.Lost        = "Lost",
-	.Carried     = "Not carried",
-	.Men_Ratio   = "Men ratio",
-	.Baggage     = "Baggage full",
-	.Men_Left    = "Men left",
-}
-
-@(private = "file")
-Factor_Unit :: enum u8 {
-	Points,
-	Men,
-	Percent,
-	Ratio,
-}
-
-@(private = "file", rodata)
-FACTOR_UNITS := #partial [Factor_Kind]Factor_Unit {
-	.Engaged   = .Men,
-	.Men_Left  = .Men,
-	.Share     = .Percent,
-	.Men_Ratio = .Ratio,
-}
-
-@(private = "file", rodata)
 ROLE_TITLES := [2]string{"Attacker", "Defender"}
 
 @(private = "file", rodata)
@@ -294,24 +254,21 @@ world_present :: proc(
 			card_line(&card, {text = reason})
 		case .Report:
 			card.title = "Battle report"
-			for &line in result.log.lines {
+			log := &result.log
+			for line in log.lines {
 				begin := len(card.parts)
-				for part in line {
-					switch value in part {
-					case string:
-						append(&card.parts, Line_Part{text = value})
-					case Battle_Name:
-						append(&card.parts, Line_Part{text = names[value]})
-					case Battle_Number:
-						append(&card.parts, tally_part(&card, result.log.numbers[value]))
-					case f32:
-						append(&card.parts, Line_Part{text = fmt.tprintf("%v", value)})
+				for &part in log.parts[line.begin:][:line.len] {
+					text := span.to_string(log.text[:], part.text)
+					shown := Line_Part {
+						text = text,
 					}
+					if len(part.tally.factors) > 0 do shown.breakdown = card_breakdown(&card, part.tally, text)
+					append(&card.parts, shown)
 				}
 				append(&card.lines, span.from_range(begin, len(card.parts)))
 			}
 		case .Outcome:
-			card.title = fmt.tprintf("Battle: %s", result.outcome_title)
+			card.title = fmt.tprintf("Battle: %s", string(result.outcome_title[:]))
 		case .Fall_Back:
 			switch {
 			case !result.follows:
@@ -331,7 +288,7 @@ world_present :: proc(
 			if open.stage == .Announce || open.stage == .Refused {
 				side := WORLD.armies[ids[i].index]
 				power := result.sides[i].power
-				append(column, Field{label = "Commander", value = fmt.tprintf("%v", side.temperament)})
+				append(column, Field{label = "Commander", value = fmt.tprintf("%v", side.commander_temperament)})
 				append(column, Field{label = "Men", value = util.format_compact(f64(side.men))})
 				append(column, Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", side.proficiency)})
 				append(column, Field{label = "Readiness", value = fmt.tprintf("%.0f%%", side.readiness)})
@@ -347,7 +304,7 @@ world_present :: proc(
 				append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.pursuit_readiness)})
 				continue
 			}
-			append(column, Field{label = "Posture", value = side.posture})
+			append(column, Field{label = "Posture", value = string(side.posture[:])})
 			append(column, tally_field(&card, "Men", side.men, util.format_compact(f64(side.men.total))))
 			append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.readiness)})
 			append(column, tally_field(&card, "Supply", side.stock, fmt.tprintf("%+.1f", side.stock.total)))
@@ -379,7 +336,7 @@ card_breakdown :: proc(card: ^Card, tally: Tally, total: string) -> int {
 	}
 	for factor, i in tally.factors {
 		value: string
-		switch FACTOR_UNITS[factor.kind] {
+		switch TERM_UNITS[factor.term] {
 		case .Points:
 			value = i == 0 ? fmt.tprintf("%.1f", factor.value) : fmt.tprintf("%+.1f", factor.value)
 		case .Men:
@@ -390,17 +347,10 @@ card_breakdown :: proc(card: ^Card, tally: Tally, total: string) -> int {
 			value = fmt.tprintf("%.2f", factor.value)
 		}
 		if factor.op == .Scale do value = fmt.tprintf("× %s", value)
-		append(&breakdown.terms, Field{label = FACTOR_TITLES[factor.kind], value = value})
+		append(&breakdown.terms, Field{label = TERM_TITLES[factor.term], value = value})
 	}
 	append(&card.breakdowns, breakdown)
 	return len(card.breakdowns)
-}
-
-// The tally's total, its factors on hover
-@(private = "file")
-tally_part :: proc(card: ^Card, tally: Tally) -> Line_Part {
-	total := fmt.tprintf("%.1f", tally.total)
-	return {text = total, breakdown = card_breakdown(card, tally, total)}
 }
 
 // A field showing total, the tally's factors on hover
@@ -421,12 +371,6 @@ region_identity_color :: proc(id: Region_Id) -> [4]f32 {
 	return {channel(hue, 5), channel(hue, 3), channel(hue, 1), 1}
 }
 
-// Name, or icon title if unnamed. Piece must be alive.
-@(private = "file")
-piece_title :: proc(id: Piece_Id) -> string {
-	name := WORLD.piece_names[id.index][:]
-	return len(name) > 0 ? string(name) : ICON_TITLES[WORLD.pieces[id.index].icon]
-}
 
 // Faction must be alive
 @(private = "file")
