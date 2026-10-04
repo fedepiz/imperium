@@ -526,9 +526,9 @@ OTHER_ROLE := [Role]Role {
 
 // A side's roll, in a margin
 @(private = "file")
-ROLE_TERMS := [Role]Report_Term {
-	.Attacker = .Attacker,
-	.Defender = .Defender,
+ROLE_LABELS := [Role]string {
+	.Attacker = "Attacker",
+	.Defender = "Defender",
 }
 
 @(private = "file")
@@ -615,10 +615,11 @@ Battle_Result :: struct {
 @(private = "file")
 power :: proc(side, other: Battle_Side) -> (power: Tally) {
 	proficiency := side.proficiency / 10
-	tally_add(&power, .Proficiency, proficiency)
-	tally_add(&power, .Readiness, -proficiency * (0.5 - side.readiness / 200))
+	tally_add(&power, "Proficiency", proficiency)
+	tally_add(&power, "Readiness", -proficiency * (0.5 - side.readiness / 200))
 	ratio := other.men > 0 ? side.men / other.men : 1
-	tally_add(&power, .Numbers, clamp(NUMBERS_SCALE * math.log2(max(ratio, 1e-6)), 0, NUMBERS_MAX))
+	numbers := clamp(NUMBERS_SCALE * math.log2(max(ratio, 1e-6)), 0, NUMBERS_MAX)
+	tally_add(&power, "Numbers", numbers)
 	return
 }
 
@@ -698,8 +699,8 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		avoid, held, absent := decide(.Avoid, situation[.Defender])
 		if battle.can_avoid && avoid == .Avoid_Try {
 			roll: Tally
-			tally_add(&roll, .Dice, roll_2d6(&rng))
-			tally_add(&roll, .Mobility, MOBILITY_BONUS * (defender.mobility - attacker.mobility))
+			tally_add(&roll, "Roll", roll_2d6(&rng))
+			tally_add(&roll, "Mobility", MOBILITY_BONUS * (defender.mobility - attacker.mobility))
 			reason := report_because(report, held, absent, FACT_TITLES)
 			tries := Report_Note{"tries to avoid battle", reason}
 			if check(report, names[.Defender], roll, MOBILITY_TARGET, tries) {
@@ -729,10 +730,11 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	if !decided {
 		rolls: [Role]Tally
 		for &roll, role in rolls {
-			tally_add(&roll, .Dice, roll_2d6(&rng))
-			for factor in powers[role].factors do tally_add(&roll, factor.term, factor.value)
-			tally_add(&roll, .Posture, POSTURE_ONSET[postures[role]])
-			tally_add(&roll, .Ground, ground[role])
+			tally_add(&roll, "Roll", roll_2d6(&rng))
+			append(&roll.factors, ..powers[role].factors[:])
+			roll.total += powers[role].total
+			tally_add(&roll, "Posture", POSTURE_ONSET[postures[role]])
+			tally_add(&roll, "Ground", ground[role])
 		}
 		ahead, margin := contest(report, "Onset", names, rolls)
 		situation[ahead] += {ladder(margin, ONSET_LADDER[:])}
@@ -745,8 +747,8 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			result.outcome = postures[loser] in PROBING ? .Probed : .Rout
 			decided = true
 		case:
-			tally_add(&edges[ahead], .Margin, margin)
-			tally_scale(&edges[ahead], .Share, EDGE_PER_MARGIN)
+			tally_add(&edges[ahead], "Margin", margin)
+			tally_scale(&edges[ahead], "Share", EDGE_PER_MARGIN, .Percent)
 			report_say(report, "% gains an edge of %.", names[ahead], edges[ahead])
 		}
 	}
@@ -789,12 +791,13 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		case:
 			rolls: [Role]Tally
 			for &roll, role in rolls {
-				tally_add(&roll, .Dice, roll_2d6(&rng))
-				for factor in powers[role].factors do tally_add(&roll, factor.term, factor.value)
-				tally_add(&roll, .Edge, edges[role].total)
-				tally_add(&roll, .Commit, choices[role] == .Crisis_Commit ? COMMIT_BONUS : 0)
-				tally_add(&roll, .Posture, POSTURE_CRISIS[postures[role]])
-				tally_add(&roll, .Ground, ground[role])
+				tally_add(&roll, "Roll", roll_2d6(&rng))
+				append(&roll.factors, ..powers[role].factors[:])
+				roll.total += powers[role].total
+				tally_add(&roll, "Edge", edges[role].total)
+				tally_add(&roll, "Committed", choices[role] == .Crisis_Commit ? COMMIT_BONUS : 0)
+				tally_add(&roll, "Posture", POSTURE_CRISIS[postures[role]])
+				tally_add(&roll, "Ground", ground[role])
 			}
 			ahead, margin := contest(report, "Crisis", names, rolls)
 			loser = OTHER_ROLE[ahead]
@@ -836,8 +839,8 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			row: Role_Result = as_loser[role] ? .Loser : .Winner
 			out := &result.sides[at[role]]
 			if share := OUTCOME_MEN_LOST[row][outcome]; share > 0 {
-				tally_add(&out.men, .Engaged, -engaged)
-				tally_scale(&out.men, .Share, share)
+				tally_add(&out.men, "Engaged", -engaged, .Men)
+				tally_scale(&out.men, "Share", share, .Percent)
 			}
 			out.readiness = OUTCOME_READINESS[row][outcome]
 			out.falls_back = as_loser[role] && outcome in OUTCOME_RETREATS
@@ -847,17 +850,17 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		victor := sides[winner]
 		lost := &result.sides[at[loser]].stock
 		if table := OUTCOME_STOCK_LOST[outcome]; table > 0 {
-			tally_add(lost, .Lost, -table)
-			if beaten.stock < table do tally_add(lost, .Carried, table - beaten.stock)
+			tally_add(lost, "Lost", -table)
+			if beaten.stock < table do tally_add(lost, "Not carried", table - beaten.stock)
 		}
 		if share := OUTCOME_STOCK_CAPTURED[outcome];
 		   share > 0 && lost.total < 0 && victor.men > 0 {
 			captured := &result.sides[at[winner]].stock
-			tally_add(captured, .Lost, -lost.total)
-			tally_scale(captured, .Men_Ratio, beaten.men / victor.men)
-			tally_scale(captured, .Share, share)
+			tally_add(captured, "Lost", -lost.total)
+			tally_scale(captured, "Men ratio", beaten.men / victor.men, .Ratio)
+			tally_scale(captured, "Share", share, .Percent)
 			room := victor.baggage - victor.stock
-			if captured.total > room do tally_add(captured, .Baggage, room - captured.total)
+			if captured.total > room do tally_add(captured, "Baggage full", room - captured.total)
 		}
 	}
 
@@ -869,10 +872,10 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		men_percent: f32 = side.men_max > 0 ? 100 * men / side.men_max : 100
 		if readiness >= COHESION_READINESS && men_percent >= COHESION_MEN do continue
 		roll: Tally
-		tally_add(&roll, .Dice, roll_2d6(&rng))
-		tally_add(&roll, .Proficiency, side.proficiency / 10)
-		tally_add(&roll, .Readiness, -max(0, (COHESION_READINESS - readiness) / 10))
-		tally_add(&roll, .Losses, -max(0, (COHESION_MEN - men_percent) / 10))
+		tally_add(&roll, "Roll", roll_2d6(&rng))
+		tally_add(&roll, "Proficiency", side.proficiency / 10)
+		tally_add(&roll, "Readiness", -max(0, (COHESION_READINESS - readiness) / 10))
+		tally_add(&roll, "Losses", -max(0, (COHESION_MEN - men_percent) / 10))
 		out.dissolved = !check(report, names[role], roll, COHESION_TARGET, "checks cohesion")
 	}
 
@@ -897,14 +900,14 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		result.follow_overdraw = TEMPERAMENT_FOLLOW_OVERDRAW[victor.temperament]
 		if pursued {
 			roll: Tally
-			tally_add(&roll, .Dice, roll_2d6(&rng))
-			tally_add(&roll, .Mobility, MOBILITY_BONUS * (victor.mobility - beaten.mobility))
+			tally_add(&roll, "Roll", roll_2d6(&rng))
+			tally_add(&roll, "Mobility", MOBILITY_BONUS * (victor.mobility - beaten.mobility))
 			pursues := Report_Note{"pursues", reason}
 			result.caught = check(report, names[winner], roll, MOBILITY_TARGET, pursues)
 			if result.caught {
 				out := &result.sides[at[loser]]
-				tally_add(&out.pursuit_men, .Men_Left, -(beaten.men + out.men.total))
-				tally_scale(&out.pursuit_men, .Share, OUTCOME_PURSUIT_MEN[outcome])
+				tally_add(&out.pursuit_men, "Men left", -(beaten.men + out.men.total), .Men)
+				tally_scale(&out.pursuit_men, "Share", OUTCOME_PURSUIT_MEN[outcome], .Percent)
 				out.pursuit_readiness = PURSUIT_READINESS
 			}
 		}
@@ -953,8 +956,8 @@ contest :: proc(
 	ahead = roll[.Attacker].total < roll[.Defender].total ? .Defender : .Attacker
 	behind := OTHER_ROLE[ahead]
 	by: Tally
-	tally_add(&by, ROLE_TERMS[ahead], roll[ahead].total)
-	tally_add(&by, ROLE_TERMS[behind], -roll[behind].total)
+	tally_add(&by, ROLE_LABELS[ahead], roll[ahead].total)
+	tally_add(&by, ROLE_LABELS[behind], -roll[behind].total)
 	attacker, defender := names[.Attacker], names[.Defender]
 	report_say(report, "%: % %, % %.", label, attacker, roll[.Attacker], defender, roll[.Defender])
 	report_say(report, "% is ahead by %.", names[ahead], by)

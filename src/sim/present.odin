@@ -267,7 +267,7 @@ world_present :: proc(
 			append(column, Field{label = ROLE_TITLES[column_index], value = names[i]})
 			if open.stage == .Announce || open.stage == .Refused {
 				side := WORLD.armies[ids[i].index]
-				power := result.sides[i].power
+				power := &result.sides[i].power
 				append(column, Field{label = "Commander", value = fmt.tprintf("%v", side.commander_temperament)})
 				append(column, Field{label = "Men", value = util.format_compact(f64(side.men))})
 				append(column, Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", side.proficiency)})
@@ -280,14 +280,14 @@ world_present :: proc(
 			if open.stage == .Fall_Back {
 				if !result.caught || i == result.winner do continue
 				men := util.format_compact(f64(side.pursuit_men.total))
-				append(column, tally_field(&card, "Men", side.pursuit_men, men))
+				append(column, tally_field(&card, "Men", &side.pursuit_men, men))
 				append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.pursuit_readiness)})
 				continue
 			}
 			append(column, Field{label = "Posture", value = span.to_string(report.text[:], side.posture)})
-			append(column, tally_field(&card, "Men", side.men, util.format_compact(f64(side.men.total))))
+			append(column, tally_field(&card, "Men", &side.men, util.format_compact(f64(side.men.total))))
 			append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.readiness)})
-			append(column, tally_field(&card, "Supply", side.stock, fmt.tprintf("%+.1f", side.stock.total)))
+			append(column, tally_field(&card, "Supply", &side.stock, fmt.tprintf("%+.1f", side.stock.total)))
 			if side.dissolved do append(column, Field{label = "Fate", value = "Dissolved"})
 		}
 		append(&card.actions, Action{label = "Next", ask = .Next, enabled = WORLD.movement.subject == {}})
@@ -310,7 +310,7 @@ card_report :: proc(card: ^Card, report: ^Report) {
 			shown := Line_Part {
 				text = text,
 			}
-			if len(part.tally.factors) > 0 do shown.breakdown = card_breakdown(card, part.tally, text)
+			if len(part.tally.factors) > 0 do shown.breakdown = card_breakdown(card, &part.tally, text)
 			if part.note.len > 0 {
 				note := span.to_string(report.text[:], part.note)
 				append(&card.breakdowns, Breakdown{note = note})
@@ -324,13 +324,13 @@ card_report :: proc(card: ^Card, report: ^Report) {
 
 // Adds the tally's factors as a breakdown under total; returns its index + 1
 @(private = "file")
-card_breakdown :: proc(card: ^Card, tally: Tally, total: string) -> int {
+card_breakdown :: proc(card: ^Card, tally: ^Tally, total: string) -> int {
 	breakdown := Breakdown {
 		total = total,
 	}
-	for factor, i in tally.factors {
+	for &factor, i in tally.factors {
 		value: string
-		switch TERM_UNITS[factor.term] {
+		switch factor.unit {
 		case .Points:
 			value = i == 0 ? fmt.tprintf("%.1f", factor.value) : fmt.tprintf("%+.1f", factor.value)
 		case .Men:
@@ -341,7 +341,7 @@ card_breakdown :: proc(card: ^Card, tally: Tally, total: string) -> int {
 			value = fmt.tprintf("%.2f", factor.value)
 		}
 		if factor.op == .Scale do value = fmt.tprintf("× %s", value)
-		append(&breakdown.terms, Field{label = TERM_TITLES[factor.term], value = value})
+		append(&breakdown.terms, Field{label = string(factor.label[:]), value = value})
 	}
 	append(&card.breakdowns, breakdown)
 	return len(card.breakdowns)
@@ -349,7 +349,7 @@ card_breakdown :: proc(card: ^Card, tally: Tally, total: string) -> int {
 
 // A field showing total, the tally's factors on hover
 @(private = "file")
-tally_field :: proc(card: ^Card, label: string, tally: Tally, total: string) -> Field {
+tally_field :: proc(card: ^Card, label: string, tally: ^Tally, total: string) -> Field {
 	if len(tally.factors) == 0 do return {label = label, value = total}
 	return {label = label, value = total, breakdown = card_breakdown(card, tally, total)}
 }

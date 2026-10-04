@@ -6,72 +6,17 @@ import "core:strings"
 import "../span"
 
 TALLY_FACTORS_MAX :: 20
+FACTOR_LABEL_MAX :: 16
 REPORT_TEXT_MAX :: 4096
 REPORT_PARTS_MAX :: 160
 REPORT_LINES_MAX :: 24
 
-// What a derived number is made of
-Report_Term :: enum u8 {
-	Dice,
-	Proficiency,
-	Readiness,
-	Numbers,
-	Posture,
-	Ground,
-	Edge,
-	Commit,
-	Mobility,
-	Losses,
-	Attacker,
-	Defender,
-	Margin,
-	Engaged,
-	Share,
-	Lost,
-	Carried,
-	Men_Ratio,
-	Baggage,
-	Men_Left,
-}
-
-@(rodata)
-TERM_TITLES := [Report_Term]string {
-	.Dice        = "Roll",
-	.Proficiency = "Proficiency",
-	.Readiness   = "Readiness",
-	.Numbers     = "Numbers",
-	.Posture     = "Posture",
-	.Ground      = "Ground",
-	.Edge        = "Edge",
-	.Commit      = "Committed",
-	.Mobility    = "Mobility",
-	.Losses      = "Losses",
-	.Attacker    = "Attacker",
-	.Defender    = "Defender",
-	.Margin      = "Margin",
-	.Engaged     = "Engaged",
-	.Share       = "Share",
-	.Lost        = "Lost",
-	.Carried     = "Not carried",
-	.Men_Ratio   = "Men ratio",
-	.Baggage     = "Baggage full",
-	.Men_Left    = "Men left",
-}
-
-Term_Unit :: enum u8 {
+// How a factor's value reads
+Factor_Unit :: enum u8 {
 	Points,
 	Men,
 	Percent,
 	Ratio,
-}
-
-// Points unless listed
-@(rodata)
-TERM_UNITS := #partial [Report_Term]Term_Unit {
-	.Engaged   = .Men,
-	.Men_Left  = .Men,
-	.Share     = .Percent,
-	.Men_Ratio = .Ratio,
 }
 
 Factor_Op :: enum u8 {
@@ -81,14 +26,16 @@ Factor_Op :: enum u8 {
 }
 
 Factor :: struct {
-	term:  Report_Term,
+	// Truncated to FACTOR_LABEL_MAX bytes
+	label: [dynamic; FACTOR_LABEL_MAX]u8,
 	op:    Factor_Op,
+	unit:  Factor_Unit,
 	value: f32,
 }
 
 // A derived number and what it is made of. A roll is a tally starting with the dice; empty = not rolled.
 Tally :: struct {
-	// Added zeros left out, other than the dice
+	// Added zeros left out
 	factors: [dynamic; TALLY_FACTORS_MAX]Factor,
 	total:   f32,
 }
@@ -123,14 +70,27 @@ Report_Arg :: union {
 	Report_Note,
 }
 
-tally_add :: proc(tally: ^Tally, term: Report_Term, value: f32) {
+tally_add :: proc(tally: ^Tally, label: string, value: f32, unit := Factor_Unit.Points) {
 	tally.total += value
-	if value != 0 || term == .Dice do append(&tally.factors, Factor{term, .Add, value})
+	if value == 0 do return
+	factor := Factor {
+		op    = .Add,
+		unit  = unit,
+		value = value,
+	}
+	append(&factor.label, ..transmute([]u8)label)
+	append(&tally.factors, factor)
 }
 
-tally_scale :: proc(tally: ^Tally, term: Report_Term, value: f32) {
+tally_scale :: proc(tally: ^Tally, label: string, value: f32, unit := Factor_Unit.Points) {
 	tally.total *= value
-	append(&tally.factors, Factor{term, .Scale, value})
+	factor := Factor {
+		op    = .Scale,
+		unit  = unit,
+		value = value,
+	}
+	append(&factor.label, ..transmute([]u8)label)
+	append(&tally.factors, factor)
 }
 
 // Adds a line; each % in text takes the next arg. A tally shows its total, and its factors on hover.
