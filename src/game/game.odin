@@ -192,9 +192,9 @@ scene_pawn :: proc(handle: sim.Piece_Id) -> (sim.Pawn, bool) {
 
 // While the run keyed by the breakdown is hovered, a tooltip of its note, terms, a rule and the total. 0 = none.
 @(private = "file")
-breakdown_hover :: proc(card: ^sim.Card, breakdown: int, style: ui.Style) {
+breakdown_hover :: proc(card: sim.Card, breakdown: int, style: ui.Style) {
 	if breakdown == 0 || !ui.signal(fmt.tprintf("breakdown %d", breakdown)).hovered do return
-	shown := &card.breakdowns[breakdown - 1]
+	shown := card.breakdowns[breakdown - 1]
 	if ui.tooltip(style) {
 		if shown.note != "" do ui.label(shown.note)
 		for term in shown.terms {
@@ -328,7 +328,7 @@ cards_build :: proc(place: sim.Card_Place) {
 					append(&texts, text)
 				}
 				ui.label_text(texts[:], {width = ui.em(CARD_LINES_EM)})
-				for part in parts do breakdown_hover(&card, part.breakdown, tooltip_style)
+				for part in parts do breakdown_hover(card, part.breakdown, tooltip_style)
 			}
 			// Fields, and stats beside them
 			if ui.row({width = ui.fit(), height = ui.fit(), gap = CARD_COLUMN_GAP}) {
@@ -349,7 +349,7 @@ cards_build :: proc(place: sim.Card_Place) {
 									value.underline = true
 								}
 								ui.label_text({value}, {width = ui.em(value_em[column])})
-								breakdown_hover(&card, field.breakdown, tooltip_style)
+								breakdown_hover(card, field.breakdown, tooltip_style)
 							}
 						}
 					}

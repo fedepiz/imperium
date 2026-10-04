@@ -354,7 +354,7 @@ map_draw_tick :: proc(
 	}
 	map_arrows(scene)
 	map_areas(scene, dt)
-	map_regions(scene, region_colouring, camera.zoom, dt)
+	map_regions(scene^, region_colouring, camera.zoom, dt)
 	marks_draw(&MAP_DRAW.marks, &MAP_DRAW.render_list, camera, viewport, pixel_density)
 }
 
@@ -568,7 +568,7 @@ Region_Range :: enum u8 {
 }
 
 @(private = "file")
-map_regions :: proc(scene: ^sim.Scene, colouring: sim.Region_Colouring_Mode, zoom: f32, dt: f32) {
+map_regions :: proc(scene: sim.Scene, colouring: sim.Region_Colouring_Mode, zoom: f32, dt: f32) {
 	regions := &MAP_DRAW.render_terrain.highlights[.Regions]
 	step := util.ease_step(HIGHLIGHT_EASE, dt)
 	looks := REGION_LOOKS[colouring][zoom < REGION_FAR_ZOOM ? .Far : .Near]
@@ -1029,7 +1029,7 @@ marks_draw :: proc(
 ) {
 	draw: gfx.Draw_Ctx
 	rect: [4]f32 = {0, 0, viewport.x, viewport.y}
-	gfx.draw_begin(&draw, list, span.from_array(&list.instances), rect, pixel_density)
+	gfx.draw_begin(&draw, list, span.from_array(list.instances), rect, pixel_density)
 	for mark in mm.marks[:] {
 		size := [2]f32{mark.width, mark.height}
 		corner := mark.pos - size / 2

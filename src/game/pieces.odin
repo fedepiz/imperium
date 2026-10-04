@@ -96,7 +96,12 @@ pieces_load :: proc(
 			colour_ok := len(colour.children) == 3
 			for value in colour.children do colour_ok &&= .Has_Num in value.flags && value.num >= 0 && value.num <= 255
 			if !colour_ok {
-				return nil, nil, nil, fail(path, row.key, n, "its colour must be [r, g, b], each from 0 to 255")
+				return nil, nil, nil, fail(
+					path,
+					row.key,
+					n,
+					"its colour must be [r, g, b], each from 0 to 255",
+				)
 			}
 			for value, channel in colour.children do faction.color[channel] = value.num / 255
 			faction.color.a = 1
@@ -127,13 +132,22 @@ pieces_load :: proc(
 				at_ok := len(at.children) == 2
 				for coord in at.children do at_ok &&= .Has_Num in coord.flags
 				if !at_ok {
-					return nil, nil, nil, fail(path, row.key, n, "each piece must stand at [x, y], in cells")
+					return nil, nil, nil, fail(
+						path,
+						row.key,
+						n,
+						"each piece must stand at [x, y], in cells",
+					)
 				}
 				piece.pos = {at.children[0].num, at.children[1].num}
-				if region_id, has_capital_of := tabula.get_text(piece_row, "capital_of"); has_capital_of {
+				if region_id, has_capital_of := tabula.get_text(piece_row, "capital_of");
+				   has_capital_of {
 					for id, m in region_ids do if id == region_id {piece.capital_of = sim.Region_Id(m + 1); break}
 					if piece.capital_of == 0 {
-						message := fmt.tprintf("its piece's capital_of %q is not a region", region_id)
+						message := fmt.tprintf(
+							"its piece's capital_of %q is not a region",
+							region_id,
+						)
 						return nil, nil, nil, fail(path, row.key, n, message)
 					}
 					if has_capital[piece.capital_of - 1] {
@@ -144,14 +158,24 @@ pieces_load :: proc(
 				}
 				if general, has_general := tabula.get_text(piece_row, "general"); has_general {
 					if general == "" {
-						return nil, nil, nil, fail(path, row.key, n, "its piece's general needs a name")
+						return nil, nil, nil, fail(
+							path,
+							row.key,
+							n,
+							"its piece's general needs a name",
+						)
 					}
 					character := sim.Scenario_Character {
 						name        = general,
 						temperament = GENERAL_TEMPERAMENT_DEFAULT,
 					}
-					if _, has_temperament := tabula.get_text(piece_row, "temperament"); has_temperament {
-						temperament, is_temperament := enum_get(piece_row, "temperament", sim.Temperament)
+					if _, has_temperament := tabula.get_text(piece_row, "temperament");
+					   has_temperament {
+						temperament, is_temperament := enum_get(
+							piece_row,
+							"temperament",
+							sim.Temperament,
+						)
 						if !is_temperament do return nil, nil, nil, fail(path, row.key, n, "its piece's temperament is not a temperament")
 						character.temperament = temperament
 					}
@@ -160,21 +184,31 @@ pieces_load :: proc(
 				}
 				if men, has_men := tabula.get_num(piece_row, "men"); has_men {
 					if men < 1 || men != f32(int(men)) {
-						return nil, nil, nil, fail(path, row.key, n, "its piece's men must be a whole number")
+						return nil, nil, nil, fail(
+							path,
+							row.key,
+							n,
+							"its piece's men must be a whole number",
+						)
 					}
 					proficiency, has_proficiency := tabula.get_num(piece_row, "proficiency")
 					if !has_proficiency || proficiency < 0 || proficiency > 100 {
-						return nil, nil, nil, fail(path, row.key, n, "its piece's proficiency must be from 0 to 100")
+						return nil, nil, nil, fail(
+							path,
+							row.key,
+							n,
+							"its piece's proficiency must be from 0 to 100",
+						)
 					}
 					piece.army = {
-						active           = true,
-						men              = int(men),
-						men_max          = int(men),
-						proficiency      = proficiency,
-						readiness        = 100,
-						foraging         = tabula.get_num(piece_row, "foraging", ARMY_FORAGING_DEFAULT),
-						baggage          = tabula.get_num(piece_row, "baggage", ARMY_BAGGAGE_DEFAULT),
-						mobility         = tabula.get_num(piece_row, "mobility", ARMY_MOBILITY_DEFAULT),
+						active      = true,
+						men         = int(men),
+						men_max     = int(men),
+						proficiency = proficiency,
+						readiness   = 100,
+						foraging    = tabula.get_num(piece_row, "foraging", ARMY_FORAGING_DEFAULT),
+						baggage     = tabula.get_num(piece_row, "baggage", ARMY_BAGGAGE_DEFAULT),
+						mobility    = tabula.get_num(piece_row, "mobility", ARMY_MOBILITY_DEFAULT),
 					}
 					piece.army.stock = piece.army.baggage
 				}
@@ -193,3 +227,4 @@ enum_get :: proc(row: tabula.Row, key: string, $T: typeid) -> (value: T, ok: boo
 	text := tabula.get_text(row, key) or_return
 	return reflect.enum_from_name(T, text)
 }
+

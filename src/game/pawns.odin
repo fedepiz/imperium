@@ -35,10 +35,10 @@ PAWNS: struct {
 // Size multiplier per icon, see PAWN_CELLS_PER_PIXEL
 @(private = "file", rodata)
 PAWN_SIZES := [sim.Icon]f32 {
-	.Village    = 1.1,
-	.Town       = 1.3,
-	.City       = 1.4,
-	.Large_City = 1.7,
+	.Village    = 1.65, // 1.1
+	.Town       = 1.95, // 1.3
+	.City       = 2.1, // 1.4
+	.Large_City = 2.55, // 1.7
 	.Army       = 1.1,
 	.Fleet      = 1.0,
 }
@@ -118,7 +118,7 @@ pawns_draw :: proc(
 	gfx.draw_begin(
 		&draw,
 		&PAWNS.render_list,
-		span.from_array(&PAWNS.render_list.instances),
+		span.from_array(PAWNS.render_list.instances),
 		{0, 0, viewport.x, viewport.y},
 		pixel_density,
 	)

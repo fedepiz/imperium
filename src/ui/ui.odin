@@ -350,7 +350,7 @@ Hashtable :: struct($Id: typeid, $N: int) {
 Key_Hashtable :: Hashtable(Id, HASH_CAPACITY)
 
 @(private = "file")
-hashtable_find :: proc(ht: ^Hashtable($Id, $N), needle: Key) -> Id {
+hashtable_find :: proc(ht: Hashtable($Id, $N), needle: Key) -> Id {
 	if needle == KEY_NIL {return 0}
 	// Probe
 	idx := u64(needle) % len(ht.keys)
@@ -413,7 +413,7 @@ anim :: proc(label: string, target: f32, initial: f32 = 0) -> f32 {
 
 @(private = "file")
 anim_from_key :: proc(key: Key, target: f32, initial: f32 = 0) -> f32 {
-	id := hashtable_find(&UI.anim_hash_table, key)
+	id := hashtable_find(UI.anim_hash_table, key)
 	if id == 0 {
 		assert(UI.anim_free_count > 0)
 		id = UI.anim_free[UI.anim_free_count - 1]
@@ -433,7 +433,7 @@ anim_from_key :: proc(key: Key, target: f32, initial: f32 = 0) -> f32 {
 @(private = "file")
 box_alloc :: proc(key: Key) -> Id {
 	// A nil key gets a fresh value
-	id := hashtable_find(&UI.key_hash_table, key)
+	id := hashtable_find(UI.key_hash_table, key)
 	if id == 0 {
 		assert(UI.box_free_count > 0)
 		id = UI.box_free[UI.box_free_count - 1]
@@ -642,8 +642,8 @@ update_interaction :: proc(input: Input) {
 			under = id
 		}
 		if !hot_found && .Hover_Text in box.flags {
-			local := mouse_pos - text_origin(box)
-			if tag := gfx.text_tag_at(box.text, local, text_room(box)); tag != 0 {
+			local := mouse_pos - text_origin(box^)
+			if tag := gfx.text_tag_at(box.text, local, text_room(box^)); tag != 0 {
 				UI.hot = Key(tag)
 				UI.hovered_any = true
 				hot_found = true
@@ -670,7 +670,7 @@ update_interaction :: proc(input: Input) {
 			for id := under; id != 0; id = UI.boxes[id].parent {
 				box := &UI.boxes[id]
 				if scroll_flag(axis) in box.flags {
-					box.scroll_target[axis] += scroll_from_wheel(box, input.wheel)[axis]
+					box.scroll_target[axis] += scroll_from_wheel(box^, input.wheel)[axis]
 					break
 				}
 			}
@@ -717,7 +717,7 @@ update_interaction :: proc(input: Input) {
 key_takes_keyboard :: proc(key: Key) -> bool {
 	return(
 		key_is_enabled_box(key) &&
-		.Keyboard in UI.boxes[hashtable_find(&UI.key_hash_table, key)].flags \
+		.Keyboard in UI.boxes[hashtable_find(UI.key_hash_table, key)].flags \
 	)
 }
 
@@ -769,7 +769,7 @@ box_make :: proc(key: Key, forced: Style) -> (Id, Signal) {
 // A box was built this frame with key, and is not disabled.
 @(private = "file")
 key_is_enabled_box :: proc(key: Key) -> bool {
-	box := &UI.boxes[hashtable_find(&UI.key_hash_table, key)]
+	box := &UI.boxes[hashtable_find(UI.key_hash_table, key)]
 	return key != KEY_NIL && box.key == key && .Disabled not_in box.flags
 }
 
@@ -900,7 +900,7 @@ layout :: proc() {
 	for i := 0; i < UI.box_order_count; i += 1 {
 		box := &UI.boxes[UI.box_order[i]]
 		if box.text == 0 || box.size.y.kind != .Text {continue}
-		room := [2]f32{text_room(box).x, math.INF_F32}
+		room := [2]f32{text_room(box^).x, math.INF_F32}
 		box.size_computed.y = gfx.text_measure(box.text, room).y + 2 * box.padding.y
 	}
 
@@ -950,7 +950,7 @@ layout :: proc() {
 
 // The first child of parent in the flow, and the next one after id: floating boxes are skipped.
 @(private = "file")
-flow_first :: proc(parent: ^Box) -> Id {
+flow_first :: proc(parent: Box) -> Id {
 	return flow_skip(parent.child_first)
 }
 
@@ -970,7 +970,7 @@ flow_skip :: proc(id: Id) -> Id {
 
 // How far the wheel moves a scrolling box's content, in pixels.
 @(private = "file")
-scroll_from_wheel :: proc(box: ^Box, wheel: [2]f32) -> [2]f32 {
+scroll_from_wheel :: proc(box: Box, wheel: [2]f32) -> [2]f32 {
 	em := gfx.font_size(box.font)
 	// Turning the wheel away from the user reveals what is above.
 	return [2]f32{wheel.x, -wheel.y} * SCROLL_STEP * em
@@ -991,7 +991,7 @@ scroll_flag :: proc(axis: Axis) -> Box_Flag {
 
 // Where a box's text starts: left-aligned after the padding, centered vertically, never above the box.
 @(private = "file")
-text_origin :: proc(box: ^Box) -> [2]f32 {
+text_origin :: proc(box: Box) -> [2]f32 {
 	size := gfx.text_measure(box.text, text_room(box))
 	pos := box.pos_computed
 	pos.x += box.padding.x
@@ -1001,7 +1001,7 @@ text_origin :: proc(box: ^Box) -> [2]f32 {
 
 // The room a box's text is laid out in: the box inside its padding. Text that does not fit ends in an ellipsis.
 @(private = "file")
-text_room :: proc(box: ^Box) -> [2]f32 {
+text_room :: proc(box: Box) -> [2]f32 {
 	return {
 		max(0, box.size_computed.x - 2 * box.padding.x),
 		max(0, box.size_computed.y - 2 * box.padding.y),
@@ -1054,7 +1054,7 @@ compute_dependent_sizes :: proc(axis: Axis) {
 		case .Fit, .Grow:
 			value = 0
 			count := 0
-			for child := flow_first(box); child != 0; child = flow_next(child) {
+			for child := flow_first(box^); child != 0; child = flow_next(child) {
 				child_value := UI.boxes[child].size_computed[axis]
 				if axis == box.child_axis {
 					value += child_value
@@ -1081,7 +1081,7 @@ compute_dependent_sizes :: proc(axis: Axis) {
 
 		if axis != parent.child_axis {
 			// Cross-axis children each have the parent's full extent available, and no more.
-			for kid := flow_first(parent); kid != 0; kid = flow_next(kid) {
+			for kid := flow_first(parent^); kid != 0; kid = flow_next(kid) {
 				child := &UI.boxes[kid]
 				if child.size[axis].kind == .Grow {
 					child.size_computed[axis] = available
@@ -1095,7 +1095,7 @@ compute_dependent_sizes :: proc(axis: Axis) {
 
 		total, total_weight: f32
 		count := 0
-		for kid := flow_first(parent); kid != 0; kid = flow_next(kid) {
+		for kid := flow_first(parent^); kid != 0; kid = flow_next(kid) {
 			child := &UI.boxes[kid]
 			total += child.size_computed[axis]
 			if child.size[axis].kind == .Grow && child.size[axis].value > 0 {
@@ -1108,7 +1108,7 @@ compute_dependent_sizes :: proc(axis: Axis) {
 
 		if remaining > 0 && total_weight > 0 {
 			// Leftover space goes to Grow children by weight.
-			for kid := flow_first(parent); kid != 0; kid = flow_next(kid) {
+			for kid := flow_first(parent^); kid != 0; kid = flow_next(kid) {
 				child := &UI.boxes[kid]
 				size := child.size[axis]
 				if size.kind == .Grow && size.value > 0 {
@@ -1118,13 +1118,13 @@ compute_dependent_sizes :: proc(axis: Axis) {
 		} else if remaining < 0 && !scrolls {
 			// Overflow is taken from each child in proportion to the size it is willing to give up.
 			budget: f32
-			for kid := flow_first(parent); kid != 0; kid = flow_next(kid) {
+			for kid := flow_first(parent^); kid != 0; kid = flow_next(kid) {
 				child := &UI.boxes[kid]
 				budget += child.size_computed[axis] * (1 - child.size[axis].strictness)
 			}
 			if budget > 0 {
 				fraction := min(1, -remaining / budget)
-				for kid := flow_first(parent); kid != 0; kid = flow_next(kid) {
+				for kid := flow_first(parent^); kid != 0; kid = flow_next(kid) {
 					child := &UI.boxes[kid]
 					give := child.size_computed[axis] * (1 - child.size[axis].strictness)
 					child.size_computed[axis] -= give * fraction
@@ -1173,7 +1173,7 @@ draw :: proc(ctx: ^gfx.Draw_Ctx) {
 			gfx.draw_rectangle(ctx, bounds, border, box.radius, box.thickness, SOFTNESS)
 		}
 		if box.text != 0 {
-			gfx.text_draw(ctx, box.text, text_origin(box), text_room(box), {1, 1, 1, alpha})
+			gfx.text_draw(ctx, box.text, text_origin(box^), text_room(box^), {1, 1, 1, alpha})
 		}
 		if .Focusable in box.flags {
 			focus_t := box.focus_t
@@ -1319,7 +1319,7 @@ scroll_panel_end :: proc(open: bool) {
 // The pane is found by its label, so it must have been made under the same parent.
 scrollbar :: proc(pane_label: string, axis: Axis, style := Style{}) {
 	pane_key := key_from_string(pane_label)
-	pane_id := hashtable_find(&UI.key_hash_table, pane_key)
+	pane_id := hashtable_find(UI.key_hash_table, pane_key)
 	pane := &UI.boxes[pane_id]
 	view := pane.size_computed[axis]
 	content := max(pane.content_size[axis], view)
@@ -1379,7 +1379,7 @@ scrollbar :: proc(pane_label: string, axis: Axis, style := Style{}) {
 	// The wheel over the bar scrolls its pane, as it would over the pane itself.
 	wheel := track_signal.wheel + thumb_signal.wheel
 	if pane_id != 0 {
-		pane.scroll_target[axis] += scroll_from_wheel(pane, wheel)[axis]
+		pane.scroll_target[axis] += scroll_from_wheel(pane^, wheel)[axis]
 	}
 }
 
@@ -1396,7 +1396,7 @@ tooltip :: proc(style := Style{}) -> bool {
 	parent_push(UI.overlay)
 	key := key_from_string("tooltip")
 	// Last frame's size decides whether it fits to the right of and below the mouse.
-	size := UI.boxes[hashtable_find(&UI.key_hash_table, key)].size_computed
+	size := UI.boxes[hashtable_find(UI.key_hash_table, key)].size_computed
 	position := UI.mouse + TOOLTIP_OFFSET
 	flipped := UI.mouse - TOOLTIP_OFFSET - size
 	for axis in Axis {

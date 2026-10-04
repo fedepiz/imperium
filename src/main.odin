@@ -237,7 +237,7 @@ main :: proc() {
 			gfx.draw_begin(
 				&draw,
 				&GLOBAL.render_list,
-				span.from_array(&GLOBAL.render_list.instances),
+				span.from_array(GLOBAL.render_list.instances),
 				{0, 0, f32(logical_width), f32(logical_height)},
 				pixel_density,
 			)

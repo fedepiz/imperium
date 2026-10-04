@@ -201,14 +201,14 @@ corridor_mark :: proc(block: [2]int) {
 // A* over cells or blocks. Results (cost, back direction) are left in SCRATCH. The fine level stays inside the
 // current corridor and never cuts corners past impassable cells.
 @(private = "file")
-search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost: f32, ok: bool) {
+search :: proc(table: Pathfind_Table, $level: Level, from, to: [2]int) -> (cost: f32, ok: bool) {
 	scratch := &SCRATCH.search[level]
 	scratch.stamp += 1
 	clear(&scratch.heap)
 	size := level == .Fine ? WORLD_SIZE : BLOCKS_SIZE
 
 	// Octile distance * min cost; at the coarse level, max'd with the landmark (ALT) bounds. Scaled by the tie-break.
-	estimate :: proc(table: ^Pathfind_Table, $level: Level, node, goal: [2]int) -> f32 {
+	estimate :: proc(table: Pathfind_Table, $level: Level, node, goal: [2]int) -> f32 {
 		when level == .Fine {
 			h := octile(node, goal) * table.derived.min_cost
 		} else {
@@ -221,10 +221,12 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 				) *
 				table.derived.min_cost
 			for l in 0 ..< table.derived.landmarks.count {
-				from := &table.derived.landmarks.from[l]
-				to := &table.derived.landmarks.to[l]
-				if from[a] < math.INF_F32 && from[b] < math.INF_F32 do h = max(h, from[b] - from[a])
-				if to[a] < math.INF_F32 && to[b] < math.INF_F32 do h = max(h, to[a] - to[b])
+				from_a := table.derived.landmarks.from[l][a]
+				from_b := table.derived.landmarks.from[l][b]
+				to_a := table.derived.landmarks.to[l][a]
+				to_b := table.derived.landmarks.to[l][b]
+				if from_a < math.INF_F32 && from_b < math.INF_F32 do h = max(h, from_b - from_a)
+				if to_a < math.INF_F32 && to_b < math.INF_F32 do h = max(h, to_a - to_b)
 			}
 		}
 		return h * HEURISTIC_TIE_BREAK
@@ -252,7 +254,7 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 			if !util.grid_contains(next, size) do continue
 			next_index := util.grid_index(next, size)
 			when level == .Fine {
-				move := step_cost(table, at, dir)
+				move := step_cost(table.grid, at, dir)
 				if move == 0 do continue
 				if SCRATCH.corridor[util.grid_index(next / BLOCKING_FACTOR, BLOCKS_SIZE)] != SCRATCH.corridor_stamp do continue
 			} else {
@@ -275,14 +277,14 @@ search :: proc(table: ^Pathfind_Table, $level: Level, from, to: [2]int) -> (cost
 
 // Cost of the entered cell * step length. 0 if out of bounds, impassable, or cutting a corner.
 @(private = "file")
-step_cost :: proc(table: ^Pathfind_Table, at: [2]int, dir: Dir) -> f32 {
+step_cost :: proc(grid: [CELLS_MAX]f32, at: [2]int, dir: Dir) -> f32 {
 	next := at + DIR_OFFSET[dir]
 	if !util.grid_contains(next, WORLD_SIZE) do return 0
 	if DIR_OFFSET[dir].x != 0 && DIR_OFFSET[dir].y != 0 {
-		if table.grid[util.grid_index({next.x, at.y}, WORLD_SIZE)] == 0 do return 0
-		if table.grid[util.grid_index({at.x, next.y}, WORLD_SIZE)] == 0 do return 0
+		if grid[util.grid_index({next.x, at.y}, WORLD_SIZE)] == 0 do return 0
+		if grid[util.grid_index({at.x, next.y}, WORLD_SIZE)] == 0 do return 0
 	}
-	return table.grid[util.grid_index(next, WORLD_SIZE)] * DIR_LENGTH[dir]
+	return grid[util.grid_index(next, WORLD_SIZE)] * DIR_LENGTH[dir]
 }
 
 @(private = "file")
@@ -366,7 +368,7 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 			// Corridor: the blocks around the shared corner
 			SCRATCH.corridor_stamp += 1
 			for around in ([4][2]int{block, next, {block.x, next.y}, {next.x, block.y}}) do corridor_mark(around)
-			if cost, ok := search(table, .Fine, from, to); ok do move = cost
+			if cost, ok := search(table^, .Fine, from, to); ok do move = cost
 		}
 	}
 
@@ -386,7 +388,7 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 	table.derived.landmarks.count = 0
 	if first < 0 do return
 	nearest := make([]f32, CELLS_COARSE_MAX, context.temp_allocator)
-	blocks_dijkstra(table, first, false, nearest)
+	blocks_dijkstra(table.derived.coarse.move, first, false, nearest)
 	for table.derived.landmarks.count < LANDMARKS_MAX {
 		farthest := -1
 		for block_index in 0 ..< CELLS_COARSE_MAX {
@@ -396,15 +398,21 @@ pathfind_build_end :: proc(domain: Pathfind_Domain, cached: Cached_File) {
 		if farthest < 0 || nearest[farthest] == 0 do break
 		l := table.derived.landmarks.count
 		table.derived.landmarks.count += 1
-		blocks_dijkstra(table, farthest, false, table.derived.landmarks.from[l][:])
-		blocks_dijkstra(table, farthest, true, table.derived.landmarks.to[l][:])
+		from, to := table.derived.landmarks.from[l][:], table.derived.landmarks.to[l][:]
+		blocks_dijkstra(table.derived.coarse.move, farthest, false, from)
+		blocks_dijkstra(table.derived.coarse.move, farthest, true, to)
 		for &cost, block_index in nearest do cost = min(cost, table.derived.landmarks.from[l][block_index])
 	}
 }
 
 // Dijkstra over blocks from a block (or to it, with reverse). Infinite = unreachable.
 @(private = "file")
-blocks_dijkstra :: proc(table: ^Pathfind_Table, start: int, reverse: bool, cost: []f32) {
+blocks_dijkstra :: proc(
+	moves: [CELLS_COARSE_MAX][Dir]f32,
+	start: int,
+	reverse: bool,
+	cost: []f32,
+) {
 	scratch := &SCRATCH.search[.Coarse]
 	clear(&scratch.heap)
 	slice.fill(cost, math.INF_F32)
@@ -419,8 +427,7 @@ blocks_dijkstra :: proc(table: ^Pathfind_Table, start: int, reverse: bool, cost:
 			next := at + DIR_OFFSET[dir]
 			if !util.grid_contains(next, BLOCKS_SIZE) do continue
 			next_index := util.grid_index(next, BLOCKS_SIZE)
-			move :=
-				reverse ? table.derived.coarse.move[next_index][DIR_OPPOSITE[dir]] : table.derived.coarse.move[entry.index][dir]
+			move := reverse ? moves[next_index][DIR_OPPOSITE[dir]] : moves[entry.index][dir]
 			if move == 0 do continue
 			next_cost := entry.priority + move
 			if next_cost >= cost[next_index] do continue
@@ -456,7 +463,7 @@ pathfind_trace :: proc(
 	// Coarse path, then corridor around it
 	from_block := from / BLOCKING_FACTOR
 	to_block := to / BLOCKING_FACTOR
-	if from_block != to_block do _ = search(table, .Coarse, from_block, to_block) or_return
+	if from_block != to_block do _ = search(table^, .Coarse, from_block, to_block) or_return
 	SCRATCH.corridor_stamp += 1
 	block := to_block
 	for {
@@ -465,7 +472,7 @@ pathfind_trace :: proc(
 		block += DIR_OFFSET[SCRATCH.search[.Coarse].node[util.grid_index(block, BLOCKS_SIZE)].parent]
 	}
 
-	_ = search(table, .Fine, from, to) or_return
+	_ = search(table^, .Fine, from, to) or_return
 	// Walk back from dst, then reverse
 	for cell := to; cell != from; {
 		if len(out) == PATH_MAX_LEN {
@@ -524,8 +531,8 @@ pathfind_flood :: proc(
 	slice.fill(flood.cost[:], math.INF_F32)
 	slice.fill(flood.zone[:], 0)
 	slice.fill(flood.no_stop[:], false)
-	for zone in zones do stamp(flood, flood.zone[:], zone.disc, zone.hindrance)
-	for disc in no_stop do stamp(flood, flood.no_stop[:], disc, true)
+	for zone in zones do stamp(flood.corner, flood.zone[:], zone.disc, zone.hindrance)
+	for disc in no_stop do stamp(flood.corner, flood.no_stop[:], disc, true)
 	if !util.grid_contains(flood.start, WORLD_SIZE) || table.grid[util.grid_index(flood.start, WORLD_SIZE)] == 0 do return
 
 	scratch := &SCRATCH.search[.Fine]
@@ -541,7 +548,7 @@ pathfind_flood :: proc(
 		for dir in Dir {
 			next := at + DIR_OFFSET[dir]
 			if !util.grid_contains(next, FLOOD_SQUARE) do continue
-			move := step_cost(table, flood.corner + at, dir)
+			move := step_cost(table.grid, flood.corner + at, dir)
 			if move == 0 do continue
 			next_index := util.grid_index(next, FLOOD_SQUARE)
 			// Inside an enemy zone: no roads, and hindered
@@ -559,11 +566,11 @@ pathfind_flood :: proc(
 
 // Writes value into the flood-square cells whose centres are inside disc; f32 masks keep the max
 @(private = "file")
-stamp :: proc(flood: ^Pathfind_Flood, mask: []$T, disc: util.Disc, value: T) {
+stamp :: proc(corner: [2]int, mask: []$T, disc: util.Disc, value: T) {
 	covered := util.cell_rect_covering(disc.center - disc.radius, disc.center + disc.radius)
-	local := util.cell_rect_clip({covered.min - flood.corner, covered.max - flood.corner}, FLOOD_SQUARE)
+	local := util.cell_rect_clip({covered.min - corner, covered.max - corner}, FLOOD_SQUARE)
 	for y in local.min.y ..< local.max.y do for x in local.min.x ..< local.max.x {
-		if !util.disc_contains(disc, util.cell_center(flood.corner + {x, y})) do continue
+		if !util.disc_contains(disc, util.cell_center(corner + {x, y})) do continue
 		cell := &mask[util.grid_index({x, y}, FLOOD_SQUARE)]
 		when T == bool {
 			cell^ = value
@@ -574,7 +581,7 @@ stamp :: proc(flood: ^Pathfind_Flood, mask: []$T, disc: util.Disc, value: T) {
 }
 
 @(private = "file")
-flood_reaches :: proc(flood: ^Pathfind_Flood, cell: [2]int) -> bool {
+flood_reaches :: proc(flood: Pathfind_Flood, cell: [2]int) -> bool {
 	local := cell - flood.corner
 	return(
 		util.grid_contains(local, FLOOD_SQUARE) &&
@@ -584,7 +591,14 @@ flood_reaches :: proc(flood: ^Pathfind_Flood, cell: [2]int) -> bool {
 
 // Cell to stop at for dst: dst's own if possible, else the nearest reached stoppable cell within a snap-sized square
 // (none with snap 0)
-pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32, snap: int) -> (cell: [2]int, ok: bool) {
+pathfind_flood_stop :: proc(
+	flood: Pathfind_Flood,
+	dst: [2]f32,
+	snap: int,
+) -> (
+	cell: [2]int,
+	ok: bool,
+) {
 	to := util.cell_of(dst)
 	nearest := math.INF_F32
 	if !flood_reaches(flood, to) {
@@ -609,7 +623,7 @@ pathfind_flood_stop :: proc(flood: ^Pathfind_Flood, dst: [2]f32, snap: int) -> (
 
 // Cheapest stoppable cell inside the disc
 pathfind_flood_stop_within :: proc(
-	flood: ^Pathfind_Flood,
+	flood: Pathfind_Flood,
 	disc: util.Disc,
 ) -> (
 	cell: [2]int,
@@ -627,7 +641,7 @@ pathfind_flood_stop_within :: proc(
 
 // Output as pathfind_trace. False (both empty) if dst isn't reached.
 pathfind_flood_trace :: proc(
-	flood: ^Pathfind_Flood,
+	flood: Pathfind_Flood,
 	dst: [2]f32,
 	out: ^[dynamic; PATH_MAX_LEN][2]f32,
 	costs: ^[dynamic; PATH_MAX_LEN]f32,
@@ -711,7 +725,7 @@ pathfind_spread :: proc(
 		if value < out[entry.index] do continue
 		at := util.grid_pos(int(entry.index), WORLD_SIZE)
 		for dir in Dir {
-			move := step_cost(table, at, dir)
+			move := step_cost(table.grid, at, dir)
 			if move == 0 do continue
 			next := util.grid_index(at + DIR_OFFSET[dir], WORLD_SIZE)
 			if h := hindrance[next]; h > 0 do move = table.off_road[next] * DIR_LENGTH[dir] * h

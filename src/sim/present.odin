@@ -48,8 +48,7 @@ world_present :: proc(
 	region_colouring: Region_Colouring_Mode,
 	out: ^Scene,
 ) {
-	mov := &WORLD.movement
-	ordering := ordering()
+	ordering := WORLD.status.ordering
 
 	// Supply map (only when rebuilt)
 	if out.supply_map_revision != WORLD.supply_map_revision {
@@ -95,18 +94,20 @@ world_present :: proc(
 	// Walk arrow
 	clear(&out.arrows)
 	clear(&out.arrow_points)
-	if walker := piece_get(mov.subject); walker != nil {
+	if walker := piece_get(WORLD.walk.subject); walker != nil {
 		begin := len(out.arrow_points)
 		append(&out.arrow_points, walker.pos)
-		append(&out.arrow_points, ..mov.path[mov.next:])
+		append(&out.arrow_points, ..WORLD.walk.path[WORLD.walk.next:])
 		append(&out.arrows, span.from_range(begin, len(out.arrow_points)))
 	}
 
 	// Reach and zones of the focus (hidden while it walks)
-	flood := &mov.flood
-	shown := mov.flood_subject != {} && mov.flood_subject == focus && mov.flood_subject != mov.subject
-	// Flood key doubles as the areas' revision
-	revision := shown ? mov.flood_key : 0
+	focus_reach := &WORLD.focus_reach
+	flood := &focus_reach.flood
+	shown :=
+		focus_reach.subject != {} && focus_reach.subject == focus && focus != WORLD.walk.subject
+	// The reach's key doubles as the areas' revision
+	revision := shown ? focus_reach.key : 0
 	reach := &out.areas[REACH_AREA]
 	if reach.revision != revision {
 		reach.revision, reach.cells = revision, {}
@@ -118,19 +119,24 @@ world_present :: proc(
 		reach.look = REACH_LOOK
 	}
 	clear(&out.circles)
-	for slot in 0 ..< 2 {
-		area := &out.areas[FRIEND_AREA + slot]
-		area.revision = revision
-		area.look = slot == 0 ? FRIEND_LOOK : ZONE_LOOK
-		area.on_water = flood.domain != .Land
-		begin := len(out.circles)
-		count := slot == 0 ? len(mov.friend_zones) : len(mov.enemy_zones)
-		for i in 0 ..< count {
-			disc := slot == 0 ? mov.friend_zones[i] : mov.enemy_zones[i].disc
-			if shown && len(out.circles) < CIRCLES_MAX do append(&out.circles, Circle{disc.center, disc.radius})
-		}
-		area.circles = span.from_range(begin, len(out.circles))
+	friends := &out.areas[FRIEND_AREA]
+	friends.revision = revision
+	friends.look = FRIEND_LOOK
+	friends.on_water = flood.domain != .Land
+	begin := len(out.circles)
+	if shown do for zone in focus_reach.friend_zones {
+		append(&out.circles, Circle{zone.center, zone.radius})
 	}
+	friends.circles = span.from_range(begin, len(out.circles))
+	enemies := &out.areas[ZONE_AREA]
+	enemies.revision = revision
+	enemies.look = ZONE_LOOK
+	enemies.on_water = flood.domain != .Land
+	begin = len(out.circles)
+	if shown do for zone in focus_reach.enemy_zones {
+		append(&out.circles, Circle{zone.disc.center, zone.disc.radius})
+	}
+	enemies.circles = span.from_range(begin, len(out.circles))
 
 	// Regions
 	clear(&out.regions)
@@ -141,7 +147,7 @@ world_present :: proc(
 		case .Owner:
 			color = REGION_UNHELD_COLOR
 			if capital := piece_get(WORLD.region_capitals[index]); capital != nil {
-				if faction := faction_get(capital.owner); faction != nil do color = faction.color
+				if faction, ok := faction_get(WORLD.factions[:], capital.owner); ok do color = faction.color
 			}
 		case .Identity:
 			color = region_identity_color(id)
@@ -161,11 +167,11 @@ world_present :: proc(
 		place = .Status,
 		title = fmt.tprintf("Turn %d", WORLD.turn),
 	}
-	player := faction_get(WORLD.player)
-	append(&status.fields, Field{label = "Playing", value = player != nil ? faction_name(WORLD.player) : "None"})
+	_, playing := faction_get(WORLD.factions[:], WORLD.player)
+	append(&status.fields, Field{label = "Playing", value = playing ? faction_name(WORLD.player) : "None"})
 	append(
 		&status.actions,
-		Action{label = "End turn", ask = .End_Turn, enabled = turn_endable()},
+		Action{label = "End turn", ask = .End_Turn, enabled = WORLD.status.turn_endable},
 	)
 	append(&out.cards, status)
 	if piece := piece_get(focus); piece != nil {
@@ -175,8 +181,8 @@ world_present :: proc(
 			picture = Picture{piece.icon, piece.culture},
 		}
 		append(&card.fields, Field{label = "Type", value = ICON_TITLES[piece.icon]})
-		faction := faction_get(piece.owner)
-		append(&card.fields, Field{label = "Faction", value = faction != nil ? faction_name(piece.owner) : "None"})
+		_, owned := faction_get(WORLD.factions[:], piece.owner)
+		append(&card.fields, Field{label = "Faction", value = owned ? faction_name(piece.owner) : "None"})
 		append(&card.fields, Field{label = "Culture", value = fmt.tprintf("%v", piece.culture)})
 		if character_get(piece.general) != nil {
 			append(&card.fields, Field{label = "General", value = string(WORLD.character_names[piece.general.index][:])})
@@ -186,7 +192,7 @@ world_present :: proc(
 		if piece.movement_domain != nil {
 			budget := fmt.tprintf(
 				"%s of %s",
-				util.format_compact(f64(movement_budget(focus))),
+				util.format_compact(f64(WORLD.movement_left[focus.index])),
 				util.format_compact(f64(piece.movement_per_turn)),
 			)
 			append(&card.stats, Field{label = "Movement", value = budget})
@@ -221,8 +227,8 @@ world_present :: proc(
 		}
 		met_by := string(WORLD.piece_names[open.actor.index][:])
 		append(&card.fields, Field{label = "Met by", value = met_by})
-		faction := faction_get(met.owner)
-		append(&card.fields, Field{label = "Faction", value = faction != nil ? faction_name(met.owner) : "None"})
+		_, owned := faction_get(WORLD.factions[:], met.owner)
+		append(&card.fields, Field{label = "Faction", value = owned ? faction_name(met.owner) : "None"})
 		append(
 			&card.actions,
 			Action{label = "Conquer", ask = .Conquer, enabled = open.conquerable},
@@ -290,7 +296,7 @@ world_present :: proc(
 			append(column, tally_field(&card, "Supply", &side.stock, fmt.tprintf("%+.1f", side.stock.total)))
 			if side.dissolved do append(column, Field{label = "Fate", value = "Dissolved"})
 		}
-		append(&card.actions, Action{label = "Next", ask = .Next, enabled = WORLD.movement.subject == {}})
+		append(&card.actions, Action{label = "Next", ask = .Next, enabled = WORLD.walk.subject == {}})
 		append(&out.cards, card)
 	}
 

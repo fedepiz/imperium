@@ -1,4 +1,4 @@
-#+private
+#+private file
 package sim
 
 import "core:fmt"
@@ -7,6 +7,7 @@ import "core:math/linalg"
 
 import "../util"
 
+@(private = "package")
 PIECE_MAX :: 1024
 FACTION_MAX :: 256
 CHARACTER_MAX :: 1024
@@ -57,8 +58,8 @@ ROAD_READINESS_PER_MOVEMENT :: 0.1
 READINESS_PER_MOVEMENT :: 1
 OVERDRAW_READINESS :: 2
 
-// End of turn: readiness rises toward stock / baggage by up to READINESS_RECOVERY, scaled by
-// rest = (1 − exertion)², and drops by SUPPLY_DRAG when above it
+// End of turn: readiness rises toward stock / baggage by up to READINESS_RECOVERY, scaled by (1 − exertion)², and
+// drops by SUPPLY_DRAG when above it
 READINESS_RECOVERY :: 20
 SUPPLY_DRAG :: 5
 
@@ -99,6 +100,7 @@ FORAGE_YIELD := [Terrain_Type]f32 {
 	.Fields    = 1,
 }
 
+@(private = "package")
 WORLD: struct {
 	atlas:               Atlas,
 	// Index 0 = region 1
@@ -125,7 +127,14 @@ WORLD: struct {
 	contacts:            [dynamic; CONTACTS_MAX]Contact_Event,
 	// The player asked to end the turn; it ends once contacts are resolved and nothing is open
 	ending:              bool,
-	movement:            Movement,
+	walk:                Walk,
+	// Shown for the focus
+	focus_reach:         Reach,
+	// For planning this tick's order
+	order_reach:         Reach,
+	// As of the last tick's end
+	status:              World_Status,
+	movement_left:       [PIECE_MAX]f32,
 	// From 1. Each faction plays once per turn, in slot order.
 	turn:                int,
 	// The player's supply map, 0..100 per cell, rebuilt at the start of each faction's turn
@@ -175,34 +184,97 @@ Interaction_Stage :: enum u8 {
 	Refused,
 }
 
-Movement :: struct {
+// The one walk in progress: a piece along a path, and optionally a piece trailing it
+Walk :: struct {
 	// Walking piece, nil = none
-	subject:        Piece_Id,
+	subject:                 Piece_Id,
 	// Smoothed path. cost[i] = cost per cell from point i-1 to i. next = point being walked to.
-	path:           [dynamic; WALK_POINTS_MAX][2]f32,
-	cost:           [dynamic; WALK_POINTS_MAX]f32,
-	next:           int,
-	target:         Piece_Id,
+	path:                    [dynamic; WALK_POINTS_MAX][2]f32,
+	cost:                    [dynamic; WALK_POINTS_MAX]f32,
+	next:                    int,
 	// Ends once outside its zone and the chaser has stopped; nil = at the path's end
-	clear_of:       Piece_Id,
+	clear_of:                Piece_Id,
 	// Trails the subject, stepping onto the path at point 0; to the end when chaser_follows, else to point 0. Stops
 	// on reaching the subject or spending chaser_budget movement points.
+	chaser:                  Piece_Id,
+	chaser_next:             int,
+	chaser_follows:          bool,
+	chaser_budget:           f32,
+	// Contact made when the walk ends; nil = none
+	on_arrival_contact_with: Piece_Id,
+}
+
+// A walk to start: which piece, where to, and the walk's optional parts
+Walk_Order :: struct {
+	piece:          Piece_Id,
+	// Toward the target's contact zone when set, else toward destination (snapped within a square of snap cells)
+	destination:    [2]f32,
+	snap:           int,
+	target:         Piece_Id,
+	// Movement points the walk may use; 0 = the piece's movement budget left
+	budget:         f32,
+	// Its zone doesn't slow the walk
+	unhindered_by:  Piece_Id,
+	// See Walk
+	clear_of:       Piece_Id,
 	chaser:         Piece_Id,
-	chaser_next:    int,
 	chaser_follows: bool,
 	chaser_budget:  f32,
-	// Reach of the focus. Nil subject and 0 key = none. Key hashes all flood inputs; recomputed only on change.
-	flood:          Pathfind_Flood,
-	enemy_zones:    [dynamic; PIECE_MAX]Pathfind_Zone,
-	friend_zones:   [dynamic; PIECE_MAX]util.Disc,
-	bodies:         [dynamic; PIECE_MAX]util.Disc,
-	flood_subject:  Piece_Id,
-	flood_key:      u64,
+}
+
+// Facts about the world between ticks
+World_Status :: struct {
+	// Faction whose orders are taken; nil = none
+	ordering:     Faction_Id,
+	turn_endable: bool,
+}
+
+// One army's battle and chase losses; nil army = none
+Loss :: struct {
+	army:                  Piece_Id,
+	men, readiness, stock: f32,
+}
+
+// What a piece marched this tick, in movement points; nil piece = none
+Stride :: struct {
+	piece:            Piece_Id,
+	marched_road:     f32,
+	marched_off_road: f32,
+	// Beyond its budget
+	overdrawn:        f32,
+}
+
+// A piece's new position; nil piece = none
+Move :: struct {
+	piece: Piece_Id,
+	pos:   [2]f32,
+}
+
+// One tick of the walk. Arrived: it ended with the walker there.
+Walk_Tick :: struct {
+	moves:   [2]Move,
+	strides: [2]Stride,
+	done:    bool,
+	arrived: bool,
+}
+
+// Where a piece can walk: a pathfinding flood from it, and the zones and bodies it was built from
+Reach :: struct {
+	// Nil = none
+	subject:      Piece_Id,
+	// Hashes the flood's inputs; refilled only when it changes. 0 = none.
+	key:          u64,
+	flood:        Pathfind_Flood,
+	// Slow the walk and turn roads off
+	enemy_zones:  [dynamic; PIECE_MAX]Pathfind_Zone,
+	// Shown only
+	friend_zones: [dynamic; PIECE_MAX]util.Disc,
+	// Can't be stopped on
+	bodies:       [dynamic; PIECE_MAX]util.Disc,
 }
 
 // pos moved along path toward point next, up to step cells, ending at point last or once max_due movement points are
 // due. The leg onto point 0 costs like the first segment.
-@(private = "file")
 walk_along :: proc(
 	pos: [2]f32,
 	path: [][2]f32,
@@ -232,11 +304,59 @@ walk_along :: proc(
 	return
 }
 
-// 0 for a stale or nil id
-movement_budget :: proc(id: Piece_Id) -> f32 {
-	piece := piece_get(id)
-	if piece == nil do return 0
-	return max(0, piece.movement_per_turn - WORLD.piece_turns[id.index].movement_spent)
+// id's reach within budget, among pieces; unhindered_by's zone doesn't slow it. Nil or immovable id: none.
+reach_update :: proc(
+	reach: ^Reach,
+	pieces: []Piece,
+	factions: []Faction,
+	id: Piece_Id,
+	budget: f32,
+	unhindered_by: Piece_Id,
+) {
+	clear(&reach.enemy_zones)
+	clear(&reach.friend_zones)
+	clear(&reach.bodies)
+	subject, found := piece_in(pieces, id)
+	if !found || subject.movement_domain == nil {
+		reach.subject = {}
+		reach.key = 0
+		return
+	}
+	domain := subject.movement_domain.(Pathfind_Domain)
+
+	// Pieces that can touch the flood's square, with a cell of margin for rounding
+	half: f32 = PATHFIND_FLOOD_SIZE / 2 + 1
+	flood_area := [4]f32{subject.pos.x - half, subject.pos.y - half, 2 * half, 2 * half}
+
+	// Bodies
+	for other, index in pieces {
+		if !piece_alive(other) || (Piece_Id{u16(index), other.generation}) == id do continue
+		body := util.Disc{other.pos, subject.body + other.body}
+		if util.disc_overlaps_rect(body, flood_area) do append(&reach.bodies, body)
+	}
+
+	// Contact zones in its domain
+	for other, index in pieces {
+		other_id := Piece_Id{u16(index), other.generation}
+		if !piece_alive(other) || other_id == id do continue
+		if other.contact.radius == 0 || domain not_in other.contact.domains do continue
+		zone := util.Disc{other.pos, other.contact.radius}
+		if !util.disc_overlaps_rect(zone, flood_area) do continue
+		if pieces_friendly(subject, other, factions) {
+			append(&reach.friend_zones, zone)
+		} else if other_id != unhindered_by {
+			append(&reach.enemy_zones, Pathfind_Zone{zone, other.hindrance})
+		}
+	}
+
+	// Reflood only when an input changed
+	zones := reach.enemy_zones[:]
+	bodies := reach.bodies[:]
+	key := util.hash_contents(id, subject.pos, budget, domain, zones, bodies)
+	if key == reach.key do return
+	pathfind_flood(subject.pos, domain, budget, zones, bodies, &reach.flood)
+	reach.subject = id
+	reach.key = key
 }
 
 Atlas :: struct {
@@ -300,7 +420,7 @@ measure_land :: proc(terrain: []Terrain) -> (land: Land) {
 // Priority: mountains > fertile/marsh > highland > forest/desert/steppe/fields.
 terrain_type_of :: proc(
 	terrain: []Terrain,
-	land: ^Land,
+	land: Land,
 	i: int,
 ) -> (
 	best: Terrain_Type,
@@ -378,12 +498,14 @@ terrain_drop_specks :: proc(terrain: []Terrain) {
 // 0 = none
 Way_Id :: distinct u16
 
+@(private = "package")
 world_init :: proc() {
 	for index := PIECE_MAX - 1; index >= 0; index -= 1 do append(&WORLD.pieces_free, u16(index))
 	for index := FACTION_MAX - 1; index >= 0; index -= 1 do append(&WORLD.factions_free, u16(index))
 	for index := CHARACTER_MAX - 1; index >= 0; index -= 1 do append(&WORLD.characters_free, u16(index))
 }
 
+@(private = "package")
 world_load :: proc(scenario: Scenario) -> bool {
 	terrain := &WORLD.atlas.terrain
 	ok :=
@@ -435,7 +557,7 @@ world_load :: proc(scenario: Scenario) -> bool {
 	// Terrain types
 	{
 		land := measure_land(terrain[:])
-		for &cell, i in terrain do cell.type, cell.type_strength = terrain_type_of(terrain[:], &land, i)
+		for &cell, i in terrain do cell.type, cell.type_strength = terrain_type_of(terrain[:], land, i)
 		terrain_open_passes(terrain[:])
 		terrain_drop_specks(terrain[:])
 	}
@@ -532,55 +654,41 @@ world_load :: proc(scenario: Scenario) -> bool {
 		}
 	}
 	supply_map_build(WORLD.player)
+	WORLD.status = status_of(
+		WORLD.interaction.actor != {},
+		WORLD.walk.subject != {},
+		len(WORLD.contacts) > 0,
+		WORLD.ending,
+		WORLD.player,
+	)
+	movement_budgets(WORLD.pieces[:], WORLD.piece_turns[:], &WORLD.movement_left)
 	return ok
 }
 
+@(private = "package")
 world_step :: proc(input: Step_Input) {
-	mov := &WORLD.movement
+	budgets: [PIECE_MAX]f32
+	movement_budgets(WORLD.pieces[:], WORLD.piece_turns[:], &budgets)
 
 	// Step: End Turn Request
-	// Ending the turn is a request: the player's armies sitting in an enemy army's zone make contact, then the turn
-	// ends once every contact is resolved and nothing is open
-	if input.end_turn && turn_endable() {
+	// A request: the contacts are made, then the turn ends once all are resolved and nothing is open
+	if input.end_turn && WORLD.status.turn_endable {
 		WORLD.ending = true
-		for piece, index in WORLD.pieces {
-			if !piece_alive(piece) || piece.owner != WORLD.player || !WORLD.armies[index].active do continue
-			for other, other_index in WORLD.pieces {
-				if !piece_alive(other) || pieces_friendly(piece, other) || !WORLD.armies[other_index].active do continue
-				if linalg.distance(piece.pos, other.pos) >= other.contact.radius do continue
-				append(
-					&WORLD.contacts,
-					Contact_Event{piece_id(index), piece_id(other_index), false},
-				)
-			}
-		}
+		end_turn_contacts(
+			WORLD.pieces[:],
+			WORLD.armies[:],
+			WORLD.factions[:],
+			WORLD.player,
+			&WORLD.contacts,
+		)
 	}
 
 	// This tick's order, if any: at most one piece is sent to walk per tick
-	order: struct {
-		piece:          Piece_Id,
-		// Toward the target's contact zone when set, else toward destination (snapped within a square of snap cells)
-		destination:    [2]f32,
-		snap:           int,
-		target:         Piece_Id,
-		// Movement points the walk may use; 0 = the piece's movement budget left
-		budget:         f32,
-		// Its zone doesn't slow the walk
-		unhindered_by:  Piece_Id,
-		// See Movement
-		clear_of:       Piece_Id,
-		chaser:         Piece_Id,
-		chaser_follows: bool,
-		chaser_budget:  f32,
-	}
+	order: Walk_Order
 
 	// Step: Interaction
 	// Answers to the open interaction. A battle advances on Next once nothing walks.
-	// Battle and chase losses, for the Armies step
-	losses: [2]struct {
-		army:                  Piece_Id,
-		men, readiness, stock: f32,
-	}
+	losses: [2]Loss
 	if open := &WORLD.interaction; open.actor != {} {
 		if open.stage == .Meet_Town {
 			if input.answer == .Conquer && open.conquerable {
@@ -590,7 +698,7 @@ world_step :: proc(input: Step_Input) {
 			} else if input.answer == .Leave {
 				open^ = {}
 			}
-		} else if input.answer == .Next && mov.subject == {} {
+		} else if input.answer == .Next && WORLD.walk.subject == {} {
 			result := &open.result
 			ids := [2]Piece_Id{open.actor, open.target}
 			fallen := 1 - result.winner
@@ -609,24 +717,11 @@ world_step :: proc(input: Step_Input) {
 				// Dissolved armies leave the map
 				for side, i in result.sides do if side.dissolved do piece_despawn(ids[i])
 
-				// Fall back away from the winner: the chase's length when caught, else until clear of the winner. The
-				// winner trails within movement left plus the temperament's overdraw. Chase losses land here.
+				// Fall back away from the winner. Chase losses land here.
 				beaten, victor := piece_get(loser), piece_get(winner)
 				if !result.sides[fallen].falls_back || beaten == nil || victor == nil do break
-				reach: f32 = result.caught ? CHASE_BUDGET : FALL_BACK_BUDGET
-				order = {
-					piece         = loser,
-					destination   = beaten.pos + linalg.normalize0(beaten.pos - victor.pos) * reach,
-					snap          = 2 * int(reach) + 1,
-					budget        = reach,
-					unhindered_by = winner,
-				}
-				if !result.caught do order.clear_of = winner
-				if result.follows {
-					order.chaser = winner
-					order.chaser_follows = result.caught
-					order.chaser_budget = movement_budget(winner) + result.follow_overdraw
-				}
+				budget := budgets[winner.index]
+				order = fall_back_order(result^, loser, winner, beaten.pos, victor.pos, budget)
 				side := result.sides[fallen]
 				if result.caught do losses[fallen] = {loser, side.pursuit_men.total, side.pursuit_readiness, 0}
 				open.stage = .Fall_Back
@@ -644,7 +739,7 @@ world_step :: proc(input: Step_Input) {
 		contact := WORLD.contacts[0]
 		ordered_remove(&WORLD.contacts, 0)
 		initiator, other := piece_get(contact.initiator), piece_get(contact.other)
-		if initiator == nil || other == nil || pieces_friendly(initiator^, other^) do continue
+		if initiator == nil || other == nil || pieces_friendly(initiator^, other^, WORLD.factions[:]) do continue
 		reach := max(initiator.contact.radius, other.contact.radius)
 		if linalg.distance(initiator.pos, other.pos) >= reach do continue
 
@@ -660,26 +755,14 @@ world_step :: proc(input: Step_Input) {
 		}
 
 		ids := [2]Piece_Id{contact.initiator, contact.other}
-		battle := Battle {
-			ordered   = contact.targeted,
-			can_avoid = true,
-			seed      = util.hash_contents(WORLD.turn, WORLD.player, ids[0], ids[1]),
-		}
-		for id, i in ids {
-			army := WORLD.armies[id.index]
-			battle.sides[i] = {
-				men         = f32(army.men),
-				men_max     = f32(army.men_max),
-				proficiency = army.proficiency,
-				readiness   = army.readiness,
-				stock       = army.stock,
-				baggage     = army.baggage,
-				mobility    = army.mobility,
-				temperament = army.commander_temperament,
-				can_attack  = !WORLD.piece_turns[id.index].attacked,
-				name        = string(WORLD.piece_names[id.index][:]),
-			}
-		}
+		seed := util.hash_contents(WORLD.turn, WORLD.player, ids[0], ids[1])
+		battle := battle_of(
+			contact,
+			WORLD.armies[:],
+			WORLD.piece_turns[:],
+			WORLD.piece_names[:],
+			seed,
+		)
 		result := battle_resolve(battle)
 		if !result.fought && !result.refused do continue
 		if result.fought do WORLD.piece_turns[ids[result.attacker].index].attacked = true
@@ -692,7 +775,15 @@ world_step :: proc(input: Step_Input) {
 	}
 
 	// Step: Player Order
-	// Unless the battle sent someone this tick; only for a piece the player controls
+	// Unless the battle sent someone this tick; only for a piece the player controls. After Contacts: a battle opened
+	// this tick drops the order.
+	status := status_of(
+		WORLD.interaction.actor != {},
+		WORLD.walk.subject != {},
+		len(WORLD.contacts) > 0,
+		WORLD.ending,
+		WORLD.player,
+	)
 	if order.piece == {} && input.order != nil {
 		player_piece: Piece_Id
 		switch player_order in input.order {
@@ -704,173 +795,83 @@ world_step :: proc(input: Step_Input) {
 			order.target = player_order.target
 		}
 		if piece := piece_get(player_piece);
-		   piece != nil && ordering() != {} && piece.owner == ordering() {
+		   piece != nil && status.ordering != {} && piece.owner == status.ordering {
 			order.piece = player_piece
 		}
 	}
 
-	// Step: Movement Flood
-	// Where this tick's ordered piece can walk, else the focus (for showing its reach)
-	{
-		flooded := order.piece != {} ? order.piece : input.focus
-		zones, bodies := &mov.enemy_zones, &mov.bodies
-		clear(zones)
-		clear(bodies)
-		clear(&mov.friend_zones)
-		subject := piece_get(flooded)
-		if subject == nil || subject.movement_domain == nil {
-			mov.flood_subject, mov.flood_key = {}, 0
-		} else {
-			domain := subject.movement_domain.(Pathfind_Domain)
-			budget :=
-				order.piece != {} && order.budget > 0 ? order.budget : movement_budget(flooded)
-
-			// Gather bodies (can't stop on), enemy zones (slow, no roads) and friendly contacts touching the flood
-			// square, padded a cell for rounding
-			half: f32 = PATHFIND_FLOOD_SIZE / 2 + 1
-			square := [4]f32{subject.pos.x - half, subject.pos.y - half, 2 * half, 2 * half}
-			for other, index in WORLD.pieces {
-				if !piece_alive(other) || piece_id(index) == flooded do continue
-				body := util.Disc{other.pos, subject.body + other.body}
-				if util.disc_overlaps_rect(body, square) do append(bodies, body)
-				if other.contact.radius == 0 || domain not_in other.contact.domains do continue
-				contact := util.Disc{other.pos, other.contact.radius}
-				if !util.disc_overlaps_rect(contact, square) do continue
-				if pieces_friendly(subject^, other) {
-					append(&mov.friend_zones, contact)
-				} else if piece_id(index) != order.unhindered_by {
-					append(zones, Pathfind_Zone{contact, other.hindrance})
-				}
-			}
-
-			// Reflood only when an input changed
-			key := util.hash_contents(flooded, subject.pos, budget, domain, zones[:], bodies[:])
-			if key != mov.flood_key {
-				pathfind_flood(subject.pos, domain, budget, zones[:], bodies[:], &mov.flood)
-				mov.flood_subject, mov.flood_key = flooded, key
-			}
-		}
-	}
-
 	// Step: Orders
-	// Start this tick's walk along the flood's cheapest path, smoothed
-	if order.piece != {} && mov.flood_subject == order.piece {
+	// This tick's order becomes the walk
+	if piece := piece_get(order.piece); piece != nil && piece.movement_domain != nil {
+		reach := &WORLD.order_reach
+		budget := order.budget > 0 ? order.budget : budgets[order.piece.index]
+		reach_update(
+			reach,
+			WORLD.pieces[:],
+			WORLD.factions[:],
+			order.piece,
+			budget,
+			order.unhindered_by,
+		)
+
+		// Within the target's zone, else near the destination
 		stop: [2]int
 		ok: bool
 		if target := piece_get(order.target); target != nil {
-			if mov.flood.domain in target.contact.domains {
-				stop, ok = pathfind_flood_stop_within(
-					&mov.flood,
-					util.Disc{target.pos, target.contact.radius},
-				)
+			if reach.flood.domain in target.contact.domains {
+				zone := util.Disc{target.pos, target.contact.radius}
+				stop, ok = pathfind_flood_stop_within(reach.flood, zone)
 			}
 		} else {
-			stop, ok = pathfind_flood_stop(&mov.flood, order.destination, order.snap)
+			stop, ok = pathfind_flood_stop(reach.flood, order.destination, order.snap)
 		}
-		path: [dynamic; PATH_MAX_LEN][2]f32
-		cost: [dynamic; PATH_MAX_LEN]f32
-		if ok && pathfind_flood_trace(&mov.flood, util.cell_center(stop), &path, &cost) {
-			mov.subject, mov.target = order.piece, order.target
-			clear(&mov.path)
-			clear(&mov.cost)
-			append(&mov.path, piece_get(order.piece).pos)
-			append(&mov.cost, 0)
-			append(&mov.path, ..path[:])
-			append(&mov.cost, ..cost[:])
-			mov.next = 1
-			mov.clear_of = order.clear_of
-			mov.chaser = order.chaser
-			mov.chaser_next = 0
-			mov.chaser_follows = order.chaser_follows
-			mov.chaser_budget = order.chaser_budget
 
-			// Smooth; cut points keep their segment's cost
-			n := len(mov.path)
-			resize(&mov.path, n << WALK_CUTS)
-			resize(&mov.cost, n << WALK_CUTS)
-			n = util.smooth_polyline(mov.path[:], n, false, WALK_SMOOTHING, mov.cost[:])
-			resize(&mov.path, n)
-			resize(&mov.cost, n)
+		if ok && walk_path(reach.flood, piece.pos, stop, &WORLD.walk.path, &WORLD.walk.cost) {
+			WORLD.walk.subject = order.piece
+			WORLD.walk.next = 1
+			WORLD.walk.clear_of = order.clear_of
+			WORLD.walk.chaser = order.chaser
+			WORLD.walk.chaser_next = 0
+			WORLD.walk.chaser_follows = order.chaser_follows
+			WORLD.walk.chaser_budget = order.chaser_budget
+			WORLD.walk.on_arrival_contact_with = order.target
 		} else {
 			fmt.eprintfln("No way for %v", order.piece)
 		}
 	}
 
 	// Step: Walk
-	// What the subject, then its chaser, did this step. Nil piece = didn't walk.
-	walks: [2]struct {
-		piece:            Piece_Id,
-		// Movement points, all of the walk
-		marched_road:     f32,
-		marched_off_road: f32,
-		// Movement points beyond the budget
-		overdrawn:        f32,
-	}
-	if subject := piece_get(mov.subject); subject != nil {
-		last := len(mov.path) - 1
-
-		// Subject: holds while clear of clear_of's zone
-		clear_of := piece_get(mov.clear_of)
-		clear :=
-			clear_of != nil &&
-			!util.disc_contains({clear_of.pos, clear_of.contact.radius}, subject.pos)
-		if !clear {
-			moved, reached, road, off_road := walk_along(
-				subject.pos,
-				mov.path[:],
-				mov.cost[:],
-				mov.next,
-				last,
-				WALK_PER_STEP,
-				math.INF_F32,
-			)
-			subject.pos = moved
-			mov.next = reached
-			walks[0] = {mov.subject, road, off_road, 0}
+	strides: [2]Stride
+	if WORLD.walk.subject != {} {
+		tick := walk_advance(&WORLD.walk, WORLD.pieces[:], budgets[:])
+		for move in tick.moves do if move.piece != {} do WORLD.pieces[move.piece.index].pos = move.pos
+		for stride in tick.strides do if stride.piece != {} {
+			paid := stride.marched_road + stride.marched_off_road - stride.overdrawn
+			WORLD.piece_turns[stride.piece.index].movement_spent += paid
 		}
-
-		// Chaser: stops on reaching the subject, its last point or the end of its budget
-		chasing: bool
-		if chaser := piece_get(mov.chaser); chaser != nil {
-			until := mov.chaser_follows ? last : 0
-			touching := linalg.distance(chaser.pos, subject.pos) <= chaser.body + subject.body
-			chasing = !touching && mov.chaser_next <= until && mov.chaser_budget > 0
-			if chasing {
-				moved, reached, road, off_road := walk_along(
-					chaser.pos,
-					mov.path[:],
-					mov.cost[:],
-					mov.chaser_next,
-					until,
-					WALK_PER_STEP,
-					mov.chaser_budget,
-				)
-				chaser.pos = moved
-				mov.chaser_next = reached
-				mov.chaser_budget -= road + off_road
-				walks[1] = {mov.chaser, road, off_road, 0}
+		strides = tick.strides
+		if tick.done {
+			if with := WORLD.walk.on_arrival_contact_with; with != {} && tick.arrived {
+				append(&WORLD.contacts, Contact_Event{WORLD.walk.subject, with, true})
 			}
+			WORLD.walk = {}
 		}
+	}
+	// Again: the walk spent
+	movement_budgets(WORLD.pieces[:], WORLD.piece_turns[:], &budgets)
 
-		// Pay from the budget; the rest is overdrawn
-		for &walk in walks {
-			if walk.piece == {} do continue
-			due := walk.marched_road + walk.marched_off_road
-			spent := min(due, movement_budget(walk.piece))
-			WORLD.piece_turns[walk.piece.index].movement_spent += spent
-			walk.overdrawn = due - spent
-		}
-
-		// Done; an attack move makes contact with its target
-		if (mov.next > last || clear) && !chasing {
-			if mov.target != {} do append(&WORLD.contacts, Contact_Event{mov.subject, mov.target, true})
-			mov.subject, mov.target, mov.next = {}, {}, 0
-			mov.clear_of, mov.chaser = {}, {}
-		}
-	} else {
-		// Walker gone
-		mov.subject, mov.target, mov.next = {}, {}, 0
-		mov.clear_of, mov.chaser = {}, {}
+	// Step: Focus Reach
+	// Where the focus can walk, for showing; not while it walks
+	if input.focus != WORLD.walk.subject {
+		budget := budgets[input.focus.index]
+		reach_update(
+			&WORLD.focus_reach,
+			WORLD.pieces[:],
+			WORLD.factions[:],
+			input.focus,
+			budget,
+			{},
+		)
 	}
 
 	// The turn ends now if it was asked to and everything is settled
@@ -878,118 +879,28 @@ world_step :: proc(input: Step_Input) {
 		WORLD.ending &&
 		len(WORLD.contacts) == 0 &&
 		WORLD.interaction.actor == {} &&
-		mov.subject == {}
+		WORLD.walk.subject == {}
 
 	// Step: Armies
-	for &army, index in WORLD.armies {
-		if !army.active do continue
-		piece := WORLD.pieces[index]
-		readiness := army.readiness
-		stock := army.stock
-
-		// Its general's temperament
-		general := character_get(piece.general)
-		army.commander_temperament = general != nil ? general.temperament : NO_GENERAL_TEMPERAMENT
-
-		// Battle and chase losses
-		for loss in losses {
-			if loss.army == {} || int(loss.army.index) != index do continue
-			army.men = max(0, army.men + int(math.round(loss.men)))
-			readiness += loss.readiness
-			stock += loss.stock
-		}
-
-		// Resupply, live for the player's armies: the better of network and foraging, each as men fed over own men,
-		// times that source's efficiency. The supply map is the player's.
-		if piece.owner == WORLD.player {
-			men := f32(army.men)
-			cell := util.cell_of(piece.pos)
-			network, network_efficiency, forage, forage_efficiency: f32
-			if util.grid_contains(cell, WORLD_SIZE) && men > 0 {
-				at := util.grid_index(cell, WORLD_SIZE)
-
-				// Men nearby, weighted by distance: friendly ones, and everyone (any faction)
-				friendly_men, all_men: f32
-				for other, other_index in WORLD.armies {
-					if !other.active do continue
-					other_piece := WORLD.pieces[other_index]
-					distance := linalg.distance(piece.pos, other_piece.pos)
-					if distance >= FORAGE_RADIUS do continue
-					weighted := f32(other.men) * (1 - distance / FORAGE_RADIUS)
-					all_men += weighted
-					if other_piece.owner == piece.owner do friendly_men += weighted
-				}
-
-				// Network: the supply map here, shared with friendly armies nearby
-				network_efficiency = men / friendly_men
-				network = f32(WORLD.supply_map[at]) * MEN_PER_SUPPLY / men * network_efficiency
-
-				// Foraging: the land's yield times the army's skill, shared with every army nearby
-				land := WORLD.atlas.terrain[at]
-				yield: f32
-				if land.surface == .Land {
-					yield = math.lerp(
-						FORAGE_YIELD[.Open],
-						FORAGE_YIELD[land.type],
-						util.normalized(land.type_strength),
-					)
-				}
-				forage_efficiency = men / all_men
-				forage = army.foraging * yield * MEN_PER_SUPPLY / men * forage_efficiency
-			}
-			fed := network
-			army.resupply_source = .Network
-			army.resupply_efficiency = network_efficiency
-			if forage > network {
-				fed = forage
-				army.resupply_source = .Foraging
-				army.resupply_efficiency = forage_efficiency
-			}
-			army.resupply = min(fed, 1 + SUPPLY_REFILL_MAX) - 1
-		}
-
-		// Marching
-		for walk in walks {
-			if walk.piece == {} || int(walk.piece.index) != index do continue
-			readiness -= walk.marched_road * ROAD_READINESS_PER_MOVEMENT
-			readiness -= walk.marched_off_road * READINESS_PER_MOVEMENT
-			readiness -= walk.overdrawn * OVERDRAW_READINESS
-			stock -= walk.marched_road * ROAD_STOCK_PER_MOVEMENT
-			stock -= walk.marched_off_road * STOCK_PER_MOVEMENT
-		}
-		// End of its faction's turn: supplies in and out, then rest toward what the stock allows
-		if turn_ending && piece.owner == WORLD.player {
-			stock += army.resupply
-			stock = clamp(stock, 0, army.baggage)
-			cap: f32 = army.baggage > 0 ? 100 * stock / army.baggage : 0
-			exertion: f32 =
-				piece.movement_per_turn > 0 ? 1 - movement_budget(piece_id(index)) / piece.movement_per_turn : 0
-			rest := (1 - exertion) * (1 - exertion)
-			if readiness < cap {
-				readiness = min(cap, readiness + READINESS_RECOVERY * rest)
-			} else {
-				readiness = max(cap, readiness - SUPPLY_DRAG)
-			}
-		}
-		army.readiness = clamp(readiness, 0, 100)
-		army.stock = clamp(stock, 0, army.baggage)
-	}
+	sync_temperaments(&WORLD.armies, WORLD.pieces[:], WORLD.characters[:])
+	apply_losses(&WORLD.armies, losses[:])
+	resupply_armies(
+		&WORLD.armies,
+		WORLD.pieces[:],
+		WORLD.supply_map[:],
+		WORLD.atlas.terrain[:],
+		WORLD.player,
+	)
+	march(&WORLD.armies, strides[:])
+	if turn_ending do rest_armies(&WORLD.armies, WORLD.pieces[:], budgets[:], WORLD.player)
+	clamp_armies(&WORLD.armies)
 
 	// Step: Turn End
 	// Next faction plays; wrapping past the last slot starts a new turn
 	if turn_ending {
 		WORLD.ending = false
-		from := int(WORLD.player.index)
-		next: Faction_Id
-		for step in 1 ..= FACTION_MAX {
-			index := from + step
-			if index == FACTION_MAX do WORLD.turn += 1
-			index %= FACTION_MAX
-			if faction_alive(WORLD.factions[index]) {
-				next = faction_id(index)
-				break
-			}
-		}
+		next, wrapped := next_player(WORLD.factions[:], WORLD.player)
+		if wrapped do WORLD.turn += 1
 		WORLD.player = next
 	}
 
@@ -998,6 +909,368 @@ world_step :: proc(input: Step_Input) {
 		WORLD.piece_turns = {}
 		supply_map_build(WORLD.player)
 	}
+
+	// Step: Status
+	WORLD.status = status_of(
+		WORLD.interaction.actor != {},
+		WORLD.walk.subject != {},
+		len(WORLD.contacts) > 0,
+		WORLD.ending,
+		WORLD.player,
+	)
+	movement_budgets(WORLD.pieces[:], WORLD.piece_turns[:], &WORLD.movement_left)
+}
+
+// (movement per turn, spent) -> movement left. Map.
+movement_budgets :: proc(pieces: []Piece, turns: []Piece_Turn, budgets: ^[PIECE_MAX]f32) {
+	for piece, index in pieces {
+		left := max(0, piece.movement_per_turn - turns[index].movement_spent)
+		budgets[index] = piece_alive(piece) ? left : 0
+	}
+}
+
+// (interaction open, walking, contacts pending, ending, player) -> status
+status_of :: proc(
+	open, walking, pending, ending: bool,
+	player: Faction_Id,
+) -> (
+	status: World_Status,
+) {
+	status.ordering = !open && !ending ? player : {}
+	status.turn_endable = !ending && !open && !walking && !pending
+	return
+}
+
+// (pieces, armies, player) -> contacts: each of the player's armies in an enemy army's zone. Appends.
+end_turn_contacts :: proc(
+	pieces: []Piece,
+	armies: []Army,
+	factions: []Faction,
+	player: Faction_Id,
+	contacts: ^[dynamic; CONTACTS_MAX]Contact_Event,
+) {
+	for piece, index in pieces {
+		if !piece_alive(piece) || piece.owner != player || !armies[index].active do continue
+		for other, other_index in pieces {
+			friendly := pieces_friendly(piece, other, factions)
+			if !piece_alive(other) || friendly || !armies[other_index].active do continue
+			if linalg.distance(piece.pos, other.pos) >= other.contact.radius do continue
+			initiator := Piece_Id{u16(index), piece.generation}
+			append(contacts, Contact_Event{initiator, {u16(other_index), other.generation}, false})
+		}
+	}
+}
+
+// (contact, armies, turn data, names) -> battle input. Gather.
+battle_of :: proc(
+	contact: Contact_Event,
+	armies: []Army,
+	turns: []Piece_Turn,
+	names: []Name,
+	seed: u64,
+) -> (
+	battle: Battle,
+) {
+	battle.ordered = contact.targeted
+	battle.can_avoid = true
+	battle.seed = seed
+	ids := [2]Piece_Id{contact.initiator, contact.other}
+	for id, i in ids {
+		army := armies[id.index]
+		battle.sides[i] = {
+			men         = f32(army.men),
+			men_max     = f32(army.men_max),
+			proficiency = army.proficiency,
+			readiness   = army.readiness,
+			stock       = army.stock,
+			baggage     = army.baggage,
+			mobility    = army.mobility,
+			temperament = army.commander_temperament,
+			can_attack  = !turns[id.index].attacked,
+			name        = string(names[id.index][:]),
+		}
+	}
+	return
+}
+
+// (walk, pieces, budgets) -> walk progress (in place), moves, strides. The walker moves first; the chaser follows its
+// new position.
+walk_advance :: proc(walk: ^Walk, pieces: []Piece, budgets: []f32) -> (tick: Walk_Tick) {
+	subject, alive := piece_in(pieces, walk.subject)
+	if !alive {
+		tick.done = true
+		return
+	}
+	last := len(walk.path) - 1
+
+	// Walker: holds once clear of clear_of's zone
+	clear_of, has_clear_of := piece_in(pieces, walk.clear_of)
+	clear :=
+		has_clear_of && !util.disc_contains({clear_of.pos, clear_of.contact.radius}, subject.pos)
+	if !clear {
+		moved, reached, road, off_road := walk_along(
+			subject.pos,
+			walk.path[:],
+			walk.cost[:],
+			walk.next,
+			last,
+			WALK_PER_STEP,
+			math.INF_F32,
+		)
+		subject.pos = moved
+		walk.next = reached
+		due := road + off_road
+		overdrawn := due - min(due, budgets[walk.subject.index])
+		tick.moves[0] = {walk.subject, moved}
+		tick.strides[0] = {walk.subject, road, off_road, overdrawn}
+	}
+
+	// Chaser: stops on reaching the walker, its last point or the end of its budget
+	chasing: bool
+	if chaser, has_chaser := piece_in(pieces, walk.chaser); has_chaser {
+		until := walk.chaser_follows ? last : 0
+		touching := linalg.distance(chaser.pos, subject.pos) <= chaser.body + subject.body
+		chasing = !touching && walk.chaser_next <= until && walk.chaser_budget > 0
+		if chasing {
+			moved, reached, road, off_road := walk_along(
+				chaser.pos,
+				walk.path[:],
+				walk.cost[:],
+				walk.chaser_next,
+				until,
+				WALK_PER_STEP,
+				walk.chaser_budget,
+			)
+			walk.chaser_next = reached
+			walk.chaser_budget -= road + off_road
+			due := road + off_road
+			overdrawn := due - min(due, budgets[walk.chaser.index])
+			tick.moves[1] = {walk.chaser, moved}
+			tick.strides[1] = {walk.chaser, road, off_road, overdrawn}
+		}
+	}
+	tick.done = (walk.next > last || clear) && !chasing
+	tick.arrived = tick.done
+	return
+}
+
+// (generals, characters) -> commander temperaments. Map, in place.
+sync_temperaments :: proc(armies: ^[PIECE_MAX]Army, pieces: []Piece, characters: []Character) {
+	for &army, index in armies {
+		if !army.active do continue
+		general, found := character_in(characters, pieces[index].general)
+		army.commander_temperament = found ? general.temperament : NO_GENERAL_TEMPERAMENT
+	}
+}
+
+// (losses) -> men, readiness, stock. Scatter, in place: additions commute.
+apply_losses :: proc(armies: ^[PIECE_MAX]Army, losses: []Loss) {
+	for loss in losses {
+		army := &armies[loss.army.index]
+		if loss.army == {} || !army.active do continue
+		army.men = max(0, army.men + int(math.round(loss.men)))
+		army.readiness += loss.readiness
+		army.stock += loss.stock
+	}
+}
+
+// (positions, men, supply map, terrain) -> the player's armies' resupply. In place: reads every army's men, writes
+// only resupply.
+resupply_armies :: proc(
+	armies: ^[PIECE_MAX]Army,
+	pieces: []Piece,
+	supply_map: []u8,
+	terrain: []Terrain,
+	player: Faction_Id,
+) {
+	for &army, index in armies {
+		piece := pieces[index]
+		if !army.active || piece.owner != player do continue
+		gain, source, efficiency := resupply(
+			army,
+			piece.pos,
+			piece.owner,
+			armies[:],
+			pieces,
+			supply_map,
+			terrain,
+		)
+		army.resupply = gain
+		army.resupply_source = source
+		army.resupply_efficiency = efficiency
+	}
+}
+
+// (strides) -> readiness, stock. Scatter, in place.
+march :: proc(armies: ^[PIECE_MAX]Army, strides: []Stride) {
+	for stride in strides {
+		army := &armies[stride.piece.index]
+		if stride.piece == {} || !army.active do continue
+		army.readiness -= stride.marched_road * ROAD_READINESS_PER_MOVEMENT
+		army.readiness -= stride.marched_off_road * READINESS_PER_MOVEMENT
+		army.readiness -= stride.overdrawn * OVERDRAW_READINESS
+		army.stock -= stride.marched_road * ROAD_STOCK_PER_MOVEMENT
+		army.stock -= stride.marched_off_road * STOCK_PER_MOVEMENT
+	}
+}
+
+// (readiness, stock, resupply, budgets) -> readiness, stock of the player's armies at its turn's end. Map, in place.
+rest_armies :: proc(
+	armies: ^[PIECE_MAX]Army,
+	pieces: []Piece,
+	budgets: []f32,
+	player: Faction_Id,
+) {
+	for &army, index in armies {
+		piece := pieces[index]
+		if !army.active || piece.owner != player do continue
+		exertion: f32 =
+			piece.movement_per_turn > 0 ? 1 - budgets[index] / piece.movement_per_turn : 0
+		army.stock = clamp(army.stock + army.resupply, 0, army.baggage)
+		cap: f32 = army.baggage > 0 ? 100 * army.stock / army.baggage : 0
+		ease := (1 - exertion) * (1 - exertion)
+		if army.readiness < cap {
+			army.readiness = min(cap, army.readiness + READINESS_RECOVERY * ease)
+		} else {
+			army.readiness = max(cap, army.readiness - SUPPLY_DRAG)
+		}
+	}
+}
+
+// Readiness and stock into range. Map, in place.
+clamp_armies :: proc(armies: ^[PIECE_MAX]Army) {
+	for &army in armies {
+		if !army.active do continue
+		army.readiness = clamp(army.readiness, 0, 100)
+		army.stock = clamp(army.stock, 0, army.baggage)
+	}
+}
+
+// (result, pieces, positions, winner's budget) -> the loser's walk away: the chase's length when caught, else until
+// clear of the winner, who trails within its budget plus overdraw
+fall_back_order :: proc(
+	result: Battle_Result,
+	loser, winner: Piece_Id,
+	loser_pos, winner_pos: [2]f32,
+	winner_budget: f32,
+) -> (
+	order: Walk_Order,
+) {
+	reach: f32 = result.caught ? CHASE_BUDGET : FALL_BACK_BUDGET
+	order = {
+		piece         = loser,
+		destination   = loser_pos + linalg.normalize0(loser_pos - winner_pos) * reach,
+		snap          = 2 * int(reach) + 1,
+		budget        = reach,
+		unhindered_by = winner,
+	}
+	if !result.caught do order.clear_of = winner
+	if result.follows {
+		order.chaser = winner
+		order.chaser_follows = result.caught
+		order.chaser_budget = winner_budget + result.follow_overdraw
+	}
+	return
+}
+
+// (flood, start, stop) -> smoothed path and costs. False if stop isn't reached.
+walk_path :: proc(
+	flood: Pathfind_Flood,
+	start: [2]f32,
+	stop: [2]int,
+	path: ^[dynamic; WALK_POINTS_MAX][2]f32,
+	cost: ^[dynamic; WALK_POINTS_MAX]f32,
+) -> bool {
+	traced: [dynamic; PATH_MAX_LEN][2]f32
+	traced_cost: [dynamic; PATH_MAX_LEN]f32
+	if !pathfind_flood_trace(flood, util.cell_center(stop), &traced, &traced_cost) do return false
+	clear(path)
+	clear(cost)
+	append(path, start)
+	append(cost, 0)
+	append(path, ..traced[:])
+	append(cost, ..traced_cost[:])
+
+	// Smooth; cut points keep their segment's cost
+	n := len(path^)
+	resize(path, n << WALK_CUTS)
+	resize(cost, n << WALK_CUTS)
+	n = util.smooth_polyline(path^[:], n, false, WALK_SMOOTHING, cost^[:])
+	resize(path, n)
+	resize(cost, n)
+	return true
+}
+
+// (army, position, armies nearby, supply map, terrain) -> turns of supply gained, source, efficiency 0..1. The better of
+// network (shared with friendly armies nearby) and foraging (shared with all).
+resupply :: proc(
+	army: Army,
+	pos: [2]f32,
+	owner: Faction_Id,
+	armies: []Army,
+	pieces: []Piece,
+	supply_map: []u8,
+	terrain: []Terrain,
+) -> (
+	gain: f32,
+	source: Resupply_Source,
+	efficiency: f32,
+) {
+	men := f32(army.men)
+	cell := util.cell_of(pos)
+	network, network_efficiency, forage, forage_efficiency: f32
+	if util.grid_contains(cell, WORLD_SIZE) && men > 0 {
+		at := util.grid_index(cell, WORLD_SIZE)
+
+		// Men nearby, weighted by distance: friendly ones, and everyone (any faction)
+		friendly_men, all_men: f32
+		for other, index in armies {
+			if !other.active do continue
+			distance := linalg.distance(pos, pieces[index].pos)
+			if distance >= FORAGE_RADIUS do continue
+			weighted := f32(other.men) * (1 - distance / FORAGE_RADIUS)
+			all_men += weighted
+			if pieces[index].owner == owner do friendly_men += weighted
+		}
+
+		// Network: the supply map here, shared with friendly armies nearby
+		network_efficiency = men / friendly_men
+		network = f32(supply_map[at]) * MEN_PER_SUPPLY / men * network_efficiency
+
+		// Foraging: the land's yield times the army's skill, shared with every army nearby
+		land := terrain[at]
+		yield: f32
+		if land.surface == .Land {
+			yield = math.lerp(
+				FORAGE_YIELD[.Open],
+				FORAGE_YIELD[land.type],
+				util.normalized(land.type_strength),
+			)
+		}
+		forage_efficiency = men / all_men
+		forage = army.foraging * yield * MEN_PER_SUPPLY / men * forage_efficiency
+	}
+	fed := network
+	source = .Network
+	efficiency = network_efficiency
+	if forage > network {
+		fed = forage
+		source = .Foraging
+		efficiency = forage_efficiency
+	}
+	gain = min(fed, 1 + SUPPLY_REFILL_MAX) - 1
+	return
+}
+
+// (factions, from) -> next living faction in slot order; wrapped: past the last slot, a new turn
+next_player :: proc(factions: []Faction, from: Faction_Id) -> (next: Faction_Id, wrapped: bool) {
+	for step in 1 ..= len(factions) {
+		index := int(from.index) + step
+		if index == len(factions) do wrapped = true
+		index %= len(factions)
+		if faction_alive(factions[index]) do return {u16(index), factions[index].generation}, wrapped
+	}
+	return
 }
 
 // Rebuilds the supply map for a faction: spread from its sources, slowed by everyone else's zones
@@ -1018,22 +1291,10 @@ supply_map_build :: proc(faction: Faction_Id) {
 	WORLD.supply_map_revision += 1
 }
 
-// The player, or nil while an interaction is open
-ordering :: proc() -> Faction_Id {
-	return WORLD.interaction.actor == {} && !WORLD.ending ? WORLD.player : {}
-}
-
-turn_endable :: proc() -> bool {
-	return(
-		!WORLD.ending &&
-		WORLD.movement.subject == {} &&
-		len(WORLD.contacts) == 0 &&
-		WORLD.interaction.actor == {} \
-	)
-}
-
-pieces_friendly :: proc(a, b: Piece) -> bool {
-	return faction_get(a.owner) != nil && a.owner == b.owner
+// Same owner, and that faction alive
+pieces_friendly :: proc(a, b: Piece, factions: []Faction) -> bool {
+	_, owned := faction_get(factions, a.owner)
+	return owned && a.owner == b.owner
 }
 
 Piece :: struct {
@@ -1084,16 +1345,24 @@ piece_despawn :: proc(id: Piece_Id) {
 }
 
 // Nil if the id is stale or nil
+@(private = "package")
 piece_get :: proc(id: Piece_Id) -> ^Piece {
-	piece := &WORLD.pieces[id.index]
-	if id.generation & 1 == 0 || piece.generation != id.generation do return nil
-	return piece
+	if _, ok := piece_in(WORLD.pieces[:], id); !ok do return nil
+	return &WORLD.pieces[id.index]
 }
 
+// The piece id names among pieces; false if id is nil or stale
+piece_in :: proc(pieces: []Piece, id: Piece_Id) -> (piece: Piece, ok: bool) {
+	piece = pieces[id.index]
+	return piece, id.generation & 1 == 1 && piece.generation == id.generation
+}
+
+@(private = "package")
 piece_alive :: proc(piece: Piece) -> bool {
 	return piece.generation & 1 == 1
 }
 
+@(private = "package")
 piece_id :: proc(index: int) -> Piece_Id {
 	return {u16(index), WORLD.pieces[index].generation}
 }
@@ -1123,6 +1392,7 @@ name_set :: proc(name: ^Name, text: string) {
 }
 
 // Even generation (including the zero id) = nil
+@(private = "package")
 Faction_Id :: struct {
 	index:      u16,
 	generation: u16,
@@ -1142,18 +1412,17 @@ faction_spawn :: proc(faction: Faction, name: string) -> Faction_Id {
 
 // Stale or nil id: no-op. Its pieces are left with no faction.
 faction_despawn :: proc(id: Faction_Id) {
-	faction := faction_get(id)
-	if faction == nil do return
-	faction.generation += 1
+	if _, ok := faction_get(WORLD.factions[:], id); !ok do return
+	WORLD.factions[id.index].generation += 1
 	clear(&WORLD.faction_names[id.index])
 	append(&WORLD.factions_free, id.index)
 }
 
-// Nil if the id is stale or nil
-faction_get :: proc(id: Faction_Id) -> ^Faction {
-	faction := &WORLD.factions[id.index]
-	if id.generation & 1 == 0 || faction.generation != id.generation do return nil
-	return faction
+// The faction id names among factions; false if id is nil or stale
+@(private = "package")
+faction_get :: proc(factions: []Faction, id: Faction_Id) -> (faction: Faction, ok: bool) {
+	faction = factions[id.index]
+	return faction, id.generation & 1 == 1 && faction.generation == id.generation
 }
 
 faction_alive :: proc(faction: Faction) -> bool {
@@ -1198,10 +1467,22 @@ character_despawn :: proc(id: Character_Id) {
 }
 
 // Nil if the id is stale or nil
+@(private = "package")
 character_get :: proc(id: Character_Id) -> ^Character {
-	character := &WORLD.characters[id.index]
-	if id.generation & 1 == 0 || character.generation != id.generation do return nil
-	return character
+	if _, ok := character_in(WORLD.characters[:], id); !ok do return nil
+	return &WORLD.characters[id.index]
+}
+
+// The character id names among characters; false if id is nil or stale
+character_in :: proc(
+	characters: []Character,
+	id: Character_Id,
+) -> (
+	character: Character,
+	ok: bool,
+) {
+	character = characters[id.index]
+	return character, id.generation & 1 == 1 && character.generation == id.generation
 }
 
 character_alive :: proc(character: Character) -> bool {

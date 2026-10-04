@@ -10,8 +10,8 @@ from_range :: proc(begin, end: int) -> Span {
 	return {begin, end - begin}
 }
 
-from_array :: proc(array: ^[$N]$T) -> Span {
-	return {0, len(array^)}
+from_array :: proc(array: [$N]$T) -> Span {
+	return {0, len(array)}
 }
 
 advance :: proc(s: ^Span) {
