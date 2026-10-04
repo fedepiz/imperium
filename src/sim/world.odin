@@ -807,7 +807,6 @@ world_step :: proc(input: Step_Input) {
 		overdrawn:        f32,
 	}
 	if subject := piece_get(mov.subject); subject != nil {
-		before := subject.pos
 		last := len(mov.path) - 1
 
 		// Subject: holds while clear of clear_of's zone
@@ -862,22 +861,9 @@ world_step :: proc(input: Step_Input) {
 			walk.overdrawn = due - spent
 		}
 
-		// Contact: entering an enemy zone ends the walk (not while an interaction plays out its walks)
-		met: Piece_Id
-		domain := subject.movement_domain.(Pathfind_Domain)
-		if WORLD.interaction.actor == {} do for other, index in WORLD.pieces {
-			if !piece_alive(other) || piece_id(index) == mov.subject || pieces_friendly(subject^, other) do continue
-			if other.contact.radius == 0 || domain not_in other.contact.domains do continue
-			zone := util.Disc{other.pos, other.contact.radius}
-			if util.disc_contains(zone, subject.pos) && !util.disc_contains(zone, before) {
-				met = piece_id(index)
-				break
-			}
-		}
-
-		if met != {} || ((mov.next > last || clear) && !chasing) {
-			if met == {} do met = mov.target
-			if met != {} do append(&WORLD.contacts, Contact_Event{mov.subject, met, met == mov.target})
+		// Done; an attack move makes contact with its target
+		if (mov.next > last || clear) && !chasing {
+			if mov.target != {} do append(&WORLD.contacts, Contact_Event{mov.subject, mov.target, true})
 			mov.subject, mov.target, mov.next = {}, {}, 0
 			mov.clear_of, mov.chaser = {}, {}
 		}
