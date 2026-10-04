@@ -298,6 +298,29 @@ WORSENING := bit_set[Choice]{.Posture_Press, .Crisis_Commit}
 
 // Report wording
 @(private = "file")
+FACT_TITLES := [Fact]string {
+	.Temperament_Bold     = "Bold",
+	.Temperament_Steady   = "Steady",
+	.Temperament_Cautious = "Cautious",
+	.Temperament_Cunning  = "Cunning",
+	.Strength_Superior    = "Superior",
+	.Strength_Ahead       = "Ahead",
+	.Strength_Even        = "Even",
+	.Strength_Behind      = "Behind",
+	.Strength_Outmatched  = "Outmatched",
+	.Contact_Ordered      = "Ordered",
+	.Contact_Intercepting = "Intercepting",
+	.Role_Defending       = "Defending",
+	.Onset_Winning        = "Winning",
+	.Onset_Even           = "Even fight",
+	.Onset_Losing         = "Losing",
+	.Onset_Losing_Badly   = "Losing badly",
+	.Victory_Slight       = "Slight victory",
+	.Victory_Clear        = "Clear victory",
+	.Victory_Heavy        = "Heavy victory",
+	.Victory_Rout         = "Rout",
+}
+@(private = "file")
 POSTURE_TITLES := #partial [Choice]string {
 	.Posture_Press    = "Press",
 	.Posture_Standard = "Standard",
@@ -613,18 +636,24 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	contact := [2]bit_set[Fact]{facts(initiator, other), facts(other, initiator)}
 	if battle.ordered do contact[0] += {.Contact_Ordered}
 	contact[1] += {.Contact_Intercepting}
+	attacking: [2]bool
+	reasons: [2]span.Span
+	for i in 0 ..< 2 {
+		choice, held, absent := decide(.Contact, contact[i])
+		attacking[i] = choice == .Contact_Attack
+		reasons[i] = report_because(report, held, absent, FACT_TITLES)
+	}
 	switch {
-	case battle.forced ||
-	     (initiator.can_attack && decide(.Contact, contact[0]) == .Contact_Attack):
+	case battle.forced || (initiator.can_attack && attacking[0]):
 		result.fought = true
-	case other.can_attack && decide(.Contact, contact[1]) == .Contact_Attack:
+	case other.can_attack && attacking[1]:
 		result.fought = true
 		result.attacker = 1
 	case:
 		result.refused = battle.ordered
-		reason := "Its commander judges the odds too poor."
-		if !initiator.can_attack do reason = "It has already attacked this turn."
-		report_say(report, reason)
+		refusal: Report_Arg = Report_Note{"Its commander declines.", reasons[0]}
+		if !initiator.can_attack do refusal = "It has already attacked this turn."
+		report_say(report, "%", refusal)
 	}
 
 	// The fight, by role; at: each role's index in the contact order
@@ -651,7 +680,9 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	situation: [Role]bit_set[Fact]
 	for side, role in sides do situation[role] = facts(side, sides[OTHER_ROLE[role]])
 	situation[.Defender] += {.Role_Defending}
-	report_say(report, "% attacks %.", names[.Attacker], names[.Defender])
+	attacks := Report_Note{"attacks", reasons[result.attacker]}
+	if battle.forced do attacks.note = {}
+	report_say(report, "% % %.", names[.Attacker], attacks, names[.Defender])
 	report_say(report, "Power % against %.", powers[.Attacker], powers[.Defender])
 	ground := [Role]f32 {
 		.Attacker = 0,
@@ -664,11 +695,14 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		// Step: Avoid
 		defender := sides[.Defender]
 		attacker := sides[.Attacker]
-		if battle.can_avoid && decide(.Avoid, situation[.Defender]) == .Avoid_Try {
+		avoid, held, absent := decide(.Avoid, situation[.Defender])
+		if battle.can_avoid && avoid == .Avoid_Try {
 			roll: Tally
 			tally_add(&roll, .Dice, roll_2d6(&rng))
 			tally_add(&roll, .Mobility, MOBILITY_BONUS * (defender.mobility - attacker.mobility))
-			if check(report, names[.Defender], roll, MOBILITY_TARGET, "tries to avoid battle") {
+			reason := report_because(report, held, absent, FACT_TITLES)
+			tries := Report_Note{"tries to avoid battle", reason}
+			if check(report, names[.Defender], roll, MOBILITY_TARGET, tries) {
 				result.outcome = .Avoided
 				loser = .Defender
 				decided = true
@@ -679,11 +713,13 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	// Step: Posture
 	postures: [Role]Choice
 	{
-		words: [Role]string
+		words: [Role]Report_Note
 		for role in Role {
-			postures[role] = decide(.Posture, situation[role])
+			held, absent: bit_set[Fact]
+			postures[role], held, absent = decide(.Posture, situation[role])
 			result.sides[at[role]].posture = report_text(report, POSTURE_TITLES[postures[role]])
-			words[role] = CHOICE_WORDS[postures[role]]
+			reason := report_because(report, held, absent, FACT_TITLES)
+			words[role] = {CHOICE_WORDS[postures[role]], reason}
 		}
 		if !decided do choose(report, names, words)
 	}
@@ -733,10 +769,12 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	worsened: bool
 	if !decided {
 		choices: [Role]Choice
-		words: [Role]string
+		words: [Role]Report_Note
 		for role in Role {
-			choices[role] = decide(.Crisis, situation[role])
-			words[role] = CHOICE_WORDS[choices[role]]
+			held, absent: bit_set[Fact]
+			choices[role], held, absent = decide(.Crisis, situation[role])
+			reason := report_because(report, held, absent, FACT_TITLES)
+			words[role] = {CHOICE_WORDS[choices[role]], reason}
 		}
 		choose(report, names, words)
 		switch {
@@ -847,7 +885,12 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		victor := sides[winner]
 		beaten := sides[loser]
 		follow := Choice.Follow_Stay
-		if can_advance do follow = decide(.Follow, situation[winner] + {OUTCOME_VICTORY[outcome]})
+		reason: span.Span
+		if can_advance {
+			held, absent: bit_set[Fact]
+			follow, held, absent = decide(.Follow, situation[winner] + {OUTCOME_VICTORY[outcome]})
+			reason = report_because(report, held, absent, FACT_TITLES)
+		}
 		if follow == .Follow_Pursue && !can_pursue do follow = .Follow_Advance
 		pursued := follow == .Follow_Pursue
 		result.follows = follow != .Follow_Stay
@@ -856,7 +899,8 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			roll: Tally
 			tally_add(&roll, .Dice, roll_2d6(&rng))
 			tally_add(&roll, .Mobility, MOBILITY_BONUS * (victor.mobility - beaten.mobility))
-			result.caught = check(report, names[winner], roll, MOBILITY_TARGET, "pursues")
+			pursues := Report_Note{"pursues", reason}
+			result.caught = check(report, names[winner], roll, MOBILITY_TARGET, pursues)
 			if result.caught {
 				out := &result.sides[at[loser]]
 				tally_add(&out.pursuit_men, .Men_Left, -(beaten.men + out.men.total))
@@ -882,7 +926,13 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 
 // The side's roll against target: whether it reached it
 @(private = "file")
-check :: proc(report: ^Report, name: string, roll: Tally, target: f32, action: string) -> bool {
+check :: proc(
+	report: ^Report,
+	name: string,
+	roll: Tally,
+	target: f32,
+	action: Report_Arg,
+) -> bool {
 	passed := roll.total >= target
 	verdict := passed ? "succeeds" : "fails"
 	report_say(report, "% %: % against %, and %.", name, action, roll, target, verdict)
@@ -913,7 +963,7 @@ contest :: proc(
 
 // Both sides' choices
 @(private = "file")
-choose :: proc(report: ^Report, names: [Role]string, words: [Role]string) {
+choose :: proc(report: ^Report, names: [Role]string, words: [Role]Report_Note) {
 	attacker, defender := names[.Attacker], names[.Defender]
 	report_say(report, "% %; % %.", attacker, words[.Attacker], defender, words[.Defender])
 }
@@ -931,12 +981,21 @@ ladder :: proc(value: f32, rungs: []Rung) -> Fact {
 	return rungs[len(rungs) - 1].fact
 }
 
+// With the matching rule's facts that hold, and those it needs absent
 @(private = "file")
-decide :: proc(decision: Decision, situation: bit_set[Fact]) -> (choice: Choice) {
+decide :: proc(
+	decision: Decision,
+	situation: bit_set[Fact],
+) -> (
+	choice: Choice,
+	held, absent: bit_set[Fact],
+) {
 	for rule in RULES[decision] {
 		matches := rule.all <= situation && (rule.none & situation) == {}
 		if matches && (rule.any == {} || (rule.any & situation) != {}) {
 			choice = rule.choice
+			held = (rule.all | rule.any) & situation
+			absent = rule.none
 			break
 		}
 	}

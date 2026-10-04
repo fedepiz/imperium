@@ -190,22 +190,25 @@ scene_pawn :: proc(handle: sim.Piece_Id) -> (sim.Pawn, bool) {
 	return {}, false
 }
 
-// While the run keyed by the breakdown is hovered, a tooltip of its terms, a rule, then the total. 0 = none.
+// While the run keyed by the breakdown is hovered, a tooltip of its note, terms, a rule and the total. 0 = none.
 @(private = "file")
 breakdown_hover :: proc(card: ^sim.Card, breakdown: int, style: ui.Style) {
 	if breakdown == 0 || !ui.signal(fmt.tprintf("breakdown %d", breakdown)).hovered do return
 	shown := &card.breakdowns[breakdown - 1]
 	if ui.tooltip(style) {
+		if shown.note != "" do ui.label(shown.note)
 		for term in shown.terms {
 			if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
 				ui.label(term.label, {width = ui.em(CARD_LABEL_EM), text_color = CARD_FADED_INK})
 				ui.label(term.value, {width = ui.em(CARD_STAT_EM)})
 			}
 		}
-		ui.panel("rule", {width = ui.grow(), height = ui.px(1), background = MAP_INK, thickness = 0})
-		if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
-			ui.label("Total", {width = ui.em(CARD_LABEL_EM), text_color = CARD_FADED_INK})
-			ui.label(shown.total, {width = ui.em(CARD_STAT_EM)})
+		if shown.total != "" {
+			ui.panel("rule", {width = ui.grow(), height = ui.px(1), background = MAP_INK, thickness = 0})
+			if ui.row({width = ui.fit(), height = ui.fit(), gap = 12}) {
+				ui.label("Total", {width = ui.em(CARD_LABEL_EM), text_color = CARD_FADED_INK})
+				ui.label(shown.total, {width = ui.em(CARD_STAT_EM)})
+			}
 		}
 	}
 }

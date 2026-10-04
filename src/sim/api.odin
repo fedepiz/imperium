@@ -411,6 +411,8 @@ Line_Part :: struct {
 
 // A number's terms and their total
 Breakdown :: struct {
+	// Shown above the terms
+	note:  string,
 	terms: [dynamic; TALLY_FACTORS_MAX]Field,
 	total: string,
 }

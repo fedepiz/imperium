@@ -300,7 +300,7 @@ world_present :: proc(
 	pathfind_cache_get(&out.caches[.Pathfind_Sea], .Sea)
 }
 
-// Adds the report's lines, each tally's factors on hover
+// Adds the report's lines, each tally's factors and note on hover
 @(private = "file")
 card_report :: proc(card: ^Card, report: ^Report) {
 	for line in report.lines {
@@ -311,6 +311,11 @@ card_report :: proc(card: ^Card, report: ^Report) {
 				text = text,
 			}
 			if len(part.tally.factors) > 0 do shown.breakdown = card_breakdown(card, part.tally, text)
+			if part.note.len > 0 {
+				note := span.to_string(report.text[:], part.note)
+				append(&card.breakdowns, Breakdown{note = note})
+				shown.breakdown = len(card.breakdowns)
+			}
 			append(&card.parts, shown)
 		}
 		append(&card.lines, span.from_range(begin, len(card.parts)))

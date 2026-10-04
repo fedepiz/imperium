@@ -102,10 +102,17 @@ Report :: struct {
 	lines: [dynamic; REPORT_LINES_MAX]span.Span,
 }
 
-// Text shown; on hover, the tally behind it when it has factors
+// Text shown; on hover, its tally's factors and its note
 Report_Part :: struct {
 	text:  span.Span,
 	tally: Tally,
+	note:  span.Span,
+}
+
+// Text, with a span of the report's text shown on hover
+Report_Note :: struct {
+	text: string,
+	note: span.Span,
 }
 
 // Fills a % slot
@@ -113,6 +120,7 @@ Report_Arg :: union {
 	string,
 	Tally,
 	f32,
+	Report_Note,
 }
 
 tally_add :: proc(tally: ^Tally, term: Report_Term, value: f32) {
@@ -154,6 +162,8 @@ write :: proc(report: ^Report, text: string, args: []Report_Arg) {
 			put(report, fmt.bprintf(digits[:], "%v", value))
 		case Tally:
 			put(report, fmt.bprintf(digits[:], "%.1f", value.total), value)
+		case Report_Note:
+			put(report, value.text, {}, value.note)
 		}
 	}
 	put(report, rest)
@@ -161,11 +171,35 @@ write :: proc(report: ^Report, text: string, args: []Report_Arg) {
 
 // Appends text as a part, the tally behind it
 @(private = "file")
-put :: proc(report: ^Report, text: string, tally: Tally = {}) {
+put :: proc(report: ^Report, text: string, tally: Tally = {}, note: span.Span = {}) {
 	if text == "" do return
 	begin := len(report.text)
 	append(&report.text, ..transmute([]u8)text)
-	end := len(report.text)
-	append(&report.parts, Report_Part{text = span.from_range(begin, end), tally = tally})
+	part := Report_Part{span.from_range(begin, len(report.text)), tally, note}
+	append(&report.parts, part)
+}
+
+// "Because X and Y, and not Z nor W"; empty when both sets are
+report_because :: proc(
+	report: ^Report,
+	held, absent: bit_set[$E],
+	titles: [E]string,
+) -> span.Span {
+	add :: proc(report: ^Report, text: string) {append(&report.text, ..transmute([]u8)text)}
+	begin := len(report.text)
+	if held != {} || absent != {} do add(report, "Because ")
+	joint := ""
+	for fact in held {
+		add(report, joint)
+		add(report, titles[fact])
+		joint = " and "
+	}
+	joint = held != {} ? ", and not " : "not "
+	for fact in absent {
+		add(report, joint)
+		add(report, titles[fact])
+		joint = " nor "
+	}
+	return span.from_range(begin, len(report.text))
 }
 
