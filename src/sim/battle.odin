@@ -62,61 +62,12 @@ AVOID_READINESS :: 5
 
 // Temperaments -------------------------------------------------------------------------------------------------------
 
-// Attacks when own strength − enemy strength + initiative ≥ 0; ORDERED_INITIATIVE (sent at the enemy) and
-// INTERCEPT_INITIATIVE (the enemy entered its zone) add to the temperament's
 @(private = "file")
-TEMPERAMENT_ATTACK_INITIATIVE := [Temperament]f32 {
-	.Bold     = 1,
-	.Steady   = 0,
-	.Cautious = -2,
-	.Cunning  = 0,
-}
-@(private = "file")
-ORDERED_INITIATIVE :: 2
-@(private = "file")
-INTERCEPT_INITIATIVE :: -1
-// As defender, tries to avoid battle when own strength − enemy strength < this (−inf: never)
-@(private = "file")
-TEMPERAMENT_AVOID_BELOW := [Temperament]f32 {
-	.Bold     = math.NEG_INF_F32,
-	.Steady   = 0,
-	.Cautious = 1,
-	.Cunning  = 1,
-}
-@(private = "file")
-TEMPERAMENT_POSTURE := [Role][Temperament]Posture {
-	.Attacker = {.Bold = .Press, .Steady = .Standard, .Cautious = .Probe, .Cunning = .Standard},
-	.Defender = {.Bold = .Press, .Steady = .Standard, .Cautious = .Probe, .Cunning = .Press},
-}
-// Crisis: commits when edge > COMMIT_ABOVE, breaks off when edge ≤ BREAK_OFF_AT, holds otherwise
-@(private = "file")
-TEMPERAMENT_COMMIT_ABOVE := [Temperament]f32 {
-	.Bold     = math.NEG_INF_F32,
-	.Steady   = 0,
-	.Cautious = math.INF_F32,
-	.Cunning  = 0,
-}
-@(private = "file")
-TEMPERAMENT_BREAK_OFF_AT := [Temperament]f32 {
-	.Bold     = math.NEG_INF_F32,
-	.Steady   = -2,
-	.Cautious = -2,
-	.Cunning  = -2,
-}
-// Least severity at which the winner advances, and pursues (4: never)
-@(private = "file")
-TEMPERAMENT_ADVANCE_FROM := [Temperament]int {
-	.Bold     = 0,
-	.Steady   = 1,
-	.Cautious = 3,
-	.Cunning  = 0,
-}
-@(private = "file")
-TEMPERAMENT_PURSUE_FROM := [Temperament]int {
-	.Bold     = 2,
-	.Steady   = 3,
-	.Cautious = 4,
-	.Cunning  = 2,
+TEMPERAMENT_FACTS := [Temperament]Fact {
+	.Bold     = .Temperament_Bold,
+	.Steady   = .Temperament_Steady,
+	.Cautious = .Temperament_Cautious,
+	.Cunning  = .Temperament_Cunning,
 }
 // Movement points a winner marches beyond its budget to follow
 @(private = "file")
@@ -127,59 +78,239 @@ TEMPERAMENT_FOLLOW_OVERDRAW := [Temperament]f32 {
 	.Cunning  = 0,
 }
 
+// Decisions -----------------------------------------------------------------------------------------------------------
+
+// Facts about a side
+@(private = "file")
+Fact :: enum u8 {
+	// Temperament
+	Temperament_Bold,
+	Temperament_Steady,
+	Temperament_Cautious,
+	Temperament_Cunning,
+	// Strength: own power − the enemy's
+	Strength_Superior,
+	Strength_Ahead,
+	Strength_Even,
+	Strength_Behind,
+	Strength_Outmatched,
+	// Contact
+	Contact_Ordered,
+	Contact_Intercepting,
+	Role_Defending,
+	// Onset: own roll − the enemy's
+	Onset_Winning,
+	Onset_Even,
+	Onset_Losing,
+	Onset_Losing_Badly,
+	// Victory
+	Victory_Slight,
+	Victory_Clear,
+	Victory_Heavy,
+	Victory_Rout,
+}
+
+@(private = "file")
+Rung :: struct {
+	from: f32,
+	fact: Fact,
+}
+
+// Highest rung first
+@(private = "file")
+STRENGTH_LADDER := [?]Rung {
+	{2, .Strength_Superior},
+	{0.5, .Strength_Ahead},
+	{-0.5, .Strength_Even},
+	{-2, .Strength_Behind},
+	{math.NEG_INF_F32, .Strength_Outmatched},
+}
+@(private = "file")
+ONSET_LADDER := [?]Rung {
+	{ONSET_TIE, .Onset_Winning},
+	{-ONSET_TIE, .Onset_Even},
+	{-4, .Onset_Losing},
+	{math.NEG_INF_F32, .Onset_Losing_Badly},
+}
+
+// None = undecided
+@(private = "file")
+Choice :: enum u8 {
+	None,
+	Contact_Attack,
+	Contact_Decline,
+	// As defender
+	Avoid_Try,
+	Avoid_Stand,
+	Posture_Press,
+	Posture_Standard,
+	Posture_Probe,
+	Crisis_Commit,
+	Crisis_Hold,
+	Crisis_Break_Off,
+	// As winner
+	Follow_Stay,
+	Follow_Advance,
+	Follow_Pursue,
+}
+
+@(private = "file")
+Decision :: enum u8 {
+	Contact,
+	Avoid,
+	Posture,
+	Crisis,
+	Follow,
+}
+
+@(private = "file")
+DECISION_CHOICES := [Decision]bit_set[Choice] {
+	.Contact = {.Contact_Attack, .Contact_Decline},
+	.Avoid   = {.Avoid_Try, .Avoid_Stand},
+	.Posture = {.Posture_Press, .Posture_Standard, .Posture_Probe},
+	.Crisis  = {.Crisis_Commit, .Crisis_Hold, .Crisis_Break_Off},
+	.Follow  = {.Follow_Stay, .Follow_Advance, .Follow_Pursue},
+}
+
+@(private = "file")
+Rule :: struct {
+	all:    bit_set[Fact],
+	// At least one, unless empty
+	any:    bit_set[Fact],
+	none:   bit_set[Fact],
+	choice: Choice,
+}
+
+// First match wins
+@(private = "file")
+RULES := [Decision][]Rule {
+	.Contact = {
+		// Bold
+		{all = {.Temperament_Bold, .Contact_Ordered}, choice = .Contact_Attack},
+		{
+			all = {.Temperament_Bold, .Contact_Intercepting},
+			any = {.Strength_Superior, .Strength_Ahead, .Strength_Even},
+			choice = .Contact_Attack,
+		},
+		{
+			all = {.Temperament_Bold},
+			none = {.Contact_Intercepting, .Strength_Outmatched},
+			choice = .Contact_Attack,
+		},
+		// Cautious
+		{
+			all = {.Temperament_Cautious, .Contact_Ordered},
+			any = {.Strength_Superior, .Strength_Ahead},
+			choice = .Contact_Attack,
+		},
+		{all = {.Temperament_Cautious, .Strength_Superior}, choice = .Contact_Attack},
+		{all = {.Temperament_Cautious}, choice = .Contact_Decline},
+		// Everyone
+		{all = {.Contact_Ordered}, none = {.Strength_Outmatched}, choice = .Contact_Attack},
+		{
+			all = {.Contact_Intercepting},
+			any = {.Strength_Superior, .Strength_Ahead},
+			choice = .Contact_Attack,
+		},
+		{
+			any = {.Strength_Superior, .Strength_Ahead, .Strength_Even},
+			none = {.Contact_Intercepting},
+			choice = .Contact_Attack,
+		},
+		{choice = .Contact_Decline},
+	},
+	.Avoid   = {
+		// Bold
+		{all = {.Temperament_Bold}, choice = .Avoid_Stand},
+		// Cautious, Cunning
+		{
+			all = {.Temperament_Cautious},
+			any = {.Strength_Even, .Strength_Behind, .Strength_Outmatched},
+			choice = .Avoid_Try,
+		},
+		{
+			all = {.Temperament_Cunning},
+			any = {.Strength_Even, .Strength_Behind, .Strength_Outmatched},
+			choice = .Avoid_Try,
+		},
+		// Everyone
+		{any = {.Strength_Behind, .Strength_Outmatched}, choice = .Avoid_Try},
+		{choice = .Avoid_Stand},
+	},
+	.Posture = {
+		{all = {.Temperament_Bold}, choice = .Posture_Press},
+		{all = {.Temperament_Cautious}, choice = .Posture_Probe},
+		{all = {.Temperament_Cunning, .Role_Defending}, choice = .Posture_Press},
+		{choice = .Posture_Standard},
+	},
+	.Crisis  = {
+		// Bold
+		{all = {.Temperament_Bold}, choice = .Crisis_Commit},
+		// Cautious
+		{all = {.Temperament_Cautious, .Onset_Losing_Badly}, choice = .Crisis_Break_Off},
+		{all = {.Temperament_Cautious}, choice = .Crisis_Hold},
+		// Everyone
+		{all = {.Onset_Winning}, choice = .Crisis_Commit},
+		{all = {.Onset_Losing_Badly}, choice = .Crisis_Break_Off},
+		{choice = .Crisis_Hold},
+	},
+	.Follow  = {
+		// Bold, Cunning
+		{
+			all = {.Temperament_Bold},
+			any = {.Victory_Heavy, .Victory_Rout},
+			choice = .Follow_Pursue,
+		},
+		{all = {.Temperament_Bold}, choice = .Follow_Advance},
+		{
+			all = {.Temperament_Cunning},
+			any = {.Victory_Heavy, .Victory_Rout},
+			choice = .Follow_Pursue,
+		},
+		{all = {.Temperament_Cunning}, choice = .Follow_Advance},
+		// Cautious
+		{all = {.Temperament_Cautious, .Victory_Rout}, choice = .Follow_Advance},
+		{all = {.Temperament_Cautious}, choice = .Follow_Stay},
+		// Everyone
+		{all = {.Victory_Rout}, choice = .Follow_Pursue},
+		{any = {.Victory_Clear, .Victory_Heavy}, choice = .Follow_Advance},
+		{choice = .Follow_Stay},
+	},
+}
+
 // Postures -----------------------------------------------------------------------------------------------------------
 
 @(private = "file")
-Posture :: enum u8 {
-	Press,
-	Standard,
-	Probe,
-}
-
-@(private = "file")
-POSTURE_ONSET := [Posture]f32 {
-	.Press    = 1,
-	.Standard = 0,
-	.Probe    = -1,
+POSTURE_ONSET := #partial [Choice]f32 {
+	.Posture_Press = 1,
+	.Posture_Probe = -1,
 }
 @(private = "file")
-POSTURE_CRISIS := [Posture]f32 {
-	.Press    = -1,
-	.Standard = 0,
-	.Probe    = 0,
+POSTURE_CRISIS := #partial [Choice]f32 {
+	.Posture_Press = -1,
 }
 // Can't be routed at the onset, and pulls out when behind after it
 @(private = "file")
-POSTURE_PROBES := bit_set[Posture]{.Probe}
+PROBING := bit_set[Choice]{.Posture_Probe}
 // Losing the crisis is one step worse
 @(private = "file")
-POSTURE_WORSENS := bit_set[Posture]{.Press}
-
-@(private = "file")
-Crisis_Choice :: enum u8 {
-	Hold,
-	Commit,
-	Break_Off,
-}
+WORSENING := bit_set[Choice]{.Posture_Press, .Crisis_Commit}
 
 // Report wording
 @(private = "file")
-POSTURE_TITLES := [Posture]string {
-	.Press    = "Press",
-	.Standard = "Standard",
-	.Probe    = "Probe",
+POSTURE_TITLES := #partial [Choice]string {
+	.Posture_Press    = "Press",
+	.Posture_Standard = "Standard",
+	.Posture_Probe    = "Probe",
 }
 @(private = "file")
-POSTURE_WORDS := [Posture]string {
-	.Press    = "presses",
-	.Standard = "stands",
-	.Probe    = "probes",
-}
-@(private = "file")
-CHOICE_WORDS := [Crisis_Choice]string {
-	.Hold      = "holds",
-	.Commit    = "commits",
-	.Break_Off = "breaks off",
+CHOICE_WORDS := #partial [Choice]string {
+	.Posture_Press    = "presses",
+	.Posture_Standard = "stands",
+	.Posture_Probe    = "probes",
+	.Crisis_Commit    = "commits",
+	.Crisis_Hold      = "holds",
+	.Crisis_Break_Off = "breaks off",
 }
 
 // Outcomes -----------------------------------------------------------------------------------------------------------
@@ -222,17 +353,16 @@ OUTCOME_WORDS := [Battle_Outcome]string {
 	.Heavy_Defeat = "is heavily defeated",
 	.Rout         = "is routed",
 }
-// How bad for the loser
 @(private = "file")
-OUTCOME_SEVERITY := [Battle_Outcome]int {
-	.Avoided      = 0,
-	.Stalemate    = 0,
-	.Probed       = 0,
-	.Withdrew     = 0,
-	.Repulsed     = 0,
-	.Defeat       = 1,
-	.Heavy_Defeat = 2,
-	.Rout         = 3,
+OUTCOME_VICTORY := [Battle_Outcome]Fact {
+	.Avoided      = .Victory_Slight,
+	.Stalemate    = .Victory_Slight,
+	.Probed       = .Victory_Slight,
+	.Withdrew     = .Victory_Slight,
+	.Repulsed     = .Victory_Slight,
+	.Defeat       = .Victory_Clear,
+	.Heavy_Defeat = .Victory_Heavy,
+	.Rout         = .Victory_Rout,
 }
 // One step worse, for a loser that committed or pressed
 @(private = "file")
@@ -480,15 +610,14 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	// Step: Contact. [0] attacks, else [1] may intercept; else nobody does.
 	initiator := battle.sides[0]
 	other := battle.sides[1]
-	gap := power(initiator, other).total - power(other, initiator).total
-	initiative: f32 =
-		TEMPERAMENT_ATTACK_INITIATIVE[initiator.temperament] +
-		(battle.ordered ? ORDERED_INITIATIVE : 0)
+	contact := [2]bit_set[Fact]{facts(initiator, other), facts(other, initiator)}
+	if battle.ordered do contact[0] += {.Contact_Ordered}
+	contact[1] += {.Contact_Intercepting}
 	switch {
-	case battle.forced || (initiator.can_attack && gap + initiative >= 0):
+	case battle.forced ||
+	     (initiator.can_attack && decide(.Contact, contact[0]) == .Contact_Attack):
 		result.fought = true
-	case other.can_attack &&
-	     -gap + TEMPERAMENT_ATTACK_INITIATIVE[other.temperament] + INTERCEPT_INITIATIVE >= 0:
+	case other.can_attack && decide(.Contact, contact[1]) == .Contact_Attack:
 		result.fought = true
 		result.attacker = 1
 	case:
@@ -519,6 +648,9 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		result.sides[at[role]].power = powers[role]
 	}
 	if !result.fought do return
+	situation: [Role]bit_set[Fact]
+	for side, role in sides do situation[role] = facts(side, sides[OTHER_ROLE[role]])
+	situation[.Defender] += {.Role_Defending}
 	report_say(report, "% attacks %.", names[.Attacker], names[.Defender])
 	report_say(report, "Power % against %.", powers[.Attacker], powers[.Defender])
 	ground := [Role]f32 {
@@ -532,8 +664,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		// Step: Avoid
 		defender := sides[.Defender]
 		attacker := sides[.Attacker]
-		gap := powers[.Defender].total - powers[.Attacker].total
-		if battle.can_avoid && gap < TEMPERAMENT_AVOID_BELOW[defender.temperament] {
+		if battle.can_avoid && decide(.Avoid, situation[.Defender]) == .Avoid_Try {
 			roll: Tally
 			tally_add(&roll, .Dice, roll_2d6(&rng))
 			tally_add(&roll, .Mobility, MOBILITY_BONUS * (defender.mobility - attacker.mobility))
@@ -546,13 +677,13 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	}
 
 	// Step: Posture
-	postures: [Role]Posture
+	postures: [Role]Choice
 	{
 		words: [Role]string
-		for side, role in sides {
-			postures[role] = TEMPERAMENT_POSTURE[role][side.temperament]
+		for role in Role {
+			postures[role] = decide(.Posture, situation[role])
 			result.sides[at[role]].posture = report_text(report, POSTURE_TITLES[postures[role]])
-			words[role] = POSTURE_WORDS[postures[role]]
+			words[role] = CHOICE_WORDS[postures[role]]
 		}
 		if !decided do choose(report, names, words)
 	}
@@ -568,12 +699,14 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			tally_add(&roll, .Ground, ground[role])
 		}
 		ahead, margin := contest(report, "Onset", names, rolls)
+		situation[ahead] += {ladder(margin, ONSET_LADDER[:])}
+		situation[OTHER_ROLE[ahead]] += {ladder(-margin, ONSET_LADDER[:])}
 		switch {
 		case margin < ONSET_TIE:
 			report_say(report, "Neither gains the upper hand.")
 		case margin >= ONSET_ROUT_MARGIN:
 			loser = OTHER_ROLE[ahead]
-			result.outcome = postures[loser] in POSTURE_PROBES ? .Probed : .Rout
+			result.outcome = postures[loser] in PROBING ? .Probed : .Rout
 			decided = true
 		case:
 			tally_add(&edges[ahead], .Margin, margin)
@@ -586,7 +719,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	if !decided {
 		for role in Role {
 			behind := edges[role].total - edges[OTHER_ROLE[role]].total
-			if postures[role] in POSTURE_PROBES && behind <= PROBE_PULL_OUT {
+			if postures[role] in PROBING && behind <= PROBE_PULL_OUT {
 				report_say(report, "% is probing and falls behind.", names[role])
 				result.outcome = .Probed
 				loser = role
@@ -599,22 +732,20 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	// Step: Crisis
 	worsened: bool
 	if !decided {
-		choices: [Role]Crisis_Choice
+		choices: [Role]Choice
 		words: [Role]string
-		for side, role in sides {
-			e := edges[role].total - edges[OTHER_ROLE[role]].total
-			if e > TEMPERAMENT_COMMIT_ABOVE[side.temperament] do choices[role] = .Commit
-			if e <= TEMPERAMENT_BREAK_OFF_AT[side.temperament] do choices[role] = .Break_Off
+		for role in Role {
+			choices[role] = decide(.Crisis, situation[role])
 			words[role] = CHOICE_WORDS[choices[role]]
 		}
 		choose(report, names, words)
 		switch {
-		case choices[.Attacker] == .Break_Off && choices[.Defender] == .Break_Off:
+		case choices[.Attacker] == .Crisis_Break_Off && choices[.Defender] == .Crisis_Break_Off:
 			result.outcome = .Stalemate
-		case choices[.Attacker] == .Break_Off:
+		case choices[.Attacker] == .Crisis_Break_Off:
 			result.outcome = .Repulsed
 			loser = .Attacker
-		case choices[.Defender] == .Break_Off:
+		case choices[.Defender] == .Crisis_Break_Off:
 			result.outcome = .Withdrew
 			loser = .Defender
 		case:
@@ -623,7 +754,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 				tally_add(&roll, .Dice, roll_2d6(&rng))
 				for factor in powers[role].factors do tally_add(&roll, factor.term, factor.value)
 				tally_add(&roll, .Edge, edges[role].total)
-				tally_add(&roll, .Commit, choices[role] == .Commit ? COMMIT_BONUS : 0)
+				tally_add(&roll, .Commit, choices[role] == .Crisis_Commit ? COMMIT_BONUS : 0)
 				tally_add(&roll, .Posture, POSTURE_CRISIS[postures[role]])
 				tally_add(&roll, .Ground, ground[role])
 			}
@@ -639,7 +770,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			case:
 				result.outcome = .Rout
 			}
-			if choices[loser] == .Commit || postures[loser] in POSTURE_WORSENS {
+			if choices[loser] in WORSENING || postures[loser] in WORSENING {
 				worsened = OUTCOME_WORSE[result.outcome] != result.outcome
 				result.outcome = OUTCOME_WORSE[result.outcome]
 			}
@@ -715,10 +846,11 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		can_pursue := standing && outcome in OUTCOME_PURSUABLE
 		victor := sides[winner]
 		beaten := sides[loser]
-		severity := OUTCOME_SEVERITY[outcome]
-		pursued := can_pursue && severity >= TEMPERAMENT_PURSUE_FROM[victor.temperament]
-		result.follows =
-			pursued || can_advance && severity >= TEMPERAMENT_ADVANCE_FROM[victor.temperament]
+		follow := Choice.Follow_Stay
+		if can_advance do follow = decide(.Follow, situation[winner] + {OUTCOME_VICTORY[outcome]})
+		if follow == .Follow_Pursue && !can_pursue do follow = .Follow_Advance
+		pursued := follow == .Follow_Pursue
+		result.follows = follow != .Follow_Stay
 		result.follow_overdraw = TEMPERAMENT_FOLLOW_OVERDRAW[victor.temperament]
 		if pursued {
 			roll: Tally
@@ -784,5 +916,31 @@ contest :: proc(
 choose :: proc(report: ^Report, names: [Role]string, words: [Role]string) {
 	attacker, defender := names[.Attacker], names[.Defender]
 	report_say(report, "% %; % %.", attacker, words[.Attacker], defender, words[.Defender])
+}
+
+// Temperament and strength
+@(private = "file")
+facts :: proc(side, other: Battle_Side) -> bit_set[Fact] {
+	gap := power(side, other).total - power(other, side).total
+	return {TEMPERAMENT_FACTS[side.temperament], ladder(gap, STRENGTH_LADDER[:])}
+}
+
+@(private = "file")
+ladder :: proc(value: f32, rungs: []Rung) -> Fact {
+	for rung in rungs do if value >= rung.from do return rung.fact
+	return rungs[len(rungs) - 1].fact
+}
+
+@(private = "file")
+decide :: proc(decision: Decision, situation: bit_set[Fact]) -> (choice: Choice) {
+	for rule in RULES[decision] {
+		matches := rule.all <= situation && (rule.none & situation) == {}
+		if matches && (rule.any == {} || (rule.any & situation) != {}) {
+			choice = rule.choice
+			break
+		}
+	}
+	assert(choice in DECISION_CHOICES[decision])
+	return
 }
 
