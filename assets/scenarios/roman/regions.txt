@@ -1,0 +1,54 @@
+# The regions of the map, in the order of their ids, from 1. Each has an id, a snake_case word the other files name it
+# by, which no other region has. Each cell of regions.png is painted in the colour of the region it lies in: [r, g, b],
+# each from 1 to 255, a colour no other region has. A cell of any other colour, such as the black of land in no region
+# or the white of the sea, lies in none.
+
+# Aemilia et Liguria
+region = { id = mediolanum            name = "Mediolanum"            colour = [220,  50,  47] }
+region = { id = genua                 name = "Genua"                 colour = [112,  68, 131] }
+
+# Venetia et Histria
+region = { id = aquileia              name = "Aquileia"              colour = [ 50, 100, 220] }
+region = { id = verona                name = "Verona"                colour = [123, 179,  44] }
+
+# Flaminia et Picenum
+region = { id = ravenna               name = "Ravenna"               colour = [235, 215,  40] }
+
+# Tuscia et Umbria
+region = { id = florentia             name = "Florentia"             colour = [ 60, 170,  70] }
+
+# Campania
+region = { id = roma                  name = "Roma"                  colour = [140,  70, 190] }
+region = { id = neapolis              name = "Neapolis"              colour = [ 52, 141, 137] }
+
+# Apulia et Calabria
+region = { id = tarentum              name = "Tarentum"              colour = [240, 150,  30] }
+
+# Lucania et Bruttii
+region = { id = rhegium               name = "Rhegium"               colour = [ 40, 170, 170] }
+
+# Sicilia
+region = { id = syracusae             name = "Syracusae"             colour = [230, 110, 170] }
+
+# Alpes Cottiae
+region = { id = segusio               name = "Segusio"               colour = [150,  90,  40] }
+
+# Alpes Poeninae
+region = { id = octodurum             name = "Octodurum"             colour = [210,  40, 200] }
+
+# Raetia
+region = { id = augusta_vindelicorum  name = "Augusta Vindelicorum"  colour = [128, 128,  20] }
+
+# Noricum
+region = { id = virunum               name = "Virunum"               colour = [130,  30,  50] }
+region = { id = iuvavum               name = "Iuvavum"               colour = [ 47,  91,  53] }
+
+# Pannonia Savia
+region = { id = siscia                name = "Siscia"                colour = [150, 230, 150] }
+
+# Dalmatia
+region = { id = domavia               name = "Domavia"               colour = [250, 160, 120] }
+region = { id = salona                name = "Salona"                colour = [171, 138,  45] }
+
+# Maxima Sequanorum
+region = { id = vesontio              name = "Vesontio"              colour = [ 30,  50, 130] }
