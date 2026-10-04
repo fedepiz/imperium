@@ -81,8 +81,10 @@ CHASE_BUDGET :: 15
 // 1 − distance / FORAGE_RADIUS
 FORAGE_RADIUS :: 12
 
-// Commander temperament of an army without a general
+// Default commander temperament
 NO_GENERAL_TEMPERAMENT :: Temperament.Steady
+// Default name of a piece
+UNNAMED_PIECE :: "???"
 
 // What the land yields to foragers, 0..1, by terrain type; blended from Open by the type's strength
 FORAGE_YIELD := [Terrain_Type]f32 {
@@ -501,7 +503,17 @@ world_load :: proc(scenario: Scenario) -> bool {
 					traits = piece.traits,
 					general = general,
 				},
-				piece.army,
+				{
+					active = piece.army.active,
+					men = piece.army.men,
+					men_max = piece.army.men_max,
+					proficiency = piece.army.proficiency,
+					readiness = piece.army.readiness,
+					foraging = piece.army.foraging,
+					mobility = piece.army.mobility,
+					stock = piece.army.stock,
+					baggage = piece.army.baggage,
+				},
 				piece.name,
 			)
 			if piece.capital_of > 0 && int(piece.capital_of) <= len(WORLD.region_capitals) {
@@ -579,7 +591,7 @@ world_step :: proc(input: Step_Input) {
 				open^ = {}
 			}
 		} else if input.answer == .Next && mov.subject == {} {
-			result := open.result
+			result := &open.result
 			ids := [2]Piece_Id{open.actor, open.target}
 			fallen := 1 - result.winner
 			loser := ids[fallen]
@@ -665,8 +677,8 @@ world_step :: proc(input: Step_Input) {
 				mobility    = army.mobility,
 				temperament = army.commander_temperament,
 				can_attack  = !WORLD.piece_turns[id.index].attacked,
+				name        = string(WORLD.piece_names[id.index][:]),
 			}
-			name_set(&battle.sides[i].name, piece_title(id))
 		}
 		result := battle_resolve(battle)
 		if !result.fought && !result.refused do continue
@@ -888,6 +900,8 @@ world_step :: proc(input: Step_Input) {
 		piece := WORLD.pieces[index]
 		readiness := army.readiness
 		stock := army.stock
+
+		// Its general's temperament
 		general := character_get(piece.general)
 		army.commander_temperament = general != nil ? general.temperament : NO_GENERAL_TEMPERAMENT
 
@@ -1067,7 +1081,7 @@ piece_spawn :: proc(piece: Piece, army: Army, name: string) -> Piece_Id {
 	generation := slot.generation + 1
 	slot^ = piece
 	slot.generation = generation
-	name_set(&WORLD.piece_names[index], name)
+	name_set(&WORLD.piece_names[index], name != "" ? name : UNNAMED_PIECE)
 	WORLD.armies[index] = army
 	WORLD.piece_turns[index] = {}
 	return {index, generation}
@@ -1088,12 +1102,6 @@ piece_get :: proc(id: Piece_Id) -> ^Piece {
 	piece := &WORLD.pieces[id.index]
 	if id.generation & 1 == 0 || piece.generation != id.generation do return nil
 	return piece
-}
-
-// Name, or "???" if unnamed. Piece must be alive.
-piece_title :: proc(id: Piece_Id) -> string {
-	name := WORLD.piece_names[id.index][:]
-	return len(name) > 0 ? string(name) : "???"
 }
 
 piece_alive :: proc(piece: Piece) -> bool {

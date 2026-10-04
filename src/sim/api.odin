@@ -72,7 +72,7 @@ Piece_Trait :: enum u8 {
 	Capturable,
 }
 
-// A character's
+// How a character commands
 Temperament :: enum u8 {
 	Bold,
 	Steady,
@@ -181,9 +181,23 @@ Scenario_Piece :: struct {
 	traits:            bit_set[Piece_Trait;u8],
 	// 0 = none. At most one capital per region.
 	capital_of:        Region_Id,
-	// 1-based index into character_names, 0 = none
+	// 1-based index into characters, 0 = none
 	general:           int,
-	army:              Army,
+	army:              Scenario_Army,
+}
+
+// The Army fields a scenario sets
+Scenario_Army :: struct {
+	// False = no army
+	active:      bool,
+	men:         int,
+	men_max:     int,
+	proficiency: f32,
+	readiness:   f32,
+	foraging:    f32,
+	mobility:    f32,
+	stock:       f32,
+	baggage:     f32,
 }
 
 // Derived data saved between runs to speed up loading

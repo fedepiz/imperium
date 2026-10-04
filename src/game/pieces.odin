@@ -14,7 +14,7 @@ PIECES_FILE :: "pieces.txt"
 ARMY_FORAGING_DEFAULT :: 40
 ARMY_BAGGAGE_DEFAULT :: 4
 ARMY_MOBILITY_DEFAULT :: 2
-// For generals that don't set one
+// Default temperament of a general
 GENERAL_TEMPERAMENT_DEFAULT :: sim.Temperament.Steady
 
 // Results in the temp allocator. Prints the error and returns false on failure. File format: see pieces.txt.

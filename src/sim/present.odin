@@ -171,7 +171,7 @@ world_present :: proc(
 	if piece := piece_get(focus); piece != nil {
 		card := Card {
 			place   = .Focus,
-			title   = piece_title(focus),
+			title   = string(WORLD.piece_names[focus.index][:]),
 			picture = Picture{piece.icon, piece.culture},
 		}
 		append(&card.fields, Field{label = "Type", value = ICON_TITLES[piece.icon]})
@@ -216,10 +216,11 @@ world_present :: proc(
 	   open.stage == .Meet_Town && actor != nil && met != nil {
 		card := Card {
 			place   = .Interaction,
-			title   = piece_title(open.target),
+			title   = string(WORLD.piece_names[open.target.index][:]),
 			picture = Picture{met.icon, met.culture},
 		}
-		append(&card.fields, Field{label = "Met by", value = piece_title(open.actor)})
+		met_by := string(WORLD.piece_names[open.actor.index][:])
+		append(&card.fields, Field{label = "Met by", value = met_by})
 		faction := faction_get(met.owner)
 		append(&card.fields, Field{label = "Faction", value = faction != nil ? faction_name(met.owner) : "None"})
 		append(
@@ -236,11 +237,12 @@ world_present :: proc(
 	// Battle: attacker's side left, defender's right. The actor and target are in the result's contact order.
 	if open.actor != {} && open.stage != .Meet_Town {
 		result := &open.result
+		report := &result.report
 		ids := [2]Piece_Id{open.actor, open.target}
-		names := [2]string{piece_title(open.actor), piece_title(open.target)}
+		names: [2]string
+		for id, i in ids do names[i] = string(WORLD.piece_names[id.index][:])
 		attacker := result.attacker
 		defender := 1 - attacker
-		winner, loser := names[result.winner], names[1 - result.winner]
 		card := Card {
 			place = .Interaction,
 		}
@@ -249,37 +251,15 @@ world_present :: proc(
 			card.title = fmt.tprintf("%s attacks %s", names[attacker], names[defender])
 		case .Refused:
 			card.title = fmt.tprintf("%s won't attack %s", names[attacker], names[defender])
-			attacked := WORLD.piece_turns[open.actor.index].attacked
-			reason := attacked ? "It has already attacked this turn." : "Its commander judges the odds too poor."
-			card_line(&card, {text = reason})
+			card_report(&card, report)
 		case .Report:
 			card.title = "Battle report"
-			log := &result.log
-			for line in log.lines {
-				begin := len(card.parts)
-				for &part in log.parts[line.begin:][:line.len] {
-					text := span.to_string(log.text[:], part.text)
-					shown := Line_Part {
-						text = text,
-					}
-					if len(part.tally.factors) > 0 do shown.breakdown = card_breakdown(&card, part.tally, text)
-					append(&card.parts, shown)
-				}
-				append(&card.lines, span.from_range(begin, len(card.parts)))
-			}
+			card_report(&card, report)
 		case .Outcome:
-			card.title = fmt.tprintf("Battle: %s", string(result.outcome_title[:]))
+			outcome := span.to_string(report.text[:], result.outcome_title)
+			card.title = fmt.tprintf("Battle: %s", outcome)
 		case .Fall_Back:
-			switch {
-			case !result.follows:
-				card.title = fmt.tprintf("%s falls back", loser)
-			case !result.pursued:
-				card.title = fmt.tprintf("%s falls back; %s advances", loser, winner)
-			case result.caught:
-				card.title = fmt.tprintf("%s pursues and catches %s", winner, loser)
-			case:
-				card.title = fmt.tprintf("%s pursues; %s gets away", winner, loser)
-			}
+			card.title = span.to_string(report.text[:], result.follow_title)
 		}
 		order := [2]int{attacker, defender}
 		if open.stage != .Report do for i, column_index in order {
@@ -304,7 +284,7 @@ world_present :: proc(
 				append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.pursuit_readiness)})
 				continue
 			}
-			append(column, Field{label = "Posture", value = string(side.posture[:])})
+			append(column, Field{label = "Posture", value = span.to_string(report.text[:], side.posture)})
 			append(column, tally_field(&card, "Men", side.men, util.format_compact(f64(side.men.total))))
 			append(column, Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.readiness)})
 			append(column, tally_field(&card, "Supply", side.stock, fmt.tprintf("%+.1f", side.stock.total)))
@@ -320,12 +300,21 @@ world_present :: proc(
 	pathfind_cache_get(&out.caches[.Pathfind_Sea], .Sea)
 }
 
-// Adds a paragraph made of parts
+// Adds the report's lines, each tally's factors on hover
 @(private = "file")
-card_line :: proc(card: ^Card, parts: ..Line_Part) {
-	begin := len(card.parts)
-	append(&card.parts, ..parts)
-	append(&card.lines, span.from_range(begin, len(card.parts)))
+card_report :: proc(card: ^Card, report: ^Report) {
+	for line in report.lines {
+		begin := len(card.parts)
+		for &part in report.parts[line.begin:][:line.len] {
+			text := span.to_string(report.text[:], part.text)
+			shown := Line_Part {
+				text = text,
+			}
+			if len(part.tally.factors) > 0 do shown.breakdown = card_breakdown(card, part.tally, text)
+			append(&card.parts, shown)
+		}
+		append(&card.lines, span.from_range(begin, len(card.parts)))
+	}
 }
 
 // Adds the tally's factors as a breakdown under total; returns its index + 1

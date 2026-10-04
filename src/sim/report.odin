@@ -12,35 +12,25 @@ REPORT_LINES_MAX :: 24
 
 // What a derived number is made of
 Report_Term :: enum u8 {
-	// The 2d6
 	Dice,
 	Proficiency,
-	// What low readiness costs
 	Readiness,
 	Numbers,
 	Posture,
 	Ground,
 	Edge,
 	Commit,
-	// MOBILITY_BONUS × (own mobility − the other's)
 	Mobility,
-	// Men below COHESION_MEN %
 	Losses,
-	// A side's roll, in a margin
 	Attacker,
 	Defender,
 	Margin,
-	// The smaller side's men
 	Engaged,
 	Share,
-	// Supply lost by the outcome, and what wasn't carried of it
 	Lost,
 	Carried,
-	// The loser's men over the winner's
 	Men_Ratio,
-	// Room left in the winner's baggage
 	Baggage,
-	// The loser's men after the battle
 	Men_Left,
 }
 
@@ -118,6 +108,13 @@ Report_Part :: struct {
 	tally: Tally,
 }
 
+// Fills a % slot
+Report_Arg :: union {
+	string,
+	Tally,
+	f32,
+}
+
 tally_add :: proc(tally: ^Tally, term: Report_Term, value: f32) {
 	tally.total += value
 	if value != 0 || term == .Dice do append(&tally.factors, Factor{term, .Add, value})
@@ -129,12 +126,21 @@ tally_scale :: proc(tally: ^Tally, term: Report_Term, value: f32) {
 }
 
 // Adds a line; each % in text takes the next arg. A tally shows its total, and its factors on hover.
-report_say :: proc(report: ^Report, text: string, args: ..union {
-		string,
-		Tally,
-		f32,
-	}) {
+report_say :: proc(report: ^Report, text: string, args: ..Report_Arg) {
 	first := len(report.parts)
+	write(report, text, args)
+	append(&report.lines, span.from_range(first, len(report.parts)))
+}
+
+// Adds text outside the lines; returns its span
+report_text :: proc(report: ^Report, text: string, args: ..Report_Arg) -> span.Span {
+	begin := len(report.text)
+	write(report, text, args)
+	return span.from_range(begin, len(report.text))
+}
+
+@(private = "file")
+write :: proc(report: ^Report, text: string, args: []Report_Arg) {
 	digits: [32]u8
 	rest := text
 	for arg in args {
@@ -151,7 +157,6 @@ report_say :: proc(report: ^Report, text: string, args: ..union {
 		}
 	}
 	put(report, rest)
-	append(&report.lines, span.from_range(first, len(report.parts)))
 }
 
 // Appends text as a part, the tally behind it
