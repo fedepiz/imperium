@@ -240,6 +240,8 @@ renderer_init :: proc(window: ^sdl.Window) -> (out: Renderer) {
 			&{label = "viewport", usage = {.Uniform, .CopyDst}, size = size},
 		)
 		layout := wgpu.RenderPipelineGetBindGroupLayout(out.quad_pipeline, 0)
+		defer wgpu.BindGroupLayoutRelease(layout)
+
 		out.viewport_group = wgpu.DeviceCreateBindGroup(
 			out.device,
 			&{
