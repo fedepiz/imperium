@@ -13,6 +13,16 @@ import "vendor:wgpu/sdl3glue"
 @(private = "file")
 QUAD_SHADER :: #load("quad.wgsl", string)
 
+
+// Budgets
+RENDER_IMAGES_MAX :: 4000
+// Largest texture every WebGPU device supports
+RENDER_ATLAS_SIZE_MAX :: 8192
+
+RENDER_QUADS_MAX :: 32000
+RENDER_PASS_MAX :: 256
+
+
 Renderer_Flag :: enum {
 	Ready,
 }
@@ -34,6 +44,11 @@ Renderer :: struct {
 	// Viewport data
 	viewport_buffer: wgpu.Buffer,
 	viewport_group:  wgpu.BindGroup,
+	// Images
+	atlas_texture:   wgpu.Texture,
+	atlas_view:      wgpu.TextureView,
+	atlas_sampler:   wgpu.Sampler,
+	atlas_group:     wgpu.BindGroup,
 }
 
 @(private = "file")
@@ -51,8 +66,20 @@ SURFACE_FORMATS :: [?]Surface_Format {
 	{.RGBA8UnormSrgb, .RGBA8Unorm},
 }
 
-renderer_init :: proc(window: ^sdl.Window) -> (out: Renderer) {
+renderer_init :: proc(
+	window: ^sdl.Window,
+	// Atlas size and, per image, its rect in the atlas and RGBA8 premultiplied pixels
+	atlas_size: [2]int,
+	extents: []Extents,
+	pixels: [][]u8,
+) -> (
+	out: Renderer,
+) {
 	assert(window != nil)
+	assert(len(extents) == len(pixels))
+	assert(len(extents) <= RENDER_IMAGES_MAX)
+	assert(atlas_size.x <= RENDER_ATLAS_SIZE_MAX && atlas_size.y <= RENDER_ATLAS_SIZE_MAX)
+
 	out.window = window
 	// Create instance
 	out.instance = wgpu.CreateInstance()
@@ -180,6 +207,11 @@ renderer_init :: proc(window: ^sdl.Window) -> (out: Renderer) {
 			offset = u64(offset_of(Render_Quad, colors)) + 12,
 			shaderLocation = 4,
 		},
+		{format = .Float32x4, offset = u64(offset_of(Render_Quad, clip)), shaderLocation = 5},
+		{format = .Float32, offset = u64(offset_of(Render_Quad, radii)), shaderLocation = 6},
+		{format = .Float32, offset = u64(offset_of(Render_Quad, thickness)), shaderLocation = 7},
+		{format = .Float32, offset = u64(offset_of(Render_Quad, softness)), shaderLocation = 8},
+		{format = .Float32x4, offset = u64(offset_of(Render_Quad, source)), shaderLocation = 9},
 	}
 
 	out.quad_pipeline = wgpu.DeviceCreateRenderPipeline(
@@ -255,7 +287,75 @@ renderer_init :: proc(window: ^sdl.Window) -> (out: Renderer) {
 				},
 			},
 		)
+	}
 
+	// Prepare images
+	{
+		// Create texture, starts zeroed so gaps are transparent
+		out.atlas_texture = wgpu.DeviceCreateTexture(
+			out.device,
+			&{
+				label = "atlas",
+				usage = {.TextureBinding, .CopyDst},
+				dimension = ._2D,
+				size = {u32(atlas_size.x), u32(atlas_size.y), 1},
+				format = .RGBA8Unorm,
+				mipLevelCount = 1,
+				sampleCount = 1,
+			},
+		)
+
+		// Upload each image at its source position
+		for extent, i in extents {
+			image_pixels := pixels[i]
+			pos := [2]int{int(extent.x_min), int(extent.y_min)}
+			size := [2]int{int(extent.x_max) - pos.x, int(extent.y_max) - pos.y}
+			if size.x <= 0 || size.y <= 0 do continue
+
+			assert(pos.x >= 0 && pos.y >= 0)
+			assert(pos.x + size.x <= atlas_size.x && pos.y + size.y <= atlas_size.y)
+			assert(len(image_pixels) == size.x * size.y * 4)
+
+			wgpu.QueueWriteTexture(
+				out.queue,
+				&{
+					texture = out.atlas_texture,
+					origin = {u32(pos.x), u32(pos.y), 0},
+					aspect = .All,
+				},
+				raw_data(image_pixels),
+				uint(len(image_pixels)),
+				&{bytesPerRow = u32(size.x * 4), rowsPerImage = u32(size.y)},
+				&{u32(size.x), u32(size.y), 1},
+			)
+		}
+
+		// View, sampler and bind group for the shader
+		out.atlas_view = wgpu.TextureCreateView(out.atlas_texture)
+		out.atlas_sampler = wgpu.DeviceCreateSampler(
+			out.device,
+			&{
+				addressModeU = .ClampToEdge,
+				addressModeV = .ClampToEdge,
+				addressModeW = .ClampToEdge,
+				magFilter = .Linear,
+				minFilter = .Linear,
+				mipmapFilter = .Nearest,
+				lodMaxClamp = 32,
+				maxAnisotropy = 1,
+			},
+		)
+
+		layout := wgpu.RenderPipelineGetBindGroupLayout(out.quad_pipeline, 1)
+		defer wgpu.BindGroupLayoutRelease(layout)
+		entries := [?]wgpu.BindGroupEntry {
+			{binding = 0, textureView = out.atlas_view},
+			{binding = 1, sampler = out.atlas_sampler},
+		}
+		out.atlas_group = wgpu.DeviceCreateBindGroup(
+			out.device,
+			&{label = "atlas", layout = layout, entryCount = len(entries), entries = &entries[0]},
+		)
 	}
 
 	out.flags += {.Ready}
@@ -263,6 +363,11 @@ renderer_init :: proc(window: ^sdl.Window) -> (out: Renderer) {
 }
 
 renderer_deinit :: proc(rend: Renderer) {
+	if rend.atlas_group != nil do wgpu.BindGroupRelease(rend.atlas_group)
+	if rend.atlas_sampler != nil do wgpu.SamplerRelease(rend.atlas_sampler)
+	if rend.atlas_view != nil do wgpu.TextureViewRelease(rend.atlas_view)
+	if rend.atlas_texture != nil do wgpu.TextureRelease(rend.atlas_texture)
+
 	if rend.viewport_group != nil do wgpu.BindGroupRelease(rend.viewport_group)
 	if rend.viewport_buffer != nil do wgpu.BufferRelease(rend.viewport_buffer)
 
@@ -386,6 +491,7 @@ renderer_draw :: proc(
 		wgpu.RenderPassEncoderSetPipeline(pass, rend.quad_pipeline)
 		wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.viewport_group)
 		wgpu.RenderPassEncoderSetVertexBuffer(pass, 0, rend.quad_buffer, 0, wgpu.WHOLE_SIZE)
+		wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.atlas_group)
 
 		for command in passes {
 			switch c in command {
@@ -428,9 +534,6 @@ Render_Quad :: struct {
 	// Border 'softness'
 	softness:  f32,
 }
-
-RENDER_QUADS_MAX :: 32000
-RENDER_PASS_MAX :: 256
 
 Render_Quad_Pass :: struct {
 	texture: Texture_Id,
