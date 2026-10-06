@@ -134,7 +134,12 @@ map_pawns_build :: proc(pawns: ^Map_Pawns, assets: ^Assets) {
 	for &cultures, set in pawns.images {
 		for &icons, culture in cultures {
 			for &image, icon in icons {
-				name := fmt.tprintf("%s/%s_%s", SET_NAMES[set], CULTURE_NAMES[culture], ICON_NAMES[icon])
+				name := fmt.tprintf(
+					"%s/%s_%s",
+					SET_NAMES[set],
+					CULTURE_NAMES[culture],
+					ICON_NAMES[icon],
+				)
 				drawing, drawing_found := assets_image_find(assets, name)
 				fill, fill_found := assets_image_find(assets, fmt.tprintf("%s_fill", name))
 				if !drawing_found || !fill_found {
@@ -205,7 +210,8 @@ map_pawns_frame :: proc(
 	}
 	sprites := make([dynamic]Sprite, 0, len(scene) * len(Pawn_Set), context.temp_allocator)
 	{
-		margin := [2]f32{visible.x_max - visible.x_min, visible.y_max - visible.y_min} * VIEW_TOLERANCE
+		margin :=
+			[2]f32{visible.x_max - visible.x_min, visible.y_max - visible.y_min} * VIEW_TOLERANCE
 		for pawn, index in scene {
 			for weight, set in weights {
 				image := pawns.images[set][pawn.culture][pawn.icon]
@@ -219,7 +225,10 @@ map_pawns_frame :: proc(
 				hi := pawn.pos + half
 				if hi.x < visible.x_min - margin.x || lo.x > visible.x_max + margin.x do continue
 				if hi.y < visible.y_min - margin.y || lo.y > visible.y_max + margin.y do continue
-				append(&sprites, Sprite{pawn = index, lo = lo, hi = hi, image = image, weight = weight})
+				append(
+					&sprites,
+					Sprite{pawn = index, lo = lo, hi = hi, image = image, weight = weight},
+				)
 			}
 		}
 	}
@@ -234,8 +243,16 @@ map_pawns_frame :: proc(
 			rect := Extents{sprite.lo.x, sprite.lo.y, sprite.hi.x, sprite.hi.y}
 			append(
 				quads,
-				Render_Quad{rect = rect, source = sprite.image.fill, colors = {paper, paper, paper, paper}},
-				Render_Quad{rect = rect, source = sprite.image.drawing, colors = {ink, ink, ink, ink}},
+				Render_Quad {
+					rect = rect,
+					source = sprite.image.fill,
+					colors = {paper, paper, paper, paper},
+				},
+				Render_Quad {
+					rect = rect,
+					source = sprite.image.drawing,
+					colors = {ink, ink, ink, ink},
+				},
 			)
 		}
 		append(passes, Render_Quad_Pass{space = .World, begin = begin, len = len(quads) - begin})
@@ -248,7 +265,8 @@ map_pawns_frame :: proc(
 	{
 		for sprite in sprites {
 			bottom := [2]f32{(sprite.lo.x + sprite.hi.x) / 2, sprite.hi.y}
-			anchors[sprite.pawn] += (bottom - {visible.x_min, visible.y_min}) * view.zoom * sprite.weight
+			anchors[sprite.pawn] +=
+				(bottom - {visible.x_min, visible.y_min}) * view.zoom * sprite.weight
 			anchor_weights[sprite.pawn] += sprite.weight
 		}
 		for &anchor, index in anchors {
@@ -271,7 +289,9 @@ map_pawns_frame :: proc(
 		metrics := assets_text_font(assets, pawns.label_font)
 		for pawn, index in scene {
 			if pawn.label == "" || anchor_weights[index] <= 0 do continue
-			run := Text_Run{text = pawn.label}
+			run := Text_Run {
+				text = pawn.label,
+			}
 			layout := text_layout({run}, {metrics}, UNBOUNDED, glyphs[glyph_count:], nil)
 			anchor := anchors[index]
 			append(
@@ -294,7 +314,12 @@ map_pawns_frame :: proc(
 		at:           [2]f32,
 		color:        [4]u8,
 	}
-	copies := make([dynamic]Label_Copy, 0, len(labels) * (len(HALO_SHIFTS) + 1), context.temp_allocator)
+	copies := make(
+		[dynamic]Label_Copy,
+		0,
+		len(labels) * (len(HALO_SHIFTS) + 1),
+		context.temp_allocator,
+	)
 	{
 		paper := color_of(style.paper, 1)
 		ink := color_of(style.ink, 1)
@@ -335,3 +360,4 @@ map_pawns_frame :: proc(
 		append(passes, Render_Quad_Pass{space = .Screen, begin = begin, len = len(quads) - begin})
 	}
 }
+
