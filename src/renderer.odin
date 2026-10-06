@@ -65,7 +65,7 @@ Renderer :: struct {
 	// Ground pass data. ground_group is group 1: uniforms, sampler, grids
 	ground_pipeline: wgpu.RenderPipeline,
 	ground_uniforms: wgpu.Buffer,
-	ground_grids:    [Render_Ground_Grid]Texture,
+	ground_grids:    [Ground_Grid]Texture,
 	ground_group:    wgpu.BindGroup,
 }
 
@@ -83,34 +83,50 @@ Ground_Grid_Format :: struct {
 }
 
 @(private = "file", rodata)
-GROUND_GRID_FORMATS := [Render_Ground_Grid]Ground_Grid_Format {
-	.Value = {.R8Unorm, 1},
+GROUND_GRID_FORMATS := [Ground_Grid]Ground_Grid_Format {
+	.Value  = {.R8Unorm, 1},
+	.Divide = {.R16Float, 2},
+}
+
+// Per-cell textures read by the ground shader. Binding = 2 + Ground_Grid
+@(private = "file")
+Ground_Grid :: enum {
+	Value,
+	Divide,
 }
 
 // Must match struct Ground in ground.wgsl.
 // WGSL vec3f: align 16, size 12. Each [3]f32 is followed by one f32 (scalar or padding)
 @(private = "file")
 Ground_Uniform :: struct {
-	base_color:     [3]f32,
-	stain_amount:   f32,
-	base_stain:     [3]f32,
-	value_strength: f32,
-	value_low:      [3]f32,
-	_:              f32,
-	value_high:     [3]f32,
-	_:              f32,
+	base_color:        [3]f32,
+	stain_amount:      f32,
+	base_stain:        [3]f32,
+	_:                 f32,
+	divide_shallow:    [3]f32,
+	divide_tint:       f32,
+	divide_deep:       [3]f32,
+	divide_wobble:     f32,
+	divide_line_color: [3]f32,
+	divide_line_width: f32,
+	value_low:         [3]f32,
+	value_strength:    f32,
+	value_high:        [3]f32,
+	value_clip:        i32,
 	// Grid size in cells
-	grid:           [2]f32,
-	_:              [2]f32,
+	grid:              [2]f32,
+	divide_depth_from: f32,
+	divide_depth_full: f32,
 }
+#assert(size_of(Ground_Uniform) == 128)
 
 // Must match struct View in view.wgsl
 @(private = "file")
 View_Uniform :: struct {
 	size:   [2]f32,
 	center: [2]f32,
-	zoom:   f32,
-	_:      f32,
+	zoom:          f32,
+	pixel_density: f32,
 }
 
 @(private = "file")
@@ -505,8 +521,8 @@ renderer_init :: proc(
 		)
 
 		// Group 1. Binding 0: uniforms, 1: sampler, 2 + grid: grid texture
-		layout_entries: [2 + len(Render_Ground_Grid)]wgpu.BindGroupLayoutEntry
-		group_entries: [2 + len(Render_Ground_Grid)]wgpu.BindGroupEntry
+		layout_entries: [2 + len(Ground_Grid)]wgpu.BindGroupLayoutEntry
+		group_entries: [2 + len(Ground_Grid)]wgpu.BindGroupEntry
 		layout_entries[0] = {
 			binding = 0,
 			visibility = {.Fragment},
@@ -702,9 +718,17 @@ renderer_draw :: proc(
 	// Views. Screen: 1 unit = 1 physical pixel, origin top-left
 	{
 		size := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)}
+		// 0 on failure
+		density := sdl.GetWindowPixelDensity(rend.window)
+		if density <= 0 do density = 1
 		views := [Render_Space]View_Uniform {
-			.Screen = {size = size, center = size / 2, zoom = 1},
-			.World = {size = size, center = view.center, zoom = view.zoom},
+			.Screen = {size = size, center = size / 2, zoom = 1, pixel_density = density},
+			.World = {
+				size = size,
+				center = view.center,
+				zoom = view.zoom,
+				pixel_density = density,
+			},
 		}
 		for &uniform, space in views {
 			wgpu.QueueWriteBuffer(
@@ -761,13 +785,22 @@ renderer_draw :: proc(
 				// Queue writes are applied at submit, before any draw: only the last ground pass
 				// of a frame takes effect
 				uniform := Ground_Uniform {
-					base_color     = c.ground.base.color,
-					stain_amount   = c.ground.base.stain_amount,
-					base_stain     = c.ground.base.stain,
-					value_strength = c.ground.value.strength,
-					value_low      = c.ground.value.low,
-					value_high     = c.ground.value.high,
-					grid           = {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT},
+					base_color        = c.ground.base.color,
+					stain_amount      = c.ground.base.stain_amount,
+					base_stain        = c.ground.base.stain,
+					divide_shallow    = c.ground.divide.shallow,
+					divide_tint       = c.ground.divide.tint,
+					divide_deep       = c.ground.divide.deep,
+					divide_wobble     = c.ground.divide.wobble,
+					divide_line_color = c.ground.divide.line_color,
+					divide_line_width = c.ground.divide.line_width,
+					value_low         = c.ground.value.low,
+					value_strength    = c.ground.value.strength,
+					value_high        = c.ground.value.high,
+					value_clip        = i32(c.ground.value.clip),
+					grid              = {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT},
+					divide_depth_from = c.ground.divide.depth_from,
+					divide_depth_full = c.ground.divide.depth_full,
 				}
 				wgpu.QueueWriteBuffer(
 					rend.queue,
@@ -798,22 +831,38 @@ renderer_draw :: proc(
 	return true
 }
 
-// Overwrites all cells of a grid
-renderer_ground_write :: proc(
+// Overwrites the Value grid: input of Render_Ground.value
+renderer_ground_value_write :: proc(
 	rend: ^Renderer,
-	grid: Render_Ground_Grid,
-	// Row-major from the top-left, no row padding. Texel format: see Render_Ground_Grid
-	cells: []byte,
+	// 1 byte per cell, read as 0..1. Row-major from the top-left
+	cells: []u8,
 ) {
 	if !(.Ready in rend.flags) do return
-	texel_size := GROUND_GRID_FORMATS[grid].texel_size
-	assert(len(cells) == RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT * texel_size)
+	ground_grid_write(rend, .Value, raw_data(cells), len(cells))
+}
 
+// Overwrites the Divide grid: input of Render_Ground.divide
+renderer_ground_divide_write :: proc(
+	rend: ^Renderer,
+	// Signed distance per cell, in cells. > 0 land side, < 0 water side. Row-major from the top-left
+	distances: []f32,
+) {
+	if !(.Ready in rend.flags) do return
+	// Stored as 16-bit floats
+	halves := make([]f16, len(distances), context.temp_allocator)
+	for distance, i in distances do halves[i] = f16(distance)
+	ground_grid_write(rend, .Divide, raw_data(halves), len(halves))
+}
+
+@(private = "file")
+ground_grid_write :: proc(rend: ^Renderer, grid: Ground_Grid, texels: rawptr, count: int) {
+	assert(count == RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT)
+	texel_size := GROUND_GRID_FORMATS[grid].texel_size
 	wgpu.QueueWriteTexture(
 		rend.queue,
 		&{texture = rend.ground_grids[grid].texture, aspect = .All},
-		raw_data(cells),
-		uint(len(cells)),
+		texels,
+		uint(count * texel_size),
 		&{
 			bytesPerRow = u32(RENDER_GROUND_WIDTH * texel_size),
 			rowsPerImage = RENDER_GROUND_HEIGHT,
@@ -867,10 +916,11 @@ Render_Quad_Pass :: struct {
 
 // Ground pass parameters. The ground shader outputs one colour per window pixel, computed from the
 // grids (RENDER_GROUND_WIDTH x RENDER_GROUND_HEIGHT cells) and these layers.
-// Layers are composited in field order. Colours: straight RGB, 0..1
+// Layers are composited in field order. Colours: straight RGB, 0..1. A zeroed layer has no effect
 Render_Ground :: struct {
-	base:  Render_Ground_Base,
-	value: Render_Ground_Value,
+	base:   Render_Ground_Base,
+	divide: Render_Ground_Divide,
+	value:  Render_Ground_Value,
 }
 
 // Base layer: colour with noise stains. Outside the grid: color * 0.72
@@ -882,18 +932,39 @@ Render_Ground_Base :: struct {
 	stain_amount: f32,
 }
 
+// Divide layer. d = Divide grid (bilinear) + noise: signed distance in cells, > 0 land, < 0 water.
+// Tints the water side, draws a line at d = 0, and defines the sides other layers clip to.
+// The line is drawn over the layers between divide and value
+Render_Ground_Divide :: struct {
+	// Water side: multiplied by mix(shallow, deep, t), t = 0 at depth_from cells from the line,
+	// 1 at depth_full
+	shallow:    [3]f32,
+	deep:       [3]f32,
+	depth_from: f32,
+	depth_full: f32,
+	// Blend factor of the multiply at the line, 0..1. Falls to 0.65 of it away from the line
+	tint:       f32,
+	line_color: [3]f32,
+	// Logical pixels. Varies along the line by a factor 0.8..1.2
+	line_width: f32,
+	// Peak-to-peak amplitude of the noise added to d, in cells
+	wobble:     f32,
+}
+
+// Side of the divide a layer is restricted to
+Render_Ground_Clip :: enum i32 {
+	None,
+	Land,
+	Water,
+}
+
 // Value layer: multiplies the colour by mix(low, high, v). v: Value grid, bilinear
 Render_Ground_Value :: struct {
 	low:      [3]f32,
 	high:     [3]f32,
 	// Blend factor of the multiply, 0..1. 0 = layer off
 	strength: f32,
-}
-
-// Per-cell textures read by the ground shader. Written with renderer_ground_write
-Render_Ground_Grid :: enum {
-	// 1 byte per cell, read as 0..1. Input of Render_Ground.value
-	Value,
+	clip:     Render_Ground_Clip,
 }
 
 // Full-window draw of the ground, positioned by the frame's Render_View

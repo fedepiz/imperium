@@ -48,7 +48,7 @@ main :: proc() {
 	}
 	defer renderer_deinit(renderer)
 
-	// DEMO begin: load the scenario grids, show elevation, centre the camera
+	// DEMO begin: load the scenario grids, build the coast, centre the camera
 	for name, grid in DEMO_GRID_NAMES {
 		path := fmt.tprintf("assets/scenarios/roman/%s.png", name)
 		data, data_err := os.read_entire_file(path, context.temp_allocator)
@@ -68,8 +68,16 @@ main :: proc() {
 		copy(DEMO.grids[grid][:], img.pixels.buf[:])
 	}
 	DEMO.shown = .Elevation
-	DEMO.value_shown = true
-	renderer_ground_write(&renderer, .Value, DEMO.grids[DEMO.shown][:])
+	renderer_ground_value_write(&renderer, DEMO.grids[DEMO.shown][:])
+	{
+		// surface.png: black land, grey lake, white sea
+		cells :: RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT
+		water := make([]bool, cells, context.temp_allocator)
+		for surface, i in DEMO.grids[.Surface] do water[i] = surface >= 64
+		coast := make([]f32, cells, context.temp_allocator)
+		map_coast_build(coast, water, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT})
+		renderer_ground_divide_write(&renderer, coast)
+	}
 	DEMO.view = {
 		center = [2]f32{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT} / 2,
 		zoom   = 2 * sdl.GetWindowPixelDensity(window),
@@ -93,7 +101,7 @@ main :: proc() {
 				case ._1, ._2, ._3, ._4:
 					DEMO.shown = Demo_Grid(int(event.key.scancode) - int(sdl.Scancode._1))
 					DEMO.value_shown = true
-					renderer_ground_write(&renderer, .Value, DEMO.grids[DEMO.shown][:])
+					renderer_ground_value_write(&renderer, DEMO.grids[DEMO.shown][:])
 				case ._0:
 					DEMO.value_shown = false
 				case .D:
@@ -124,14 +132,30 @@ main :: proc() {
 
 		// DEMO begin: ground pass, then world-space quads
 		{
-			// Map look: stained vellum base, red-to-green value wash
+			// Map look: stained vellum base, coast, red-to-green value wash over land
 			ground := Render_Ground {
 				base = {
 					color = {0.840, 0.772, 0.620},
 					stain = {0.720, 0.620, 0.460},
 					stain_amount = 0.5,
 				},
-				value = {low = {0.85, 0.45, 0.35}, high = {0.45, 0.75, 0.40}, strength = 0.8},
+				divide = {
+					shallow = {0.560, 0.610, 0.620},
+					deep = {0.200, 0.330, 0.480},
+					depth_from = 0,
+					depth_full = 80,
+					tint = 0.55,
+					line_color = {0.150, 0.105, 0.070},
+					line_width = 1.6,
+					// Old style: wobble 0.3, scaled by 1.6 in the shader
+					wobble = 0.3 * 1.6,
+				},
+				value = {
+					low = {0.85, 0.45, 0.35},
+					high = {0.45, 0.75, 0.40},
+					strength = 0.8,
+					clip = .Land,
+				},
 			}
 			// Plain look: white base, black-to-white value wash. Shows the raw grid as grey
 			if DEMO.plain {

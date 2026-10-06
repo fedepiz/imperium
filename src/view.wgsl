@@ -8,6 +8,8 @@ struct View {
     center: vec2f,
     // Physical pixels per unit
     zoom:   f32,
+    // Physical pixels per logical pixel
+    pixel_density: f32,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
