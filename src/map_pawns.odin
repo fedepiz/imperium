@@ -286,44 +286,52 @@ map_pawns_frame :: proc(
 		}
 	}
 
-	// Phase: Label draws. Every label 8 times in paper colour, shifted around its place: the halos.
+	// Phase: Label copies. Every label 8 times in paper colour, shifted around its place: the halos.
 	// Then every label once in ink
-	draws := make([dynamic]Draw_Glyphs, 0, len(labels) * (len(HALO_SHIFTS) + 1), context.temp_allocator)
+	Label_Copy :: struct {
+		glyphs_begin: int,
+		glyphs_len:   int,
+		at:           [2]f32,
+		color:        [4]u8,
+	}
+	copies := make([dynamic]Label_Copy, 0, len(labels) * (len(HALO_SHIFTS) + 1), context.temp_allocator)
 	{
 		paper := color_of(style.paper, 1)
 		ink := color_of(style.ink, 1)
 		for label in labels {
 			for shift in HALO_SHIFTS {
+				at := label.at + shift * LABEL_HALO
+				append(&copies, Label_Copy{label.glyphs_begin, label.glyphs_len, at, paper})
+			}
+		}
+		for label in labels {
+			append(&copies, Label_Copy{label.glyphs_begin, label.glyphs_len, label.at, ink})
+		}
+	}
+
+	// Phase: Label quads. Each glyph's ink box, moved to its copy's place, with its bitmap from the atlas
+	{
+		begin := len(quads)
+		font := &assets.fonts[pawns.label_font]
+		for copy in copies {
+			for glyph in glyphs[copy.glyphs_begin:][:copy.glyphs_len] {
+				// No bitmap
+				if glyph.ink.x_max <= glyph.ink.x_min do continue
 				append(
-					&draws,
-					Draw_Glyphs {
-						begin = label.glyphs_begin,
-						len = label.glyphs_len,
-						font = pawns.label_font,
-						at = label.at + shift * LABEL_HALO,
-						color = paper,
+					quads,
+					Render_Quad {
+						rect = {
+							copy.at.x + glyph.ink.x_min,
+							copy.at.y + glyph.ink.y_min,
+							copy.at.x + glyph.ink.x_max,
+							copy.at.y + glyph.ink.y_max,
+						},
+						source = font.sources[int(glyph.char) - FONT_FIRST],
+						colors = {copy.color, copy.color, copy.color, copy.color},
 					},
 				)
 			}
 		}
-		for label in labels {
-			append(
-				&draws,
-				Draw_Glyphs {
-					begin = label.glyphs_begin,
-					len = label.glyphs_len,
-					font = pawns.label_font,
-					at = label.at,
-					color = ink,
-				},
-			)
-		}
-	}
-
-	// Phase: Label quads
-	{
-		begin := len(quads)
-		draw_glyphs(draws[:], glyphs[:glyph_count], assets, quads)
 		append(passes, Render_Quad_Pass{space = .Screen, begin = begin, len = len(quads) - begin})
 	}
 }

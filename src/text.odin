@@ -35,6 +35,11 @@ Text_Font :: struct {
 	// advances[i]: pen advance of the character first + i. Other characters take no room and give no glyph
 	first:    rune,
 	advances: []f32,
+	// The box each character's bitmap fills, indexed like advances. offsets: from the pen position on
+	// the baseline to its top-left. Zero size, or past the arrays: the character has no bitmap.
+	// Only Text_Glyph.ink is made from these: they can be left empty
+	offsets:  [][2]f32,
+	sizes:    [][2]f32,
 }
 
 // A character or image, placed relative to the text's top-left corner. +y down
@@ -49,6 +54,8 @@ Text_Glyph :: struct {
 	pen:    [2]f32,
 	// The box it occupies: from the pen its advance wide, and its line tall
 	cell:   Extents,
+	// The box its bitmap fills. Zero for a character without one. For an image: its cell
+	ink:    Extents,
 }
 
 Text_Line :: struct {
@@ -128,6 +135,17 @@ Cut :: struct {
 	run:         int,
 }
 
+// Box of a character's bitmap, with the pen at the origin. Empty if it has none
+@(private = "file")
+ink_of :: proc(font: Text_Font, char: rune) -> Extents {
+	index := int(char) - int(font.first)
+	if index < 0 || index >= len(font.offsets) || index >= len(font.sizes) do return {}
+	size := font.sizes[index]
+	if size.x <= 0 || size.y <= 0 do return {}
+	offset := font.offsets[index]
+	return {offset.x, offset.y, offset.x + size.x, offset.y + size.y}
+}
+
 @(private = "file")
 advance_of :: proc(font: Text_Font, char: rune) -> (advance: f32, found: bool) {
 	index := int(char) - int(font.first)
@@ -158,15 +176,23 @@ text_layout :: proc(
 		pen.any = true
 	}
 
-	// Adds a glyph at the pen, advance wide. Its height comes when the line closes
+	// Adds a glyph at the pen, advance wide. Its heights come when the line closes: until then its
+	// ink is relative to the baseline
 	put :: proc(pen: ^Pen, run, offset: int, char: rune, x, advance: f32) {
 		if pen.glyph_count < len(pen.glyphs) {
+			ink := ink_of(pen.fonts[pen.runs[run].font], char)
+			// No bitmap: stays the zero box
+			if ink.x_max > ink.x_min {
+				ink.x_min += x
+				ink.x_max += x
+			}
 			pen.glyphs[pen.glyph_count] = {
 				run    = run,
 				offset = offset,
 				char   = char,
 				pen    = {x, 0},
 				cell   = {x_min = x, x_max = x + advance},
+				ink    = ink,
 			}
 		}
 		pen.glyph_count += 1
@@ -191,8 +217,11 @@ text_layout :: proc(
 		}
 		pen.glyph_count = cut.glyph_count
 
-		dot, _ := advance_of(pen.fonts[pen.runs[cut.run].font], ELLIPSIS_CHAR)
-		bottom := pen.last_top + pen.last_ascent - pen.last_descent
+		font := pen.fonts[pen.runs[cut.run].font]
+		dot, _ := advance_of(font, ELLIPSIS_CHAR)
+		ink := ink_of(font, ELLIPSIS_CHAR)
+		baseline := pen.last_top + pen.last_ascent
+		bottom := baseline - pen.last_descent
 		for i in 0 ..< ELLIPSIS_COUNT {
 			x := cut.x + f32(i) * dot
 			if pen.glyph_count < len(pen.glyphs) {
@@ -200,8 +229,9 @@ text_layout :: proc(
 					run    = cut.run,
 					offset = -1,
 					char   = ELLIPSIS_CHAR,
-					pen    = {x, pen.last_top + pen.last_ascent},
+					pen    = {x, baseline},
 					cell   = {x, pen.last_top, x + dot, bottom},
+					ink    = {x + ink.x_min, baseline + ink.y_min, x + ink.x_max, baseline + ink.y_max},
 				}
 			}
 			pen.glyph_count += 1
@@ -228,10 +258,17 @@ text_layout :: proc(
 			truncate(pen)
 			return
 		}
+		baseline := pen.line_top + pen.ascent
 		for &glyph in pen.glyphs[min(pen.line_begin, len(pen.glyphs)):min(pen.glyph_count, len(pen.glyphs))] {
-			glyph.pen.y = pen.line_top + pen.ascent
+			glyph.pen.y = baseline
 			glyph.cell.y_min = pen.line_top
 			glyph.cell.y_max = bottom
+			if glyph.char == 0 {
+				glyph.ink = glyph.cell
+			} else if glyph.ink.x_max > glyph.ink.x_min {
+				glyph.ink.y_min += baseline
+				glyph.ink.y_max += baseline
+			}
 		}
 		if pen.line_count < len(pen.lines) {
 			pen.lines[pen.line_count] = {

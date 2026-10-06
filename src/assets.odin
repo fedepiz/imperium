@@ -276,7 +276,7 @@ assets_font_find :: proc(assets: ^Assets, name: string, size: u16) -> (index: in
 }
 
 // Metrics of a loaded font, for text layout: in logical pixels, for characters FONT_FIRST..FONT_LAST.
-// It views the font's advances: valid for as long as assets stays where it is
+// It views the font's arrays: valid for as long as assets stays where it is
 assets_text_font :: proc(assets: ^Assets, font: int) -> Text_Font {
 	loaded := &assets.fonts[font]
 	return {
@@ -285,5 +285,7 @@ assets_text_font :: proc(assets: ^Assets, font: int) -> Text_Font {
 		line_gap = loaded.line_gap,
 		first = FONT_FIRST,
 		advances = loaded.advances[:],
+		offsets = loaded.offsets[:],
+		sizes = loaded.sizes[:],
 	}
 }
