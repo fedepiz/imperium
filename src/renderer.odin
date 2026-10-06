@@ -28,27 +28,36 @@ Renderer_Flag :: enum {
 }
 
 Renderer :: struct {
-	flags:           bit_set[Renderer_Flag],
-	window:          ^sdl.Window,
-	instance:        wgpu.Instance,
-	adapter:         wgpu.Adapter,
-	surface:         wgpu.Surface,
-	device:          wgpu.Device,
-	queue:           wgpu.Queue,
-	format:          Surface_Format,
+	flags:         bit_set[Renderer_Flag],
+	window:        ^sdl.Window,
+	instance:      wgpu.Instance,
+	adapter:       wgpu.Adapter,
+	surface:       wgpu.Surface,
+	device:        wgpu.Device,
+	queue:         wgpu.Queue,
+	format:        Surface_Format,
 	// Cached window size
-	window_size:     [2]i32,
+	window_size:   [2]i32,
 	// Quad pass data
-	quad_pipeline:   wgpu.RenderPipeline,
-	quad_buffer:     wgpu.Buffer,
-	// Viewport data
-	viewport_buffer: wgpu.Buffer,
-	viewport_group:  wgpu.BindGroup,
+	quad_pipeline: wgpu.RenderPipeline,
+	quad_buffer:   wgpu.Buffer,
+	// One view per space, bound at group 0
+	view_buffers:  [Render_Space]wgpu.Buffer,
+	view_groups:   [Render_Space]wgpu.BindGroup,
 	// Images
-	atlas_texture:   wgpu.Texture,
-	atlas_view:      wgpu.TextureView,
-	atlas_sampler:   wgpu.Sampler,
-	atlas_group:     wgpu.BindGroup,
+	atlas_texture: wgpu.Texture,
+	atlas_view:    wgpu.TextureView,
+	atlas_sampler: wgpu.Sampler,
+	atlas_group:   wgpu.BindGroup,
+}
+
+// Must match the shader's View struct
+@(private = "file")
+View_Uniform :: struct {
+	size:   [2]f32,
+	center: [2]f32,
+	zoom:   f32,
+	_:      f32,
 }
 
 @(private = "file")
@@ -212,6 +221,7 @@ renderer_init :: proc(
 		{format = .Float32, offset = u64(offset_of(Render_Quad, thickness)), shaderLocation = 7},
 		{format = .Float32, offset = u64(offset_of(Render_Quad, softness)), shaderLocation = 8},
 		{format = .Float32x4, offset = u64(offset_of(Render_Quad, source)), shaderLocation = 9},
+		{format = .Float32x2, offset = u64(offset_of(Render_Quad, axis)), shaderLocation = 10},
 	}
 
 	out.quad_pipeline = wgpu.DeviceCreateRenderPipeline(
@@ -265,28 +275,31 @@ renderer_init :: proc(
 	)
 
 
+	// Views, written every frame
 	{
-		size: u64 = size_of([4]f32)
-		out.viewport_buffer = wgpu.DeviceCreateBuffer(
-			out.device,
-			&{label = "viewport", usage = {.Uniform, .CopyDst}, size = size},
-		)
+		size: u64 = size_of(View_Uniform)
 		layout := wgpu.RenderPipelineGetBindGroupLayout(out.quad_pipeline, 0)
 		defer wgpu.BindGroupLayoutRelease(layout)
 
-		out.viewport_group = wgpu.DeviceCreateBindGroup(
-			out.device,
-			&{
-				label = "viewport",
-				layout = layout,
-				entryCount = 1,
-				entries = &wgpu.BindGroupEntry {
-					binding = 0,
-					buffer = out.viewport_buffer,
-					size = size,
+		for space in Render_Space {
+			out.view_buffers[space] = wgpu.DeviceCreateBuffer(
+				out.device,
+				&{label = "view", usage = {.Uniform, .CopyDst}, size = size},
+			)
+			out.view_groups[space] = wgpu.DeviceCreateBindGroup(
+				out.device,
+				&{
+					label = "view",
+					layout = layout,
+					entryCount = 1,
+					entries = &wgpu.BindGroupEntry {
+						binding = 0,
+						buffer = out.view_buffers[space],
+						size = size,
+					},
 				},
-			},
-		)
+			)
+		}
 	}
 
 	// Prepare images
@@ -368,8 +381,8 @@ renderer_deinit :: proc(rend: Renderer) {
 	if rend.atlas_view != nil do wgpu.TextureViewRelease(rend.atlas_view)
 	if rend.atlas_texture != nil do wgpu.TextureRelease(rend.atlas_texture)
 
-	if rend.viewport_group != nil do wgpu.BindGroupRelease(rend.viewport_group)
-	if rend.viewport_buffer != nil do wgpu.BufferRelease(rend.viewport_buffer)
+	for group in rend.view_groups do if group != nil do wgpu.BindGroupRelease(group)
+	for buffer in rend.view_buffers do if buffer != nil do wgpu.BufferRelease(buffer)
 
 	if rend.quad_pipeline != nil do wgpu.RenderPipelineRelease(rend.quad_pipeline)
 	if rend.quad_buffer != nil do wgpu.BufferRelease(rend.quad_buffer)
@@ -383,6 +396,8 @@ renderer_deinit :: proc(rend: Renderer) {
 
 renderer_draw :: proc(
 	rend: ^Renderer,
+	// Where world space sits in the window this frame
+	view: Render_View,
 	quads: []Render_Quad,
 	passes: []Render_Pass,
 ) -> (
@@ -421,15 +436,6 @@ renderer_draw :: proc(
 				},
 			)
 
-			viewport := [4]f32{f32(size.x), f32(size.y), 0, 0}
-			wgpu.QueueWriteBuffer(
-				rend.queue,
-				rend.viewport_buffer,
-				0,
-				&viewport,
-				size_of(viewport),
-			)
-
 			fmt.println("Surface:", rend.format, size)
 			return
 		}
@@ -452,12 +458,30 @@ renderer_draw :: proc(
 		return
 	}
 
-	view := wgpu.TextureCreateView(
+	surface_view := wgpu.TextureCreateView(
 		surface_texture.texture,
 		&{format = rend.format.view, mipLevelCount = 1, arrayLayerCount = 1},
 	)
 
 	// Send data to gpu
+	// Views. Screen space is the view that maps units to pixels one to one from the top-left
+	{
+		size := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)}
+		views := [Render_Space]View_Uniform {
+			.Screen = {size = size, center = size / 2, zoom = 1},
+			.World = {size = size, center = view.center, zoom = view.zoom},
+		}
+		for &uniform, space in views {
+			wgpu.QueueWriteBuffer(
+				rend.queue,
+				rend.view_buffers[space],
+				0,
+				&uniform,
+				size_of(uniform),
+			)
+		}
+	}
+
 	// Quads
 	if len(quads) > 0 {
 		quad_count := min(RENDER_QUADS_MAX, len(quads))
@@ -479,7 +503,7 @@ renderer_draw :: proc(
 			&{
 				colorAttachmentCount = 1,
 				colorAttachments = &wgpu.RenderPassColorAttachment {
-					view = view,
+					view = surface_view,
 					depthSlice = wgpu.DEPTH_SLICE_UNDEFINED,
 					loadOp = .Clear,
 					storeOp = .Store,
@@ -489,13 +513,13 @@ renderer_draw :: proc(
 		)
 
 		wgpu.RenderPassEncoderSetPipeline(pass, rend.quad_pipeline)
-		wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.viewport_group)
 		wgpu.RenderPassEncoderSetVertexBuffer(pass, 0, rend.quad_buffer, 0, wgpu.WHOLE_SIZE)
 		wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.atlas_group)
 
 		for command in passes {
 			switch c in command {
 			case Render_Quad_Pass:
+				wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.view_groups[c.space])
 				wgpu.RenderPassEncoderDraw(pass, 4, u32(c.len), 0, u32(c.begin))
 			}
 		}
@@ -510,17 +534,34 @@ renderer_draw :: proc(
 
 	wgpu.CommandBufferRelease(commands)
 	wgpu.CommandEncoderRelease(encoder)
-	wgpu.TextureViewRelease(view)
+	wgpu.TextureViewRelease(surface_view)
 	wgpu.TextureRelease(surface_texture.texture)
 	return true
 }
 
 Texture_Id :: u32
 
+// The coordinate space a pass's quads are given in
+Render_Space :: enum {
+	// Physical pixels from the window's top-left
+	Screen,
+	// Positioned in the window by the frame's Render_View
+	World,
+}
+
+// Maps world space to the window: pixel = (p - center) * zoom + window_size / 2
+Render_View :: struct {
+	// World position shown at the window centre
+	center: [2]f32,
+	// Physical pixels per world unit
+	zoom:   f32,
+}
+
+// Lengths (rect, radii, thickness, softness) are in units of the pass's space
 Render_Quad :: struct {
-	// Rectangle in xy (pixel) space
+	// Rectangle, before rotation
 	rect:      Extents,
-	// Clipping rectangle in xy space
+	// Clipping rectangle, always in screen space. Zero = none
 	clip:      Extents,
 	// Per corner, 4 colours. TL clockwise winding order
 	colors:    [4][4]u8,
@@ -533,12 +574,14 @@ Render_Quad :: struct {
 	thickness: f32,
 	// Border 'softness'
 	softness:  f32,
+	// Direction of the rect's local x axis, any length. Zero = unrotated. Rotation is about the rect centre
+	axis:      [2]f32,
 }
 
 Render_Quad_Pass :: struct {
-	texture: Texture_Id,
-	begin:   int,
-	len:     int,
+	space: Render_Space,
+	begin: int,
+	len:   int,
 }
 
 Render_Pass :: union {
