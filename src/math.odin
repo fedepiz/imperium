@@ -30,6 +30,7 @@ Axis :: enum {
 	Y,
 }
 
+// Out: pos.
 //  Shelf packing algorithm
 shelf_pack :: proc(region: [2]int, sizes: [][2]int, padding: int, pos: [][2]int) -> bool {
 	assert(len(sizes) == len(pos))
@@ -72,6 +73,7 @@ shelf_pack :: proc(region: [2]int, sizes: [][2]int, padding: int, pos: [][2]int)
 
 // Grids: row-major, index = y * size.x + x, cell (x, y) covers [x, x + 1) x [y, y + 1)
 
+// Out: out.
 // Exact Euclidean distance transform (Felzenszwalb-Huttenlocher), columns then rows.
 // out[i] = distance from cell i to the nearest cell with source[i] set, in cells
 distance_transform :: proc(source: []bool, size: [2]int, out: []f32) {
@@ -147,6 +149,7 @@ grid_bilinear :: proc(values: []f32, size: [2]int, p: [2]f32) -> f32 {
 	return math.lerp(top, bottom, f.y)
 }
 
+// In/out: values.
 // Separable Gaussian blur, in place. sigma in cells. Kernel: reach cells either side. Edge values extended
 grid_blur :: proc(values: []f32, size: [2]int, sigma: f32, reach: int) {
 	assert(len(values) == size.x * size.y)
@@ -180,6 +183,7 @@ grid_blur :: proc(values: []f32, size: [2]int, sigma: f32, reach: int) {
 	}
 }
 
+// Out: out.
 // Thickens the parts of a mask thinner than about 2 * widen + 1 cells, so threads become bands.
 // Does not extend past the ends of threads, nor grow isolated cells.
 // support: cells of the mask a cell needs within widen of it to be added. A straight 1-cell thread gives 3
@@ -225,6 +229,7 @@ mask_thicken :: proc(mask: []bool, size: [2]int, widen: int, support: int, out: 
 
 // Images: RGBA8, rows from the top, tightly packed
 
+// Out: dst.
 // Halves an image: each pixel of dst is the mean of a 2 x 2 block of src. dst is (size + 1) / 2.
 // Blocks past the edge of src count as zero there: partial coverage, for premultiplied alpha
 image_halve :: proc(src: []u8, size: [2]int, dst: []u8) {
@@ -315,6 +320,7 @@ Polyline_Smoothing :: struct {
 	cut_max:       f32,
 }
 
+// Out: dst, appended to.
 // Smooths every run of src into dst. A run of n points becomes n << cut_iter points.
 // Open runs keep their end points. Runs under 2 points, or that do not fit in dst, are dropped
 polylines_smooth :: proc(src: Polylines, smoothing: Polyline_Smoothing, dst: ^Polylines) {
@@ -374,6 +380,7 @@ polylines_smooth :: proc(src: Polylines, smoothing: Polyline_Smoothing, dst: ^Po
 	}
 }
 
+// In/out: nearest, side.
 // For each cell whose centre is within reach of a run and nearer to it than |nearest[i]|:
 // nearest[i] = offset from the cell centre to the closest point of the run,
 // side[i] (optional) = 1 if the centre is left of the segment's direction, -1 if right (+y down).
@@ -423,7 +430,8 @@ polylines_stamp :: proc(
 	}
 }
 
-// Traces the edges between cells of different labels as polylines along cell corners, appended to out.
+// Out: out, appended to.
+// Traces the edges between cells of different labels as polylines along cell corners.
 // Label 0 = no cell: edges against it are not traced. The larger label is on the left of each run (+y down).
 // Runs are open between corners where 1, 3 or 4 edges meet, closed loops elsewhere. Unsmoothed
 boundaries_trace :: proc(labels: []u16, size: [2]int, out: ^Polylines) {

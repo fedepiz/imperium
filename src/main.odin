@@ -42,7 +42,7 @@ main :: proc() {
 	renderer: Renderer
 	{
 		loaded := new(Assets_Loaded, context.temp_allocator)
-		assets_load(&GLOBAL.assets, loaded)
+		assets_load(&GLOBAL.assets, sdl.GetWindowPixelDensity(window), loaded)
 		renderer = renderer_init(
 			window,
 			{ASSETS_ATLAS_SIZE, ASSETS_ATLAS_SIZE},
@@ -221,7 +221,10 @@ main :: proc() {
 			geography.regions = DEMO.regions[:]
 		}
 
-		map_build(&GLOBAL.map_state, &renderer, &GLOBAL.assets, geography, MAP_STYLE)
+		// The updates hold slices of geography and of temporary memory: applied here, while both live
+		map_build(&GLOBAL.map_state, &GLOBAL.assets, geography, MAP_STYLE, &GLOBAL.render_data.updates)
+		renderer_update(&renderer, GLOBAL.render_data.updates[:])
+		clear(&GLOBAL.render_data.updates)
 	}
 	{
 		// Made-up highlights. Zone: a disc. Reach: a blob with a 1-cell thread running from it
@@ -247,7 +250,7 @@ main :: proc() {
 	DEMO.frame_ticks = sdl.GetTicksNS()
 	DEMO.view = {
 		center = [2]f32{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT} / 2,
-		zoom   = 2 * sdl.GetWindowPixelDensity(window),
+		zoom   = 2,
 	}
 	// DEMO end
 
@@ -284,9 +287,8 @@ main :: proc() {
 			// DEMO begin: wheel zooms about the cursor, left drag pans
 			case .MOUSE_WHEEL:
 				size: [2]i32
-				sdl.GetWindowSizeInPixels(window, &size.x, &size.y)
+				sdl.GetWindowSize(window, &size.x, &size.y)
 				cursor := [2]f32{event.wheel.mouse_x, event.wheel.mouse_y}
-				cursor *= sdl.GetWindowPixelDensity(window)
 				from_centre := cursor - [2]f32{f32(size.x), f32(size.y)} / 2
 				under_cursor := DEMO.view.center + from_centre / DEMO.view.zoom
 				DEMO.view.zoom = clamp(DEMO.view.zoom * math.pow(1.15, event.wheel.y), 0.25, 400)
@@ -294,7 +296,6 @@ main :: proc() {
 			case .MOUSE_MOTION:
 				if .LEFT in event.motion.state {
 					moved := [2]f32{event.motion.xrel, event.motion.yrel}
-					moved *= sdl.GetWindowPixelDensity(window)
 					DEMO.view.center -= moved / DEMO.view.zoom
 				}
 			// DEMO end
@@ -310,20 +311,20 @@ main :: proc() {
 			DEMO.frame_ticks = now
 
 			{
+				window_size: [2]i32
+				sdl.GetWindowSize(window, &window_size.x, &window_size.y)
 				scene := Map_Scene {
 					view           = DEMO.view,
+					window         = {f32(window_size.x), f32(window_size.y)},
 					region_display = DEMO.region_display,
 				}
 
 				// Regions: colours from regions.txt, the one under the cursor highlighted
 				regions: [RENDER_GROUND_AREAS]Map_Region
 				{
-					size: [2]i32
-					sdl.GetWindowSizeInPixels(window, &size.x, &size.y)
 					cursor: [2]f32
 					_ = sdl.GetMouseState(&cursor.x, &cursor.y)
-					cursor *= sdl.GetWindowPixelDensity(window)
-					under := DEMO.view.center + (cursor - [2]f32{f32(size.x), f32(size.y)} / 2) / DEMO.view.zoom
+					under := DEMO.view.center + (cursor - scene.window / 2) / DEMO.view.zoom
 					hovered := 0
 					if under.x >= 0 && under.y >= 0 && under.x < MAP_WIDTH && under.y < MAP_HEIGHT {
 						hovered = int(DEMO.regions[int(under.y) * MAP_WIDTH + int(under.x)])
@@ -379,7 +380,7 @@ main :: proc() {
 					{pos = {357, 381}, icon = .Town, culture = .Roman, label = "Aquileia"},
 					{pos = {377, 461}, icon = .Town, culture = .Roman, label = "Neapolis"},
 					{pos = {386, 540}, icon = .Village, culture = .Roman, label = "Syracusae"},
-					{pos = {323, 341}, icon = .Town, culture = .Germanic, label = "Augusta Vindelicorum"},
+					{pos = {323, 341}, icon = .Town, culture = .Germanic, label = "Augusta\nVindelicorum"},
 					{pos = {346, 428}, icon = .Army, culture = .Roman, label = "Legio I", pulsing = true},
 					{pos = {350, 330}, icon = .Army, culture = .Germanic, label = "Alamanni"},
 				}
@@ -390,14 +391,16 @@ main :: proc() {
 
 				map_frame(
 					&GLOBAL.map_state,
-					&renderer,
 					&GLOBAL.assets,
 					scene,
 					MAP_STYLE,
 					dt,
+					&GLOBAL.render_data.updates,
 					&GLOBAL.render_data.quads,
 					&GLOBAL.render_data.passes,
 				)
+				// The updates hold slices of the scene: applied here, while it lives
+				renderer_update(&renderer, GLOBAL.render_data.updates[:])
 			}
 		}
 		// DEMO end
@@ -479,12 +482,14 @@ DEMO_GRID_NAMES :: [Demo_Grid]string {
 
 @(private = "file")
 Render_Data :: struct {
-	quads:  [dynamic; RENDER_QUADS_MAX]Render_Quad,
-	passes: [dynamic; RENDER_PASS_MAX]Render_Pass,
+	updates: [dynamic; RENDER_UPDATES_MAX]Render_Update,
+	quads:   [dynamic; RENDER_QUADS_MAX]Render_Quad,
+	passes:  [dynamic; RENDER_PASS_MAX]Render_Pass,
 }
 
 @(private = "file")
 render_data_clear :: proc(data: ^Render_Data) {
+	clear(&data.updates)
 	clear(&data.quads)
 	clear(&data.passes)
 }

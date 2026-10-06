@@ -37,6 +37,8 @@ RENDER_ATLAS_SPACING :: 1 << (RENDER_ATLAS_MIPS - 1)
 
 RENDER_QUADS_MAX :: 1 << 16
 RENDER_PASS_MAX :: 256
+// Updates applied in one renderer_update
+RENDER_UPDATES_MAX :: 64
 
 // Ground size in cells. 1 world unit = 1 cell
 RENDER_GROUND_WIDTH :: 1024
@@ -172,7 +174,7 @@ AREA_OWN_MIN :: 0.1
 // CPU side of the area layers. Not in Renderer: too large to pass by value
 @(private = "file")
 GROUND_AREAS: struct {
-	// Per cell: on the land side of the divide. From renderer_ground_divide_write
+	// Per cell: on the land side of the divide. From the last Render_Update_Divide
 	land:   [RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT]bool,
 	layers: [RENDER_GROUND_AREA_LAYERS]Area_Layer,
 }
@@ -1140,16 +1142,17 @@ renderer_draw :: proc(
 	)
 
 	// Send data to gpu
-	// Views. Screen: 1 unit = 1 physical pixel, origin top-left
+	// Views. Callers work in logical pixels: the uniforms are in physical ones.
+	// Screen: 1 unit = 1 logical pixel, origin top-left
 	{
 		size := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)}
-		density := renderer_pixel_density(rend)
+		density := pixel_density(rend)
 		views := [Render_Space]View_Uniform {
-			.Screen = {size = size, center = size / 2, zoom = 1, pixel_density = density},
+			.Screen = {size = size, center = size / density / 2, zoom = density, pixel_density = density},
 			.World = {
 				size = size,
 				center = view.center,
-				zoom = view.zoom,
+				zoom = view.zoom * density,
 				pixel_density = density,
 			},
 		}
@@ -1362,8 +1365,39 @@ renderer_draw :: proc(
 	return true
 }
 
+// Applies updates to the ground's stored inputs, in order. They stay until updated again.
+// Updates hold slices: this reads them, and keeps none
+renderer_update :: proc(rend: ^Renderer, updates: []Render_Update) {
+	if !(.Ready in rend.flags) do return
+	for update in updates {
+		switch u in update {
+		case Render_Update_Value:
+			ground_value_write(rend, u.cells)
+		case Render_Update_Divide:
+			ground_divide_write(rend, u.distances)
+		case Render_Update_Taper:
+			ground_taper_write(rend, u.cells)
+		case Render_Update_Category:
+			ground_category_write(rend, u.cells)
+		case Render_Update_Category_Looks:
+			ground_category_looks_write(rend, u.looks)
+		case Render_Update_Stroke:
+			ground_stroke_write(rend, u.stroke, u.lines, u.head)
+		case Render_Update_Areas:
+			ground_areas_write(rend, u.layer, u.ids, u.side)
+		case Render_Update_Area:
+			ground_area_write(rend, u.layer, u.area, u.side, u.corner, u.size, u.mask)
+		case Render_Update_Area_Looks:
+			ground_area_looks_write(rend, u.layer, u.looks)
+		case Render_Update_Area_Circles:
+			ground_area_circles_write(rend, u.layer, u.circles)
+		}
+	}
+}
+
 // Overwrites the Value grid: input of Render_Ground.value
-renderer_ground_value_write :: proc(
+@(private = "file")
+ground_value_write :: proc(
 	rend: ^Renderer,
 	// 1 byte per cell, read as 0..1. Row-major from the top-left
 	cells: []u8,
@@ -1373,7 +1407,8 @@ renderer_ground_value_write :: proc(
 }
 
 // Overwrites the Divide grid: input of Render_Ground.divide
-renderer_ground_divide_write :: proc(
+@(private = "file")
+ground_divide_write :: proc(
 	rend: ^Renderer,
 	// Signed distance per cell, in cells. > 0 land side, < 0 water side. Row-major from the top-left
 	distances: []f32,
@@ -1388,27 +1423,18 @@ renderer_ground_divide_write :: proc(
 	for distance, i in distances do GROUND_AREAS.land[i] = distance > 0
 }
 
-// World rect shown in the window through view. Empty before the first frame
-renderer_view_extents :: proc(rend: ^Renderer, view: Render_View) -> Extents {
-	if view.zoom <= 0 do return {}
-	half := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)} / 2 / view.zoom
-	return {
-		x_min = view.center.x - half.x,
-		y_min = view.center.y - half.y,
-		x_max = view.center.x + half.x,
-		y_max = view.center.y + half.y,
-	}
-}
-
-// Physical pixels per logical pixel of the window
-renderer_pixel_density :: proc(rend: ^Renderer) -> f32 {
+// Physical pixels per logical pixel of the window. The renderer's interface is in logical pixels
+// throughout: this stays inside it
+@(private = "file")
+pixel_density :: proc(rend: ^Renderer) -> f32 {
 	density := sdl.GetWindowPixelDensity(rend.window)
 	return density > 0 ? density : 1
 }
 
 // Replaces every area of a layer. Each area's edges are smoothed, and neighbours share theirs.
 // Cells are taken on the given side of the divide only: write the Divide grid first
-renderer_ground_areas_write :: proc(
+@(private = "file")
+ground_areas_write :: proc(
 	rend: ^Renderer,
 	layer: int,
 	// Area per cell, 0 = none. Row-major from the top-left
@@ -1468,7 +1494,8 @@ renderer_ground_areas_write :: proc(
 // Replaces the cells of one area of a layer: mask[y * size.x + x] for cell corner + {x, y}.
 // An empty mask removes the area. Cells are taken on the given side of the divide only, and are
 // taken from the layer's other areas
-renderer_ground_area_write :: proc(
+@(private = "file")
+ground_area_write :: proc(
 	rend: ^Renderer,
 	layer: int,
 	area: u8,
@@ -1570,7 +1597,8 @@ renderer_ground_area_write :: proc(
 
 // Overwrites the circles of a layer. A circle adds a disc to its area's shape, cut at the divide like
 // the area. Circles of one area must be consecutive. Circles past the budget are dropped
-renderer_ground_area_circles_write :: proc(
+@(private = "file")
+ground_area_circles_write :: proc(
 	rend: ^Renderer,
 	layer: int,
 	circles: []Render_Ground_Area_Circle,
@@ -1596,7 +1624,8 @@ renderer_ground_area_circles_write :: proc(
 }
 
 // Overwrites the look of every area of a layer: looks[i] for area i, none past len(looks)
-renderer_ground_area_looks_write :: proc(
+@(private = "file")
+ground_area_looks_write :: proc(
 	rend: ^Renderer,
 	layer: int,
 	looks: []Render_Ground_Area_Look,
@@ -1621,6 +1650,7 @@ renderer_ground_area_looks_write :: proc(
 	)
 }
 
+// In/out: areas.
 // Recomputes the field of one area over the cells of [lo, hi), and writes it to the cells that hold it:
 // the area's own, and those outside every area that are nearer to it than to the area they hold.
 // Field: signed distance from the cell centre to the area's edge, less half a cell, blurred.
@@ -1693,7 +1723,8 @@ area_field_build :: proc(areas: ^Area_Layer, area: u8, lo: [2]int, hi: [2]int) {
 }
 
 // Overwrites the Category grid: input of Render_Ground.category
-renderer_ground_category_write :: proc(
+@(private = "file")
+ground_category_write :: proc(
 	rend: ^Renderer,
 	// Row-major from the top-left
 	cells: []Render_Ground_Category_Cell,
@@ -1703,7 +1734,8 @@ renderer_ground_category_write :: proc(
 }
 
 // Overwrites the look of every category: looks[i] for category i, none past len(looks)
-renderer_ground_category_looks_write :: proc(rend: ^Renderer, looks: []Render_Ground_Category_Look) {
+@(private = "file")
+ground_category_looks_write :: proc(rend: ^Renderer, looks: []Render_Ground_Category_Look) {
 	if !(.Ready in rend.flags) do return
 	assert(len(looks) <= RENDER_GROUND_CATEGORIES)
 
@@ -1727,7 +1759,8 @@ renderer_ground_category_looks_write :: proc(rend: ^Renderer, looks: []Render_Gr
 }
 
 // Overwrites the Taper grid: thins strokes of kind Render_Ground_Stroke_Line
-renderer_ground_taper_write :: proc(
+@(private = "file")
+ground_taper_write :: proc(
 	rend: ^Renderer,
 	// 1 byte per cell, read as 0..1. Row-major from the top-left
 	cells: []u8,
@@ -1738,7 +1771,8 @@ renderer_ground_taper_write :: proc(
 
 // Overwrites the line geometry of a stroke: input of Render_Ground.strokes[stroke].
 // Segments past RENDER_GROUND_STROKE_SEGMENTS_MAX are dropped
-renderer_ground_stroke_write :: proc(
+@(private = "file")
+ground_stroke_write :: proc(
 	rend: ^Renderer,
 	stroke: int,
 	// Points in cells
@@ -1795,19 +1829,109 @@ ground_grid_write :: proc(rend: ^Renderer, grid: Ground_Grid, texels: rawptr, co
 	)
 }
 
+// A change to one of the ground's stored inputs: a grid, a table of looks, the lines of a stroke,
+// the areas of a layer. Applied by renderer_update. Grids are row-major from the top-left,
+// RENDER_GROUND_WIDTH x RENDER_GROUND_HEIGHT cells
+Render_Update :: union {
+	Render_Update_Value,
+	Render_Update_Divide,
+	Render_Update_Taper,
+	Render_Update_Category,
+	Render_Update_Category_Looks,
+	Render_Update_Stroke,
+	Render_Update_Areas,
+	Render_Update_Area,
+	Render_Update_Area_Looks,
+	Render_Update_Area_Circles,
+}
+
+// The Value grid: input of Render_Ground.value
+Render_Update_Value :: struct {
+	// 1 byte per cell, read as 0..1
+	cells: []u8,
+}
+
+// The Divide grid: input of Render_Ground.divide. Area layers take their sides from it:
+// update it before them
+Render_Update_Divide :: struct {
+	// Signed distance per cell, in cells. > 0 land side, < 0 water side
+	distances: []f32,
+}
+
+// The Taper grid: thins strokes of kind Render_Ground_Stroke_Line
+Render_Update_Taper :: struct {
+	// 1 byte per cell, read as 0..1
+	cells: []u8,
+}
+
+// The Category grid: input of Render_Ground.category
+Render_Update_Category :: struct {
+	cells: []Render_Ground_Category_Cell,
+}
+
+// The look of every category: looks[i] for category i, none past len(looks)
+Render_Update_Category_Looks :: struct {
+	looks: []Render_Ground_Category_Look,
+}
+
+// The lines of a stroke: input of Render_Ground.strokes[stroke].
+// Segments past RENDER_GROUND_STROKE_SEGMENTS_MAX are dropped
+Render_Update_Stroke :: struct {
+	stroke: int,
+	// Points in cells
+	lines:  Polylines,
+	// Arrowhead at the end of each open run: length, width, in logical pixels. Zero = none
+	head:   [2]f32,
+}
+
+// Every area of a layer, from a grid. Each area's edges are smoothed, and neighbours share theirs.
+// Cells are taken on the given side of the divide only
+Render_Update_Areas :: struct {
+	layer: int,
+	// Area per cell, 0 = none
+	ids:   []u8,
+	side:  Render_Ground_Side,
+}
+
+// The cells of one area of a layer: mask[y * size.x + x] for cell corner + {x, y}.
+// An empty mask removes the area. Cells are taken on the given side of the divide only, and are
+// taken from the layer's other areas
+Render_Update_Area :: struct {
+	layer:  int,
+	// Not 0
+	area:   u8,
+	side:   Render_Ground_Side,
+	corner: [2]int,
+	size:   [2]int,
+	mask:   []bool,
+}
+
+// The look of every area of a layer: looks[i] for area i, none past len(looks)
+Render_Update_Area_Looks :: struct {
+	layer: int,
+	looks: []Render_Ground_Area_Look,
+}
+
+// The circles of a layer. A circle adds a disc to its area's shape, cut at the divide like the
+// area. Circles of one area must be consecutive. Circles past the budget are dropped
+Render_Update_Area_Circles :: struct {
+	layer:   int,
+	circles: []Render_Ground_Area_Circle,
+}
+
 // Coordinate space of a quad pass
 Render_Space :: enum {
-	// Physical pixels, origin at the window top-left
+	// Logical pixels, origin at the window top-left
 	Screen,
 	// World units, mapped to the window by the frame's Render_View
 	World,
 }
 
-// World to window: pixel = (p - center) * zoom + window_size / 2
+// World to window, in logical pixels: pixel = (p - center) * zoom + window_size / 2
 Render_View :: struct {
 	// World position at the window centre
 	center: [2]f32,
-	// Physical pixels per world unit
+	// Logical pixels per world unit
 	zoom:   f32,
 }
 
@@ -1815,7 +1939,7 @@ Render_View :: struct {
 Render_Quad :: struct {
 	// Unrotated rectangle
 	rect:      Extents,
-	// Clip rectangle, screen space. Zero = none
+	// Clip rectangle, in screen space (logical pixels) whatever the pass's space. Zero = none
 	clip:      Extents,
 	// Per corner, 4 colours. TL clockwise winding order
 	colors:    [4][4]u8,
@@ -1874,7 +1998,7 @@ Render_Ground_Base :: struct {
 }
 
 // Category layer. Category grid: (category, strength) per cell. Each category has a look, written
-// with renderer_ground_category_looks_write. The looks of the 4 cells around a pixel are blended
+// with Render_Update_Category_Looks. The looks of the 4 cells around a pixel are blended
 Render_Ground_Category :: struct {
 	// Colour of the looks' patterns
 	pattern_color: [3]f32,
@@ -1929,7 +2053,7 @@ Render_Ground_Divide :: struct {
 	wobble:     f32,
 }
 
-// Stroke layer: draws along the lines written with renderer_ground_stroke_write.
+// Stroke layer: draws along the lines written with Render_Update_Stroke.
 // d = distance to the stroke's nearest segment. Widths: logical pixels. nil = off
 Render_Ground_Stroke :: union {
 	Render_Ground_Stroke_Line,
@@ -1938,7 +2062,7 @@ Render_Ground_Stroke :: union {
 }
 
 // A filled line with an edge line either side, the same width on screen at any zoom.
-// Heads: see renderer_ground_stroke_write
+// Heads: see Render_Update_Stroke
 Render_Ground_Stroke_Arrow :: struct {
 	// Outer width, edges included
 	width:      f32,
@@ -1974,7 +2098,7 @@ Render_Ground_Stroke_Double :: struct {
 }
 
 // Area layer: a wash per area, and a line where two areas meet.
-// Areas: renderer_ground_areas_write. Their looks: renderer_ground_area_looks_write
+// Areas: Render_Update_Areas or Render_Update_Area. Their looks: Render_Update_Area_Looks
 Render_Ground_Area_Layer :: struct {
 	// Line where two areas meet
 	border_color:    [3]f32,

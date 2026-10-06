@@ -237,7 +237,8 @@ MARKINGS := [?]Marking {
 	},
 }
 
-// Replaces out.marks. Grids are row-major, size.x * size.y cells
+// Out: out.
+// Places the marks of a map, replacing out.marks. Grids are row-major, size.x * size.y cells
 map_marks_place :: proc(
 	size: [2]int,
 	// 0..255 per cell
@@ -447,7 +448,8 @@ map_marks_place :: proc(
 	})
 }
 
-// Appends a world-space quad per mark overlapping visible (in cells), in draw order.
+// Out: out, appended to.
+// A world-space quad per mark overlapping visible (in cells), in draw order.
 // Quads past the capacity of out are dropped
 map_marks_quads :: proc(marks: ^Map_Marks, visible: Extents, out: ^[dynamic; RENDER_QUADS_MAX]Render_Quad) {
 	for mark in marks.marks {

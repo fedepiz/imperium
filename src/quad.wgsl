@@ -60,7 +60,8 @@ fn vs_main(@builtin(vertex_index) index:u32, quad: Quad_In) -> Vertex_Out {
     out.color     = colors[index];
     out.local     = local;
     out.half_size = half_size;
-    out.clip      = quad.clip;
+    // Screen space to physical pixels
+    out.clip      = quad.clip * view.pixel_density;
     out.shape     = shape;
     out.source    = quad.source;
     return out;

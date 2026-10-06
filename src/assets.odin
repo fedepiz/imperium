@@ -16,6 +16,8 @@ Assets :: struct {
 	image_names: [ASSETS_IMAGES_MAX]string,
 	image_rects: [ASSETS_IMAGES_MAX]Extents,
 	fonts:       [FONTS_MAX]Font,
+	// Physical pixels per logical pixel the fonts were rasterised for
+	pixel_density: f32,
 }
 
 
@@ -30,23 +32,24 @@ FONT_FIRST :: 32
 FONT_LAST :: 126
 FONT_GLYPH_COUNT :: FONT_LAST - FONT_FIRST + 1
 
-Glyph :: struct {
-	// Rect in the atlas
-	source:  Extents,
-	// From pen position on the baseline to the glyph's top-left
-	offset:  [2]f32,
-	// Pen advance after this glyph
-	advance: f32,
-}
-
+// Glyph data is one array per property, indexed by character - FONT_FIRST.
+// The metrics (ascent, descent, line_gap, advances) are what text layout reads: see assets_text_font
 Font :: struct {
-	// As listed in assets_load. size: pixel height
+	// As listed in assets_load. size: em height in logical pixels
 	name:     string,
 	size:     u16,
+	// Logical pixels. descent is negative
 	ascent:   f32,
 	descent:  f32,
 	line_gap: f32,
-	glyphs:   [FONT_GLYPH_COUNT]Glyph,
+	// Pen advance after each glyph, in logical pixels
+	advances: [FONT_GLYPH_COUNT]f32,
+	// From the pen position on the baseline to each glyph's top-left, in logical pixels
+	offsets:  [FONT_GLYPH_COUNT][2]f32,
+	// Each glyph's size when drawn, in logical pixels. Zero for blank glyphs
+	sizes:    [FONT_GLYPH_COUNT][2]f32,
+	// Each glyph's rect in the atlas, in physical pixels: sizes * Assets.pixel_density
+	sources:  [FONT_GLYPH_COUNT]Extents,
 }
 
 Assets_Loaded :: struct {
@@ -54,7 +57,16 @@ Assets_Loaded :: struct {
 	pixels: [ASSETS_IMAGES_MAX][]u8,
 }
 
-assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
+// Out: assets, out.
+// Loads the images and fonts listed inside, and lays them out in the atlas
+assets_load :: proc(
+	assets: ^Assets,
+	// Physical pixels per logical pixel of the window. Glyphs are rasterised at font size * this
+	pixel_density: f32,
+	out: ^Assets_Loaded,
+) {
+	assets.pixel_density = pixel_density > 0 ? pixel_density : 1
+
 	blob_arena: mem.Arena
 	mem.arena_init(&blob_arena, assets.blob[:])
 	blob_alloc := mem.arena_allocator(&blob_arena)
@@ -162,29 +174,32 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 			continue
 		}
 
-		scale := stbtt.ScaleForPixelHeight(&info, f32(source.size))
+		// Font units to physical pixels. Metrics are stored in logical pixels
+		density := assets.pixel_density
+		scale := stbtt.ScaleForPixelHeight(&info, f32(source.size) * density)
 		ascent, descent, line_gap: c.int
 		stbtt.GetFontVMetrics(&info, &ascent, &descent, &line_gap)
-		font.ascent = f32(ascent) * scale
-		font.descent = f32(descent) * scale
-		font.line_gap = f32(line_gap) * scale
+		font.ascent = f32(ascent) * scale / density
+		font.descent = f32(descent) * scale / density
+		font.line_gap = f32(line_gap) * scale / density
 
 		for codepoint in FONT_FIRST ..= FONT_LAST {
 			slot := id
 			id += 1
 			assert(slot < ASSETS_IMAGES_MAX)
-			glyph := &font.glyphs[codepoint - FONT_FIRST]
+			glyph := codepoint - FONT_FIRST
 
 			advance, bearing: c.int
 			stbtt.GetCodepointHMetrics(&info, rune(codepoint), &advance, &bearing)
-			glyph.advance = f32(advance) * scale
+			font.advances[glyph] = f32(advance) * scale / density
 
 			// Glyph box relative to the pen, empty for whitespace
 			x0, y0, x1, y1: c.int
 			stbtt.GetCodepointBitmapBox(&info, rune(codepoint), scale, scale, &x0, &y0, &x1, &y1)
 			w, h := x1 - x0, y1 - y0
-			glyph.offset = {f32(x0), f32(y0)}
+			font.offsets[glyph] = [2]f32{f32(x0), f32(y0)} / density
 			if w <= 0 || h <= 0 do continue
+			font.sizes[glyph] = [2]f32{f32(w), f32(h)} / density
 
 			// Rasterise coverage into temporary memory
 			coverage := make([]u8, w * h, context.temp_allocator)
@@ -237,8 +252,8 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 	// Glyphs pick up their atlas rect
 	for font_index in 0 ..< len(font_sources) {
 		font := &assets.fonts[font_index]
-		for &glyph, i in font.glyphs {
-			glyph.source = assets.image_rects[font_first_slot[font_index] + i]
+		for &source, glyph in font.sources {
+			source = assets.image_rects[font_first_slot[font_index] + glyph]
 		}
 	}
 
@@ -258,4 +273,17 @@ assets_font_find :: proc(assets: ^Assets, name: string, size: u16) -> (index: in
 		if font.name == name && font.size == size do return i, true
 	}
 	return 0, false
+}
+
+// Metrics of a loaded font, for text layout: in logical pixels, for characters FONT_FIRST..FONT_LAST.
+// It views the font's advances: valid for as long as assets stays where it is
+assets_text_font :: proc(assets: ^Assets, font: int) -> Text_Font {
+	loaded := &assets.fonts[font]
+	return {
+		ascent = loaded.ascent,
+		descent = loaded.descent,
+		line_gap = loaded.line_gap,
+		first = FONT_FIRST,
+		advances = loaded.advances[:],
+	}
 }

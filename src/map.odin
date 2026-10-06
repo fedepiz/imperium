@@ -6,8 +6,11 @@ import "core:math"
 import "core:slice"
 
 // Map graphics: turns a map's geography and style into what the renderer draws.
-// map_build: once per map, from a Map_Geography. Fills the ground's grids, strokes and looks, places the marks.
-// map_frame: every frame, from a Map_Scene. Updates what changes and appends the map's passes
+// map_build: once per map, from a Map_Geography. Places the marks.
+// map_frame: every frame, from a Map_Scene.
+// Neither touches the renderer: they append the updates, quads and passes it is to be given.
+// Updates hold slices of their inputs and of temporary memory: give them to renderer_update before
+// either goes away
 
 // Map size in cells: the renderer's ground
 MAP_WIDTH :: RENDER_GROUND_WIDTH
@@ -60,6 +63,8 @@ Map_Highlight_Drawn :: struct {
 Map_Scene :: struct {
 	// Camera. The view the caller gives renderer_draw
 	view:           Render_View,
+	// Size of the window, in logical pixels
+	window:         [2]f32,
 	region_display: Map_Region_Display,
 	// Index: region, as in Map_Geography.regions. Entry 0 is unused
 	regions:        []Map_Region,
@@ -137,7 +142,7 @@ Map_Geography :: struct {
 	rivers:    Polylines,
 	roads:     Polylines,
 	// Region per cell, 0 = none. On land only. Gives the shapes of the region washes and the
-	// borders between regions. Their looks: renderer_ground_area_looks_write(MAP_AREAS_REGIONS)
+	// borders between regions. Their colours: Map_Scene.regions
 	regions:   []u8,
 }
 
@@ -325,14 +330,15 @@ MAP_STYLE :: Map_Style {
 	cover_jitter       = 0.8,
 }
 
-// Builds a map. Writes the renderer's ground grids, strokes and category looks. Replaces m.marks.
+// Out: m, and updates, appended to.
+// Builds a map: the ground's grids, strokes and category looks as updates, and the marks in m.
 // Finds the pawn images and the label font in assets
 map_build :: proc(
 	m: ^Map,
-	rend: ^Renderer,
 	assets: ^Assets,
 	geography: Map_Geography,
 	style: Map_Style,
+	updates: ^[dynamic; RENDER_UPDATES_MAX]Render_Update,
 ) {
 	assert(len(geography.water) == MAP_CELLS)
 	assert(len(geography.elevation) == MAP_CELLS && len(geography.moisture) == MAP_CELLS)
@@ -343,10 +349,10 @@ map_build :: proc(
 	// Step: Coast
 	coast := make([]f32, MAP_CELLS, context.temp_allocator)
 	map_coast_build(geography.water, size, coast)
-	renderer_ground_divide_write(rend, coast)
+	append(updates, Render_Update_Divide{distances = coast})
 
 	// Step: Regions. After the coast: areas are cut at it
-	renderer_ground_areas_write(rend, MAP_AREAS_REGIONS, geography.regions, .Land)
+	append(updates, Render_Update_Areas{layer = MAP_AREAS_REGIONS, ids = geography.regions, side = .Land})
 
 	// Step: Ways. Smoothed, each kind to its stroke
 	Way_Kind :: struct {
@@ -365,18 +371,19 @@ map_build :: proc(
 			make([]Polyline_Run, MAP_WAYS_MAX, context.temp_allocator),
 		)
 		polylines_smooth(kind.raw, kind.smoothing, &ways[kind.stroke])
-		renderer_ground_stroke_write(rend, kind.stroke, ways[kind.stroke])
+		append(updates, Render_Update_Stroke{stroke = kind.stroke, lines = ways[kind.stroke]})
 	}
 	// Rivers thin with elevation
-	renderer_ground_taper_write(rend, geography.elevation)
+	append(updates, Render_Update_Taper{cells = geography.elevation})
 
 	// Step: Cover
-	renderer_ground_category_write(
-		rend,
-		slice.reinterpret([]Render_Ground_Category_Cell, geography.cover),
+	append(
+		updates,
+		Render_Update_Category{cells = slice.reinterpret([]Render_Ground_Category_Cell, geography.cover)},
 	)
-	looks := style.cover_looks
-	renderer_ground_category_looks_write(rend, slice.enumerated_array(&looks))
+	looks := make([]Render_Ground_Category_Look, len(Map_Cover), context.temp_allocator)
+	for look, kind in style.cover_looks do looks[kind] = look
+	append(updates, Render_Update_Category_Looks{looks = looks})
 
 	// Step: Pawn images and label font
 	map_pawns_build(&m.pawns, assets)
@@ -395,26 +402,40 @@ map_build :: proc(
 	)
 }
 
-// Draws the map for a frame. Updates the renderer's area looks, highlights and arrows from the scene,
-// and appends the ground pass, the marks in view, the pawns and their labels
+// Out: updates, quads, passes, appended to. In/out: m.
+// A frame of the map. Updates: the area looks, the highlights that changed, the arrows, the wash if it
+// changed. Passes: the ground, the marks in view, the pawns, their labels
 map_frame :: proc(
 	m: ^Map,
-	rend: ^Renderer,
 	assets: ^Assets,
 	scene: Map_Scene,
 	style: Map_Style,
 	// Seconds since the last frame
 	dt: f32,
+	updates: ^[dynamic; RENDER_UPDATES_MAX]Render_Update,
 	quads: ^[dynamic; RENDER_QUADS_MAX]Render_Quad,
 	passes: ^[dynamic; RENDER_PASS_MAX]Render_Pass,
 ) {
 	assert(len(scene.highlights) <= MAP_HIGHLIGHTS_MAX)
+	assert(scene.view.zoom > 0)
+
+	// Step: Visible. The part of the world in the window, in cells
+	visible: Extents
+	{
+		half := scene.window / 2 / scene.view.zoom
+		visible = {
+			x_min = scene.view.center.x - half.x,
+			y_min = scene.view.center.y - half.y,
+			x_max = scene.view.center.x + half.x,
+			y_max = scene.view.center.y + half.y,
+		}
+	}
 	// Share of the way to its target a look moves this frame
 	ease := 1 - math.exp(-LOOK_EASE * dt)
 
 	// Step: Regions. Band by display, zoom and highlight
 	{
-		far := scene.view.zoom / renderer_pixel_density(rend) < REGION_FAR_ZOOM
+		far := scene.view.zoom < REGION_FAR_ZOOM
 		for region, id in scene.regions {
 			if id == 0 || id >= RENDER_GROUND_AREAS do continue
 			band: Map_Band
@@ -435,13 +456,24 @@ map_frame :: proc(
 			drawn.thickness += (band.thickness - drawn.thickness) * ease
 			drawn.inside += (band.inside - drawn.inside) * ease
 		}
-		renderer_ground_area_looks_write(rend, MAP_AREAS_REGIONS, m.region_looks[:])
+		append(updates, Render_Update_Area_Looks{layer = MAP_AREAS_REGIONS, looks = m.region_looks[:]})
 	}
 
 	// Step: Highlights. Slot i is area i + 1 of its kind's layer. Cells are written when they change
 	{
-		looks: [RENDER_GROUND_AREA_LAYERS][MAP_HIGHLIGHTS_MAX + 1]Render_Ground_Area_Look
-		circles: [RENDER_GROUND_AREA_LAYERS][dynamic; RENDER_GROUND_AREA_CIRCLES_MAX]Render_Ground_Area_Circle
+		// Per layer, in temporary memory: the updates keep slices of them
+		HIGHLIGHT_AREA_LAYERS :: [?]int{MAP_AREAS_ZONES, MAP_AREAS_CONTACTS, MAP_AREAS_REACH}
+		looks: [RENDER_GROUND_AREA_LAYERS][]Render_Ground_Area_Look
+		circles: [RENDER_GROUND_AREA_LAYERS][dynamic]Render_Ground_Area_Circle
+		for layer in HIGHLIGHT_AREA_LAYERS {
+			looks[layer] = make([]Render_Ground_Area_Look, MAP_HIGHLIGHTS_MAX + 1, context.temp_allocator)
+			circles[layer] = make(
+				[dynamic]Render_Ground_Area_Circle,
+				0,
+				RENDER_GROUND_AREA_CIRCLES_MAX,
+				context.temp_allocator,
+			)
+		}
 		for &drawn, slot in m.highlights {
 			area := u8(slot + 1)
 			highlight: Map_Highlight
@@ -470,7 +502,7 @@ map_frame :: proc(
 			if content != drawn.written {
 				// Gone, or moved to another layer
 				if drawn.written != 0 && (!shown || drawn.layer != layer) {
-					renderer_ground_area_write(rend, drawn.layer, area, .Land, {}, {}, nil)
+					append(updates, Render_Update_Area{layer = drawn.layer, area = area})
 				}
 				if shown {
 					cells := highlight.cells
@@ -493,14 +525,16 @@ map_frame :: proc(
 						}
 						cells = thick
 					}
-					renderer_ground_area_write(
-						rend,
-						layer,
-						area,
-						highlight.on_water ? .Water : .Land,
-						highlight.corner,
-						highlight.size,
-						cells,
+					append(
+						updates,
+						Render_Update_Area {
+							layer = layer,
+							area = area,
+							side = highlight.on_water ? .Water : .Land,
+							corner = highlight.corner,
+							size = highlight.size,
+							mask = cells,
+						},
 					)
 					// Fades in
 					drawn.look.border = 0
@@ -517,21 +551,24 @@ map_frame :: proc(
 			drawn.look.inside += (look.band.inside - drawn.look.inside) * ease
 			looks[layer][area] = drawn.look
 			for circle in highlight.circles {
+				if len(circles[layer]) == RENDER_GROUND_AREA_CIRCLES_MAX do break
 				append(&circles[layer], Render_Ground_Area_Circle{circle.center, circle.radius, area})
 			}
 		}
-		for layer in ([?]int{MAP_AREAS_ZONES, MAP_AREAS_CONTACTS, MAP_AREAS_REACH}) {
-			renderer_ground_area_looks_write(rend, layer, looks[layer][:])
-			renderer_ground_area_circles_write(rend, layer, circles[layer][:])
+		for layer in HIGHLIGHT_AREA_LAYERS {
+			append(updates, Render_Update_Area_Looks{layer = layer, looks = looks[layer]})
+			append(updates, Render_Update_Area_Circles{layer = layer, circles = circles[layer][:]})
 		}
 	}
 
 	// Step: Arrows
-	renderer_ground_stroke_write(
-		rend,
-		MAP_STROKE_ARROWS,
-		scene.arrows,
-		{style.arrow_head_length, style.arrow_head_width},
+	append(
+		updates,
+		Render_Update_Stroke {
+			stroke = MAP_STROKE_ARROWS,
+			lines = scene.arrows,
+			head = {style.arrow_head_length, style.arrow_head_width},
+		},
 	)
 
 	// Step: Wash. Its values are written when they change
@@ -540,7 +577,7 @@ map_frame :: proc(
 		assert(len(scene.wash) == MAP_CELLS)
 		content := max(u64(xxhash.XXH3_64_default(scene.wash)), 1)
 		if content != m.wash_written {
-			renderer_ground_value_write(rend, scene.wash)
+			append(updates, Render_Update_Value{cells = scene.wash})
 			m.wash_written = content
 		}
 		ground.value = {
@@ -554,7 +591,7 @@ map_frame :: proc(
 	// Step: Ground pass, and the marks in view drawn into it
 	append(passes, Render_Ground_Pass{ground = ground})
 	begin := len(quads)
-	map_marks_quads(&m.marks, renderer_view_extents(rend, scene.view), quads)
+	map_marks_quads(&m.marks, visible, quads)
 	append(
 		passes,
 		Render_Quad_Pass {
@@ -566,7 +603,7 @@ map_frame :: proc(
 	)
 
 	// Step: Pawns and labels, over the ground
-	map_pawns_frame(&m.pawns, rend, assets, scene.pawns, scene.view, style, dt, quads, passes)
+	map_pawns_frame(&m.pawns, assets, scene.pawns, scene.view, visible, style, dt, quads, passes)
 }
 
 // Ground layers for a style. Value layer: off, see the wash in map_frame

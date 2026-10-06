@@ -25,6 +25,7 @@ COAST_SMOOTHING :: Polyline_Smoothing {
 @(private = "file")
 COAST_REACH :: f32(3)
 
+// Out: coast.
 // coast[i] = signed distance from cell i's centre to the coast, in cells. > 0 on land, < 0 on water.
 // Grids are row-major, size.x * size.y cells
 map_coast_build :: proc(water: []bool, size: [2]int, coast: []f32) {
