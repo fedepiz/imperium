@@ -3,6 +3,9 @@
 @group(1) @binding(0) var atlas:         texture_2d<f32>;
 @group(1) @binding(1) var atlas_sampler: sampler;
 
+// Added to the mip level. Negative: sharper, and less steady when shrunk
+const LEVEL_BIAS = 0.0;
+
 struct Quad_In {
     @location(0)  rect:      vec4f,
     @location(1)  color_tl:  vec4f,
@@ -98,7 +101,10 @@ fn fs_main(in: Vertex_Out) -> @location(0) vec4f {
 
     let t     = clamp(in.local / (in.half_size * 2.0) + 0.5, vec2f(0.0), vec2f(1.0));
     let uv    = mix(in.source.xy, in.source.zw, t) / vec2f(textureDimensions(atlas));
-    let texel = textureSampleLevel(atlas, atlas_sampler, uv, 0.0);
+    // Mip level: source texels per pixel of the quad, as a power of two
+    let texels = (in.source.zw - in.source.xy) / (in.half_size * 2.0);
+    let level  = log2(max(max(texels.x, texels.y), 1.0)) + LEVEL_BIAS;
+    let texel  = textureSampleLevel(atlas, atlas_sampler, uv, max(level, 0.0));
     let tex   = select(vec4f(1.0), texel, in.source.z > in.source.x);
 
     // Premultiply alpha

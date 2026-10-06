@@ -19,6 +19,7 @@ GLOBAL: struct {
 // Asset budgets must fit the renderer's
 #assert(ASSETS_IMAGES_MAX <= RENDER_IMAGES_MAX)
 #assert(ASSETS_ATLAS_SIZE <= RENDER_ATLAS_SIZE_MAX)
+#assert(ASSETS_ATLAS_SPACING % RENDER_ATLAS_SPACING == 0)
 
 main :: proc() {
 	context.allocator = mem.panic_allocator()

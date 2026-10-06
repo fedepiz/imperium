@@ -22,6 +22,8 @@ Assets :: struct {
 // Budgets
 ASSETS_IMAGES_MAX :: 4000
 ASSETS_ATLAS_SIZE :: 4096
+// Images sit on multiples of this in the atlas, at least this far apart
+ASSETS_ATLAS_SPACING :: 16
 
 FONTS_MAX :: 8
 FONT_FIRST :: 32
@@ -210,9 +212,13 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 		}
 	}
 
-	// Layout
+	// Layout. Packed at sizes rounded up to the spacing, so every position is a multiple of it
+	spaced := make([][2]int, len(sizes), context.temp_allocator)
+	for size, i in sizes {
+		spaced[i] = (size + ASSETS_ATLAS_SPACING - 1) / ASSETS_ATLAS_SPACING * ASSETS_ATLAS_SPACING
+	}
 	positions := make([][2]int, len(sizes), context.temp_allocator)
-	if !shelf_pack({ASSETS_ATLAS_SIZE, ASSETS_ATLAS_SIZE}, sizes, 2, positions) {
+	if !shelf_pack({ASSETS_ATLAS_SIZE, ASSETS_ATLAS_SIZE}, spaced, ASSETS_ATLAS_SPACING, positions) {
 		fmt.eprintln("Images do not fit in the atlas")
 		return
 	}

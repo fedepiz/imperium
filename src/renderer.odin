@@ -28,6 +28,12 @@ STROKE_SHADER :: VIEW_SHADER + #load("stroke.wgsl", string)
 RENDER_IMAGES_MAX :: 4000
 // Largest texture every WebGPU device supports
 RENDER_ATLAS_SIZE_MAX :: 8192
+// Mip levels of the atlas: level n is the images at 1 / 2^n size. Quads drawn smaller than their
+// source read the level that matches
+RENDER_ATLAS_MIPS :: 5
+// Atlas images must sit on multiples of this, and at least this far apart: a texel of the
+// smallest level then never covers two images
+RENDER_ATLAS_SPACING :: 1 << (RENDER_ATLAS_MIPS - 1)
 
 RENDER_QUADS_MAX :: 1 << 16
 RENDER_PASS_MAX :: 256
@@ -78,7 +84,7 @@ Renderer :: struct {
 	view_layout:     wgpu.BindGroupLayout,
 	view_buffers:    [Render_Space]wgpu.Buffer,
 	view_groups:     [Render_Space]wgpu.BindGroup,
-	// Linear filter, clamp to edge. Used by the atlas and the ground grids
+	// Linear filter, also between mip levels, clamp to edge. Used by the atlas and the ground grids
 	sampler:         wgpu.Sampler,
 	// Images
 	atlas_texture:   wgpu.Texture,
@@ -600,12 +606,12 @@ renderer_init :: proc(
 				dimension = ._2D,
 				size = {u32(atlas_size.x), u32(atlas_size.y), 1},
 				format = .RGBA8Unorm,
-				mipLevelCount = 1,
+				mipLevelCount = RENDER_ATLAS_MIPS,
 				sampleCount = 1,
 			},
 		)
 
-		// Upload each image at its source position
+		// Upload each image at its source position, then its halvings to the smaller levels
 		for extent, i in extents {
 			image_pixels := pixels[i]
 			pos := [2]int{int(extent.x_min), int(extent.y_min)}
@@ -615,19 +621,29 @@ renderer_init :: proc(
 			assert(pos.x >= 0 && pos.y >= 0)
 			assert(pos.x + size.x <= atlas_size.x && pos.y + size.y <= atlas_size.y)
 			assert(len(image_pixels) == size.x * size.y * 4)
+			assert(pos.x % RENDER_ATLAS_SPACING == 0 && pos.y % RENDER_ATLAS_SPACING == 0)
 
-			wgpu.QueueWriteTexture(
-				out.queue,
-				&{
-					texture = out.atlas_texture,
-					origin = {u32(pos.x), u32(pos.y), 0},
-					aspect = .All,
-				},
-				raw_data(image_pixels),
-				uint(len(image_pixels)),
-				&{bytesPerRow = u32(size.x * 4), rowsPerImage = u32(size.y)},
-				&{u32(size.x), u32(size.y), 1},
-			)
+			for level in 0 ..< RENDER_ATLAS_MIPS {
+				if level > 0 {
+					halved := make([]u8, ((size.x + 1) / 2) * ((size.y + 1) / 2) * 4, context.temp_allocator)
+					image_halve(image_pixels, size, halved)
+					image_pixels = halved
+					size = (size + 1) / 2
+				}
+				wgpu.QueueWriteTexture(
+					out.queue,
+					&{
+						texture = out.atlas_texture,
+						mipLevel = u32(level),
+						origin = {u32(pos.x >> uint(level)), u32(pos.y >> uint(level)), 0},
+						aspect = .All,
+					},
+					raw_data(image_pixels),
+					uint(len(image_pixels)),
+					&{bytesPerRow = u32(size.x * 4), rowsPerImage = u32(size.y)},
+					&{u32(size.x), u32(size.y), 1},
+				)
+			}
 		}
 
 		// View, sampler and bind group for the shader
@@ -640,7 +656,7 @@ renderer_init :: proc(
 				addressModeW = .ClampToEdge,
 				magFilter = .Linear,
 				minFilter = .Linear,
-				mipmapFilter = .Nearest,
+				mipmapFilter = .Linear,
 				lodMaxClamp = 32,
 				maxAnisotropy = 1,
 			},

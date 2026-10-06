@@ -223,6 +223,27 @@ mask_thicken :: proc(mask: []bool, size: [2]int, widen: int, support: int, out: 
 	for &inside, i in out do inside = mask[i] || (inside && near_thin[i])
 }
 
+// Images: RGBA8, rows from the top, tightly packed
+
+// Halves an image: each pixel of dst is the mean of a 2 x 2 block of src. dst is (size + 1) / 2.
+// Blocks past the edge of src count as zero there: partial coverage, for premultiplied alpha
+image_halve :: proc(src: []u8, size: [2]int, dst: []u8) {
+	half := (size + 1) / 2
+	assert(len(src) == size.x * size.y * 4 && len(dst) == half.x * half.y * 4)
+	for y in 0 ..< half.y {
+		for x in 0 ..< half.x {
+			sum: [4]int
+			for block_y in 2 * y ..< min(2 * y + 2, size.y) {
+				for block_x in 2 * x ..< min(2 * x + 2, size.x) {
+					at := (block_y * size.x + block_x) * 4
+					for channel in 0 ..< 4 do sum[channel] += int(src[at + channel])
+				}
+			}
+			for channel in 0 ..< 4 do dst[(y * half.x + x) * 4 + channel] = u8((sum[channel] + 2) / 4)
+		}
+	}
+}
+
 // Scalars
 
 // Smoothstep from 0 at from to 1 at full. full < from: decreasing
