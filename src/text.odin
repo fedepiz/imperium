@@ -81,47 +81,47 @@ Text_Layout :: struct {
 // Where a layout stands: the pen, the line being filled, and the last line closed
 @(private = "file")
 Pen :: struct {
-	runs:            []Text_Run,
-	fonts:           []Text_Font,
-	room:            [2]f32,
-	glyphs:          []Text_Glyph,
-	lines:           []Text_Line,
+	runs:           []Text_Run,
+	fonts:          []Text_Font,
+	room:           [2]f32,
+	glyphs:         []Text_Glyph,
+	lines:          []Text_Line,
 	// Glyphs and lines produced so far. Past the buffers they are counted but not stored
-	glyph_count:     int,
-	line_count:      int,
-	size:            [2]f32,
-	truncated:       bool,
+	glyph_count:    int,
+	line_count:     int,
+	size:           [2]f32,
+	truncated:      bool,
 	// A line did not fit the room's height: nothing more is laid out
-	stopped:         bool,
+	stopped:        bool,
 	// Something was laid out, so the text has at least one line
-	any:             bool,
+	any:            bool,
 	// Pen position on the line, from its left edge
-	x:               f32,
+	x:              f32,
 	// Separators since the last word. Their glyphs are produced as they come, at the end of the
 	// glyphs so far, and dropped if no word follows them on the line
-	pending:         f32,
-	pending_count:   int,
-	pending_begin:   int,
+	pending:        f32,
+	pending_count:  int,
+	pending_begin:  int,
 	// The line being filled
-	line_top:        f32,
-	line_begin:      int,
+	line_top:       f32,
+	line_begin:     int,
 	// It began because the one before was full: separators at its start are dropped
-	line_wrapped:    bool,
+	line_wrapped:   bool,
 	// Run of its first glyph, -1 = none yet
-	line_first_run:  int,
+	line_first_run: int,
 	// Tallest ascent and descent, and widest gap, of the fonts with something on the line
-	ascent:          f32,
-	descent:         f32,
-	line_gap:        f32,
+	ascent:         f32,
+	descent:        f32,
+	line_gap:       f32,
 	// Where the line would be cut for an ellipsis: after the last glyph the ellipsis still fits behind
-	cut:             Cut,
+	cut:            Cut,
 	// The last line closed
-	last_begin:      int,
-	last_top:        f32,
-	last_ascent:     f32,
-	last_descent:    f32,
-	last_first_run:  int,
-	last_cut:        Cut,
+	last_begin:     int,
+	last_top:       f32,
+	last_ascent:    f32,
+	last_descent:   f32,
+	last_first_run: int,
+	last_cut:       Cut,
 }
 
 @(private = "file")
@@ -187,12 +187,12 @@ text_layout :: proc(
 				ink.x_max += x
 			}
 			pen.glyphs[pen.glyph_count] = {
-				run    = run,
+				run = run,
 				offset = offset,
-				char   = char,
-				pen    = {x, 0},
-				cell   = {x_min = x, x_max = x + advance},
-				ink    = ink,
+				char = char,
+				pen = {x, 0},
+				cell = {x_min = x, x_max = x + advance},
+				ink = ink,
 			}
 		}
 		pen.glyph_count += 1
@@ -203,7 +203,12 @@ text_layout :: proc(
 	cut_here :: proc(pen: ^Pen, run: int) {
 		dot, _ := advance_of(pen.fonts[pen.runs[run].font], ELLIPSIS_CHAR)
 		if pen.x + dot * ELLIPSIS_COUNT > pen.room.x + FIT_SLACK do return
-		pen.cut = {valid = true, glyph_count = pen.glyph_count, x = pen.x, run = run}
+		pen.cut = {
+			valid       = true,
+			glyph_count = pen.glyph_count,
+			x           = pen.x,
+			run         = run,
+		}
 	}
 
 	// Drops the line being filled, cuts the last closed line at its cut and ends it in an ellipsis
@@ -213,7 +218,10 @@ text_layout :: proc(
 		cut := pen.last_cut
 		if !cut.valid {
 			// No glyph leaves room for the ellipsis: it stands alone
-			cut = {glyph_count = pen.last_begin, run = max(pen.last_first_run, 0)}
+			cut = {
+				glyph_count = pen.last_begin,
+				run         = max(pen.last_first_run, 0),
+			}
 		}
 		pen.glyph_count = cut.glyph_count
 
@@ -231,7 +239,12 @@ text_layout :: proc(
 					char   = ELLIPSIS_CHAR,
 					pen    = {x, baseline},
 					cell   = {x, pen.last_top, x + dot, bottom},
-					ink    = {x + ink.x_min, baseline + ink.y_min, x + ink.x_max, baseline + ink.y_max},
+					ink    = {
+						x + ink.x_min,
+						baseline + ink.y_min,
+						x + ink.x_max,
+						baseline + ink.y_max,
+					},
 				}
 			}
 			pen.glyph_count += 1
@@ -327,7 +340,13 @@ text_layout :: proc(
 	}
 
 	// Width of the word starting at offset in runs[run_index]. It may carry on into later runs
-	word_width :: proc(runs: []Text_Run, fonts: []Text_Font, run_index, offset: int) -> (width: f32) {
+	word_width :: proc(
+		runs: []Text_Run,
+		fonts: []Text_Font,
+		run_index, offset: int,
+	) -> (
+		width: f32,
+	) {
 		start := offset
 		for run in runs[run_index:] {
 			if run.image_aspect != 0 do return
@@ -419,22 +438,3 @@ text_layout :: proc(
 	}
 }
 
-// Width of text on one line: the sum of its characters' advances, separators included
-text_width :: proc(text: string, font: Text_Font) -> (width: f32) {
-	for char in text {
-		advance, _ := advance_of(font, char)
-		width += advance
-	}
-	return
-}
-
-// Index of the glyph whose cell holds point, relative to the text's top-left. -1 = none
-text_glyph_at :: proc(glyphs: []Text_Glyph, point: [2]f32) -> int {
-	for glyph, index in glyphs {
-		cell := glyph.cell
-		if point.x >= cell.x_min && point.x < cell.x_max && point.y >= cell.y_min && point.y < cell.y_max {
-			return index
-		}
-	}
-	return -1
-}
