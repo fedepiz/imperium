@@ -21,7 +21,7 @@ Assets :: struct {
 
 // Budgets
 ASSETS_IMAGES_MAX :: 4000
-ASSETS_ATLAS_SIZE :: 2048
+ASSETS_ATLAS_SIZE :: 4096
 
 FONTS_MAX :: 8
 FONT_FIRST :: 32
@@ -38,6 +38,9 @@ Glyph :: struct {
 }
 
 Font :: struct {
+	// As listed in assets_load. size: pixel height
+	name:     string,
+	size:     u16,
 	ascent:   f32,
 	descent:  f32,
 	line_gap: f32,
@@ -57,20 +60,49 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 	sizes := make([][2]int, ASSETS_IMAGES_MAX, context.temp_allocator)
 
 	// doing work in-line before extraction
-	image_sources: []string = {
-		"logo",
-		"terrain/mountain_0", "terrain/mountain_1", "terrain/mountain_2", "terrain/mountain_3",
-		"terrain/hill_0", "terrain/hill_1", "terrain/hill_2", "terrain/hill_3",
-		"terrain/conifer_0", "terrain/conifer_1", "terrain/conifer_2", "terrain/conifer_3",
-		"terrain/broadleaf_0", "terrain/broadleaf_1", "terrain/broadleaf_2", "terrain/broadleaf_3",
-		"terrain/cypress_0", "terrain/cypress_1", "terrain/cypress_2", "terrain/cypress_3",
-		"terrain/palm_0", "terrain/palm_1", "terrain/palm_2", "terrain/palm_3",
-		"terrain/tuft_0", "terrain/tuft_1", "terrain/tuft_2", "terrain/tuft_3",
-		"terrain/marsh_0", "terrain/marsh_1", "terrain/marsh_2", "terrain/marsh_3",
-		"terrain/dune_0", "terrain/dune_1", "terrain/dune_2", "terrain/dune_3",
-		"terrain/sea_0", "terrain/sea_1",
+	image_sources := make([dynamic]string, 0, ASSETS_IMAGES_MAX, context.temp_allocator)
+	append(&image_sources, "logo")
+	{
+		// Terrain marks: terrain/<kind>_<variant>
+		Mark_Kind :: struct {
+			name:     string,
+			variants: int,
+		}
+		mark_kinds := [?]Mark_Kind {
+			{"mountain", 4},
+			{"hill", 4},
+			{"conifer", 4},
+			{"broadleaf", 4},
+			{"cypress", 4},
+			{"palm", 4},
+			{"tuft", 4},
+			{"marsh", 4},
+			{"dune", 4},
+			{"sea", 2},
+		}
+		for kind in mark_kinds {
+			for variant in 0 ..< kind.variants {
+				append(&image_sources, fmt.tprintf("terrain/%s_%d", kind.name, variant))
+			}
+		}
+
+		// Pawns: <set>/<culture>_<icon>, and its silhouette <set>/<culture>_<icon>_fill
+		for set in ([?]string{"pawns", "medallions"}) {
+			for culture in ([?]string{"roman", "germanic"}) {
+				for icon in ([?]string{"town_0", "town_1", "town_2", "town_3", "army"}) {
+					append(&image_sources, fmt.tprintf("%s/%s_%s", set, culture, icon))
+					append(&image_sources, fmt.tprintf("%s/%s_%s_fill", set, culture, icon))
+				}
+			}
+		}
 	}
-	font_sources: []string = {"aniron"}
+
+	Font_Source :: struct {
+		name: string,
+		// Pixel height
+		size: u16,
+	}
+	font_sources := [?]Font_Source{{"aniron", 18}, {"forgotten_uncial", 22}}
 	assert(len(font_sources) <= FONTS_MAX)
 
 	// Slots are handed out in order, image 0 is the default
@@ -110,8 +142,11 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 
 	// Fonts, glyphs take consecutive slots, font 0 is the default
 	font_first_slot: [FONTS_MAX]int
-	for name, font_index in font_sources {
+	for source, font_index in font_sources {
+		name := source.name
 		font := &assets.fonts[font_index]
+		font.name = strings.clone(name, blob_alloc)
+		font.size = source.size
 		font_first_slot[font_index] = id
 
 		data, data_err := os.read_entire_file_from_path(
@@ -125,7 +160,7 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 			continue
 		}
 
-		scale := stbtt.ScaleForPixelHeight(&info, 18)
+		scale := stbtt.ScaleForPixelHeight(&info, f32(source.size))
 		ascent, descent, line_gap: c.int
 		stbtt.GetFontVMetrics(&info, &ascent, &descent, &line_gap)
 		font.ascent = f32(ascent) * scale
@@ -207,6 +242,14 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 assets_image_find :: proc(assets: ^Assets, name: string) -> (index: int, found: bool) {
 	for image_name, i in assets.image_names {
 		if image_name == name do return i, true
+	}
+	return 0, false
+}
+
+// Index of the font loaded under name at size, as listed in assets_load. Not found: 0, the default font
+assets_font_find :: proc(assets: ^Assets, name: string, size: u16) -> (index: int, found: bool) {
+	for font, i in assets.fonts {
+		if font.name == name && font.size == size do return i, true
 	}
 	return 0, false
 }

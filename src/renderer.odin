@@ -37,8 +37,13 @@ RENDER_GROUND_WIDTH :: 1024
 RENDER_GROUND_HEIGHT :: 1024
 // Categories of the ground's category layer
 RENDER_GROUND_CATEGORIES :: 256
+// Area layers of the ground, and areas per layer. Area 0 = none
+RENDER_GROUND_AREA_LAYERS :: 4
+RENDER_GROUND_AREAS :: 256
+// Circles per area layer
+RENDER_GROUND_AREA_CIRCLES_MAX :: 512
 // Strokes of the ground
-RENDER_GROUND_STROKES :: 2
+RENDER_GROUND_STROKES :: 3
 // Line segments per stroke
 RENDER_GROUND_STROKE_SEGMENTS_MAX :: 1 << 16
 
@@ -85,6 +90,15 @@ Renderer :: struct {
 	ground_grids:    [Ground_Grid]Texture,
 	// RENDER_GROUND_CATEGORIES x 2 texels. Row 0: wash colour, wash. Row 1: pattern, pattern ink
 	ground_category_looks: Texture,
+	// Area layers: 2D arrays, one slice per layer. CPU side: GROUND_AREAS.
+	// Owners, fields: one texel per cell, a channel per Render_Ground_Side.
+	// Looks: RENDER_GROUND_AREAS x 2 texels. Row 0: colour, border. Row 1: thickness, inside
+	ground_area_owners: Texture,
+	ground_area_fields: Texture,
+	ground_area_looks:  Texture,
+	// RENDER_GROUND_AREA_CIRCLES_MAX x RENDER_GROUND_AREA_LAYERS texels, a row per layer:
+	// centre, radius, area
+	ground_area_circles: Texture,
 	ground_layout:   wgpu.BindGroupLayout,
 	// Recreated on resize: it binds strokes_target and sprites_target
 	ground_group:    wgpu.BindGroup,
@@ -102,8 +116,10 @@ Renderer :: struct {
 // Instance of the stroke pipeline, in cells
 @(private = "file")
 Stroke_Segment :: struct {
-	a: [2]f32,
-	b: [2]f32,
+	a:    [2]f32,
+	b:    [2]f32,
+	// Arrowhead at b: length, width, in logical pixels. Zero = none
+	head: [2]f32,
 }
 
 @(private = "file")
@@ -121,7 +137,61 @@ GROUND_BINDING_STROKES_TARGET :: 3 + len(Ground_Grid)
 @(private = "file")
 GROUND_BINDING_SPRITES_TARGET :: 4 + len(Ground_Grid)
 @(private = "file")
-GROUND_BINDINGS :: 5 + len(Ground_Grid)
+GROUND_BINDING_AREA_OWNERS :: 5 + len(Ground_Grid)
+@(private = "file")
+GROUND_BINDING_AREA_FIELDS :: 6 + len(Ground_Grid)
+@(private = "file")
+GROUND_BINDING_AREA_LOOKS :: 7 + len(Ground_Grid)
+@(private = "file")
+GROUND_BINDING_AREA_CIRCLES :: 8 + len(Ground_Grid)
+@(private = "file")
+GROUND_BINDINGS :: 9 + len(Ground_Grid)
+
+// Area fields. A field is how far a cell centre is inside its area, in cells, negative outside.
+// Blur: sigma and kernel radius, in cells. Smooths the cell steps of the edges
+@(private = "file")
+AREA_BLUR_SIGMA :: 1.5
+@(private = "file")
+AREA_BLUR_REACH :: 4
+// Cells recomputed around an area's bounds
+@(private = "file")
+AREA_MARGIN :: AREA_BLUR_REACH + 2
+// Fields are clamped to +-this
+@(private = "file")
+AREA_FIELD_MAX :: 64
+// Least field on an area's own cells after the blur, so they stay covered
+@(private = "file")
+AREA_OWN_MIN :: 0.1
+
+// CPU side of the area layers. Not in Renderer: too large to pass by value
+@(private = "file")
+GROUND_AREAS: struct {
+	// Per cell: on the land side of the divide. From renderer_ground_divide_write
+	land:   [RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT]bool,
+	layers: [RENDER_GROUND_AREA_LAYERS]Area_Layer,
+}
+
+@(private = "file")
+Area_Layer :: struct {
+	// Area per cell, 0 = none
+	ids:    [RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT]u8,
+	// Per cell and side: the area whose field the cell holds, 0 = none, and that field.
+	// A cell outside every area holds the field of the area it is least outside of.
+	// Mirrors of ground_area_owners and ground_area_fields
+	owners: [RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT][Render_Ground_Side]u8,
+	fields: [RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT][Render_Ground_Side]f16,
+	// Per area: the side it lives on, and the bounds of its cells, [min, max). Empty: max = 0
+	sides:  [RENDER_GROUND_AREAS]Render_Ground_Side,
+	bounds: [RENDER_GROUND_AREAS]Area_Bounds,
+	// Circles last written
+	circle_count: i32,
+}
+
+@(private = "file")
+Area_Bounds :: struct {
+	min: [2]int,
+	max: [2]int,
+}
 
 @(private = "file")
 STROKES_TARGET_FORMAT :: wgpu.TextureFormat.RGBA16Float
@@ -176,8 +246,25 @@ Ground_Uniform :: struct {
 	category_pattern:  [3]f32,
 	category_strength: f32,
 	strokes:           [RENDER_GROUND_STROKES]Stroke_Uniform,
+	areas:             [RENDER_GROUND_AREA_LAYERS]Area_Layer_Uniform,
 }
-#assert(size_of(Ground_Uniform) == 144 + 48 * RENDER_GROUND_STROKES)
+#assert(
+	size_of(Ground_Uniform) ==
+	144 + 48 * RENDER_GROUND_STROKES + 48 * RENDER_GROUND_AREA_LAYERS,
+)
+
+// Must match struct Area_Layer in ground.wgsl
+@(private = "file")
+Area_Layer_Uniform :: struct {
+	border_color:    [3]f32,
+	border_strength: f32,
+	border_width:    f32,
+	border_clip:     i32,
+	wander:          f32,
+	strength:        f32,
+	circle_count:    i32,
+	_:               [3]i32,
+}
 
 // Must match struct Stroke in ground.wgsl. Field use per kind: see the Render_Ground_Stroke variants
 @(private = "file")
@@ -197,6 +284,7 @@ Stroke_Kind :: enum i32 {
 	None,
 	Line,
 	Double,
+	Arrow,
 }
 
 // Must match struct View in view.wgsl
@@ -605,6 +693,64 @@ renderer_init :: proc(
 			)
 			out.ground_category_looks = {texture, wgpu.TextureCreateView(texture)}
 		}
+		// Area layers
+		{
+			Area_Texture :: struct {
+				texture: ^Texture,
+				format:  wgpu.TextureFormat,
+				size:    [2]u32,
+			}
+			area_textures := [?]Area_Texture {
+				{&out.ground_area_owners, .RG8Unorm, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}},
+				{&out.ground_area_fields, .RG16Float, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}},
+				{&out.ground_area_looks, .RGBA32Float, {RENDER_GROUND_AREAS, 2}},
+			}
+			for area_texture in area_textures {
+				texture := wgpu.DeviceCreateTexture(
+					out.device,
+					&{
+						label = "ground areas",
+						usage = {.TextureBinding, .CopyDst},
+						dimension = ._2D,
+						size = {
+							area_texture.size.x,
+							area_texture.size.y,
+							RENDER_GROUND_AREA_LAYERS,
+						},
+						format = area_texture.format,
+						mipLevelCount = 1,
+						sampleCount = 1,
+					},
+				)
+				// Array view even with one layer
+				view := wgpu.TextureCreateView(
+					texture,
+					&{
+						format = area_texture.format,
+						dimension = ._2DArray,
+						mipLevelCount = 1,
+						arrayLayerCount = RENDER_GROUND_AREA_LAYERS,
+						aspect = .All,
+					},
+				)
+				area_texture.texture^ = {texture, view}
+			}
+		}
+		{
+			texture := wgpu.DeviceCreateTexture(
+				out.device,
+				&{
+					label = "ground area circles",
+					usage = {.TextureBinding, .CopyDst},
+					dimension = ._2D,
+					size = {RENDER_GROUND_AREA_CIRCLES_MAX, RENDER_GROUND_AREA_LAYERS, 1},
+					format = .RGBA32Float,
+					mipLevelCount = 1,
+					sampleCount = 1,
+				},
+			)
+			out.ground_area_circles = {texture, wgpu.TextureCreateView(texture)}
+		}
 		out.ground_uniforms = wgpu.DeviceCreateBuffer(
 			out.device,
 			&{
@@ -615,7 +761,7 @@ renderer_init :: proc(
 		)
 
 		// Group 1. Binding 0: uniforms, 1: sampler, 2 + grid: grid texture, then the category looks,
-		// the strokes target and the sprites target.
+		// the strokes target, the sprites target and the area layers' owners, fields, looks and circles.
 		// The group is created with the strokes target, on resize
 		layout_entries: [GROUND_BINDINGS]wgpu.BindGroupLayoutEntry
 		layout_entries[0] = {
@@ -635,6 +781,15 @@ renderer_init :: proc(
 				texture = {sampleType = .Float, viewDimension = ._2D},
 			}
 		}
+		for binding in ([?]u32{GROUND_BINDING_AREA_OWNERS, GROUND_BINDING_AREA_FIELDS}) {
+			layout_entries[binding].texture.viewDimension = ._2DArray
+		}
+		// 32-bit floats cannot be filtered
+		layout_entries[GROUND_BINDING_AREA_LOOKS].texture = {
+			sampleType    = .UnfilterableFloat,
+			viewDimension = ._2DArray,
+		}
+		layout_entries[GROUND_BINDING_AREA_CIRCLES].texture.sampleType = .UnfilterableFloat
 		out.ground_layout = wgpu.DeviceCreateBindGroupLayout(
 			out.device,
 			&{label = "ground", entryCount = len(layout_entries), entries = &layout_entries[0]},
@@ -707,6 +862,7 @@ renderer_init :: proc(
 		attributes := [?]wgpu.VertexAttribute {
 			{format = .Float32x2, offset = u64(offset_of(Stroke_Segment, a)), shaderLocation = 0},
 			{format = .Float32x2, offset = u64(offset_of(Stroke_Segment, b)), shaderLocation = 1},
+			{format = .Float32x2, offset = u64(offset_of(Stroke_Segment, head)), shaderLocation = 2},
 		}
 		// Keeps the smallest distance written to a pixel
 		nearest := wgpu.BlendState {
@@ -776,6 +932,15 @@ renderer_deinit :: proc(rend: Renderer) {
 		if grid.view != nil do wgpu.TextureViewRelease(grid.view)
 		if grid.texture != nil do wgpu.TextureRelease(grid.texture)
 	}
+	for texture in ([?]Texture {
+			rend.ground_area_owners,
+			rend.ground_area_fields,
+			rend.ground_area_looks,
+			rend.ground_area_circles,
+		}) {
+		if texture.view != nil do wgpu.TextureViewRelease(texture.view)
+		if texture.texture != nil do wgpu.TextureRelease(texture.texture)
+	}
 	if rend.ground_category_looks.view != nil {
 		wgpu.TextureViewRelease(rend.ground_category_looks.view)
 	}
@@ -813,6 +978,9 @@ renderer_draw :: proc(
 ) {
 	// Abort if not ready
 	if !(.Ready in rend.flags) do return
+
+	// Not drawing: still submit, so queued buffer and texture writes do not pile up
+	defer if !drawn do wgpu.QueueSubmit(rend.queue, {})
 
 	// Skip if minimised
 	if .MINIMIZED in sdl.GetWindowFlags(rend.window) do return
@@ -897,6 +1065,22 @@ renderer_draw :: proc(
 					binding     = GROUND_BINDING_STROKES_TARGET,
 					textureView = rend.strokes_target.view,
 				}
+				entries[GROUND_BINDING_AREA_OWNERS] = {
+					binding     = GROUND_BINDING_AREA_OWNERS,
+					textureView = rend.ground_area_owners.view,
+				}
+				entries[GROUND_BINDING_AREA_FIELDS] = {
+					binding     = GROUND_BINDING_AREA_FIELDS,
+					textureView = rend.ground_area_fields.view,
+				}
+				entries[GROUND_BINDING_AREA_LOOKS] = {
+					binding     = GROUND_BINDING_AREA_LOOKS,
+					textureView = rend.ground_area_looks.view,
+				}
+				entries[GROUND_BINDING_AREA_CIRCLES] = {
+					binding     = GROUND_BINDING_AREA_CIRCLES,
+					textureView = rend.ground_area_circles.view,
+				}
 				entries[GROUND_BINDING_SPRITES_TARGET] = {
 					binding     = GROUND_BINDING_SPRITES_TARGET,
 					textureView = rend.sprites_target.view,
@@ -943,9 +1127,7 @@ renderer_draw :: proc(
 	// Views. Screen: 1 unit = 1 physical pixel, origin top-left
 	{
 		size := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)}
-		// 0 on failure
-		density := sdl.GetWindowPixelDensity(rend.window)
-		if density <= 0 do density = 1
+		density := renderer_pixel_density(rend)
 		views := [Render_Space]View_Uniform {
 			.Screen = {size = size, center = size / 2, zoom = 1, pixel_density = density},
 			.World = {
@@ -1092,6 +1274,17 @@ renderer_draw :: proc(
 					divide_depth_from = c.ground.divide.depth_from,
 					divide_depth_full = c.ground.divide.depth_full,
 				}
+				for layer, i in c.ground.areas {
+					uniform.areas[i] = {
+						border_color    = layer.border_color,
+						border_strength = layer.border_strength,
+						border_width    = layer.border_width,
+						border_clip     = i32(layer.border_clip),
+						wander          = layer.wander,
+						strength        = layer.strength,
+						circle_count    = GROUND_AREAS.layers[i].circle_count,
+					}
+				}
 				for stroke, i in c.ground.strokes {
 					switch look in stroke {
 					case Render_Ground_Stroke_Line:
@@ -1113,6 +1306,14 @@ renderer_draw :: proc(
 							strength   = look.fill_strength,
 							edge_width = look.edge_width,
 							clip       = i32(look.clip),
+						}
+					case Render_Ground_Stroke_Arrow:
+						uniform.strokes[i] = {
+							kind       = .Arrow,
+							color      = look.edge_color,
+							width      = look.width,
+							fill       = look.fill_color,
+							edge_width = look.edge_width,
 						}
 					}
 				}
@@ -1166,6 +1367,313 @@ renderer_ground_divide_write :: proc(
 	halves := make([]f16, len(distances), context.temp_allocator)
 	for distance, i in distances do halves[i] = f16(distance)
 	ground_grid_write(rend, .Divide, raw_data(halves), len(halves))
+
+	// The area layers' fields depend on each cell's side
+	for distance, i in distances do GROUND_AREAS.land[i] = distance > 0
+}
+
+// World rect shown in the window through view. Empty before the first frame
+renderer_view_extents :: proc(rend: ^Renderer, view: Render_View) -> Extents {
+	if view.zoom <= 0 do return {}
+	half := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)} / 2 / view.zoom
+	return {
+		x_min = view.center.x - half.x,
+		y_min = view.center.y - half.y,
+		x_max = view.center.x + half.x,
+		y_max = view.center.y + half.y,
+	}
+}
+
+// Physical pixels per logical pixel of the window
+renderer_pixel_density :: proc(rend: ^Renderer) -> f32 {
+	density := sdl.GetWindowPixelDensity(rend.window)
+	return density > 0 ? density : 1
+}
+
+// Replaces every area of a layer. Each area's edges are smoothed, and neighbours share theirs.
+// Cells are taken on the given side of the divide only: write the Divide grid first
+renderer_ground_areas_write :: proc(
+	rend: ^Renderer,
+	layer: int,
+	// Area per cell, 0 = none. Row-major from the top-left
+	ids: []u8,
+	side: Render_Ground_Side,
+) {
+	if !(.Ready in rend.flags) do return
+	assert(layer >= 0 && layer < RENDER_GROUND_AREA_LAYERS)
+	assert(len(ids) == RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT)
+	areas := &GROUND_AREAS.layers[layer]
+
+	// Step: Cells. Ids on the side, and the bounds of each area
+	areas.bounds = {}
+	bounds := &areas.bounds
+	for id, i in ids {
+		areas.owners[i] = {}
+		areas.fields[i] = {}
+		areas.ids[i] = 0
+		if id == 0 || GROUND_AREAS.land[i] != (side == .Land) do continue
+		areas.ids[i] = id
+		cell := [2]int{i % RENDER_GROUND_WIDTH, i / RENDER_GROUND_WIDTH}
+		if bounds[id].max == {} {
+			bounds[id] = {cell, cell + 1}
+		} else {
+			bounds[id].min = {min(bounds[id].min.x, cell.x), min(bounds[id].min.y, cell.y)}
+			bounds[id].max = {max(bounds[id].max.x, cell.x + 1), max(bounds[id].max.y, cell.y + 1)}
+		}
+	}
+
+	// Step: Fields
+	for area in 1 ..< RENDER_GROUND_AREAS {
+		if bounds[area].max == {} do continue
+		areas.sides[area] = side
+		area_field_build(areas, u8(area), bounds[area].min - AREA_MARGIN, bounds[area].max + AREA_MARGIN)
+	}
+
+	// Step: Upload the layer
+	extent := wgpu.Extent3D{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT, 1}
+	wgpu.QueueWriteTexture(
+		rend.queue,
+		&{texture = rend.ground_area_owners.texture, origin = {0, 0, u32(layer)}, aspect = .All},
+		&areas.owners,
+		size_of(areas.owners),
+		&{bytesPerRow = RENDER_GROUND_WIDTH * 2, rowsPerImage = RENDER_GROUND_HEIGHT},
+		&extent,
+	)
+	wgpu.QueueWriteTexture(
+		rend.queue,
+		&{texture = rend.ground_area_fields.texture, origin = {0, 0, u32(layer)}, aspect = .All},
+		&areas.fields,
+		size_of(areas.fields),
+		&{bytesPerRow = RENDER_GROUND_WIDTH * 4, rowsPerImage = RENDER_GROUND_HEIGHT},
+		&extent,
+	)
+}
+
+// Replaces the cells of one area of a layer: mask[y * size.x + x] for cell corner + {x, y}.
+// An empty mask removes the area. Cells are taken on the given side of the divide only, and are
+// taken from the layer's other areas
+renderer_ground_area_write :: proc(
+	rend: ^Renderer,
+	layer: int,
+	area: u8,
+	side: Render_Ground_Side,
+	corner: [2]int,
+	size: [2]int,
+	mask: []bool,
+) {
+	if !(.Ready in rend.flags) do return
+	assert(layer >= 0 && layer < RENDER_GROUND_AREA_LAYERS)
+	assert(area != 0)
+	assert(len(mask) == size.x * size.y)
+	GRID :: [2]int{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}
+	areas := &GROUND_AREAS.layers[layer]
+
+	// Step: Cells. Drop the old ones, take the new ones. Areas losing cells are rebuilt too
+	before := areas.bounds[area]
+	before_side := areas.sides[area]
+	for y in before.min.y ..< before.max.y {
+		for x in before.min.x ..< before.max.x {
+			if areas.ids[y * GRID.x + x] == area do areas.ids[y * GRID.x + x] = 0
+		}
+	}
+	after: Area_Bounds
+	robbed: [RENDER_GROUND_AREAS]bool
+	for y in 0 ..< size.y {
+		for x in 0 ..< size.x {
+			if !mask[y * size.x + x] do continue
+			cell := corner + {x, y}
+			if cell.x < 0 || cell.y < 0 || cell.x >= GRID.x || cell.y >= GRID.y do continue
+			index := cell.y * GRID.x + cell.x
+			if GROUND_AREAS.land[index] != (side == .Land) do continue
+			if was := areas.ids[index]; was != 0 do robbed[was] = true
+			areas.ids[index] = area
+			if after.max == {} {
+				after = {cell, cell + 1}
+			} else {
+				after.min = {min(after.min.x, cell.x), min(after.min.y, cell.y)}
+				after.max = {max(after.max.x, cell.x + 1), max(after.max.y, cell.y + 1)}
+			}
+		}
+	}
+	areas.bounds[area] = after
+	areas.sides[area] = side
+	if before.max == {} && after.max == {} do return
+
+	// Step: Fields. Over the old and new bounds: fields held for the area there are dropped,
+	// then rebuilt from the new cells
+	around := after.max == {} ? before : after
+	if before.max != {} && after.max != {} {
+		around.min = {min(before.min.x, after.min.x), min(before.min.y, after.min.y)}
+		around.max = {max(before.max.x, after.max.x), max(before.max.y, after.max.y)}
+	}
+	around = {around.min - AREA_MARGIN, around.max + AREA_MARGIN}
+	for y in max(around.min.y, 0) ..< min(around.max.y, GRID.y) {
+		for x in max(around.min.x, 0) ..< min(around.max.x, GRID.x) {
+			index := y * GRID.x + x
+			for held_side in Render_Ground_Side {
+				if areas.owners[index][held_side] != area do continue
+				areas.owners[index][held_side] = 0
+				areas.fields[index][held_side] = 0
+			}
+		}
+	}
+	if after.max != {} do area_field_build(areas, area, around.min, around.max)
+	for was_robbed, other in robbed {
+		if !was_robbed || u8(other) == area do continue
+		lo := areas.bounds[other].min - AREA_MARGIN
+		hi := areas.bounds[other].max + AREA_MARGIN
+		area_field_build(areas, u8(other), lo, hi)
+		around.min = {min(around.min.x, lo.x), min(around.min.y, lo.y)}
+		around.max = {max(around.max.x, hi.x), max(around.max.y, hi.y)}
+	}
+
+	// Step: Upload the cells touched
+	lo := [2]int{max(around.min.x, 0), max(around.min.y, 0)}
+	hi := [2]int{min(around.max.x, GRID.x), min(around.max.y, GRID.y)}
+	if hi.x <= lo.x || hi.y <= lo.y do return
+	first := lo.y * GRID.x + lo.x
+	extent := wgpu.Extent3D{u32(hi.x - lo.x), u32(hi.y - lo.y), 1}
+	origin := wgpu.Origin3D{u32(lo.x), u32(lo.y), u32(layer)}
+	wgpu.QueueWriteTexture(
+		rend.queue,
+		&{texture = rend.ground_area_owners.texture, origin = origin, aspect = .All},
+		&areas.owners,
+		size_of(areas.owners),
+		&{offset = u64(first * 2), bytesPerRow = RENDER_GROUND_WIDTH * 2, rowsPerImage = extent.height},
+		&extent,
+	)
+	wgpu.QueueWriteTexture(
+		rend.queue,
+		&{texture = rend.ground_area_fields.texture, origin = origin, aspect = .All},
+		&areas.fields,
+		size_of(areas.fields),
+		&{offset = u64(first * 4), bytesPerRow = RENDER_GROUND_WIDTH * 4, rowsPerImage = extent.height},
+		&extent,
+	)
+}
+
+// Overwrites the circles of a layer. A circle adds a disc to its area's shape, cut at the divide like
+// the area. Circles of one area must be consecutive. Circles past the budget are dropped
+renderer_ground_area_circles_write :: proc(
+	rend: ^Renderer,
+	layer: int,
+	circles: []Render_Ground_Area_Circle,
+) {
+	if !(.Ready in rend.flags) do return
+	assert(layer >= 0 && layer < RENDER_GROUND_AREA_LAYERS)
+
+	count := min(len(circles), RENDER_GROUND_AREA_CIRCLES_MAX)
+	GROUND_AREAS.layers[layer].circle_count = i32(count)
+	if count == 0 do return
+	texels: [RENDER_GROUND_AREA_CIRCLES_MAX][4]f32
+	for circle, i in circles[:count] {
+		texels[i] = {circle.center.x, circle.center.y, circle.radius, f32(circle.area)}
+	}
+	wgpu.QueueWriteTexture(
+		rend.queue,
+		&{texture = rend.ground_area_circles.texture, origin = {0, u32(layer), 0}, aspect = .All},
+		&texels,
+		uint(count * size_of([4]f32)),
+		&{bytesPerRow = RENDER_GROUND_AREA_CIRCLES_MAX * size_of([4]f32), rowsPerImage = 1},
+		&{u32(count), 1, 1},
+	)
+}
+
+// Overwrites the look of every area of a layer: looks[i] for area i, none past len(looks)
+renderer_ground_area_looks_write :: proc(
+	rend: ^Renderer,
+	layer: int,
+	looks: []Render_Ground_Area_Look,
+) {
+	if !(.Ready in rend.flags) do return
+	assert(layer >= 0 && layer < RENDER_GROUND_AREA_LAYERS)
+	assert(len(looks) <= RENDER_GROUND_AREAS)
+
+	// Row 1 also carries the area's side, for its circles
+	texels: [2][RENDER_GROUND_AREAS][4]f32
+	for look, i in looks {
+		texels[0][i] = {look.color.r, look.color.g, look.color.b, look.border}
+		texels[1][i] = {look.thickness, look.inside, f32(GROUND_AREAS.layers[layer].sides[i]), 0}
+	}
+	wgpu.QueueWriteTexture(
+		rend.queue,
+		&{texture = rend.ground_area_looks.texture, origin = {0, 0, u32(layer)}, aspect = .All},
+		&texels,
+		size_of(texels),
+		&{bytesPerRow = RENDER_GROUND_AREAS * size_of([4]f32), rowsPerImage = 2},
+		&{RENDER_GROUND_AREAS, 2, 1},
+	)
+}
+
+// Recomputes the field of one area over the cells of [lo, hi), and writes it to the cells that hold it:
+// the area's own, and those outside every area that are nearer to it than to the area they hold.
+// Field: signed distance from the cell centre to the area's edge, less half a cell, blurred.
+// Cells of the other side of the divide are neither inside nor outside: the field passes over them
+@(private = "file")
+area_field_build :: proc(areas: ^Area_Layer, area: u8, lo: [2]int, hi: [2]int) {
+	GRID :: [2]int{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}
+	side := areas.sides[area]
+
+	in_grid :: proc(cell: [2]int) -> bool {
+		return cell.x >= 0 && cell.y >= 0 && cell.x < GRID.x && cell.y < GRID.y
+	}
+	on_side :: proc(side: Render_Ground_Side, cell: [2]int) -> bool {
+		if !in_grid(cell) do return false
+		return GROUND_AREAS.land[cell.y * GRID.x + cell.x] == (side == .Land)
+	}
+
+	// Step: Distances to the nearest cell outside the area, and inside it
+	size := hi - lo
+	inside := make([]bool, size.x * size.y, context.temp_allocator)
+	outside := make([]bool, size.x * size.y, context.temp_allocator)
+	for y in 0 ..< size.y {
+		for x in 0 ..< size.x {
+			cell := lo + {x, y}
+			i := y * size.x + x
+			inside[i] = on_side(side, cell) && areas.ids[cell.y * GRID.x + cell.x] == area
+			// Off the grid counts as outside
+			outside[i] = !inside[i] && (on_side(side, cell) || !in_grid(cell))
+		}
+	}
+	out_by := make([]f32, size.x * size.y, context.temp_allocator)
+	in_by := make([]f32, size.x * size.y, context.temp_allocator)
+	distance_transform(outside, size, out_by)
+	distance_transform(inside, size, in_by)
+
+	// Step: Field
+	field := make([]f32, size.x * size.y, context.temp_allocator)
+	for &value, i in field {
+		switch {
+		case in_by[i] == 0:
+			value = out_by[i] - 0.5
+		case out_by[i] == 0:
+			value = 0.5 - in_by[i]
+		case:
+			value = (out_by[i] - in_by[i]) / 2
+		}
+		value = clamp(value, -AREA_FIELD_MAX, AREA_FIELD_MAX)
+	}
+	grid_blur(field, size, AREA_BLUR_SIGMA, AREA_BLUR_REACH)
+
+	// Step: Write
+	for y in max(lo.y, 0) ..< min(hi.y, GRID.y) {
+		for x in max(lo.x, 0) ..< min(hi.x, GRID.x) {
+			index := y * GRID.x + x
+			value := field[(y - lo.y) * size.x + (x - lo.x)]
+			member := areas.ids[index]
+			if member == area && on_side(side, {x, y}) do value = max(value, AREA_OWN_MIN)
+			// Cells of other areas are written by those areas
+			if member != 0 && member != area && areas.sides[member] == side {
+				if on_side(side, {x, y}) do continue
+			}
+			owner := &areas.owners[index][side]
+			held := &areas.fields[index][side]
+			if member == area || owner^ == area || owner^ == 0 || value > f32(held^) {
+				owner^ = area
+				held^ = f16(value)
+			}
+		}
+	}
 }
 
 // Overwrites the Category grid: input of Render_Ground.category
@@ -1219,27 +1727,32 @@ renderer_ground_stroke_write :: proc(
 	stroke: int,
 	// Points in cells
 	lines: Polylines,
+	// Arrowhead at the end of each open run: length, width, in logical pixels. Zero = none
+	head: [2]f32 = {},
 ) {
 	if !(.Ready in rend.flags) do return
 	assert(stroke >= 0 && stroke < RENDER_GROUND_STROKES)
 
-	segments := make(
-		[dynamic]Stroke_Segment,
-		0,
-		RENDER_GROUND_STROKE_SEGMENTS_MAX,
-		context.temp_allocator,
-	)
+	total := 0
+	for run in lines.runs do total += run.closed ? run.len : max(run.len - 1, 0)
+	total = min(total, RENDER_GROUND_STROKE_SEGMENTS_MAX)
+	rend.stroke_counts[stroke] = u32(total)
+	if total == 0 do return
+
+	segments := make([dynamic]Stroke_Segment, 0, total, context.temp_allocator)
 	fill: for run in lines.runs {
 		points := lines.points[run.begin:][:run.len]
 		count := run.closed ? run.len : run.len - 1
 		for i in 0 ..< count {
-			if len(segments) == RENDER_GROUND_STROKE_SEGMENTS_MAX do break fill
-			append(&segments, Stroke_Segment{points[i], points[(i + 1) % run.len]})
+			if len(segments) == total do break fill
+			segment := Stroke_Segment {
+				a = points[i],
+				b = points[(i + 1) % run.len],
+			}
+			if !run.closed && i == count - 1 do segment.head = head
+			append(&segments, segment)
 		}
 	}
-
-	rend.stroke_counts[stroke] = u32(len(segments))
-	if len(segments) == 0 do return
 	wgpu.QueueWriteBuffer(
 		rend.queue,
 		rend.stroke_buffers[stroke],
@@ -1326,8 +1839,11 @@ Render_Ground :: struct {
 	base:     Render_Ground_Base,
 	category: Render_Ground_Category,
 	divide:   Render_Ground_Divide,
-	// Drawn in index order, under the divide's line. Over that line: the quads of passes with
-	// target = .Ground
+	// Layer 0: here, under the strokes. Layers 1 and up: in order, over the quads of passes with
+	// target = .Ground, under the value layer
+	areas:    [RENDER_GROUND_AREA_LAYERS]Render_Ground_Area_Layer,
+	// Drawn in index order. Line and Double: under the divide's line. Arrow: over every layer.
+	// Over the divide's line: the quads of passes with target = .Ground
 	strokes:  [RENDER_GROUND_STROKES]Render_Ground_Stroke,
 	value:    Render_Ground_Value,
 }
@@ -1402,6 +1918,17 @@ Render_Ground_Divide :: struct {
 Render_Ground_Stroke :: union {
 	Render_Ground_Stroke_Line,
 	Render_Ground_Stroke_Double,
+	Render_Ground_Stroke_Arrow,
+}
+
+// A filled line with an edge line either side, the same width on screen at any zoom.
+// Heads: see renderer_ground_stroke_write
+Render_Ground_Stroke_Arrow :: struct {
+	// Outer width, edges included
+	width:      f32,
+	fill_color: [3]f32,
+	edge_color: [3]f32,
+	edge_width: f32,
 }
 
 // One line, with a wash either side of it
@@ -1428,6 +1955,48 @@ Render_Ground_Stroke_Double :: struct {
 	fill_color:    [3]f32,
 	fill_strength: f32,
 	clip:          Render_Ground_Clip,
+}
+
+// Area layer: a wash per area, and a line where two areas meet.
+// Areas: renderer_ground_areas_write. Their looks: renderer_ground_area_looks_write
+Render_Ground_Area_Layer :: struct {
+	// Line where two areas meet
+	border_color:    [3]f32,
+	// 0..1
+	border_strength: f32,
+	// Logical pixels
+	border_width:    f32,
+	border_clip:     Render_Ground_Clip,
+	// Peak-to-peak noise displacement of the edges per axis, in cells
+	wander:          f32,
+	// Scales the washes, 0..1. 0 = no washes
+	strength:        f32,
+}
+
+// Look of one area. The colour under it is multiplied toward color:
+// by border at the area's edge, easing to inside over thickness cells inward
+Render_Ground_Area_Look :: struct {
+	color:     [3]f32,
+	// 0..1
+	border:    f32,
+	// Cells
+	thickness: f32,
+	// 0..1
+	inside:    f32,
+}
+
+// A disc added to an area's shape
+Render_Ground_Area_Circle :: struct {
+	// Cells
+	center: [2]f32,
+	radius: f32,
+	area:   u8,
+}
+
+// Side of the divide an area lives on
+Render_Ground_Side :: enum u8 {
+	Land,
+	Water,
 }
 
 // Side of the divide a layer is restricted to

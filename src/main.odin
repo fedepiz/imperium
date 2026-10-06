@@ -51,7 +51,8 @@ main :: proc() {
 	}
 	defer renderer_deinit(renderer)
 
-	// DEMO begin: load the scenario into a Map_Geography, build the map, centre the camera
+	// DEMO begin: load the scenario into a Map_Geography, build the map, make up highlights,
+	// centre the camera
 	for name, grid in DEMO_GRID_NAMES {
 		path := fmt.tprintf("assets/scenarios/roman/%s.png", name)
 		data, data_err := os.read_entire_file(path, context.temp_allocator)
@@ -70,8 +71,6 @@ main :: proc() {
 		}
 		copy(DEMO.grids[grid][:], img.pixels.buf[:])
 	}
-	DEMO.shown = .Elevation
-	renderer_ground_value_write(&renderer, DEMO.grids[DEMO.shown][:])
 	{
 		geography: Map_Geography
 		geography.elevation = DEMO.grids[.Elevation][:]
@@ -170,8 +169,81 @@ main :: proc() {
 			}
 		}
 
+		// Step: Regions. regions.txt: a `region = { ... colour = [r, g, b] }` line per region, ids from 1
+		// in file order. regions.png: each cell painted in its region's colour
+		{
+			txt_path :: "assets/scenarios/roman/regions.txt"
+			png_path :: "assets/scenarios/roman/regions.png"
+			txt, txt_err := os.read_entire_file(txt_path, context.temp_allocator)
+			png, png_err := os.read_entire_file(png_path, context.temp_allocator)
+			img, img_err := image.load_from_bytes(png, {}, context.temp_allocator)
+			if txt_err != nil || png_err != nil || img_err != nil || img.channels != 3 || img.depth != 8 {
+				fmt.eprintln("Failed to load the regions")
+				return
+			}
+			if img.width != MAP_WIDTH || img.height != MAP_HEIGHT {
+				fmt.eprintln("Not the size of the map", png_path)
+				return
+			}
+
+			text := string(txt)
+			for line in strings.split_lines_iterator(&text) {
+				trimmed := strings.trim_space(line)
+				colour_at := strings.index(trimmed, "colour")
+				if !strings.has_prefix(trimmed, "region") || colour_at < 0 do continue
+				if DEMO.region_count == RENDER_GROUND_AREAS - 1 do break
+				// The three whole numbers after `colour`
+				colour: [3]u8
+				count := 0
+				for i := colour_at; i < len(trimmed) && count < 3; i += 1 {
+					if trimmed[i] < '0' || trimmed[i] > '9' do continue
+					number := 0
+					for ; i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9'; i += 1 {
+						number = number * 10 + int(trimmed[i] - '0')
+					}
+					colour[count] = u8(number)
+					count += 1
+				}
+				DEMO.region_count += 1
+				DEMO.region_colours[DEMO.region_count] = colour
+			}
+
+			pixels := img.pixels.buf[:]
+			for i in 0 ..< MAP_CELLS {
+				pixel := [3]u8{pixels[i * 3], pixels[i * 3 + 1], pixels[i * 3 + 2]}
+				for id in 1 ..= DEMO.region_count {
+					if DEMO.region_colours[id] != pixel do continue
+					DEMO.regions[i] = u8(id)
+					break
+				}
+			}
+			geography.regions = DEMO.regions[:]
+		}
+
 		map_build(&GLOBAL.map_state, &renderer, &GLOBAL.assets, geography, MAP_STYLE)
 	}
+	{
+		// Made-up highlights. Zone: a disc. Reach: a blob with a 1-cell thread running from it
+		for y in 0 ..< DEMO_ZONE_SIZE.y {
+			for x in 0 ..< DEMO_ZONE_SIZE.x {
+				from_middle := [2]f32{f32(x), f32(y)} + 0.5 - 24
+				DEMO.zone_cells[y * DEMO_ZONE_SIZE.x + x] = linalg.length(from_middle) < 18
+			}
+		}
+		for y in 0 ..< DEMO_REACH_SIZE.y {
+			for x in 0 ..< DEMO_REACH_SIZE.x {
+				from_blob := [2]f32{f32(x), f32(y)} + 0.5 - 10
+				DEMO.reach_cells[y * DEMO_REACH_SIZE.x + x] = linalg.length(from_blob) < 5
+			}
+		}
+		at := [2]int{10, 10}
+		for step in 0 ..< 60 {
+			DEMO.reach_cells[at.y * DEMO_REACH_SIZE.x + at.x] = true
+			at[step % 2] += 1
+		}
+	}
+	DEMO.region_display = .Filled_When_Far
+	DEMO.frame_ticks = sdl.GetTicksNS()
 	DEMO.view = {
 		center = [2]f32{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT} / 2,
 		zoom   = 2 * sdl.GetWindowPixelDensity(window),
@@ -190,16 +262,22 @@ main :: proc() {
 				if event.key.scancode == .ESCAPE {
 					running = false
 				}
-				// DEMO begin: 1-4 select the value grid, 0 turns the value layer off, D toggles the plain look
+				// DEMO begin: 1-4 show a scenario grid as the wash (surface, elevation, trees, moisture),
+				// 0 none. R cycles the region display. Z, H, A toggle the made-up zone, reach and arrow
 				#partial switch event.key.scancode {
 				case ._1, ._2, ._3, ._4:
-					DEMO.shown = Demo_Grid(int(event.key.scancode) - int(sdl.Scancode._1))
-					DEMO.value_shown = true
-					renderer_ground_value_write(&renderer, DEMO.grids[DEMO.shown][:])
+					DEMO.wash = Demo_Grid(int(event.key.scancode) - int(sdl.Scancode._1))
+					DEMO.wash_shown = true
 				case ._0:
-					DEMO.value_shown = false
-				case .D:
-					DEMO.plain = !DEMO.plain
+					DEMO.wash_shown = false
+				case .R:
+					DEMO.region_display = Map_Region_Display((int(DEMO.region_display) + 1) % len(Map_Region_Display))
+				case .Z:
+					DEMO.zone_hidden = !DEMO.zone_hidden
+				case .H:
+					DEMO.reach_hidden = !DEMO.reach_hidden
+				case .A:
+					DEMO.arrow_hidden = !DEMO.arrow_hidden
 				}
 				// DEMO end
 			// DEMO begin: wheel zooms about the cursor, left drag pans
@@ -224,224 +302,104 @@ main :: proc() {
 
 		render_data_clear(&GLOBAL.render_data)
 
-		// DEMO begin: ground pass, marks into the ground, then world-space quads
+		// DEMO begin: a made-up scene drawn by map_frame
 		{
-			// Map look: the map's style, with a red-to-green value wash over land
-			ground := map_ground(MAP_STYLE)
-			ground.value = {
-				low      = {0.85, 0.45, 0.35},
-				high     = {0.45, 0.75, 0.40},
-				strength = 0.8,
-				clip     = .Land,
-			}
-			// Plain look: white base, black-to-white value wash. Shows the raw grid as grey
-			if DEMO.plain {
-				ground = {
-					base = {color = {1, 1, 1}},
-					value = {low = {0, 0, 0}, high = {1, 1, 1}, strength = 1},
-				}
-			}
-			if !DEMO.value_shown do ground.value.strength = 0
-			append(&GLOBAL.render_data.passes, Render_Ground_Pass{ground = ground})
+			now := sdl.GetTicksNS()
+			dt := min(f32(now - DEMO.frame_ticks) / 1e9, 0.1)
+			DEMO.frame_ticks = now
 
-			// Marks in view, as a quad pass into the ground. Not in the plain look
-			if !DEMO.plain {
-				window_size: [2]i32
-				sdl.GetWindowSizeInPixels(window, &window_size.x, &window_size.y)
-				half := [2]f32{f32(window_size.x), f32(window_size.y)} / 2 / DEMO.view.zoom
-				visible := Extents {
-					x_min = DEMO.view.center.x - half.x,
-					y_min = DEMO.view.center.y - half.y,
-					x_max = DEMO.view.center.x + half.x,
-					y_max = DEMO.view.center.y + half.y,
+			{
+				scene := Map_Scene {
+					view           = DEMO.view,
+					region_display = DEMO.region_display,
 				}
-				begin := len(GLOBAL.render_data.quads)
-				map_marks_quads(&GLOBAL.map_state.marks, visible, &GLOBAL.render_data.quads)
-				append(
+
+				// Regions: colours from regions.txt, the one under the cursor highlighted
+				regions: [RENDER_GROUND_AREAS]Map_Region
+				{
+					size: [2]i32
+					sdl.GetWindowSizeInPixels(window, &size.x, &size.y)
+					cursor: [2]f32
+					_ = sdl.GetMouseState(&cursor.x, &cursor.y)
+					cursor *= sdl.GetWindowPixelDensity(window)
+					under := DEMO.view.center + (cursor - [2]f32{f32(size.x), f32(size.y)} / 2) / DEMO.view.zoom
+					hovered := 0
+					if under.x >= 0 && under.y >= 0 && under.x < MAP_WIDTH && under.y < MAP_HEIGHT {
+						hovered = int(DEMO.regions[int(under.y) * MAP_WIDTH + int(under.x)])
+					}
+					for id in 1 ..= DEMO.region_count {
+						colour := DEMO.region_colours[id]
+						regions[id] = {
+							color       = [3]f32{f32(colour.r), f32(colour.g), f32(colour.b)} / 255,
+							highlighted = id == hovered,
+						}
+					}
+				}
+				scene.regions = regions[:DEMO.region_count + 1]
+
+				// Highlights: a zone with a circle in slot 0, a reach in slot 1
+				zone_circles := [?]Map_Circle{{center = {670, 490}, radius = 10}}
+				highlights: [2]Map_Highlight
+				if !DEMO.zone_hidden {
+					highlights[0] = {
+						kind    = .Zone,
+						corner  = DEMO_ZONE_CORNER,
+						size    = DEMO_ZONE_SIZE,
+						cells   = DEMO.zone_cells[:],
+						circles = zone_circles[:],
+					}
+				}
+				if !DEMO.reach_hidden {
+					highlights[1] = {
+						kind   = .Reach,
+						corner = DEMO_REACH_CORNER,
+						size   = DEMO_REACH_SIZE,
+						cells  = DEMO.reach_cells[:],
+					}
+				}
+				scene.highlights = highlights[:]
+
+				// Arrow: along the reach's thread
+				arrow_points: [7][2]f32
+				arrow_runs: [1]Polyline_Run
+				scene.arrows = polylines_over(arrow_points[:], arrow_runs[:])
+				if !DEMO.arrow_hidden {
+					for k in 0 ..< len(arrow_points) {
+						at := [2]f32{f32(DEMO_REACH_CORNER.x), f32(DEMO_REACH_CORNER.y)} + 10.5 + f32(k) * 5
+						append(&scene.arrows.points, at)
+					}
+					append(&scene.arrows.runs, Polyline_Run{begin = 0, len = len(arrow_points)})
+				}
+
+				// Pawns: towns with their names, two armies. Roma highlighted, Legio I pulsing
+				pawns := [?]Map_Pawn {
+					{pos = {353, 441}, icon = .Large_City, culture = .Roman, label = "Roma", highlighted = true},
+					{pos = {296, 386}, icon = .City, culture = .Roman, label = "Mediolanum"},
+					{pos = {357, 381}, icon = .Town, culture = .Roman, label = "Aquileia"},
+					{pos = {377, 461}, icon = .Town, culture = .Roman, label = "Neapolis"},
+					{pos = {386, 540}, icon = .Village, culture = .Roman, label = "Syracusae"},
+					{pos = {323, 341}, icon = .Town, culture = .Germanic, label = "Augusta Vindelicorum"},
+					{pos = {346, 428}, icon = .Army, culture = .Roman, label = "Legio I", pulsing = true},
+					{pos = {350, 330}, icon = .Army, culture = .Germanic, label = "Alamanni"},
+				}
+				scene.pawns = pawns[:]
+
+				// Wash: a scenario grid standing in for a map mode
+				if DEMO.wash_shown do scene.wash = DEMO.grids[DEMO.wash][:]
+
+				map_frame(
+					&GLOBAL.map_state,
+					&renderer,
+					&GLOBAL.assets,
+					scene,
+					MAP_STYLE,
+					dt,
+					&GLOBAL.render_data.quads,
 					&GLOBAL.render_data.passes,
-					Render_Quad_Pass {
-						space = .World,
-						target = .Ground,
-						begin = begin,
-						len = len(GLOBAL.render_data.quads) - begin,
-					},
 				)
 			}
-
-			red := [4]u8{180, 64, 40, 255}
-			quads: [dynamic; 32]Render_Quad
-			middle := [2]f32{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT} / 2
-
-			// 12 pills around the grid centre. Pill from a to b, half width w:
-			// rect of size (|b - a| + 2w, 2w) centred on the midpoint, radii = w, axis = b - a
-			for i in 0 ..< 12 {
-				angle := f32(i) * math.TAU / 12
-				along := [2]f32{math.cos(angle), math.sin(angle)}
-				a := middle + along * 4
-				b := middle + along * 14
-				w := f32(0.6)
-				centre := (a + b) / 2
-				half_length := f32(5) + w
-				append(
-					&quads,
-					Render_Quad {
-						rect = {
-							centre.x - half_length,
-							centre.y - w,
-							centre.x + half_length,
-							centre.y + w,
-						},
-						colors = {red, red, red, red},
-						radii = w,
-						axis = b - a,
-					},
-				)
-			}
-
-			// Rotating pill
-			seconds := f32(sdl.GetTicks()) / 1000
-			append(
-				&quads,
-				Render_Quad {
-					rect = {middle.x + 24, middle.y - 1, middle.x + 36, middle.y + 1},
-					colors = {red, red, red, red},
-					radii = 1,
-					axis = {math.cos(seconds), math.sin(seconds)},
-				},
-			)
-
-			render_data_quad_pass(&GLOBAL.render_data, .World, quads[:])
 		}
 		// DEMO end
-
-		render_data_quad_pass(
-			&GLOBAL.render_data,
-			.Screen,
-			{
-				// Corner gradient: red TL, green TR, blue BR, yellow BL
-				{
-					rect = {100, 100, 500, 400},
-					colors = {
-						{255, 0, 0, 255},
-						{0, 255, 0, 255},
-						{0, 0, 255, 255},
-						{255, 255, 0, 255},
-					},
-				},
-				// Translucent white overlapping the gradient
-				{
-					rect = {300, 250, 800, 600},
-					colors = {
-						{255, 255, 255, 128},
-						{255, 255, 255, 128},
-						{255, 255, 255, 128},
-						{255, 255, 255, 128},
-					},
-				},
-				// Opaque flat orange
-				{
-					rect = {900, 150, 1200, 350},
-					colors = {
-						{230, 120, 30, 255},
-						{230, 120, 30, 255},
-						{230, 120, 30, 255},
-						{230, 120, 30, 255},
-					},
-				},
-				// Rounded
-				{
-					rect = {100, 650, 350, 800},
-					colors = {
-						{200, 60, 50, 255},
-						{200, 60, 50, 255},
-						{200, 60, 50, 255},
-						{200, 60, 50, 255},
-					},
-					radii = 24,
-				},
-				// Rounded border
-				{
-					rect = {400, 650, 650, 800},
-					colors = {
-						{240, 230, 200, 255},
-						{240, 230, 200, 255},
-						{240, 230, 200, 255},
-						{240, 230, 200, 255},
-					},
-					radii = 24,
-					thickness = 4,
-				},
-				// Soft shadow-like blob
-				{
-					rect = {1300, 150, 1500, 350},
-					colors = {{0, 0, 0, 200}, {0, 0, 0, 200}, {0, 0, 0, 200}, {0, 0, 0, 200}},
-					radii = 16,
-					softness = 16,
-				},
-				// Circle, clipped to its left half
-				{
-					rect = {1300, 450, 1500, 650},
-					clip = {1300, 450, 1400, 650},
-					colors = {
-						{80, 160, 220, 255},
-						{80, 160, 220, 255},
-						{80, 160, 220, 255},
-						{80, 160, 220, 255},
-					},
-					radii = 100,
-				},
-				// Vertical fade to transparent
-				{
-					rect = {900, 450, 1200, 750},
-					colors = {
-						{240, 230, 200, 255},
-						{240, 230, 200, 255},
-						{240, 230, 200, 0},
-						{240, 230, 200, 0},
-					},
-				},
-			},
-		)
-
-
-		// Logo at its original size
-		{
-			logo_size := [2]f32 {
-				GLOBAL.assets.image_rects[0].x_max - GLOBAL.assets.image_rects[0].x_min,
-				GLOBAL.assets.image_rects[0].y_max - GLOBAL.assets.image_rects[0].y_min,
-			}
-			white := [4]u8{255, 255, 255, 255}
-			logo := Render_Quad {
-				rect   = {1300, 700, 1300 + logo_size.x / 2, 700 + logo_size.y / 2},
-				source = GLOBAL.assets.image_rects[0],
-				colors = {white, white, white, white},
-			}
-			render_data_quad_pass(&GLOBAL.render_data, .Screen, {logo})
-		}
-
-		// Text, one quad per glyph along the baseline
-		{
-			font := &GLOBAL.assets.fonts[0]
-			text := "Imperium, late antiquity"
-			color := [4]u8{240, 230, 200, 255}
-			pen := [2]f32{100, 30 + font.ascent}
-			glyph_quads: [64]Render_Quad
-			for char, i in text {
-				glyph := font.glyphs[int(char) - FONT_FIRST]
-				size := [2]f32 {
-					glyph.source.x_max - glyph.source.x_min,
-					glyph.source.y_max - glyph.source.y_min,
-				}
-				top_left := pen + glyph.offset
-				glyph_quads[i] = {
-					rect   = {top_left.x, top_left.y, top_left.x + size.x, top_left.y + size.y},
-					source = glyph.source,
-					colors = {color, color, color, color},
-				}
-				pen.x += glyph.advance
-			}
-			render_data_quad_pass(&GLOBAL.render_data, .Screen, glyph_quads[:len(text)])
-		}
 
 		// DEMO: view from the demo camera
 		view := DEMO.view
@@ -460,15 +418,36 @@ main :: proc() {
 @(private = "file")
 DEMO: struct {
 	// Camera
-	view:        Render_View,
+	view:           Render_View,
+	// SDL nanosecond ticks at the last frame
+	frame_ticks:    u64,
 	// Scenario grids, 1 byte per cell
-	grids:       [Demo_Grid][RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT]u8,
-	// Grid currently written to the Value grid, and value layer on/off
-	shown:       Demo_Grid,
-	value_shown: bool,
-	// Plain look instead of the map look
-	plain:       bool,
+	grids:          [Demo_Grid][RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT]u8,
+	// Scenario grid shown as the scene's wash, if any
+	wash_shown:     bool,
+	wash:           Demo_Grid,
+	// Region per cell, 0 = none. Ids from 1, in regions.txt order
+	regions:        [RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT]u8,
+	region_colours: [RENDER_GROUND_AREAS][3]u8,
+	region_count:   int,
+	region_display: Map_Region_Display,
+	// Made-up scene content
+	zone_cells:     [DEMO_ZONE_SIZE.x * DEMO_ZONE_SIZE.y]bool,
+	reach_cells:    [DEMO_REACH_SIZE.x * DEMO_REACH_SIZE.y]bool,
+	zone_hidden:    bool,
+	reach_hidden:   bool,
+	arrow_hidden:   bool,
 }
+
+// Rects of the made-up highlights, in cells. Zone: Anatolia. Reach: the Balkans
+@(private = "file")
+DEMO_ZONE_CORNER :: [2]int{626, 466}
+@(private = "file")
+DEMO_ZONE_SIZE :: [2]int{48, 48}
+@(private = "file")
+DEMO_REACH_CORNER :: [2]int{430, 330}
+@(private = "file")
+DEMO_REACH_SIZE :: [2]int{80, 80}
 
 // Farthest a river affects the cover, in cells
 @(private = "file")

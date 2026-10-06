@@ -147,6 +147,82 @@ grid_bilinear :: proc(values: []f32, size: [2]int, p: [2]f32) -> f32 {
 	return math.lerp(top, bottom, f.y)
 }
 
+// Separable Gaussian blur, in place. sigma in cells. Kernel: reach cells either side. Edge values extended
+grid_blur :: proc(values: []f32, size: [2]int, sigma: f32, reach: int) {
+	assert(len(values) == size.x * size.y)
+
+	weights := make([]f32, 2 * reach + 1, context.temp_allocator)
+	total: f32
+	for &weight, i in weights {
+		offset := f32(i - reach)
+		weight = math.exp(-offset * offset / (2 * sigma * sigma))
+		total += weight
+	}
+	for &weight in weights do weight /= total
+
+	line := make([]f32, max(size.x, size.y), context.temp_allocator)
+	// Rows, then columns. stride: index step along the line
+	for axis in 0 ..< 2 {
+		length := size[axis]
+		lines := size[1 - axis]
+		stride := axis == 0 ? 1 : size.x
+		for across in 0 ..< lines {
+			first := axis == 0 ? across * size.x : across
+			for along in 0 ..< length do line[along] = values[first + along * stride]
+			for along in 0 ..< length {
+				sum: f32
+				for weight, i in weights {
+					sum += weight * line[clamp(along + i - reach, 0, length - 1)]
+				}
+				values[first + along * stride] = sum
+			}
+		}
+	}
+}
+
+// Thickens the parts of a mask thinner than about 2 * widen + 1 cells, so threads become bands.
+// Does not extend past the ends of threads, nor grow isolated cells.
+// support: cells of the mask a cell needs within widen of it to be added. A straight 1-cell thread gives 3
+mask_thicken :: proc(mask: []bool, size: [2]int, widen: int, support: int, out: []bool) {
+	assert(len(mask) == size.x * size.y && len(out) == len(mask))
+
+	// Offsets within widen cells
+	disc := make([dynamic][2]int, 0, (2 * widen + 1) * (2 * widen + 1), context.temp_allocator)
+	for dy in -widen ..= widen {
+		for dx in -widen ..= widen {
+			if dx * dx + dy * dy <= widen * widen + widen do append(&disc, [2]int{dx, dy})
+		}
+	}
+	// to[cell] = at least need cells of from within the disc. need 1: dilate. need len(disc): erode
+	morph :: proc(from: []bool, size: [2]int, disc: [][2]int, need: int, to: []bool) {
+		for y in 0 ..< size.y {
+			for x in 0 ..< size.x {
+				held := 0
+				for offset in disc {
+					at := [2]int{x, y} + offset
+					if at.x < 0 || at.y < 0 || at.x >= size.x || at.y >= size.y do continue
+					if from[at.y * size.x + at.x] do held += 1
+				}
+				to[y * size.x + x] = held >= need
+			}
+		}
+	}
+
+	// Thin: in the mask, but removed by a morphological opening
+	eroded := make([]bool, len(mask), context.temp_allocator)
+	opened := make([]bool, len(mask), context.temp_allocator)
+	morph(mask, size, disc[:], len(disc), eroded)
+	morph(eroded, size, disc[:], 1, opened)
+	thin := make([]bool, len(mask), context.temp_allocator)
+	for inside, i in mask do thin[i] = inside && !opened[i]
+	near_thin := make([]bool, len(mask), context.temp_allocator)
+	morph(thin, size, disc[:], 1, near_thin)
+
+	// Added: supported by the mask, and near a thin part
+	morph(mask, size, disc[:], support, out)
+	for &inside, i in out do inside = mask[i] || (inside && near_thin[i])
+}
+
 // Scalars
 
 // Smoothstep from 0 at from to 1 at full. full < from: decreasing
