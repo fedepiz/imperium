@@ -57,7 +57,19 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 	sizes := make([][2]int, ASSETS_IMAGES_MAX, context.temp_allocator)
 
 	// doing work in-line before extraction
-	image_sources: []string = {"logo"}
+	image_sources: []string = {
+		"logo",
+		"terrain/mountain_0", "terrain/mountain_1", "terrain/mountain_2", "terrain/mountain_3",
+		"terrain/hill_0", "terrain/hill_1", "terrain/hill_2", "terrain/hill_3",
+		"terrain/conifer_0", "terrain/conifer_1", "terrain/conifer_2", "terrain/conifer_3",
+		"terrain/broadleaf_0", "terrain/broadleaf_1", "terrain/broadleaf_2", "terrain/broadleaf_3",
+		"terrain/cypress_0", "terrain/cypress_1", "terrain/cypress_2", "terrain/cypress_3",
+		"terrain/palm_0", "terrain/palm_1", "terrain/palm_2", "terrain/palm_3",
+		"terrain/tuft_0", "terrain/tuft_1", "terrain/tuft_2", "terrain/tuft_3",
+		"terrain/marsh_0", "terrain/marsh_1", "terrain/marsh_2", "terrain/marsh_3",
+		"terrain/dune_0", "terrain/dune_1", "terrain/dune_2", "terrain/dune_3",
+		"terrain/sea_0", "terrain/sea_1",
+	}
 	font_sources: []string = {"aniron"}
 	assert(len(font_sources) <= FONTS_MAX)
 
@@ -189,4 +201,12 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 		}
 	}
 
+}
+
+// Slot of the image loaded under name, as listed in assets_load. Not found: 0, the default image
+assets_image_find :: proc(assets: ^Assets, name: string) -> (index: int, found: bool) {
+	for image_name, i in assets.image_names {
+		if image_name == name do return i, true
+	}
+	return 0, false
 }

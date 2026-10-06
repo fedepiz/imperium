@@ -29,7 +29,7 @@ RENDER_IMAGES_MAX :: 4000
 // Largest texture every WebGPU device supports
 RENDER_ATLAS_SIZE_MAX :: 8192
 
-RENDER_QUADS_MAX :: 32000
+RENDER_QUADS_MAX :: 1 << 16
 RENDER_PASS_MAX :: 256
 
 // Ground size in cells. 1 world unit = 1 cell
@@ -86,7 +86,7 @@ Renderer :: struct {
 	// RENDER_GROUND_CATEGORIES x 2 texels. Row 0: wash colour, wash. Row 1: pattern, pattern ink
 	ground_category_looks: Texture,
 	ground_layout:   wgpu.BindGroupLayout,
-	// Recreated on resize: it binds strokes_target
+	// Recreated on resize: it binds strokes_target and sprites_target
 	ground_group:    wgpu.BindGroup,
 	// Strokes. Per stroke: a segment buffer, drawn every frame as distances into one channel of
 	// strokes_target
@@ -95,6 +95,8 @@ Renderer :: struct {
 	stroke_counts:    [RENDER_GROUND_STROKES]u32,
 	// Window-sized, recreated on resize. Channel i: distance to stroke i's nearest segment, in cells
 	strokes_target:   Texture,
+	// Window-sized, recreated on resize. Quads of passes with target = .Ground, premultiplied
+	sprites_target:   Texture,
 }
 
 // Instance of the stroke pipeline, in cells
@@ -110,13 +112,16 @@ Texture :: struct {
 	view:    wgpu.TextureView,
 }
 
-// Bindings of the ground group: uniforms, sampler, grids, category looks, strokes target
+// Bindings of the ground group: uniforms, sampler, grids, category looks, strokes target,
+// sprites target
 @(private = "file")
 GROUND_BINDING_CATEGORY_LOOKS :: 2 + len(Ground_Grid)
 @(private = "file")
 GROUND_BINDING_STROKES_TARGET :: 3 + len(Ground_Grid)
 @(private = "file")
-GROUND_BINDINGS :: 4 + len(Ground_Grid)
+GROUND_BINDING_SPRITES_TARGET :: 4 + len(Ground_Grid)
+@(private = "file")
+GROUND_BINDINGS :: 5 + len(Ground_Grid)
 
 @(private = "file")
 STROKES_TARGET_FORMAT :: wgpu.TextureFormat.RGBA16Float
@@ -609,8 +614,8 @@ renderer_init :: proc(
 			},
 		)
 
-		// Group 1. Binding 0: uniforms, 1: sampler, 2 + grid: grid texture, then the category looks
-		// and the strokes target.
+		// Group 1. Binding 0: uniforms, 1: sampler, 2 + grid: grid texture, then the category looks,
+		// the strokes target and the sprites target.
 		// The group is created with the strokes target, on resize
 		layout_entries: [GROUND_BINDINGS]wgpu.BindGroupLayoutEntry
 		layout_entries[0] = {
@@ -758,8 +763,10 @@ renderer_init :: proc(
 renderer_deinit :: proc(rend: Renderer) {
 	for pipeline in rend.stroke_pipelines do if pipeline != nil do wgpu.RenderPipelineRelease(pipeline)
 	for buffer in rend.stroke_buffers do if buffer != nil do wgpu.BufferRelease(buffer)
-	if rend.strokes_target.view != nil do wgpu.TextureViewRelease(rend.strokes_target.view)
-	if rend.strokes_target.texture != nil do wgpu.TextureRelease(rend.strokes_target.texture)
+	for target in ([?]Texture{rend.strokes_target, rend.sprites_target}) {
+		if target.view != nil do wgpu.TextureViewRelease(target.view)
+		if target.texture != nil do wgpu.TextureRelease(target.texture)
+	}
 
 	if rend.ground_pipeline != nil do wgpu.RenderPipelineRelease(rend.ground_pipeline)
 	if rend.ground_group != nil do wgpu.BindGroupRelease(rend.ground_group)
@@ -837,25 +844,34 @@ renderer_draw :: proc(
 				},
 			)
 
-			// Strokes target, and the ground group that binds it
+			// Strokes and sprites targets, and the ground group that binds them
 			{
 				if rend.ground_group != nil do wgpu.BindGroupRelease(rend.ground_group)
-				if rend.strokes_target.view != nil do wgpu.TextureViewRelease(rend.strokes_target.view)
-				if rend.strokes_target.texture != nil do wgpu.TextureRelease(rend.strokes_target.texture)
+				for target in ([?]Texture{rend.strokes_target, rend.sprites_target}) {
+					if target.view != nil do wgpu.TextureViewRelease(target.view)
+					if target.texture != nil do wgpu.TextureRelease(target.texture)
+				}
 
-				texture := wgpu.DeviceCreateTexture(
-					rend.device,
-					&{
-						label = "strokes target",
-						usage = {.RenderAttachment, .TextureBinding},
-						dimension = ._2D,
-						size = {u32(size.x), u32(size.y), 1},
-						format = STROKES_TARGET_FORMAT,
-						mipLevelCount = 1,
-						sampleCount = 1,
-					},
-				)
-				rend.strokes_target = {texture, wgpu.TextureCreateView(texture)}
+				// Sprites are drawn by the quad pipeline, so in the surface's view format
+				formats := [?]wgpu.TextureFormat{STROKES_TARGET_FORMAT, rend.format.view}
+				targets: [2]Texture
+				for format, i in formats {
+					texture := wgpu.DeviceCreateTexture(
+						rend.device,
+						&{
+							label = "ground target",
+							usage = {.RenderAttachment, .TextureBinding},
+							dimension = ._2D,
+							size = {u32(size.x), u32(size.y), 1},
+							format = format,
+							mipLevelCount = 1,
+							sampleCount = 1,
+						},
+					)
+					targets[i] = {texture, wgpu.TextureCreateView(texture)}
+				}
+				rend.strokes_target = targets[0]
+				rend.sprites_target = targets[1]
 
 				entries: [GROUND_BINDINGS]wgpu.BindGroupEntry
 				entries[0] = {
@@ -880,6 +896,10 @@ renderer_draw :: proc(
 				entries[GROUND_BINDING_STROKES_TARGET] = {
 					binding     = GROUND_BINDING_STROKES_TARGET,
 					textureView = rend.strokes_target.view,
+				}
+				entries[GROUND_BINDING_SPRITES_TARGET] = {
+					binding     = GROUND_BINDING_SPRITES_TARGET,
+					textureView = rend.sprites_target.view,
 				}
 				rend.ground_group = wgpu.DeviceCreateBindGroup(
 					rend.device,
@@ -992,6 +1012,34 @@ renderer_draw :: proc(
 		wgpu.RenderPassEncoderRelease(pass)
 	}
 
+	// Sprites pass: quad passes with target = .Ground, for the ground shader
+	{
+		pass := wgpu.CommandEncoderBeginRenderPass(
+			encoder,
+			&{
+				colorAttachmentCount = 1,
+				colorAttachments = &wgpu.RenderPassColorAttachment {
+					view = rend.sprites_target.view,
+					depthSlice = wgpu.DEPTH_SLICE_UNDEFINED,
+					loadOp = .Clear,
+					storeOp = .Store,
+					clearValue = {0, 0, 0, 0},
+				},
+			},
+		)
+		wgpu.RenderPassEncoderSetPipeline(pass, rend.quad_pipeline)
+		wgpu.RenderPassEncoderSetVertexBuffer(pass, 0, rend.quad_buffer, 0, wgpu.WHOLE_SIZE)
+		wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.atlas_group)
+		for command in passes {
+			c, is_quads := command.(Render_Quad_Pass)
+			if !is_quads || c.target != .Ground do continue
+			wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.view_groups[c.space])
+			wgpu.RenderPassEncoderDraw(pass, 4, u32(c.len), 0, u32(c.begin))
+		}
+		wgpu.RenderPassEncoderEnd(pass)
+		wgpu.RenderPassEncoderRelease(pass)
+	}
+
 	{
 		// Clear pass
 		pass := wgpu.CommandEncoderBeginRenderPass(
@@ -1013,6 +1061,8 @@ renderer_draw :: proc(
 		for command in passes {
 			switch c in command {
 			case Render_Quad_Pass:
+				// Drawn in the sprites pass
+				if c.target == .Ground do continue
 				wgpu.RenderPassEncoderSetPipeline(pass, rend.quad_pipeline)
 				wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.view_groups[c.space])
 				wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.atlas_group)
@@ -1254,9 +1304,19 @@ Render_Quad :: struct {
 }
 
 Render_Quad_Pass :: struct {
-	space: Render_Space,
-	begin: int,
-	len:   int,
+	space:  Render_Space,
+	target: Render_Quad_Target,
+	begin:  int,
+	len:    int,
+}
+
+// Where a quad pass is drawn
+Render_Quad_Target :: enum {
+	// The window, over the passes before it
+	Frame,
+	// The ground's sprite layer: composited by the ground pass over the divide's line, under the
+	// value layer. Such passes are drawn in order among themselves, whatever their place in the list
+	Ground,
 }
 
 // Ground pass parameters. The ground shader outputs one colour per window pixel, computed from the
@@ -1266,7 +1326,8 @@ Render_Ground :: struct {
 	base:     Render_Ground_Base,
 	category: Render_Ground_Category,
 	divide:   Render_Ground_Divide,
-	// Drawn in index order, under the divide's line
+	// Drawn in index order, under the divide's line. Over that line: the quads of passes with
+	// target = .Ground
 	strokes:  [RENDER_GROUND_STROKES]Render_Ground_Stroke,
 	value:    Render_Ground_Value,
 }

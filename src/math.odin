@@ -133,6 +133,54 @@ distance_transform :: proc(source: []bool, size: [2]int, out: []f32) {
 	for &distance, i in out do distance = f32(math.sqrt(squared[i]))
 }
 
+// Value at p, in cells, of a grid whose values sit at cell centres. Bilinear, clamped at the edges
+grid_bilinear :: proc(values: []f32, size: [2]int, p: [2]f32) -> f32 {
+	at :: proc(values: []f32, size: [2]int, x, y: int) -> f32 {
+		return values[clamp(y, 0, size.y - 1) * size.x + clamp(x, 0, size.x - 1)]
+	}
+	q := p - 0.5
+	x := int(math.floor(q.x))
+	y := int(math.floor(q.y))
+	f := q - [2]f32{f32(x), f32(y)}
+	top := math.lerp(at(values, size, x, y), at(values, size, x + 1, y), f.x)
+	bottom := math.lerp(at(values, size, x, y + 1), at(values, size, x + 1, y + 1), f.x)
+	return math.lerp(top, bottom, f.y)
+}
+
+// Scalars
+
+// Smoothstep from 0 at from to 1 at full. full < from: decreasing
+ramp :: proc(from, full, value: f32) -> f32 {
+	if full > from do return math.smoothstep(from, full, value)
+	return 1 - math.smoothstep(full, from, value)
+}
+
+// Random
+
+// Deterministic hash of (x, y, stream) to [0, 1). Mixer: splitmix64
+random_xy :: proc(x, y: int, stream: u32) -> f32 {
+	z := (u64(u32(x)) << 32 | u64(u32(y))) ~ u64(stream) * 0x9e3779b97f4a7c15
+	z = (z ~ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ~ (z >> 27)) * 0x94d049bb133111eb
+	z = z ~ (z >> 31)
+	return f32(z >> 40) / (1 << 24)
+}
+
+// Index drawn with probability proportional to its weight. roll: 0..1. picked = false if no weight is > 0
+pick_weighted :: proc(weights: []f32, roll: f32) -> (index: int, picked: bool) {
+	total: f32
+	for weight in weights do total += weight
+	left := roll * total
+	for weight, k in weights {
+		if weight <= 0 do continue
+		index = k
+		picked = true
+		left -= weight
+		if left < 0 do break
+	}
+	return
+}
+
 // Polylines
 
 // One polyline inside a shared points buffer

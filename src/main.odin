@@ -14,6 +14,7 @@ import sdl "vendor:sdl3"
 GLOBAL: struct {
 	assets:      Assets,
 	render_data: Render_Data,
+	map_marks:   Map_Marks,
 }
 
 // Asset budgets must fit the renderer's
@@ -52,7 +53,7 @@ main :: proc() {
 	defer renderer_deinit(renderer)
 
 	// DEMO begin: load the scenario grids, build the coast, load rivers and roads, classify the cover,
-	// centre the camera
+	// place the marks, centre the camera
 	for name, grid in DEMO_GRID_NAMES {
 		path := fmt.tprintf("assets/scenarios/roman/%s.png", name)
 		data, data_err := os.read_entire_file(path, context.temp_allocator)
@@ -73,12 +74,11 @@ main :: proc() {
 	}
 	DEMO.shown = .Elevation
 	renderer_ground_value_write(&renderer, DEMO.grids[DEMO.shown][:])
+	coast := make([]f32, RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT, context.temp_allocator)
 	{
 		// surface.png: black land, grey lake, white sea
-		cells :: RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT
-		water := make([]bool, cells, context.temp_allocator)
+		water := make([]bool, len(coast), context.temp_allocator)
 		for surface, i in DEMO.grids[.Surface] do water[i] = surface >= 64
-		coast := make([]f32, cells, context.temp_allocator)
 		map_coast_build(water, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}, coast)
 		renderer_ground_divide_write(&renderer, coast)
 	}
@@ -91,6 +91,8 @@ main :: proc() {
 		context.temp_allocator,
 	)
 	for &offset in to_river do offset = DEMO_RIVER_REACH
+	// Smoothed rivers and roads, by stroke
+	ways: [RENDER_GROUND_STROKES]Polylines
 	{
 		Way_File :: struct {
 			name:      string,
@@ -151,6 +153,7 @@ main :: proc() {
 			)
 			polylines_smooth(raw, file.smoothing, &smooth)
 			renderer_ground_stroke_write(&renderer, file.stroke, smooth)
+			ways[file.stroke] = smooth
 			if file.stroke == MAP_STROKE_RIVERS {
 				polylines_stamp(
 					smooth,
@@ -162,22 +165,17 @@ main :: proc() {
 			}
 		}
 	}
+	cover := make([][2]u8, RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT, context.temp_allocator)
 	{
 		// Cover: stand-in for the game's terrain classification. Per land cell, the best-suited
 		// cover and how well it suits. Follows the old sim's rules, without valleys and passes
 		cells :: RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT
-		// Smoothstep: 0 at from, 1 at full. full < from: decreasing
-		ramp :: proc(from, full, value: f32) -> f32 {
-			if full > from do return math.smoothstep(from, full, value)
-			return 1 - math.smoothstep(full, from, value)
-		}
 
 		is_sea := make([]bool, cells, context.temp_allocator)
 		for surface, i in DEMO.grids[.Surface] do is_sea[i] = surface >= 192
 		to_sea := make([]f32, cells, context.temp_allocator)
 		distance_transform(is_sea, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}, to_sea)
 
-		cover := make([][2]u8, cells, context.temp_allocator)
 		for i in 0 ..< cells {
 			if DEMO.grids[.Surface][i] >= 64 do continue
 			elevation := f32(DEMO.grids[.Elevation][i]) / 255
@@ -214,6 +212,17 @@ main :: proc() {
 		looks := MAP_STYLE.cover_looks
 		renderer_ground_category_looks_write(&renderer, slice.enumerated_array(&looks))
 	}
+	map_marks_place(
+		{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT},
+		DEMO.grids[.Elevation][:],
+		DEMO.grids[.Moisture][:],
+		cover,
+		coast,
+		ways[MAP_STROKE_RIVERS],
+		ways[MAP_STROKE_ROADS],
+		&GLOBAL.assets,
+		&GLOBAL.map_marks,
+	)
 	DEMO.view = {
 		center = [2]f32{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT} / 2,
 		zoom   = 2 * sdl.GetWindowPixelDensity(window),
@@ -266,7 +275,7 @@ main :: proc() {
 
 		render_data_clear(&GLOBAL.render_data)
 
-		// DEMO begin: ground pass, then world-space quads
+		// DEMO begin: ground pass, marks into the ground, then world-space quads
 		{
 			// Map look: the map's style, with a red-to-green value wash over land
 			ground := map_ground(MAP_STYLE)
@@ -285,6 +294,30 @@ main :: proc() {
 			}
 			if !DEMO.value_shown do ground.value.strength = 0
 			append(&GLOBAL.render_data.passes, Render_Ground_Pass{ground = ground})
+
+			// Marks in view, as a quad pass into the ground. Not in the plain look
+			if !DEMO.plain {
+				window_size: [2]i32
+				sdl.GetWindowSizeInPixels(window, &window_size.x, &window_size.y)
+				half := [2]f32{f32(window_size.x), f32(window_size.y)} / 2 / DEMO.view.zoom
+				visible := Extents {
+					x_min = DEMO.view.center.x - half.x,
+					y_min = DEMO.view.center.y - half.y,
+					x_max = DEMO.view.center.x + half.x,
+					y_max = DEMO.view.center.y + half.y,
+				}
+				begin := len(GLOBAL.render_data.quads)
+				map_marks_quads(&GLOBAL.map_marks, visible, &GLOBAL.render_data.quads)
+				append(
+					&GLOBAL.render_data.passes,
+					Render_Quad_Pass {
+						space = .World,
+						target = .Ground,
+						begin = begin,
+						len = len(GLOBAL.render_data.quads) - begin,
+					},
+				)
+			}
 
 			red := [4]u8{180, 64, 40, 255}
 			quads: [dynamic; 32]Render_Quad

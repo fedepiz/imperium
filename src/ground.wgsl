@@ -68,6 +68,8 @@ const CLIP_WATER = 2;
 @group(1) @binding(6) var category_looks: texture_2d<f32>;
 // Window-sized. Channel i: distance to stroke i's nearest segment, in cells
 @group(1) @binding(7) var strokes_target: texture_2d<f32>;
+// Window-sized. Quads of passes with target = Ground, premultiplied
+@group(1) @binding(8) var sprites_target: texture_2d<f32>;
 
 // Render_Ground_Pattern
 const PATTERN_STIPPLE = 1;
@@ -269,6 +271,10 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     // Divide, line at d = 0
     let line_half = ground.divide_line_width * 0.5 * view.pixel_density * (0.8 + 0.4 * value_noise(p * 0.8));
     col = mix(col, ground.divide_line_color, line_aa(abs(d) * px, line_half));
+
+    // Sprites
+    let sprite = textureLoad(sprites_target, vec2i(frag.xy), 0);
+    col = col * (1.0 - sprite.a) + sprite.rgb;
 
     // Value layer: multiply by mix(low, high, value)
     let value = textureSampleLevel(value_grid, grid_sampler, p / ground.grid, 0.0).r;
