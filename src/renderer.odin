@@ -1171,8 +1171,8 @@ renderer_ground_divide_write :: proc(
 // Overwrites the Category grid: input of Render_Ground.category
 renderer_ground_category_write :: proc(
 	rend: ^Renderer,
-	// Per cell: category, strength (read as 0..1). Row-major from the top-left
-	cells: [][2]u8,
+	// Row-major from the top-left
+	cells: []Render_Ground_Category_Cell,
 ) {
 	if !(.Ready in rend.flags) do return
 	ground_grid_write(rend, .Category, raw_data(cells), len(cells))
@@ -1350,6 +1350,14 @@ Render_Ground_Category :: struct {
 	strength:      f32,
 	// Peak-to-peak noise displacement of the lookup per axis, in cells
 	jitter:        f32,
+}
+
+// One cell of the Category grid
+Render_Ground_Category_Cell :: struct {
+	// Index of its look
+	category: u8,
+	// How strongly the look applies, 0..255 read as 0..1
+	strength: u8,
 }
 
 // Look of one category

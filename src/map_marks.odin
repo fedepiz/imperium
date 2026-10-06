@@ -151,7 +151,7 @@ Marking :: struct {
 	coast:       Range,
 	elevation:   Range,
 	temperature: Range,
-	// Density per cover, times the cell's cover strength. All zero = density 1 everywhere
+	// Density per cover kind, times the cell's cover strength. All zero = density 1 everywhere
 	cover:       [Map_Cover]f32,
 	// Width multiplier at the top of the elevation range
 	grow:        f32,
@@ -243,8 +243,7 @@ map_marks_place :: proc(
 	// 0..255 per cell
 	elevation: []u8,
 	moisture: []u8,
-	// Per cell: Map_Cover, strength 0..255
-	cover: [][2]u8,
+	cover: []Map_Cover_Cell,
 	// Signed distance to the coast per cell, in cells. > 0 on land
 	coast: []f32,
 	// Smoothed, in cells. The ground along them stays free of marks
@@ -364,7 +363,7 @@ map_marks_place :: proc(
 					}
 					scores[m] = 1
 					if marking.cover != {} {
-						scores[m] = marking.cover[Map_Cover(cover[cell][0])] * f32(cover[cell][1]) / 255
+						scores[m] = marking.cover[cover[cell].kind] * f32(cover[cell].strength) / 255
 					}
 					total += scores[m]
 				}

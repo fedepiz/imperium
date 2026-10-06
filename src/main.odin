@@ -6,7 +6,6 @@ import "core:math"
 import "core:math/linalg"
 import "core:mem"
 import "core:os"
-import "core:slice"
 import "core:strings"
 
 import sdl "vendor:sdl3"
@@ -14,7 +13,7 @@ import sdl "vendor:sdl3"
 GLOBAL: struct {
 	assets:      Assets,
 	render_data: Render_Data,
-	map_marks:   Map_Marks,
+	map_state:   Map,
 }
 
 // Asset budgets must fit the renderer's
@@ -52,8 +51,7 @@ main :: proc() {
 	}
 	defer renderer_deinit(renderer)
 
-	// DEMO begin: load the scenario grids, build the coast, load rivers and roads, classify the cover,
-	// place the marks, centre the camera
+	// DEMO begin: load the scenario into a Map_Geography, build the map, centre the camera
 	for name, grid in DEMO_GRID_NAMES {
 		path := fmt.tprintf("assets/scenarios/roman/%s.png", name)
 		data, data_err := os.read_entire_file(path, context.temp_allocator)
@@ -74,35 +72,21 @@ main :: proc() {
 	}
 	DEMO.shown = .Elevation
 	renderer_ground_value_write(&renderer, DEMO.grids[DEMO.shown][:])
-	coast := make([]f32, RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT, context.temp_allocator)
 	{
-		// surface.png: black land, grey lake, white sea
-		water := make([]bool, len(coast), context.temp_allocator)
-		for surface, i in DEMO.grids[.Surface] do water[i] = surface >= 64
-		map_coast_build(water, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}, coast)
-		renderer_ground_divide_write(&renderer, coast)
-	}
-	// Rivers thin with elevation
-	renderer_ground_taper_write(&renderer, DEMO.grids[.Elevation][:])
-	// Offset from each cell centre to the nearest river, within DEMO_RIVER_REACH. For the cover
-	to_river := make(
-		[][2]f32,
-		RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT,
-		context.temp_allocator,
-	)
-	for &offset in to_river do offset = DEMO_RIVER_REACH
-	// Smoothed rivers and roads, by stroke
-	ways: [RENDER_GROUND_STROKES]Polylines
-	{
-		Way_File :: struct {
-			name:      string,
-			smoothing: Polyline_Smoothing,
-			stroke:    int,
-		}
-		way_files := [?]Way_File {
-			{"rivers", MAP_RIVER_SMOOTHING, MAP_STROKE_RIVERS},
-			{"roads", MAP_ROAD_SMOOTHING, MAP_STROKE_ROADS},
-		}
+		geography: Map_Geography
+		geography.elevation = DEMO.grids[.Elevation][:]
+		geography.moisture = DEMO.grids[.Moisture][:]
+
+		// Step: Water. surface.png: black land, grey lake, white sea
+		geography.water = make([]bool, MAP_CELLS, context.temp_allocator)
+		for surface, i in DEMO.grids[.Surface] do geography.water[i] = surface >= 64
+
+		// Step: Ways. `way = { id = N  points = [ [x, y], ... ] }`, one run per way.
+		// A line starting with `way` begins a run, lines starting with `[` hold its cells
+		way_files := [?]struct {
+			name: string,
+			out:  ^Polylines,
+		}{{"rivers", &geography.rivers}, {"roads", &geography.roads}}
 		for file in way_files {
 			path := fmt.tprintf("assets/scenarios/roman/%s.txt", file.name)
 			data, data_err := os.read_entire_file(path, context.temp_allocator)
@@ -110,9 +94,6 @@ main :: proc() {
 				fmt.eprintln("Failed to load", path)
 				return
 			}
-
-			// Step: Parse. `way = { id = N  points = [ [x, y], ... ] }`, one run per way.
-			// A line starting with `way` begins a run, lines starting with `[` hold its cells
 			raw := polylines_over(
 				make([][2]f32, DEMO_WAY_POINTS_MAX, context.temp_allocator),
 				make([]Polyline_Run, DEMO_WAYS_MAX, context.temp_allocator),
@@ -141,50 +122,31 @@ main :: proc() {
 					}
 				}
 			}
-
-			// Step: Smooth and hand to the ground's stroke
-			smooth := polylines_over(
-				make(
-					[][2]f32,
-					DEMO_WAY_POINTS_MAX << uint(file.smoothing.cut_iter),
-					context.temp_allocator,
-				),
-				make([]Polyline_Run, DEMO_WAYS_MAX, context.temp_allocator),
-			)
-			polylines_smooth(raw, file.smoothing, &smooth)
-			renderer_ground_stroke_write(&renderer, file.stroke, smooth)
-			ways[file.stroke] = smooth
-			if file.stroke == MAP_STROKE_RIVERS {
-				polylines_stamp(
-					smooth,
-					DEMO_RIVER_REACH,
-					{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT},
-					to_river,
-					nil,
-				)
-			}
+			file.out^ = raw
 		}
-	}
-	cover := make([][2]u8, RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT, context.temp_allocator)
-	{
-		// Cover: stand-in for the game's terrain classification. Per land cell, the best-suited
-		// cover and how well it suits. Follows the old sim's rules, without valleys and passes
-		cells :: RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT
 
-		is_sea := make([]bool, cells, context.temp_allocator)
+		// Step: Cover. Stand-in for the game's terrain classification: per land cell, the
+		// best-suited cover and how well it suits. Follows the old sim's rules, without valleys
+		// and passes
+		size :: [2]int{MAP_WIDTH, MAP_HEIGHT}
+		to_river := make([][2]f32, MAP_CELLS, context.temp_allocator)
+		for &offset in to_river do offset = DEMO_RIVER_REACH
+		polylines_stamp(geography.rivers, DEMO_RIVER_REACH, size, to_river, nil)
+		is_sea := make([]bool, MAP_CELLS, context.temp_allocator)
 		for surface, i in DEMO.grids[.Surface] do is_sea[i] = surface >= 192
-		to_sea := make([]f32, cells, context.temp_allocator)
-		distance_transform(is_sea, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}, to_sea)
+		to_sea := make([]f32, MAP_CELLS, context.temp_allocator)
+		distance_transform(is_sea, size, to_sea)
 
-		for i in 0 ..< cells {
-			if DEMO.grids[.Surface][i] >= 64 do continue
-			elevation := f32(DEMO.grids[.Elevation][i]) / 255
+		geography.cover = make([]Map_Cover_Cell, MAP_CELLS, context.temp_allocator)
+		for i in 0 ..< MAP_CELLS {
+			if geography.water[i] do continue
+			elevation := f32(geography.elevation[i]) / 255
 			trees := f32(DEMO.grids[.Trees][i]) / 255
-			moisture := f32(DEMO.grids[.Moisture][i]) / 255
+			moisture := f32(geography.moisture[i]) / 255
 			river := linalg.length(to_river[i])
 
 			if elevation >= 0.85 {
-				cover[i] = {u8(Map_Cover.Mountains), 255}
+				geography.cover[i] = {.Mountains, 255}
 				continue
 			}
 			low := ramp(0.22, 0.12, elevation)
@@ -204,25 +166,12 @@ main :: proc() {
 			best := Map_Cover.Open
 			for suit, kind in suits do if suit > suits[best] do best = kind
 			if best != .Open {
-				cover[i] = {u8(best), u8(clamp(suits[best], 0, 1) * 255 + 0.5)}
+				geography.cover[i] = {best, u8(clamp(suits[best], 0, 1) * 255 + 0.5)}
 			}
 		}
-		renderer_ground_category_write(&renderer, cover)
 
-		looks := MAP_STYLE.cover_looks
-		renderer_ground_category_looks_write(&renderer, slice.enumerated_array(&looks))
+		map_build(&GLOBAL.map_state, &renderer, &GLOBAL.assets, geography, MAP_STYLE)
 	}
-	map_marks_place(
-		{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT},
-		DEMO.grids[.Elevation][:],
-		DEMO.grids[.Moisture][:],
-		cover,
-		coast,
-		ways[MAP_STROKE_RIVERS],
-		ways[MAP_STROKE_ROADS],
-		&GLOBAL.assets,
-		&GLOBAL.map_marks,
-	)
 	DEMO.view = {
 		center = [2]f32{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT} / 2,
 		zoom   = 2 * sdl.GetWindowPixelDensity(window),
@@ -307,7 +256,7 @@ main :: proc() {
 					y_max = DEMO.view.center.y + half.y,
 				}
 				begin := len(GLOBAL.render_data.quads)
-				map_marks_quads(&GLOBAL.map_marks, visible, &GLOBAL.render_data.quads)
+				map_marks_quads(&GLOBAL.map_state.marks, visible, &GLOBAL.render_data.quads)
 				append(
 					&GLOBAL.render_data.passes,
 					Render_Quad_Pass {

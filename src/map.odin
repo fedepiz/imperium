@@ -1,7 +1,41 @@
 #+private
 package main
 
-// Map graphics: turns map inputs (style, ways) into the layers of the renderer's ground
+import "core:slice"
+
+// Map graphics: turns a map's geography and style into what the renderer draws.
+// map_build: once per map. Fills the ground's grids, strokes and looks, and places the marks.
+// map_ground, map_marks_quads: per frame
+
+// Map size in cells: the renderer's ground
+MAP_WIDTH :: RENDER_GROUND_WIDTH
+MAP_HEIGHT :: RENDER_GROUND_HEIGHT
+MAP_CELLS :: MAP_WIDTH * MAP_HEIGHT
+
+// Smoothed points and ways, per kind (rivers, roads). Roman scenario: 18,368 river points in 104 ways
+MAP_WAY_POINTS_MAX :: 1 << 16
+MAP_WAYS_MAX :: 1 << 10
+
+// Map graphics state kept between frames
+Map :: struct {
+	marks: Map_Marks,
+}
+
+// What map_build draws the map from. Transient: read during the call, not kept.
+// Grids: one entry per cell, row-major from the top-left, MAP_CELLS long
+Map_Geography :: struct {
+	// true = lake or sea. Gives the coast: its line, the sea tint, and where land layers stop
+	water:     []bool,
+	// 0..255. Thins rivers toward their source. Places mountains and hills, and picks tree species
+	elevation: []u8,
+	// 0..255. Picks tree species
+	moisture:  []u8,
+	// Gives the cover washes and stipple. Places trees, tufts, marsh and dune marks
+	cover:     []Map_Cover_Cell,
+	// Courses as points in cells, unsmoothed. Drawn as lines. Marks keep off them
+	rivers:    Polylines,
+	roads:     Polylines,
+}
 
 // Ground strokes the map uses
 MAP_STROKE_RIVERS :: 0
@@ -20,6 +54,15 @@ MAP_ROAD_SMOOTHING :: Polyline_Smoothing {
 	cut_ratio = 0.25,
 	cut_max   = 1.5,
 }
+
+// Land cover of one cell
+Map_Cover_Cell :: struct {
+	kind:     Map_Cover,
+	// How strongly the cell is of that kind, 0..255
+	strength: u8,
+}
+// Passed to the ground's category layer as is
+#assert(size_of(Map_Cover_Cell) == size_of(Render_Ground_Category_Cell))
 
 // Land cover. Value = category in the ground's category layer
 Map_Cover :: enum u8 {
@@ -99,8 +142,69 @@ MAP_STYLE :: Map_Style {
 	cover_jitter       = 0.8,
 }
 
-// Ground layers for a style. Value layer: off.
-// The cover looks are not part of it: write style.cover_looks with renderer_ground_category_looks_write
+// Builds a map. Writes the renderer's ground grids, strokes and category looks. Replaces m.marks
+map_build :: proc(
+	m: ^Map,
+	rend: ^Renderer,
+	assets: ^Assets,
+	geography: Map_Geography,
+	style: Map_Style,
+) {
+	assert(len(geography.water) == MAP_CELLS)
+	assert(len(geography.elevation) == MAP_CELLS && len(geography.moisture) == MAP_CELLS)
+	assert(len(geography.cover) == MAP_CELLS)
+	size :: [2]int{MAP_WIDTH, MAP_HEIGHT}
+
+	// Step: Coast
+	coast := make([]f32, MAP_CELLS, context.temp_allocator)
+	map_coast_build(geography.water, size, coast)
+	renderer_ground_divide_write(rend, coast)
+
+	// Step: Ways. Smoothed, each kind to its stroke
+	Way_Kind :: struct {
+		raw:       Polylines,
+		smoothing: Polyline_Smoothing,
+		stroke:    int,
+	}
+	way_kinds := [?]Way_Kind {
+		{geography.rivers, MAP_RIVER_SMOOTHING, MAP_STROKE_RIVERS},
+		{geography.roads, MAP_ROAD_SMOOTHING, MAP_STROKE_ROADS},
+	}
+	ways: [RENDER_GROUND_STROKES]Polylines
+	for kind in way_kinds {
+		ways[kind.stroke] = polylines_over(
+			make([][2]f32, MAP_WAY_POINTS_MAX, context.temp_allocator),
+			make([]Polyline_Run, MAP_WAYS_MAX, context.temp_allocator),
+		)
+		polylines_smooth(kind.raw, kind.smoothing, &ways[kind.stroke])
+		renderer_ground_stroke_write(rend, kind.stroke, ways[kind.stroke])
+	}
+	// Rivers thin with elevation
+	renderer_ground_taper_write(rend, geography.elevation)
+
+	// Step: Cover
+	renderer_ground_category_write(
+		rend,
+		slice.reinterpret([]Render_Ground_Category_Cell, geography.cover),
+	)
+	looks := style.cover_looks
+	renderer_ground_category_looks_write(rend, slice.enumerated_array(&looks))
+
+	// Step: Marks
+	map_marks_place(
+		size,
+		geography.elevation,
+		geography.moisture,
+		geography.cover,
+		coast,
+		ways[MAP_STROKE_RIVERS],
+		ways[MAP_STROKE_ROADS],
+		assets,
+		&m.marks,
+	)
+}
+
+// Ground layers for a style, for this frame's Render_Ground_Pass. Value layer: off
 map_ground :: proc(style: Map_Style) -> (ground: Render_Ground) {
 	ground.base = {
 		color        = style.paper,
