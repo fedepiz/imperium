@@ -1,14 +1,4 @@
-// Maps the pass's space to the window: pixel = (p - center) * zoom + size / 2
-struct View {
-    // Window size in physical pixels
-    size:   vec2f,
-    // Position shown at the window centre
-    center: vec2f,
-    // Physical pixels per unit
-    zoom:   f32,
-}
-
-@group(0) @binding(0) var<uniform> view: View;
+// Quad shader. Compiled with view.wgsl prepended (View, view_* functions)
 
 @group(1) @binding(0) var atlas:         texture_2d<f32>;
 @group(1) @binding(1) var atlas_sampler: sampler;
@@ -27,11 +17,11 @@ struct Quad_In {
     @location(10) axis:      vec2f,
 }
 
-// Lengths are in physical pixels from here on
+// All lengths in physical pixels
 struct Vertex_Out {
     @builtin(position)              position:  vec4f,
     @location(0)                    color:     vec4f,
-    // From the rect centre, in the rect's own (rotated) frame
+    // Offset from the rect centre, in the rect's rotated frame
     @location(1)                    local:     vec2f,
     @location(2) @interpolate(flat) half_size: vec2f,
     @location(3) @interpolate(flat) clip:      vec4f,
@@ -44,29 +34,26 @@ fn vs_main(@builtin(vertex_index) index:u32, quad: Quad_In) -> Vertex_Out {
     // Strip corners
     let corner = vec2f(f32(index & 1u), f32(index >> 1u));
 
-    // Space to pixels
-    let centre    = ((quad.rect.xy + quad.rect.zw) * 0.5 - view.center) * view.zoom + view.size * 0.5;
+    // Pass's space to pixels
+    let centre    = view_to_pixel((quad.rect.xy + quad.rect.zw) * 0.5);
     let half_size = (quad.rect.zw - quad.rect.xy) * 0.5 * view.zoom;
     let shape     = vec3f(quad.radius, quad.thickness, quad.softness) * view.zoom;
 
-    // Local x axis, zero = unrotated. The y axis is a quarter turn on, towards screen down
+    // Local axes. Zero axis = unrotated. axis_y = axis_x rotated by 90 degrees
     let axis_length = length(quad.axis);
     let axis_x      = select(vec2f(1.0, 0.0), quad.axis / axis_length, axis_length > 0.0);
     let axis_y      = vec2f(-axis_x.y, axis_x.x);
 
-    // Room for the soft edge and anti-aliasing
+    // Expand by softness + 1 pixel for anti-aliasing
     let grow  = shape.z + 1.0;
     let local = (corner * 2.0 - 1.0) * (half_size + grow);
     let pixel = centre + local.x * axis_x + local.y * axis_y;
-
-    // Pixels to clip space
-    let clip = pixel / view.size * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0);
 
     // Quad colours
     var colors = array(quad.color_tl, quad.color_tr, quad.color_bl, quad.color_br);
 
     var out: Vertex_Out;
-    out.position  = vec4f(clip, 0.0, 1.0);
+    out.position  = view_to_clip(pixel);
     out.color     = colors[index];
     out.local     = local;
     out.half_size = half_size;

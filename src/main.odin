@@ -1,8 +1,10 @@
 package main
 
 import "core:fmt"
+import "core:image"
 import "core:math"
 import "core:mem"
+import "core:os"
 
 import sdl "vendor:sdl3"
 
@@ -46,10 +48,31 @@ main :: proc() {
 	}
 	defer renderer_deinit(renderer)
 
-	// DEMO begin: camera start, 12 logical pixels per world unit
+	// DEMO begin: load the scenario grids, show elevation, centre the camera
+	for name, grid in DEMO_GRID_NAMES {
+		path := fmt.tprintf("assets/scenarios/roman/%s.png", name)
+		data, data_err := os.read_entire_file(path, context.temp_allocator)
+		img, img_err := image.load_from_bytes(
+			data,
+			{.do_not_expand_grayscale},
+			context.temp_allocator,
+		)
+		if data_err != nil || img_err != nil || img.channels != 1 || img.depth != 8 {
+			fmt.eprintln("Failed to load", path)
+			return
+		}
+		if img.width != RENDER_GROUND_WIDTH || img.height != RENDER_GROUND_HEIGHT {
+			fmt.eprintln("Not the size of the ground", path)
+			return
+		}
+		copy(DEMO.grids[grid][:], img.pixels.buf[:])
+	}
+	DEMO.shown = .Elevation
+	DEMO.value_shown = true
+	renderer_ground_write(&renderer, .Value, DEMO.grids[DEMO.shown][:])
 	DEMO.view = {
-		center = {0, 0},
-		zoom   = 12 * sdl.GetWindowPixelDensity(window),
+		center = [2]f32{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT} / 2,
+		zoom   = 2 * sdl.GetWindowPixelDensity(window),
 	}
 	// DEMO end
 
@@ -65,6 +88,18 @@ main :: proc() {
 				if event.key.scancode == .ESCAPE {
 					running = false
 				}
+				// DEMO begin: 1-4 select the value grid, 0 turns the value layer off, D toggles the plain look
+				#partial switch event.key.scancode {
+				case ._1, ._2, ._3, ._4:
+					DEMO.shown = Demo_Grid(int(event.key.scancode) - int(sdl.Scancode._1))
+					DEMO.value_shown = true
+					renderer_ground_write(&renderer, .Value, DEMO.grids[DEMO.shown][:])
+				case ._0:
+					DEMO.value_shown = false
+				case .D:
+					DEMO.plain = !DEMO.plain
+				}
+				// DEMO end
 			// DEMO begin: wheel zooms about the cursor, left drag pans
 			case .MOUSE_WHEEL:
 				size: [2]i32
@@ -73,7 +108,7 @@ main :: proc() {
 				cursor *= sdl.GetWindowPixelDensity(window)
 				from_centre := cursor - [2]f32{f32(size.x), f32(size.y)} / 2
 				under_cursor := DEMO.view.center + from_centre / DEMO.view.zoom
-				DEMO.view.zoom = clamp(DEMO.view.zoom * math.pow(1.15, event.wheel.y), 1, 400)
+				DEMO.view.zoom = clamp(DEMO.view.zoom * math.pow(1.15, event.wheel.y), 0.25, 400)
 				DEMO.view.center = under_cursor - from_centre / DEMO.view.zoom
 			case .MOUSE_MOTION:
 				if .LEFT in event.motion.state {
@@ -87,19 +122,38 @@ main :: proc() {
 
 		render_data_clear(&GLOBAL.render_data)
 
-		// DEMO begin: world-space quads, in world units, moved by the camera
+		// DEMO begin: ground pass, then world-space quads
 		{
-			vellum := [4]u8{214, 197, 158, 255}
+			// Map look: stained vellum base, red-to-green value wash
+			ground := Render_Ground {
+				base = {
+					color = {0.840, 0.772, 0.620},
+					stain = {0.720, 0.620, 0.460},
+					stain_amount = 0.5,
+				},
+				value = {low = {0.85, 0.45, 0.35}, high = {0.45, 0.75, 0.40}, strength = 0.8},
+			}
+			// Plain look: white base, black-to-white value wash. Shows the raw grid as grey
+			if DEMO.plain {
+				ground = {
+					base = {color = {1, 1, 1}},
+					value = {low = {0, 0, 0}, high = {1, 1, 1}, strength = 1},
+				}
+			}
+			if !DEMO.value_shown do ground.value.strength = 0
+			append(&GLOBAL.render_data.passes, Render_Ground_Pass{ground = ground})
+
 			red := [4]u8{180, 64, 40, 255}
 			quads: [dynamic; 32]Render_Quad
+			middle := [2]f32{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT} / 2
 
-			// Pills fanning out from the origin. A pill from a to b of half width w is a rect of
-			// size (|b - a| + 2w, 2w) about their midpoint, fully rounded, with its x axis along b - a
+			// 12 pills around the grid centre. Pill from a to b, half width w:
+			// rect of size (|b - a| + 2w, 2w) centred on the midpoint, radii = w, axis = b - a
 			for i in 0 ..< 12 {
 				angle := f32(i) * math.TAU / 12
 				along := [2]f32{math.cos(angle), math.sin(angle)}
-				a := along * 4
-				b := along * 14
+				a := middle + along * 4
+				b := middle + along * 14
 				w := f32(0.6)
 				centre := (a + b) / 2
 				half_length := f32(5) + w
@@ -112,74 +166,32 @@ main :: proc() {
 							centre.x + half_length,
 							centre.y + w,
 						},
-						colors = {vellum, vellum, vellum, vellum},
+						colors = {red, red, red, red},
 						radii = w,
 						axis = b - a,
 					},
 				)
 			}
 
-			// Pill turning about its centre
+			// Rotating pill
 			seconds := f32(sdl.GetTicks()) / 1000
 			append(
 				&quads,
 				Render_Quad {
-					rect = {24, -1, 36, 1},
+					rect = {middle.x + 24, middle.y - 1, middle.x + 36, middle.y + 1},
 					colors = {red, red, red, red},
 					radii = 1,
 					axis = {math.cos(seconds), math.sin(seconds)},
 				},
 			)
 
-			// Rounded border, turned 30 degrees
-			append(
-				&quads,
-				Render_Quad {
-					rect = {-36, -4, -24, 4},
-					colors = {vellum, vellum, vellum, vellum},
-					radii = 2,
-					thickness = 0.5,
-					axis = {math.cos(f32(math.TAU / 12)), math.sin(f32(math.TAU / 12))},
-				},
-			)
-
-			// Corner gradient, turned 45 degrees
-			append(
-				&quads,
-				Render_Quad {
-					rect = {-6, 20, 6, 28},
-					colors = {
-						{255, 0, 0, 255},
-						{0, 255, 0, 255},
-						{0, 0, 255, 255},
-						{255, 255, 0, 255},
-					},
-					axis = {1, 1},
-				},
-			)
-
-			// Logo, 16 units wide, turned -20 degrees
-			logo_source := GLOBAL.assets.image_rects[0]
-			logo_aspect :=
-				(logo_source.y_max - logo_source.y_min) / (logo_source.x_max - logo_source.x_min)
-			append(
-				&quads,
-				Render_Quad {
-					rect = {-8, -30 - 8 * logo_aspect, 8, -30 + 8 * logo_aspect},
-					source = logo_source,
-					colors = {{255, 255, 255, 255}, {255, 255, 255, 255}, {255, 255, 255, 255}, {255, 255, 255, 255}},
-					axis = {math.cos(f32(-math.TAU / 18)), math.sin(f32(-math.TAU / 18))},
-				},
-			)
-
-			render_data_quad_pass(&GLOBAL.render_data, .World, 0, quads[:])
+			render_data_quad_pass(&GLOBAL.render_data, .World, quads[:])
 		}
 		// DEMO end
 
 		render_data_quad_pass(
 			&GLOBAL.render_data,
 			.Screen,
-			0,
 			{
 				// Corner gradient: red TL, green TR, blue BR, yellow BL
 				{
@@ -279,7 +291,7 @@ main :: proc() {
 				source = GLOBAL.assets.image_rects[0],
 				colors = {white, white, white, white},
 			}
-			render_data_quad_pass(&GLOBAL.render_data, .Screen, 0, {logo})
+			render_data_quad_pass(&GLOBAL.render_data, .Screen, {logo})
 		}
 
 		// Text, one quad per glyph along the baseline
@@ -303,10 +315,10 @@ main :: proc() {
 				}
 				pen.x += glyph.advance
 			}
-			render_data_quad_pass(&GLOBAL.render_data, .Screen, 0, glyph_quads[:len(text)])
+			render_data_quad_pass(&GLOBAL.render_data, .Screen, glyph_quads[:len(text)])
 		}
 
-		// DEMO: the view comes from the demo camera
+		// DEMO: view from the demo camera
 		view := DEMO.view
 		if !renderer_draw(
 			&renderer,
@@ -322,8 +334,31 @@ main :: proc() {
 // DEMO begin
 @(private = "file")
 DEMO: struct {
-	// Camera over the world-space quads
-	view: Render_View,
+	// Camera
+	view:        Render_View,
+	// Scenario grids, 1 byte per cell
+	grids:       [Demo_Grid][RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT]u8,
+	// Grid currently written to the Value grid, and value layer on/off
+	shown:       Demo_Grid,
+	value_shown: bool,
+	// Plain look instead of the map look
+	plain:       bool,
+}
+
+@(private = "file")
+Demo_Grid :: enum {
+	Surface,
+	Elevation,
+	Trees,
+	Moisture,
+}
+
+@(private = "file")
+DEMO_GRID_NAMES :: [Demo_Grid]string {
+	.Surface   = "surface",
+	.Elevation = "elevation",
+	.Trees     = "trees",
+	.Moisture  = "moisture",
 }
 // DEMO end
 
@@ -343,7 +378,6 @@ render_data_clear :: proc(data: ^Render_Data) {
 render_data_quad_pass :: proc(
 	data: ^Render_Data,
 	space: Render_Space,
-	texture: Texture_Id,
 	quads: []Render_Quad,
 ) {
 	// Budgets are enforced by the fixed capacities
@@ -353,10 +387,9 @@ render_data_quad_pass :: proc(
 	if count == 0 do return
 
 	pass := Render_Quad_Pass {
-		space   = space,
-		texture = texture,
-		begin   = base,
-		len     = count,
+		space = space,
+		begin = base,
+		len   = count,
 	}
 	append(&data.passes, pass)
 }

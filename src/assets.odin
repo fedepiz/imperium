@@ -73,7 +73,7 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 		path := fmt.tprintf("assets/gfx/%s.png", name)
 
 		// Decode to premultiplied RGBA
-		data, data_err := os.read_entire_file(path, context.temp_allocator)
+		data, data_err := os.read_entire_file_from_path(path, context.temp_allocator)
 		if data_err != nil {
 			fmt.eprintln("Failed to read", path, data_err)
 			continue
@@ -102,7 +102,7 @@ assets_load :: proc(assets: ^Assets, out: ^Assets_Loaded) {
 		font := &assets.fonts[font_index]
 		font_first_slot[font_index] = id
 
-		data, data_err := os.read_entire_file(
+		data, data_err := os.read_entire_file_from_path(
 			fmt.tprintf("assets/fonts/%s.ttf", name),
 			context.temp_allocator,
 		)

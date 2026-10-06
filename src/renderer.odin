@@ -10,8 +10,15 @@ import sdl "vendor:sdl3"
 import "vendor:wgpu"
 import "vendor:wgpu/sdl3glue"
 
+// Prepended to every shader
 @(private = "file")
-QUAD_SHADER :: #load("quad.wgsl", string)
+VIEW_SHADER :: #load("view.wgsl", string)
+
+@(private = "file")
+QUAD_SHADER :: VIEW_SHADER + #load("quad.wgsl", string)
+
+@(private = "file")
+GROUND_SHADER :: VIEW_SHADER + #load("ground.wgsl", string)
 
 
 // Budgets
@@ -22,36 +29,82 @@ RENDER_ATLAS_SIZE_MAX :: 8192
 RENDER_QUADS_MAX :: 32000
 RENDER_PASS_MAX :: 256
 
+// Ground size in cells. 1 world unit = 1 cell
+RENDER_GROUND_WIDTH :: 1024
+RENDER_GROUND_HEIGHT :: 1024
+
 
 Renderer_Flag :: enum {
 	Ready,
 }
 
 Renderer :: struct {
-	flags:         bit_set[Renderer_Flag],
-	window:        ^sdl.Window,
-	instance:      wgpu.Instance,
-	adapter:       wgpu.Adapter,
-	surface:       wgpu.Surface,
-	device:        wgpu.Device,
-	queue:         wgpu.Queue,
-	format:        Surface_Format,
+	flags:           bit_set[Renderer_Flag],
+	window:          ^sdl.Window,
+	instance:        wgpu.Instance,
+	adapter:         wgpu.Adapter,
+	surface:         wgpu.Surface,
+	device:          wgpu.Device,
+	queue:           wgpu.Queue,
+	format:          Surface_Format,
 	// Cached window size
-	window_size:   [2]i32,
+	window_size:     [2]i32,
 	// Quad pass data
-	quad_pipeline: wgpu.RenderPipeline,
-	quad_buffer:   wgpu.Buffer,
-	// One view per space, bound at group 0
-	view_buffers:  [Render_Space]wgpu.Buffer,
-	view_groups:   [Render_Space]wgpu.BindGroup,
+	quad_pipeline:   wgpu.RenderPipeline,
+	quad_buffer:     wgpu.Buffer,
+	// View uniforms per space. Group 0 of every pipeline
+	view_layout:     wgpu.BindGroupLayout,
+	view_buffers:    [Render_Space]wgpu.Buffer,
+	view_groups:     [Render_Space]wgpu.BindGroup,
+	// Linear filter, clamp to edge. Used by the atlas and the ground grids
+	sampler:         wgpu.Sampler,
 	// Images
-	atlas_texture: wgpu.Texture,
-	atlas_view:    wgpu.TextureView,
-	atlas_sampler: wgpu.Sampler,
-	atlas_group:   wgpu.BindGroup,
+	atlas_texture:   wgpu.Texture,
+	atlas_view:      wgpu.TextureView,
+	atlas_group:     wgpu.BindGroup,
+	// Ground pass data. ground_group is group 1: uniforms, sampler, grids
+	ground_pipeline: wgpu.RenderPipeline,
+	ground_uniforms: wgpu.Buffer,
+	ground_grids:    [Render_Ground_Grid]Texture,
+	ground_group:    wgpu.BindGroup,
 }
 
-// Must match the shader's View struct
+@(private = "file")
+Texture :: struct {
+	texture: wgpu.Texture,
+	view:    wgpu.TextureView,
+}
+
+@(private = "file")
+Ground_Grid_Format :: struct {
+	format:     wgpu.TextureFormat,
+	// Bytes per texel
+	texel_size: int,
+}
+
+@(private = "file", rodata)
+GROUND_GRID_FORMATS := [Render_Ground_Grid]Ground_Grid_Format {
+	.Value = {.R8Unorm, 1},
+}
+
+// Must match struct Ground in ground.wgsl.
+// WGSL vec3f: align 16, size 12. Each [3]f32 is followed by one f32 (scalar or padding)
+@(private = "file")
+Ground_Uniform :: struct {
+	base_color:     [3]f32,
+	stain_amount:   f32,
+	base_stain:     [3]f32,
+	value_strength: f32,
+	value_low:      [3]f32,
+	_:              f32,
+	value_high:     [3]f32,
+	_:              f32,
+	// Grid size in cells
+	grid:           [2]f32,
+	_:              [2]f32,
+}
+
+// Must match struct View in view.wgsl
 @(private = "file")
 View_Uniform :: struct {
 	size:   [2]f32,
@@ -157,10 +210,21 @@ renderer_init :: proc(
 		(^wgpu.Device)(userdata1)^ = device
 	}
 
+	// Print validation errors: wgpu drops them when no callback is set
+	on_error :: proc "c" (
+		device: ^wgpu.Device,
+		type: wgpu.ErrorType,
+		message: string,
+		userdata1, userdata2: rawptr,
+	) {
+		context = runtime.default_context()
+		fmt.eprintfln("wgpu error (%v): %s", type, message)
+	}
+
 	device_done: bool
 	wgpu.AdapterRequestDevice(
 		out.adapter,
-		nil,
+		&{uncapturedErrorCallbackInfo = {callback = on_error}},
 		{
 			mode = .AllowProcessEvents,
 			callback = on_device,
@@ -206,6 +270,48 @@ renderer_init :: proc(
 	)
 	defer wgpu.ShaderModuleRelease(quad_module)
 
+	// Explicit bind group layouts: groups of an auto layout cannot be shared between pipelines
+	out.view_layout = wgpu.DeviceCreateBindGroupLayout(
+		out.device,
+		&{
+			label = "view",
+			entryCount = 1,
+			entries = &wgpu.BindGroupLayoutEntry {
+				binding = 0,
+				visibility = {.Vertex, .Fragment},
+				buffer = {type = .Uniform, minBindingSize = size_of(View_Uniform)},
+			},
+		},
+	)
+	atlas_layout_entries := [?]wgpu.BindGroupLayoutEntry {
+		{
+			binding = 0,
+			visibility = {.Fragment},
+			texture = {sampleType = .Float, viewDimension = ._2D},
+		},
+		{binding = 1, visibility = {.Fragment}, sampler = {type = .Filtering}},
+	}
+	atlas_layout := wgpu.DeviceCreateBindGroupLayout(
+		out.device,
+		&{
+			label = "atlas",
+			entryCount = len(atlas_layout_entries),
+			entries = &atlas_layout_entries[0],
+		},
+	)
+	defer wgpu.BindGroupLayoutRelease(atlas_layout)
+
+	quad_group_layouts := [?]wgpu.BindGroupLayout{out.view_layout, atlas_layout}
+	quad_layout := wgpu.DeviceCreatePipelineLayout(
+		out.device,
+		&{
+			label = "quad",
+			bindGroupLayoutCount = len(quad_group_layouts),
+			bindGroupLayouts = &quad_group_layouts[0],
+		},
+	)
+	defer wgpu.PipelineLayoutRelease(quad_layout)
+
 	quad_attributes := [?]wgpu.VertexAttribute {
 		{format = .Float32x4, offset = u64(offset_of(Render_Quad, rect)), shaderLocation = 0},
 		{format = .Unorm8x4, offset = u64(offset_of(Render_Quad, colors)) + 0, shaderLocation = 1},
@@ -228,6 +334,7 @@ renderer_init :: proc(
 		out.device,
 		&{
 			label = "quad",
+			layout = quad_layout,
 			vertex = {
 				module = quad_module,
 				entryPoint = "vs_main",
@@ -275,12 +382,9 @@ renderer_init :: proc(
 	)
 
 
-	// Views, written every frame
+	// View uniform buffers and bind groups
 	{
 		size: u64 = size_of(View_Uniform)
-		layout := wgpu.RenderPipelineGetBindGroupLayout(out.quad_pipeline, 0)
-		defer wgpu.BindGroupLayoutRelease(layout)
-
 		for space in Render_Space {
 			out.view_buffers[space] = wgpu.DeviceCreateBuffer(
 				out.device,
@@ -290,7 +394,7 @@ renderer_init :: proc(
 				out.device,
 				&{
 					label = "view",
-					layout = layout,
+					layout = out.view_layout,
 					entryCount = 1,
 					entries = &wgpu.BindGroupEntry {
 						binding = 0,
@@ -345,7 +449,7 @@ renderer_init :: proc(
 
 		// View, sampler and bind group for the shader
 		out.atlas_view = wgpu.TextureCreateView(out.atlas_texture)
-		out.atlas_sampler = wgpu.DeviceCreateSampler(
+		out.sampler = wgpu.DeviceCreateSampler(
 			out.device,
 			&{
 				addressModeU = .ClampToEdge,
@@ -359,15 +463,137 @@ renderer_init :: proc(
 			},
 		)
 
-		layout := wgpu.RenderPipelineGetBindGroupLayout(out.quad_pipeline, 1)
-		defer wgpu.BindGroupLayoutRelease(layout)
 		entries := [?]wgpu.BindGroupEntry {
 			{binding = 0, textureView = out.atlas_view},
-			{binding = 1, sampler = out.atlas_sampler},
+			{binding = 1, sampler = out.sampler},
 		}
 		out.atlas_group = wgpu.DeviceCreateBindGroup(
 			out.device,
-			&{label = "atlas", layout = layout, entryCount = len(entries), entries = &entries[0]},
+			&{
+				label = "atlas",
+				layout = atlas_layout,
+				entryCount = len(entries),
+				entries = &entries[0],
+			},
+		)
+	}
+
+	// Ground: grid textures (zero-initialised), uniform buffer, bind group, pipeline
+	{
+		for format, grid in GROUND_GRID_FORMATS {
+			texture := wgpu.DeviceCreateTexture(
+				out.device,
+				&{
+					label = "ground grid",
+					usage = {.TextureBinding, .CopyDst},
+					dimension = ._2D,
+					size = {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT, 1},
+					format = format.format,
+					mipLevelCount = 1,
+					sampleCount = 1,
+				},
+			)
+			out.ground_grids[grid] = {texture, wgpu.TextureCreateView(texture)}
+		}
+		out.ground_uniforms = wgpu.DeviceCreateBuffer(
+			out.device,
+			&{
+				label = "ground uniforms",
+				usage = {.Uniform, .CopyDst},
+				size = size_of(Ground_Uniform),
+			},
+		)
+
+		// Group 1. Binding 0: uniforms, 1: sampler, 2 + grid: grid texture
+		layout_entries: [2 + len(Render_Ground_Grid)]wgpu.BindGroupLayoutEntry
+		group_entries: [2 + len(Render_Ground_Grid)]wgpu.BindGroupEntry
+		layout_entries[0] = {
+			binding = 0,
+			visibility = {.Fragment},
+			buffer = {type = .Uniform, minBindingSize = size_of(Ground_Uniform)},
+		}
+		group_entries[0] = {
+			binding = 0,
+			buffer  = out.ground_uniforms,
+			size    = size_of(Ground_Uniform),
+		}
+		layout_entries[1] = {
+			binding = 1,
+			visibility = {.Fragment},
+			sampler = {type = .Filtering},
+		}
+		group_entries[1] = {
+			binding = 1,
+			sampler = out.sampler,
+		}
+		for texture, grid in out.ground_grids {
+			binding := 2 + u32(grid)
+			layout_entries[binding] = {
+				binding = binding,
+				visibility = {.Fragment},
+				texture = {sampleType = .Float, viewDimension = ._2D},
+			}
+			group_entries[binding] = {
+				binding     = binding,
+				textureView = texture.view,
+			}
+		}
+		group_layout := wgpu.DeviceCreateBindGroupLayout(
+			out.device,
+			&{label = "ground", entryCount = len(layout_entries), entries = &layout_entries[0]},
+		)
+		defer wgpu.BindGroupLayoutRelease(group_layout)
+		out.ground_group = wgpu.DeviceCreateBindGroup(
+			out.device,
+			&{
+				label = "ground",
+				layout = group_layout,
+				entryCount = len(group_entries),
+				entries = &group_entries[0],
+			},
+		)
+
+		module := wgpu.DeviceCreateShaderModule(
+			out.device,
+			&{
+				nextInChain = &wgpu.ShaderSourceWGSL {
+					sType = .ShaderSourceWGSL,
+					code = GROUND_SHADER,
+				},
+				label = "ground",
+			},
+		)
+		defer wgpu.ShaderModuleRelease(module)
+
+		group_layouts := [?]wgpu.BindGroupLayout{out.view_layout, group_layout}
+		layout := wgpu.DeviceCreatePipelineLayout(
+			out.device,
+			&{
+				label = "ground",
+				bindGroupLayoutCount = len(group_layouts),
+				bindGroupLayouts = &group_layouts[0],
+			},
+		)
+		defer wgpu.PipelineLayoutRelease(layout)
+
+		out.ground_pipeline = wgpu.DeviceCreateRenderPipeline(
+			out.device,
+			&{
+				label = "ground",
+				layout = layout,
+				vertex = {module = module, entryPoint = "vs_main"},
+				primitive = {topology = .TriangleList},
+				multisample = {count = 1, mask = ~u32(0)},
+				fragment = &wgpu.FragmentState {
+					module = module,
+					entryPoint = "fs_main",
+					targetCount = 1,
+					targets = &wgpu.ColorTargetState {
+						format = out.format.view,
+						writeMask = wgpu.ColorWriteMaskFlags_All,
+					},
+				},
+			},
 		)
 	}
 
@@ -376,13 +602,22 @@ renderer_init :: proc(
 }
 
 renderer_deinit :: proc(rend: Renderer) {
+	if rend.ground_pipeline != nil do wgpu.RenderPipelineRelease(rend.ground_pipeline)
+	if rend.ground_group != nil do wgpu.BindGroupRelease(rend.ground_group)
+	if rend.ground_uniforms != nil do wgpu.BufferRelease(rend.ground_uniforms)
+	for grid in rend.ground_grids {
+		if grid.view != nil do wgpu.TextureViewRelease(grid.view)
+		if grid.texture != nil do wgpu.TextureRelease(grid.texture)
+	}
+
 	if rend.atlas_group != nil do wgpu.BindGroupRelease(rend.atlas_group)
-	if rend.atlas_sampler != nil do wgpu.SamplerRelease(rend.atlas_sampler)
+	if rend.sampler != nil do wgpu.SamplerRelease(rend.sampler)
 	if rend.atlas_view != nil do wgpu.TextureViewRelease(rend.atlas_view)
 	if rend.atlas_texture != nil do wgpu.TextureRelease(rend.atlas_texture)
 
 	for group in rend.view_groups do if group != nil do wgpu.BindGroupRelease(group)
 	for buffer in rend.view_buffers do if buffer != nil do wgpu.BufferRelease(buffer)
+	if rend.view_layout != nil do wgpu.BindGroupLayoutRelease(rend.view_layout)
 
 	if rend.quad_pipeline != nil do wgpu.RenderPipelineRelease(rend.quad_pipeline)
 	if rend.quad_buffer != nil do wgpu.BufferRelease(rend.quad_buffer)
@@ -396,7 +631,7 @@ renderer_deinit :: proc(rend: Renderer) {
 
 renderer_draw :: proc(
 	rend: ^Renderer,
-	// Where world space sits in the window this frame
+	// World-space view for this frame
 	view: Render_View,
 	quads: []Render_Quad,
 	passes: []Render_Pass,
@@ -464,7 +699,7 @@ renderer_draw :: proc(
 	)
 
 	// Send data to gpu
-	// Views. Screen space is the view that maps units to pixels one to one from the top-left
+	// Views. Screen: 1 unit = 1 physical pixel, origin top-left
 	{
 		size := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)}
 		views := [Render_Space]View_Uniform {
@@ -512,15 +747,39 @@ renderer_draw :: proc(
 			},
 		)
 
-		wgpu.RenderPassEncoderSetPipeline(pass, rend.quad_pipeline)
 		wgpu.RenderPassEncoderSetVertexBuffer(pass, 0, rend.quad_buffer, 0, wgpu.WHOLE_SIZE)
-		wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.atlas_group)
 
 		for command in passes {
 			switch c in command {
 			case Render_Quad_Pass:
+				wgpu.RenderPassEncoderSetPipeline(pass, rend.quad_pipeline)
 				wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.view_groups[c.space])
+				wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.atlas_group)
 				wgpu.RenderPassEncoderDraw(pass, 4, u32(c.len), 0, u32(c.begin))
+
+			case Render_Ground_Pass:
+				// Queue writes are applied at submit, before any draw: only the last ground pass
+				// of a frame takes effect
+				uniform := Ground_Uniform {
+					base_color     = c.ground.base.color,
+					stain_amount   = c.ground.base.stain_amount,
+					base_stain     = c.ground.base.stain,
+					value_strength = c.ground.value.strength,
+					value_low      = c.ground.value.low,
+					value_high     = c.ground.value.high,
+					grid           = {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT},
+				}
+				wgpu.QueueWriteBuffer(
+					rend.queue,
+					rend.ground_uniforms,
+					0,
+					&uniform,
+					size_of(uniform),
+				)
+				wgpu.RenderPassEncoderSetPipeline(pass, rend.ground_pipeline)
+				wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.view_groups[.World])
+				wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.ground_group)
+				wgpu.RenderPassEncoderDraw(pass, 3, 1, 0, 0)
 			}
 		}
 
@@ -539,29 +798,51 @@ renderer_draw :: proc(
 	return true
 }
 
-Texture_Id :: u32
+// Overwrites all cells of a grid
+renderer_ground_write :: proc(
+	rend: ^Renderer,
+	grid: Render_Ground_Grid,
+	// Row-major from the top-left, no row padding. Texel format: see Render_Ground_Grid
+	cells: []byte,
+) {
+	if !(.Ready in rend.flags) do return
+	texel_size := GROUND_GRID_FORMATS[grid].texel_size
+	assert(len(cells) == RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT * texel_size)
 
-// The coordinate space a pass's quads are given in
+	wgpu.QueueWriteTexture(
+		rend.queue,
+		&{texture = rend.ground_grids[grid].texture, aspect = .All},
+		raw_data(cells),
+		uint(len(cells)),
+		&{
+			bytesPerRow = u32(RENDER_GROUND_WIDTH * texel_size),
+			rowsPerImage = RENDER_GROUND_HEIGHT,
+		},
+		&{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT, 1},
+	)
+}
+
+// Coordinate space of a quad pass
 Render_Space :: enum {
-	// Physical pixels from the window's top-left
+	// Physical pixels, origin at the window top-left
 	Screen,
-	// Positioned in the window by the frame's Render_View
+	// World units, mapped to the window by the frame's Render_View
 	World,
 }
 
-// Maps world space to the window: pixel = (p - center) * zoom + window_size / 2
+// World to window: pixel = (p - center) * zoom + window_size / 2
 Render_View :: struct {
-	// World position shown at the window centre
+	// World position at the window centre
 	center: [2]f32,
 	// Physical pixels per world unit
 	zoom:   f32,
 }
 
-// Lengths (rect, radii, thickness, softness) are in units of the pass's space
+// rect, radii, thickness, softness: units of the pass's space
 Render_Quad :: struct {
-	// Rectangle, before rotation
+	// Unrotated rectangle
 	rect:      Extents,
-	// Clipping rectangle, always in screen space. Zero = none
+	// Clip rectangle, screen space. Zero = none
 	clip:      Extents,
 	// Per corner, 4 colours. TL clockwise winding order
 	colors:    [4][4]u8,
@@ -574,7 +855,7 @@ Render_Quad :: struct {
 	thickness: f32,
 	// Border 'softness'
 	softness:  f32,
-	// Direction of the rect's local x axis, any length. Zero = unrotated. Rotation is about the rect centre
+	// Direction of the rect's local x axis, any length. Zero = unrotated. Pivot: rect centre
 	axis:      [2]f32,
 }
 
@@ -584,6 +865,44 @@ Render_Quad_Pass :: struct {
 	len:   int,
 }
 
+// Ground pass parameters. The ground shader outputs one colour per window pixel, computed from the
+// grids (RENDER_GROUND_WIDTH x RENDER_GROUND_HEIGHT cells) and these layers.
+// Layers are composited in field order. Colours: straight RGB, 0..1
+Render_Ground :: struct {
+	base:  Render_Ground_Base,
+	value: Render_Ground_Value,
+}
+
+// Base layer: colour with noise stains. Outside the grid: color * 0.72
+Render_Ground_Base :: struct {
+	color:        [3]f32,
+	// Stain colour. Stain pattern: fbm noise in world space
+	stain:        [3]f32,
+	// Mix toward stain at full noise, 0..1
+	stain_amount: f32,
+}
+
+// Value layer: multiplies the colour by mix(low, high, v). v: Value grid, bilinear
+Render_Ground_Value :: struct {
+	low:      [3]f32,
+	high:     [3]f32,
+	// Blend factor of the multiply, 0..1. 0 = layer off
+	strength: f32,
+}
+
+// Per-cell textures read by the ground shader. Written with renderer_ground_write
+Render_Ground_Grid :: enum {
+	// 1 byte per cell, read as 0..1. Input of Render_Ground.value
+	Value,
+}
+
+// Full-window draw of the ground, positioned by the frame's Render_View
+Render_Ground_Pass :: struct {
+	ground: Render_Ground,
+}
+
+// Executed in order
 Render_Pass :: union {
 	Render_Quad_Pass,
+	Render_Ground_Pass,
 }
