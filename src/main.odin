@@ -3,8 +3,11 @@ package main
 import "core:fmt"
 import "core:image"
 import "core:math"
+import "core:math/linalg"
 import "core:mem"
 import "core:os"
+import "core:slice"
+import "core:strings"
 
 import sdl "vendor:sdl3"
 
@@ -48,7 +51,8 @@ main :: proc() {
 	}
 	defer renderer_deinit(renderer)
 
-	// DEMO begin: load the scenario grids, build the coast, centre the camera
+	// DEMO begin: load the scenario grids, build the coast, load rivers and roads, classify the cover,
+	// centre the camera
 	for name, grid in DEMO_GRID_NAMES {
 		path := fmt.tprintf("assets/scenarios/roman/%s.png", name)
 		data, data_err := os.read_entire_file(path, context.temp_allocator)
@@ -75,8 +79,140 @@ main :: proc() {
 		water := make([]bool, cells, context.temp_allocator)
 		for surface, i in DEMO.grids[.Surface] do water[i] = surface >= 64
 		coast := make([]f32, cells, context.temp_allocator)
-		map_coast_build(coast, water, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT})
+		map_coast_build(water, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}, coast)
 		renderer_ground_divide_write(&renderer, coast)
+	}
+	// Rivers thin with elevation
+	renderer_ground_taper_write(&renderer, DEMO.grids[.Elevation][:])
+	// Offset from each cell centre to the nearest river, within DEMO_RIVER_REACH. For the cover
+	to_river := make(
+		[][2]f32,
+		RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT,
+		context.temp_allocator,
+	)
+	for &offset in to_river do offset = DEMO_RIVER_REACH
+	{
+		Way_File :: struct {
+			name:      string,
+			smoothing: Polyline_Smoothing,
+			stroke:    int,
+		}
+		way_files := [?]Way_File {
+			{"rivers", MAP_RIVER_SMOOTHING, MAP_STROKE_RIVERS},
+			{"roads", MAP_ROAD_SMOOTHING, MAP_STROKE_ROADS},
+		}
+		for file in way_files {
+			path := fmt.tprintf("assets/scenarios/roman/%s.txt", file.name)
+			data, data_err := os.read_entire_file(path, context.temp_allocator)
+			if data_err != nil {
+				fmt.eprintln("Failed to load", path)
+				return
+			}
+
+			// Step: Parse. `way = { id = N  points = [ [x, y], ... ] }`, one run per way.
+			// A line starting with `way` begins a run, lines starting with `[` hold its cells
+			raw := polylines_over(
+				make([][2]f32, DEMO_WAY_POINTS_MAX, context.temp_allocator),
+				make([]Polyline_Run, DEMO_WAYS_MAX, context.temp_allocator),
+			)
+			text := string(data)
+			for line in strings.split_lines_iterator(&text) {
+				trimmed := strings.trim_space(line)
+				if strings.has_prefix(trimmed, "way") {
+					append(&raw.runs, Polyline_Run{begin = len(raw.points)})
+				}
+				if !strings.has_prefix(trimmed, "[") || len(raw.runs) == 0 do continue
+				// Whole numbers in pairs. Cell (x, y) to its centre
+				numbers: [2]f32
+				count := 0
+				for i := 0; i < len(trimmed); i += 1 {
+					if trimmed[i] < '0' || trimmed[i] > '9' do continue
+					number := 0
+					for ; i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9'; i += 1 {
+						number = number * 10 + int(trimmed[i] - '0')
+					}
+					numbers[count % 2] = f32(number)
+					count += 1
+					if count % 2 == 0 {
+						append(&raw.points, numbers + 0.5)
+						raw.runs[len(raw.runs) - 1].len += 1
+					}
+				}
+			}
+
+			// Step: Smooth and hand to the ground's stroke
+			smooth := polylines_over(
+				make(
+					[][2]f32,
+					DEMO_WAY_POINTS_MAX << uint(file.smoothing.cut_iter),
+					context.temp_allocator,
+				),
+				make([]Polyline_Run, DEMO_WAYS_MAX, context.temp_allocator),
+			)
+			polylines_smooth(raw, file.smoothing, &smooth)
+			renderer_ground_stroke_write(&renderer, file.stroke, smooth)
+			if file.stroke == MAP_STROKE_RIVERS {
+				polylines_stamp(
+					smooth,
+					DEMO_RIVER_REACH,
+					{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT},
+					to_river,
+					nil,
+				)
+			}
+		}
+	}
+	{
+		// Cover: stand-in for the game's terrain classification. Per land cell, the best-suited
+		// cover and how well it suits. Follows the old sim's rules, without valleys and passes
+		cells :: RENDER_GROUND_WIDTH * RENDER_GROUND_HEIGHT
+		// Smoothstep: 0 at from, 1 at full. full < from: decreasing
+		ramp :: proc(from, full, value: f32) -> f32 {
+			if full > from do return math.smoothstep(from, full, value)
+			return 1 - math.smoothstep(full, from, value)
+		}
+
+		is_sea := make([]bool, cells, context.temp_allocator)
+		for surface, i in DEMO.grids[.Surface] do is_sea[i] = surface >= 192
+		to_sea := make([]f32, cells, context.temp_allocator)
+		distance_transform(is_sea, {RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT}, to_sea)
+
+		cover := make([][2]u8, cells, context.temp_allocator)
+		for i in 0 ..< cells {
+			if DEMO.grids[.Surface][i] >= 64 do continue
+			elevation := f32(DEMO.grids[.Elevation][i]) / 255
+			trees := f32(DEMO.grids[.Trees][i]) / 255
+			moisture := f32(DEMO.grids[.Moisture][i]) / 255
+			river := linalg.length(to_river[i])
+
+			if elevation >= 0.85 {
+				cover[i] = {u8(Map_Cover.Mountains), 255}
+				continue
+			}
+			low := ramp(0.22, 0.12, elevation)
+			delta := ramp(6, 2, river) * ramp(16, 6, to_sea[i])
+			dry_river := ramp(0.62, 0.52, moisture) * ramp(5, 1.5, river)
+			suits := [Map_Cover]f32 {
+				.Open      = 1.0 / 6,
+				.Forest    = ramp(0.05, 0.75, trees),
+				.Desert    = ramp(0.47, 0.35, moisture),
+				.Steppe    = ramp(0.40, 0.47, moisture) * ramp(0.58, 0.48, moisture),
+				.Fertile   = 1.3 * dry_river,
+				.Marsh     = 1.5 * low * max(delta, ramp(0.80, 0.88, moisture)),
+				.Highland  = 1.2 * ramp(0.55, 1.0, elevation),
+				.Mountains = 0,
+				.Fields    = 0.6 * ramp(0.52, 0.62, moisture) * ramp(0.3, 0.1, trees),
+			}
+			best := Map_Cover.Open
+			for suit, kind in suits do if suit > suits[best] do best = kind
+			if best != .Open {
+				cover[i] = {u8(best), u8(clamp(suits[best], 0, 1) * 255 + 0.5)}
+			}
+		}
+		renderer_ground_category_write(&renderer, cover)
+
+		looks := MAP_STYLE.cover_looks
+		renderer_ground_category_looks_write(&renderer, slice.enumerated_array(&looks))
 	}
 	DEMO.view = {
 		center = [2]f32{RENDER_GROUND_WIDTH, RENDER_GROUND_HEIGHT} / 2,
@@ -132,30 +268,13 @@ main :: proc() {
 
 		// DEMO begin: ground pass, then world-space quads
 		{
-			// Map look: stained vellum base, coast, red-to-green value wash over land
-			ground := Render_Ground {
-				base = {
-					color = {0.840, 0.772, 0.620},
-					stain = {0.720, 0.620, 0.460},
-					stain_amount = 0.5,
-				},
-				divide = {
-					shallow = {0.560, 0.610, 0.620},
-					deep = {0.200, 0.330, 0.480},
-					depth_from = 0,
-					depth_full = 80,
-					tint = 0.55,
-					line_color = {0.150, 0.105, 0.070},
-					line_width = 1.6,
-					// Old style: wobble 0.3, scaled by 1.6 in the shader
-					wobble = 0.3 * 1.6,
-				},
-				value = {
-					low = {0.85, 0.45, 0.35},
-					high = {0.45, 0.75, 0.40},
-					strength = 0.8,
-					clip = .Land,
-				},
+			// Map look: the map's style, with a red-to-green value wash over land
+			ground := map_ground(MAP_STYLE)
+			ground.value = {
+				low      = {0.85, 0.45, 0.35},
+				high     = {0.45, 0.75, 0.40},
+				strength = 0.8,
+				clip     = .Land,
 			}
 			// Plain look: white base, black-to-white value wash. Shows the raw grid as grey
 			if DEMO.plain {
@@ -368,6 +487,16 @@ DEMO: struct {
 	// Plain look instead of the map look
 	plain:       bool,
 }
+
+// Farthest a river affects the cover, in cells
+@(private = "file")
+DEMO_RIVER_REACH :: f32(12)
+
+// Budgets of one ways file
+@(private = "file")
+DEMO_WAY_POINTS_MAX :: 1 << 13
+@(private = "file")
+DEMO_WAYS_MAX :: 1 << 8
 
 @(private = "file")
 Demo_Grid :: enum {

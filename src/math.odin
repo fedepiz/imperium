@@ -74,12 +74,12 @@ shelf_pack :: proc(region: [2]int, sizes: [][2]int, padding: int, pos: [][2]int)
 
 // Exact Euclidean distance transform (Felzenszwalb-Huttenlocher), columns then rows.
 // out[i] = distance from cell i to the nearest cell with source[i] set, in cells
-distance_transform :: proc(out: []f32, source: []bool, size: [2]int) {
+distance_transform :: proc(source: []bool, size: [2]int, out: []f32) {
 	assert(len(out) == size.x * size.y && len(source) == len(out))
 
 	// 1D squared distance transform: lower envelope of parabolas.
 	// Scratch: parabolas len(f), bounds len(f) + 1
-	line :: proc(f, out: []f64, parabolas: []int, bounds: []f64) {
+	line :: proc(f: []f64, parabolas: []int, bounds: []f64, out: []f64) {
 		// Abscissa where parabolas q and p intersect
 		crossing :: proc(f: []f64, q, p: int) -> f64 {
 			return ((f[q] + f64(q * q)) - (f[p] + f64(p * p))) / f64(2 * q - 2 * p)
@@ -121,12 +121,12 @@ distance_transform :: proc(out: []f32, source: []bool, size: [2]int) {
 	bounds := make([]f64, n + 1, context.temp_allocator)
 	for x in 0 ..< size.x {
 		for y in 0 ..< size.y do column[y] = squared[y * size.x + x]
-		line(column[:size.y], result, parabolas, bounds)
+		line(column[:size.y], parabolas, bounds, result)
 		for y in 0 ..< size.y do squared[y * size.x + x] = result[y]
 	}
 	for y in 0 ..< size.y {
 		row := squared[y * size.x:][:size.x]
-		line(row, result, parabolas, bounds)
+		line(row, parabolas, bounds, result)
 		copy(row, result[:size.x])
 	}
 
@@ -172,7 +172,7 @@ Polyline_Smoothing :: struct {
 
 // Smooths every run of src into dst. A run of n points becomes n << cut_iter points.
 // Open runs keep their end points. Runs under 2 points, or that do not fit in dst, are dropped
-polylines_smooth :: proc(src: Polylines, dst: ^Polylines, smoothing: Polyline_Smoothing) {
+polylines_smooth :: proc(src: Polylines, smoothing: Polyline_Smoothing, dst: ^Polylines) {
 	assert(smoothing.softness >= 0 && smoothing.softness <= 1)
 	assert(smoothing.cut_ratio > 0 && smoothing.cut_ratio <= 0.5)
 	assert(smoothing.cut_iter >= 0)

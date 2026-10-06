@@ -27,7 +27,7 @@ COAST_REACH :: f32(3)
 
 // coast[i] = signed distance from cell i's centre to the coast, in cells. > 0 on land, < 0 on water.
 // Grids are row-major, size.x * size.y cells
-map_coast_build :: proc(coast: []f32, water: []bool, size: [2]int) {
+map_coast_build :: proc(water: []bool, size: [2]int, coast: []f32) {
 	cells := size.x * size.y
 	assert(len(coast) == cells && len(water) == cells)
 
@@ -45,7 +45,7 @@ map_coast_build :: proc(coast: []f32, water: []bool, size: [2]int) {
 		make([][2]f32, MAP_COAST_RAW_POINTS_MAX << uint(COAST_SMOOTHING.cut_iter), context.temp_allocator),
 		make([]Polyline_Run, MAP_COAST_RUNS_MAX, context.temp_allocator),
 	)
-	polylines_smooth(raw, &smooth, COAST_SMOOTHING)
+	polylines_smooth(raw, COAST_SMOOTHING, &smooth)
 
 	// Step: Stamp. Offset and side to the smoothed line, for cells within COAST_REACH
 	to_coast := make([][2]f32, cells, context.temp_allocator)
@@ -58,8 +58,8 @@ map_coast_build :: proc(coast: []f32, water: []bool, size: [2]int) {
 	for is_water, i in water do land[i] = !is_water
 	to_water := make([]f32, cells, context.temp_allocator)
 	to_land := make([]f32, cells, context.temp_allocator)
-	distance_transform(to_water, water, size)
-	distance_transform(to_land, land, size)
+	distance_transform(water, size, to_water)
+	distance_transform(land, size, to_land)
 
 	// Step: Blend. Line distance up to COAST_REACH - 1, cell distance from COAST_REACH
 	for is_water, i in water {
