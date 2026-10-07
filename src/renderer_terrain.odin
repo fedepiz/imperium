@@ -9,7 +9,7 @@ import "vendor:wgpu"
 
 // Terrain: the map's ground, drawn by the renderer. Paper, sea and coast, land cover, regions,
 // rivers, roads, highlights, arrows, a value wash, and marks (mountains, trees, waves).
-// renderer_terrain_build: once per map, from a Render_Terrain.
+// renderer_terrain_build: once per map, from a Render_Geography.
 // Every frame: a Render_Terrain_Frame, as Render_Data.terrain.
 // Everything else the drawing needs is derived here: the coast's distance field, smoothed courses,
 // region and highlight fields, mark placement, fades.
@@ -20,30 +20,42 @@ import "vendor:wgpu"
 RENDER_TERRAIN_WIDTH :: 1024
 RENDER_TERRAIN_HEIGHT :: 1024
 RENDER_TERRAIN_CELLS :: RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT
+// Regions in a frame, entry 0 included
+RENDER_TERRAIN_REGIONS_MAX :: 256
 // Highlights in a frame
 RENDER_TERRAIN_HIGHLIGHTS_MAX :: 16
+// Cells, and circles, of all a frame's highlights together
+RENDER_TERRAIN_HIGHLIGHT_CELLS_MAX :: RENDER_TERRAIN_CELLS
+RENDER_TERRAIN_HIGHLIGHT_CIRCLES_MAX :: 512
+// Points of the arrow
+RENDER_TERRAIN_ARROW_POINTS_MAX :: 4096
+// Points, and runs, of the courses of one kind
+RENDER_TERRAIN_COURSE_POINTS_MAX :: 1 << 16
+RENDER_TERRAIN_COURSE_RUNS_MAX :: 256
 // Variants of a mark drawing
 RENDER_MARK_VARIANTS_MAX :: 4
 
 // What the terrain is drawn from. Read during renderer_terrain_build, not kept.
-// Grids: one entry per cell, row-major from the top-left, RENDER_TERRAIN_CELLS long
-Render_Terrain :: struct {
+// Grids: one entry per cell, row-major from the top-left
+Render_Geography :: struct {
 	// true = lake or sea. Gives the coast: its line, the sea tint, and where land layers stop
-	water:     []bool,
+	water:     [RENDER_TERRAIN_CELLS]bool,
 	// 0..255. Thins rivers toward their source. Places mountains and hills, and picks tree species
-	elevation: []u8,
+	elevation: [RENDER_TERRAIN_CELLS]u8,
 	// 0..255. Picks tree species
-	moisture:  []u8,
+	moisture:  [RENDER_TERRAIN_CELLS]u8,
 	// Gives the cover washes and stipple. Places trees, tufts, marsh and dune marks
-	cover:     []Render_Cover_Cell,
+	cover:     [RENDER_TERRAIN_CELLS]Render_Cover_Cell,
 	// Courses as points in cells, smoothed by the caller. Drawn as segments between the points.
 	// Marks keep off them
-	rivers:    Polylines,
-	roads:     Polylines,
+	rivers:    Render_Courses,
+	roads:     Render_Courses,
 	// Region per cell, 0 = none. On land only. Gives the region washes and the borders between
 	// regions. Their colours: Render_Terrain_Frame.regions
-	regions:   []u8,
+	regions:   [RENDER_TERRAIN_CELLS]u8,
 }
+
+Render_Courses :: Polylines(RENDER_TERRAIN_COURSE_POINTS_MAX, RENDER_TERRAIN_COURSE_RUNS_MAX)
 
 // Land cover of one cell
 Render_Cover_Cell :: struct {
@@ -81,21 +93,24 @@ Render_Mark_Drawing :: enum {
 // Atlas rect of each drawing's variants. Empty = missing: the first empty one ends a drawing's variants
 Render_Mark_Images :: [Render_Mark_Drawing][RENDER_MARK_VARIANTS_MAX]Extents
 
-// What the terrain shows this frame, besides what it was built from. Read during renderer_draw
+// What the terrain shows this frame, besides what it was built from. Read during renderer_draw.
+// Fixed capacity
 Render_Terrain_Frame :: struct {
-	region_display: Render_Region_Display,
-	// Index: region, as in Render_Terrain.regions. Entry 0 is unused
-	regions:        []Render_Region,
-	// Up to RENDER_TERRAIN_HIGHLIGHTS_MAX. A highlight keeps its slot from frame to frame: when its
-	// content changes it fades in again
-	highlights:     []Render_Highlight,
-	// Paths as points in cells, tail to head. Each run is drawn with an arrowhead at its end
-	arrows:         Polylines,
+	region_display:    Render_Region_Display,
+	// Index: region, as in Render_Geography.regions. Entry 0 is unused
+	regions:           [RENDER_TERRAIN_REGIONS_MAX]Render_Region,
+	// A highlight keeps its slot from frame to frame: when its content changes it fades in again
+	highlights:        [RENDER_TERRAIN_HIGHLIGHTS_MAX]Render_Highlight,
+	// Of the highlights
+	highlight_cells:   [dynamic; RENDER_TERRAIN_HIGHLIGHT_CELLS_MAX]bool,
+	highlight_circles: [dynamic; RENDER_TERRAIN_HIGHLIGHT_CIRCLES_MAX]Render_Circle,
+	// A path as points in cells, tail to head, drawn with an arrowhead at its end. Empty = none
+	arrow:             [dynamic; RENDER_TERRAIN_ARROW_POINTS_MAX][2]f32,
 	// A value per cell, 0..255, RENDER_TERRAIN_CELLS long: a wash over the land, from the style's
 	// wash_low at 0 to wash_high at 255. Empty = none. For map modes such as supply
-	wash:           []u8,
+	wash:              [dynamic; RENDER_TERRAIN_CELLS]u8,
 	// Seconds since the last frame. Drives the fades
-	dt:             f32,
+	dt:                f32,
 }
 
 Render_Region_Display :: enum {
@@ -115,15 +130,16 @@ Render_Region :: struct {
 
 // A set of cells washed in the colour of its kind
 Render_Highlight :: struct {
-	kind:     Render_Highlight_Kind,
+	kind:          Render_Highlight_Kind,
 	// The set is of water cells. Otherwise of land cells
-	on_water: bool,
-	// cells[y * size.x + x] is cell corner + {x, y}. No cells = not shown
-	corner:   [2]int,
-	size:     [2]int,
-	cells:    []bool,
-	// Discs added to the shape
-	circles:  []Render_Circle,
+	on_water:      bool,
+	// Cell corner + {x, y} is highlight_cells[cells_begin + y * size.x + x]. Zero size = not shown
+	corner:        [2]int,
+	size:          [2]int,
+	cells_begin:   int,
+	// Discs added to the shape: highlight_circles[circles_begin:][:circles_len]
+	circles_begin: int,
+	circles_len:   int,
 }
 
 // Highlights of one kind share a look. Kinds on one row tile: where two meet they share an edge.
@@ -289,16 +305,11 @@ RENDER_TERRAIN_STYLE_DEFAULT :: Render_Terrain_Style {
 // marks: the atlas rects of the mark drawings
 renderer_terrain_build :: proc(
 	rend: ^Renderer,
-	terrain: Render_Terrain,
+	geography: ^Render_Geography,
 	style: Render_Terrain_Style,
 	marks: Render_Mark_Images,
 ) {
 	if !(.Ready in rend.flags) do return
-	assert(len(terrain.water) == RENDER_TERRAIN_CELLS)
-	assert(len(terrain.elevation) == RENDER_TERRAIN_CELLS)
-	assert(len(terrain.moisture) == RENDER_TERRAIN_CELLS)
-	assert(len(terrain.cover) == RENDER_TERRAIN_CELLS)
-	assert(len(terrain.regions) == RENDER_TERRAIN_CELLS)
 	size :: [2]int{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}
 
 	// Step: State. Nothing of an earlier build's frames is kept
@@ -309,24 +320,24 @@ renderer_terrain_build :: proc(
 
 	// Step: Coast. First: areas take their sides from it
 	coast := make([]f32, RENDER_TERRAIN_CELLS, context.temp_allocator)
-	terrain_coast_build(terrain.water, size, coast)
+	terrain_coast_build(geography.water[:], size, coast)
 	ground_divide_write(rend, coast)
 
 	// Step: Regions, and empty highlight layers
-	ground_areas_write(rend, LAYER_REGIONS, terrain.regions, .Land)
+	ground_areas_write(rend, LAYER_REGIONS, geography.regions[:], .Land)
 	{
 		none := make([]u8, RENDER_TERRAIN_CELLS, context.temp_allocator)
 		for layer in HIGHLIGHT_AREA_LAYERS do ground_areas_write(rend, layer, none, .Land)
 	}
 
 	// Step: Courses, each kind to its stroke
-	ground_stroke_write(rend, STROKE_RIVERS, terrain.rivers)
-	ground_stroke_write(rend, STROKE_ROADS, terrain.roads)
+	ground_stroke_write(rend, STROKE_RIVERS, &geography.rivers)
+	ground_stroke_write(rend, STROKE_ROADS, &geography.roads)
 	// Rivers thin with elevation
-	ground_taper_write(rend, terrain.elevation)
+	ground_taper_write(rend, geography.elevation[:])
 
 	// Step: Cover
-	ground_category_write(rend, terrain.cover)
+	ground_category_write(rend, geography.cover[:])
 	looks := style.cover_looks
 	ground_category_looks_write(rend, slice.enumerated_array(&looks))
 
@@ -334,12 +345,12 @@ renderer_terrain_build :: proc(
 	images := marks
 	terrain_marks_place(
 		size,
-		terrain.elevation,
-		terrain.moisture,
-		terrain.cover,
+		geography.elevation[:],
+		geography.moisture[:],
+		geography.cover[:],
 		coast,
-		terrain.rivers,
-		terrain.roads,
+		&geography.rivers,
+		&geography.roads,
 		&images,
 		&TERRAIN.marks,
 	)
@@ -392,6 +403,7 @@ WIDEN_SUPPORT :: 3
 EDGE_WOBBLE :: 1.6
 
 #assert(RENDER_TERRAIN_HIGHLIGHTS_MAX < AREAS_PER_LAYER)
+#assert(RENDER_TERRAIN_REGIONS_MAX <= AREAS_PER_LAYER)
 
 // Ground sizes, GPU side
 @(private = "file")
@@ -456,8 +468,8 @@ TERRAIN: struct {
 	// Window-sized, recreated on resize. The marks, premultiplied
 	marks_target:          Texture,
 	// Marks in view this frame, as quads of the quad pipeline, drawn into marks_target
+	marks_quads:           [dynamic; TERRAIN_MARKS_MAX]Render_Quad,
 	marks_buffer:          wgpu.Buffer,
-	marks_count:           u32,
 	// From the last build
 	style:                 Render_Terrain_Style,
 	marks:                 Terrain_Marks,
@@ -1044,16 +1056,21 @@ terrain_resize :: proc(rend: ^Renderer, size: [2]i32) {
 	}
 }
 
-// A frame's terrain: eases the looks, writes the highlights that changed, the arrows, the wash if
+// A frame's terrain: eases the looks, writes the highlights that changed, the arrow, the wash if
 // it changed, the ground's uniforms, and the marks in view.
 // window: size of the window in logical pixels
 terrain_frame :: proc(
 	rend: ^Renderer,
-	frame: Render_Terrain_Frame,
+	frame: ^Render_Terrain_Frame,
 	view: Render_View,
 	window: [2]f32,
 ) {
-	assert(len(frame.highlights) <= RENDER_TERRAIN_HIGHLIGHTS_MAX)
+	// A highlight's cells, in frame.highlight_cells
+	cells_of :: proc(frame: ^Render_Terrain_Frame, highlight: Render_Highlight) -> []bool {
+		count := highlight.size.x * highlight.size.y
+		return frame.highlight_cells[highlight.cells_begin:][:count]
+	}
+
 	style := &TERRAIN.style
 
 	// Step: Visible. The part of the world in the window, in cells
@@ -1074,7 +1091,7 @@ terrain_frame :: proc(
 	{
 		far := view.zoom < REGION_FAR_ZOOM
 		for region, id in frame.regions {
-			if id == 0 || id >= AREAS_PER_LAYER do continue
+			if id == 0 do continue
 			band: Render_Band
 			switch frame.region_display {
 			case .Hidden:
@@ -1102,16 +1119,15 @@ terrain_frame :: proc(
 		circles: [AREA_LAYERS][dynamic; AREA_CIRCLES_MAX]Ground_Area_Circle
 		for &drawn, slot in TERRAIN.highlights {
 			area := u8(slot + 1)
-			highlight: Render_Highlight
-			if slot < len(frame.highlights) do highlight = frame.highlights[slot]
-			shown := len(highlight.cells) > 0
+			highlight := frame.highlights[slot]
+			cells := cells_of(frame, highlight)
+			shown := len(cells) > 0
 			layer := HIGHLIGHT_LAYERS[highlight.kind]
 			look := style.highlight_looks[highlight.kind]
 
 			// 0 is kept for "none"
 			content: u64
 			if shown {
-				assert(len(highlight.cells) == highlight.size.x * highlight.size.y)
 				header := [6]int {
 					int(highlight.kind),
 					int(highlight.on_water),
@@ -1121,7 +1137,7 @@ terrain_frame :: proc(
 					highlight.size.y,
 				}
 				content = u64(xxhash.XXH3_64_default(slice.to_bytes(header[:])))
-				content = u64(xxhash.XXH3_64_with_seed(slice.to_bytes(highlight.cells), content))
+				content = u64(xxhash.XXH3_64_with_seed(slice.to_bytes(cells), content))
 				content = max(content, 1)
 			}
 
@@ -1131,7 +1147,6 @@ terrain_frame :: proc(
 					ground_area_write(rend, drawn.layer, area, .Land, {}, {}, nil)
 				}
 				if shown {
-					cells := highlight.cells
 					if look.widen > 0 {
 						thick := make([]bool, len(cells), context.temp_allocator)
 						mask_thicken(cells, highlight.size, look.widen, WIDEN_SUPPORT, thick)
@@ -1143,8 +1158,7 @@ terrain_frame :: proc(
 								if other_slot == slot || HIGHLIGHT_LAYERS[other.kind] != layer do continue
 								at := cell - other.corner
 								if at.x < 0 || at.y < 0 || at.x >= other.size.x || at.y >= other.size.y do continue
-								if len(other.cells) > 0 &&
-								   other.cells[at.y * other.size.x + at.x] {
+								if cells_of(frame, other)[at.y * other.size.x + at.x] {
 									inside = false
 									break
 								}
@@ -1175,7 +1189,7 @@ terrain_frame :: proc(
 			drawn.look.thickness += (look.band.thickness - drawn.look.thickness) * ease
 			drawn.look.inside += (look.band.inside - drawn.look.inside) * ease
 			looks[layer][area] = drawn.look
-			for circle in highlight.circles {
+			for circle in frame.highlight_circles[highlight.circles_begin:][:highlight.circles_len] {
 				if len(circles[layer]) == AREA_CIRCLES_MAX do break
 				append(&circles[layer], Ground_Area_Circle{circle.center, circle.radius, area})
 			}
@@ -1186,21 +1200,25 @@ terrain_frame :: proc(
 		}
 	}
 
-	// Step: Arrows
-	ground_stroke_write(
-		rend,
-		STROKE_ARROWS,
-		frame.arrows,
-		{style.arrow_head_length, style.arrow_head_width},
-	)
+	// Step: Arrow
+	{
+		arrow := new(Polylines(RENDER_TERRAIN_ARROW_POINTS_MAX, 1), context.temp_allocator)
+		copy(polylines_reserve(len(frame.arrow), false, arrow), frame.arrow[:])
+		ground_stroke_write(
+			rend,
+			STROKE_ARROWS,
+			arrow,
+			{style.arrow_head_length, style.arrow_head_width},
+		)
+	}
 
 	// Step: Wash. Its values are written when they change
 	ground := ground_from_style(style^)
 	if len(frame.wash) > 0 {
 		assert(len(frame.wash) == RENDER_TERRAIN_CELLS)
-		content := max(u64(xxhash.XXH3_64_default(frame.wash)), 1)
+		content := max(u64(xxhash.XXH3_64_default(frame.wash[:])), 1)
 		if content != TERRAIN.wash_written {
-			ground_value_write(rend, frame.wash)
+			ground_value_write(rend, frame.wash[:])
 			TERRAIN.wash_written = content
 		}
 		ground.value = {
@@ -1280,16 +1298,15 @@ terrain_frame :: proc(
 
 	// Step: Marks in view
 	{
-		quads := make([]Render_Quad, len(TERRAIN.marks.marks), context.temp_allocator)
-		count := terrain_marks_quads(&TERRAIN.marks, visible, quads)
-		TERRAIN.marks_count = u32(count)
-		if count > 0 {
+		clear(&TERRAIN.marks_quads)
+		terrain_marks_quads(&TERRAIN.marks, visible, &TERRAIN.marks_quads)
+		if len(TERRAIN.marks_quads) > 0 {
 			wgpu.QueueWriteBuffer(
 				rend.queue,
 				TERRAIN.marks_buffer,
 				0,
-				raw_data(quads),
-				uint(count * size_of(Render_Quad)),
+				raw_data(TERRAIN.marks_quads[:]),
+				uint(len(TERRAIN.marks_quads) * size_of(Render_Quad)),
 			)
 		}
 	}
@@ -1345,7 +1362,7 @@ terrain_encode :: proc(rend: ^Renderer, encoder: wgpu.CommandEncoder) {
 				},
 			},
 		)
-		quads_draw(rend, pass, TERRAIN.marks_buffer, .World, 0, int(TERRAIN.marks_count))
+		quads_draw(rend, pass, TERRAIN.marks_buffer, .World, 0, len(TERRAIN.marks_quads))
 		wgpu.RenderPassEncoderEnd(pass)
 		wgpu.RenderPassEncoderRelease(pass)
 	}
@@ -1816,7 +1833,7 @@ ground_stroke_write :: proc(
 	rend: ^Renderer,
 	stroke: int,
 	// Points in cells
-	lines: Polylines,
+	lines: ^Polylines($P, $R),
 	// Arrowhead at the end of each open run: length, width, in logical pixels. Zero = none
 	head: [2]f32 = {},
 ) {

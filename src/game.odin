@@ -58,17 +58,17 @@ Region :: struct {
 	color: [3]u8,
 }
 
-game_init :: proc(game: ^Game) {
+game_init :: proc(game: ^Game) {}
 
-}
-
-Game_Load :: struct {
-	success:   bool,
-	geography: Render_Terrain,
-}
-
-game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
-	out.success = true
+// Out: game, geography
+game_load :: proc(
+	game: ^Game,
+	scenario_name: string,
+	geo_out: ^Render_Geography,
+) -> (
+	success: bool,
+) {
+	success = true
 
 	// Load regions from tabula file
 	{
@@ -117,7 +117,7 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 
 		for entry in entries {
 			path := fmt.tprintf("assets/scenarios/%s/%s.png", scenario_name, entry.name)
-			out.success &= load_map_bitmap_one_channel(path, entry.buf)
+			success &= load_map_bitmap_one_channel(path, entry.buf)
 		}
 	}
 
@@ -125,7 +125,7 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 	region_colors := new([MAP_CELLS][3]u8, context.temp_allocator)
 	{
 		path := fmt.tprintf("assets/scenarios/%s/regions.png", scenario_name)
-		out.success &= load_map_bitmap_3_channels(path, region_colors)
+		success &= load_map_bitmap_3_channels(path, region_colors)
 	}
 
 	// Process river and road data
@@ -134,26 +134,25 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 		Desc :: struct {
 			kind_name:    string,
 			smoothing:    Polyline_Smoothing,
-			polyline_out: ^Polylines,
+			polyline_out: ^Render_Courses,
 		}
 		descs: []Desc = {
 			// Rivers: wide curves
 			{
 				kind_name = "rivers",
 				smoothing = {cut_iter = 3, cut_ratio = 0.25},
-				polyline_out = &out.geography.rivers,
+				polyline_out = &geo_out.rivers,
 			},
 			// Roads: straight, tight bends
 			{
 				kind_name = "roads",
 				smoothing = {cut_iter = 2, cut_ratio = 0.25, cut_max = 1.5},
-				polyline_out = &out.geography.roads,
+				polyline_out = &geo_out.roads,
 			},
 		}
 
-		lines_in := polylines_make(
-			WAY_MAX_STEPS_PER_TYPE,
-			WAY_PER_TYPE_MAX,
+		lines_in := new(
+			Polylines(WAY_MAX_STEPS_PER_TYPE, WAY_PER_TYPE_MAX),
 			context.temp_allocator,
 		)
 
@@ -163,31 +162,20 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 			source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
 			root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
 
-			polylines_clear(&lines_in)
+			polylines_clear(lines_in)
 
 			// Load the data points
 			for entry in root.children {
 				points_in := tbl.get_children(entry, "points")
-				points_out := polylines_reserve(len(points_in), false, &lines_in)
+				points_out := polylines_reserve(len(points_in), false, lines_in)
 				for pt, i in points_in {
 					points_out[i] = {pt.children[0].num, pt.children[1].num} + 0.5
 				}
 			}
 
-			// Create output for smoothing: each cut doubles the points
-			lines_out := polylines_make(
-				len(lines_in.points) << uint(desc.smoothing.cut_iter),
-				len(lines_in.runs),
-				context.temp_allocator,
-			)
-
-			// Perform smoothing
-			polylines_smooth(lines_in, desc.smoothing, &lines_out)
-
-			if desc.polyline_out != nil {
-				desc.polyline_out^ = lines_out
-			}
-
+			// Perform smoothing: each cut doubles the points
+			polylines_clear(desc.polyline_out)
+			polylines_smooth(lines_in, desc.smoothing, desc.polyline_out)
 		}
 	}
 
@@ -195,13 +183,13 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 	ways_sdf := new([Way_Type][MAP_CELLS]f32, context.temp_allocator)
 	{
 		Desc :: struct {
-			lines: Polylines,
+			lines: ^Render_Courses,
 			reach: f32,
 		}
 
 		descs: [Way_Type]Desc = {
-			.River = {lines = out.geography.rivers, reach = RIVER_DIST_MAX},
-			.Road = {lines = out.geography.roads, reach = ROAD_DIST_MAX},
+			.River = {lines = &geo_out.rivers, reach = RIVER_DIST_MAX},
+			.Road = {lines = &geo_out.roads, reach = ROAD_DIST_MAX},
 		}
 
 		for desc, kind in descs {
@@ -222,15 +210,14 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 	}
 
 	// Prepare geography
-	out.geography.elevation = game.terrain.elevation[:]
-	out.geography.moisture = game.terrain.moisture[:]
+	geo_out.elevation = game.terrain.elevation
+	geo_out.moisture = game.terrain.moisture
 
 	// Assign water
 	sea_mask := new([MAP_CELLS]bool, context.temp_allocator)
 	{
-		out.geography.water = make_slice([]bool, MAP_CELLS, allocator = context.temp_allocator)
 		for x, i in game.terrain.surface {
-			out.geography.water[i] = x > 0
+			geo_out.water[i] = x > 0
 			sea_mask[i] = x == 255
 		}
 	}
@@ -246,7 +233,7 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 		land_elevation := new([MAP_CELLS]f32, context.temp_allocator)
 		land := new([MAP_CELLS]f32, context.temp_allocator)
 		for x, i in game.terrain.elevation {
-			if out.geography.water[i] do continue
+			if geo_out.water[i] do continue
 			land_elevation[i] = f32(x) / 255
 			land[i] = 1
 		}
@@ -267,21 +254,16 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 	{
 		for color, i in region_colors^ {
 			game.terrain.regions[i] = 0
-			if out.geography.water[i] do continue
+			if geo_out.water[i] do continue
 			game.terrain.regions[i] = u8(region_by_color[color])
 		}
-		out.geography.regions = game.terrain.regions[:]
+		geo_out.regions = game.terrain.regions
 	}
 
 	// Classify terrian (Cover)
-	out.geography.cover = make_slice(
-		[]Render_Cover_Cell,
-		MAP_CELLS,
-		allocator = context.temp_allocator,
-	)
 	for i in 0 ..< MAP_CELLS {
 		cell: Render_Cover_Cell
-		if !out.geography.water[i] {
+		if !geo_out.water[i] {
 			elevation := game.terrain.elevation[i]
 			moisture := game.terrain.moisture[i]
 			trees := game.terrain.trees[i]
@@ -322,11 +304,11 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 				if best != .Open do cell = {best, u8(clamp(suits[best], 0, 1) * 255 + 0.5)}
 			}
 		}
-		out.geography.cover[i] = cell
+		geo_out.cover[i] = cell
 	}
 
 	// "Flatten" mountains where roads pass
-	for &cell, idx in out.geography.cover {
+	for &cell, idx in geo_out.cover {
 		if cell.kind == .Mountains && ways_sdf[.Road][idx] < ROAD_DIST_MAX do cell.kind = .Highland
 	}
 
@@ -373,3 +355,4 @@ load_map_bitmap_3_channels :: proc(file: string, out: ^[MAP_CELLS][3]u8) -> bool
 }
 
 game_tick :: proc(game: ^Game) {}
+

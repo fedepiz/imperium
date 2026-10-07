@@ -597,10 +597,10 @@ renderer_draw :: proc(
 		)
 	}
 
-	// Terrain: this frame's looks, highlights, arrows, wash and marks in view
+	// Terrain: this frame's looks, highlights, arrow, wash and marks in view
 	{
 		window := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)} / pixel_density(rend)
-		terrain_frame(rend, data.terrain, data.view, window)
+		terrain_frame(rend, &data.terrain, data.view, window)
 	}
 
 	encoder := wgpu.DeviceCreateCommandEncoder(rend.device)
@@ -721,9 +721,13 @@ Render_Data :: struct {
 	quads:   [Render_Space][dynamic; RENDER_QUADS_MAX]Render_Quad,
 }
 
-// Keeps the view
+// Empties the lists: the quads, and the terrain's highlights, arrow and wash. Keeps the rest
 render_data_clear :: proc(data: ^Render_Data) {
-	data.terrain = {}
+	data.terrain.highlights = {}
+	clear(&data.terrain.highlight_cells)
+	clear(&data.terrain.highlight_circles)
+	clear(&data.terrain.arrow)
+	clear(&data.terrain.wash)
 	for space in Render_Space do clear(&data.quads[space])
 }
 

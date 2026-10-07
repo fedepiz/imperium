@@ -37,18 +37,15 @@ terrain_coast_build :: proc(water: []bool, size: [2]int, coast: []f32) {
 	// Step: Trace. Water 1, land 2: land is on the left of every run
 	labels := make([]u16, cells, context.temp_allocator)
 	for is_water, i in water do labels[i] = is_water ? 1 : 2
-	raw := polylines_over(
-		make([][2]f32, RAW_POINTS_MAX, context.temp_allocator),
-		make([]Polyline_Run, RUNS_MAX, context.temp_allocator),
-	)
-	boundaries_trace(labels, size, &raw)
+	raw := new(Polylines(RAW_POINTS_MAX, RUNS_MAX), context.temp_allocator)
+	boundaries_trace(labels, size, raw)
 
 	// Step: Smooth
-	smooth := polylines_over(
-		make([][2]f32, RAW_POINTS_MAX << uint(COAST_SMOOTHING.cut_iter), context.temp_allocator),
-		make([]Polyline_Run, RUNS_MAX, context.temp_allocator),
+	smooth := new(
+		Polylines(RAW_POINTS_MAX << uint(COAST_SMOOTHING.cut_iter), RUNS_MAX),
+		context.temp_allocator,
 	)
-	polylines_smooth(raw, COAST_SMOOTHING, &smooth)
+	polylines_smooth(raw, COAST_SMOOTHING, smooth)
 
 	// Step: Stamp. Offset and side to the smoothed line, for cells within COAST_REACH
 	to_coast := make([][2]f32, cells, context.temp_allocator)
@@ -72,5 +69,112 @@ terrain_coast_build :: proc(water: []bool, size: [2]int, coast: []f32) {
 		near_side := side[i]
 		if near > 1 do near_side = is_water ? -1 : 1
 		coast[i] = math.lerp(near_side * near, far, math.smoothstep(COAST_REACH - 1, COAST_REACH, near))
+	}
+}
+
+// Out: out, appended to.
+// Traces the edges between cells of different labels as polylines along cell corners.
+// Label 0 = no cell: edges against it are not traced. The larger label is on the left of each run (+y down).
+// Runs are open between corners where 1, 3 or 4 edges meet, closed loops elsewhere. Unsmoothed
+@(private = "file")
+boundaries_trace :: proc(labels: []u16, size: [2]int, out: ^Polylines($P, $R)) {
+	assert(len(labels) == size.x * size.y)
+
+	// Clockwise, +y down
+	Step :: enum {
+		East,
+		South,
+		West,
+		North,
+	}
+	@(rodata, static)
+	STEPS := [Step][2]int {
+		.East  = {1, 0},
+		.South = {0, 1},
+		.West  = {-1, 0},
+		.North = {0, -1},
+	}
+
+	// Per corner: unwalked outgoing edges, and how many edges meet there
+	corners := size + 1
+	outgoing := make([]bit_set[Step], corners.x * corners.y, context.temp_allocator)
+	meeting := make([]u8, len(outgoing), context.temp_allocator)
+
+	// Step: Edges. Directed so the larger label is on the left
+	edge :: proc(outgoing: []bit_set[Step], meeting: []u8, corners, from: [2]int, step: Step) {
+		to := from + STEPS[step]
+		outgoing[from.y * corners.x + from.x] += {step}
+		meeting[from.y * corners.x + from.x] += 1
+		meeting[to.y * corners.x + to.x] += 1
+	}
+	for y in 0 ..< size.y {
+		for x in 0 ..< size.x {
+			here := labels[y * size.x + x]
+			if here == 0 do continue
+			if y > 0 {
+				above := labels[(y - 1) * size.x + x]
+				if above != 0 && above != here {
+					if here > above do edge(outgoing, meeting, corners, {x + 1, y}, .West)
+					else do edge(outgoing, meeting, corners, {x, y}, .East)
+				}
+			}
+			if x > 0 {
+				left := labels[y * size.x + x - 1]
+				if left != 0 && left != here {
+					if here > left do edge(outgoing, meeting, corners, {x, y}, .South)
+					else do edge(outgoing, meeting, corners, {x, y + 1}, .North)
+				}
+			}
+		}
+	}
+
+	// Step: Walk. Follows edges from start until a junction, a dead end, or back at start
+	walk :: proc(
+		outgoing: []bit_set[Step],
+		meeting: []u8,
+		corners, start: [2]int,
+		step: Step,
+		out: ^Polylines($P, $R),
+	) {
+		begin := len(out.points)
+		closed := false
+		at := start
+		heading := step
+		append(&out.points, [2]f32{f32(at.x), f32(at.y)})
+		for {
+			outgoing[at.y * corners.x + at.x] -= {heading}
+			at += STEPS[heading]
+			c := at.y * corners.x + at.x
+			if at == start && meeting[c] == 2 {
+				closed = true
+				break
+			}
+			append(&out.points, [2]f32{f32(at.x), f32(at.y)})
+			if meeting[c] != 2 || outgoing[c] == {} do break
+			for s in Step do if s in outgoing[c] {
+				heading = s
+				break
+			}
+		}
+
+		// Runs under 2 points, or past the run capacity, are dropped
+		count := len(out.points) - begin
+		if count < 2 || len(out.runs) == cap(out.runs) {
+			resize(&out.points, begin)
+			return
+		}
+		append(&out.runs, Polyline_Run{begin = begin, len = count, closed = closed})
+	}
+	// Open runs first, then closed loops
+	for c in 0 ..< len(outgoing) {
+		if meeting[c] == 2 do continue
+		for s in Step do if s in outgoing[c] {
+			walk(outgoing, meeting, corners, {c % corners.x, c / corners.x}, s, out)
+		}
+	}
+	for c in 0 ..< len(outgoing) {
+		for s in Step do if s in outgoing[c] {
+			walk(outgoing, meeting, corners, {c % corners.x, c / corners.x}, s, out)
+		}
 	}
 }

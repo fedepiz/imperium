@@ -7,6 +7,9 @@ import "core:math"
 // Pawns: the pieces drawn on the map, restated by the scene every frame. Nothing is kept per pawn.
 // Near, a pawn is a picture, far a medallion, cross-faded
 
+// Pawns in a scene
+MAP_PAWNS_MAX :: 1024
+
 Map_Pawn :: struct {
 	// Centre, in cells
 	pos:         [2]f32,
@@ -46,8 +49,10 @@ Map_Culture :: enum {
 	Germanic,
 }
 
-// Pawn state kept between frames
+// Pawn state: the scene, refilled every frame, and what is kept between frames
 Map_Pawns :: struct {
+	// This frame's pawns. Past the capacity, pawns are dropped
+	scene:       [dynamic; MAP_PAWNS_MAX]Map_Pawn,
 	images:      [Pawn_Set][Map_Culture][Map_Icon]Pawn_Image,
 	// 0: pictures. 1: medallions
 	medallion_t: f32,
@@ -144,18 +149,22 @@ map_pawns_build :: proc(pawns: ^Map_Pawns, assets: ^Assets) {
 
 }
 
+// Empties the scene. Keeps the rest
+map_pawns_clear :: proc(pawns: ^Map_Pawns) {
+	clear(&pawns.scene)
+}
+
 // Out: data, appended to. In/out: pawns.
 // The scene's pawns as world-space quads
-map_pawns_frame :: proc(
+map_pawns_quads :: proc(
 	pawns: ^Map_Pawns,
-	scene: []Map_Pawn,
 	view: Render_View,
 	// Size of the window, in logical pixels
 	window: [2]f32,
 	style: Map_Pawn_Style,
 	// Seconds since the last frame
 	dt: f32,
-	data: ^Render_Data,
+	quads_out: ^[dynamic; RENDER_QUADS_MAX]Render_Quad,
 ) {
 	// Straight RGB and alpha, 0..1, to a quad colour
 	color_of :: proc(rgb: [3]f32, alpha: f32) -> [4]u8 {
@@ -188,8 +197,8 @@ map_pawns_frame :: proc(
 	}
 
 	// Phase: Tints. One per pawn
-	tints := make([][3]f32, len(scene), context.temp_allocator)
-	for pawn, index in scene {
+	tints := make([][3]f32, len(pawns.scene), context.temp_allocator)
+	for pawn, index in pawns.scene {
 		tint := [3]f32{1, 1, 1}
 		if pawn.highlighted do tint = style.highlight
 		if pawn.pulsing do tint += (style.pulse - tint) * pulse
@@ -206,11 +215,11 @@ map_pawns_frame :: proc(
 		// Opacity, 0..1
 		weight: f32,
 	}
-	sprites := make([dynamic]Sprite, 0, len(scene) * len(Pawn_Set), context.temp_allocator)
+	sprites := make([dynamic]Sprite, 0, len(pawns.scene) * len(Pawn_Set), context.temp_allocator)
 	{
 		margin :=
 			[2]f32{visible.x_max - visible.x_min, visible.y_max - visible.y_min} * VIEW_TOLERANCE
-		for pawn, index in scene {
+		for pawn, index in pawns.scene {
 			for weight, set in weights {
 				image := pawns.images[set][pawn.culture][pawn.icon]
 				if weight <= 0 || image.drawing.x_max <= image.drawing.x_min do continue
@@ -238,7 +247,7 @@ map_pawns_frame :: proc(
 		ink := color_of(tint, sprite.weight)
 		rect := Extents{sprite.lo.x, sprite.lo.y, sprite.hi.x, sprite.hi.y}
 		append(
-			&data.quads[.World],
+			quads_out,
 			Render_Quad {
 				rect = rect,
 				source = sprite.image.fill,

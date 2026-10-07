@@ -1,9 +1,7 @@
 #+private
 package main
-import "core:encoding/base64"
 import "core:math"
 import "core:math/linalg"
-import "core:mem"
 import "core:slice"
 
 // All sorts of mixed math helper types
@@ -200,7 +198,9 @@ box_sum :: proc(values: []f32, size: [2]int, reach: int, out: []f32) {
 	for y in 0 ..< size.y {
 		for x in 0 ..< size.x do totals[x + 1] = totals[x] + f64(values[y * size.x + x])
 		for x in 0 ..< size.x {
-			rows[y * size.x + x] = f32(totals[min(x + reach + 1, size.x)] - totals[max(x - reach, 0)])
+			rows[y * size.x + x] = f32(
+				totals[min(x + reach + 1, size.x)] - totals[max(x - reach, 0)],
+			)
 		}
 	}
 
@@ -208,7 +208,9 @@ box_sum :: proc(values: []f32, size: [2]int, reach: int, out: []f32) {
 	for x in 0 ..< size.x {
 		for y in 0 ..< size.y do totals[y + 1] = totals[y] + f64(rows[y * size.x + x])
 		for y in 0 ..< size.y {
-			out[y * size.x + x] = f32(totals[min(y + reach + 1, size.y)] - totals[max(y - reach, 0)])
+			out[y * size.x + x] = f32(
+				totals[min(y + reach + 1, size.y)] - totals[max(y - reach, 0)],
+			)
 		}
 	}
 }
@@ -324,24 +326,12 @@ Polyline_Run :: struct {
 }
 
 // A set of polylines packed in one points buffer. Fixed capacity: appends past it are dropped
-Polylines :: struct {
-	// Note: these [dynamic] are built from slices and are nil-allocator backed
-	points: [dynamic][2]f32,
-	runs:   [dynamic]Polyline_Run,
+Polylines :: struct($POINTS, $RUNS: int) {
+	points: [dynamic; POINTS][2]f32,
+	runs:   [dynamic; RUNS]Polyline_Run,
 }
 
-// Empty set over caller storage. Capacity = len of each slice
-polylines_over :: proc(points: [][2]f32, runs: []Polyline_Run) -> Polylines {
-	return {mem.buffer_from_slice(points), mem.buffer_from_slice(runs)}
-}
-
-polylines_make :: proc(points: int, runs: int, allocator: mem.Allocator) -> Polylines {
-	points := make_slice([][2]f32, points, allocator)
-	runs := make_slice([]Polyline_Run, runs, allocator)
-	return polylines_over(points, runs)
-}
-
-polylines_clear :: proc(lines: ^Polylines) {
+polylines_clear :: proc(lines: ^Polylines($P, $R)) {
 	clear(&lines.points)
 	clear(&lines.runs)
 }
@@ -352,7 +342,7 @@ polylines_clear :: proc(lines: ^Polylines) {
 polylines_reserve :: proc(
 	count: int,
 	closed: bool,
-	lines: ^Polylines,
+	lines: ^Polylines($P, $R),
 ) -> (
 	points: [][2]f32,
 	ok: bool,
@@ -383,7 +373,11 @@ Polyline_Smoothing :: struct {
 // Out: dst, appended to.
 // Smooths every run of src into dst. A run of n points becomes n << cut_iter points.
 // Open runs keep their end points. Runs under 2 points, or that do not fit in dst, are dropped
-polylines_smooth :: proc(src: Polylines, smoothing: Polyline_Smoothing, dst: ^Polylines) {
+polylines_smooth :: proc(
+	src: ^Polylines($SP, $SR),
+	smoothing: Polyline_Smoothing,
+	dst: ^Polylines($DP, $DR),
+) {
 	assert(smoothing.softness >= 0 && smoothing.softness <= 1)
 	assert(smoothing.cut_ratio > 0 && smoothing.cut_ratio <= 0.5)
 	assert(smoothing.cut_iter >= 0)
@@ -446,7 +440,7 @@ polylines_smooth :: proc(src: Polylines, smoothing: Polyline_Smoothing, dst: ^Po
 // side[i] (optional) = 1 if the centre is left of the segment's direction, -1 if right (+y down).
 // Initialise nearest to offsets longer than reach
 polylines_stamp :: proc(
-	lines: Polylines,
+	lines: ^Polylines($P, $R),
 	reach: f32,
 	size: [2]int,
 	nearest: [][2]f32,
@@ -486,112 +480,6 @@ polylines_stamp :: proc(
 					}
 				}
 			}
-		}
-	}
-}
-
-// Out: out, appended to.
-// Traces the edges between cells of different labels as polylines along cell corners.
-// Label 0 = no cell: edges against it are not traced. The larger label is on the left of each run (+y down).
-// Runs are open between corners where 1, 3 or 4 edges meet, closed loops elsewhere. Unsmoothed
-boundaries_trace :: proc(labels: []u16, size: [2]int, out: ^Polylines) {
-	assert(len(labels) == size.x * size.y)
-
-	// Clockwise, +y down
-	Step :: enum {
-		East,
-		South,
-		West,
-		North,
-	}
-	@(rodata, static)
-	STEPS := [Step][2]int {
-		.East  = {1, 0},
-		.South = {0, 1},
-		.West  = {-1, 0},
-		.North = {0, -1},
-	}
-
-	// Per corner: unwalked outgoing edges, and how many edges meet there
-	corners := size + 1
-	outgoing := make([]bit_set[Step], corners.x * corners.y, context.temp_allocator)
-	meeting := make([]u8, len(outgoing), context.temp_allocator)
-
-	// Step: Edges. Directed so the larger label is on the left
-	edge :: proc(outgoing: []bit_set[Step], meeting: []u8, corners, from: [2]int, step: Step) {
-		to := from + STEPS[step]
-		outgoing[from.y * corners.x + from.x] += {step}
-		meeting[from.y * corners.x + from.x] += 1
-		meeting[to.y * corners.x + to.x] += 1
-	}
-	for y in 0 ..< size.y {
-		for x in 0 ..< size.x {
-			here := labels[y * size.x + x]
-			if here == 0 do continue
-			if y > 0 {
-				above := labels[(y - 1) * size.x + x]
-				if above != 0 && above != here {
-					if here > above do edge(outgoing, meeting, corners, {x + 1, y}, .West)
-					else do edge(outgoing, meeting, corners, {x, y}, .East)
-				}
-			}
-			if x > 0 {
-				left := labels[y * size.x + x - 1]
-				if left != 0 && left != here {
-					if here > left do edge(outgoing, meeting, corners, {x, y}, .South)
-					else do edge(outgoing, meeting, corners, {x, y + 1}, .North)
-				}
-			}
-		}
-	}
-
-	// Step: Walk. Follows edges from start until a junction, a dead end, or back at start
-	walk :: proc(
-		outgoing: []bit_set[Step],
-		meeting: []u8,
-		corners, start: [2]int,
-		step: Step,
-		out: ^Polylines,
-	) {
-		begin := len(out.points)
-		closed := false
-		at := start
-		heading := step
-		append(&out.points, [2]f32{f32(at.x), f32(at.y)})
-		for {
-			outgoing[at.y * corners.x + at.x] -= {heading}
-			at += STEPS[heading]
-			c := at.y * corners.x + at.x
-			if at == start && meeting[c] == 2 {
-				closed = true
-				break
-			}
-			append(&out.points, [2]f32{f32(at.x), f32(at.y)})
-			if meeting[c] != 2 || outgoing[c] == {} do break
-			for s in Step do if s in outgoing[c] {
-				heading = s
-				break
-			}
-		}
-
-		// Runs under 2 points, or past the run capacity, are dropped
-		count := len(out.points) - begin
-		if count < 2 || len(out.runs) == cap(out.runs) {
-			resize(&out.points, begin)
-			return
-		}
-		append(&out.runs, Polyline_Run{begin = begin, len = count, closed = closed})
-	}
-	// Open runs first, then closed loops
-	for c in 0 ..< len(outgoing) {
-		if meeting[c] == 2 do continue
-		for s in Step do if s in outgoing[c] {
-			walk(outgoing, meeting, corners, {c % corners.x, c / corners.x}, s, out)
-		}
-	}
-	for c in 0 ..< len(outgoing) {
-		for s in Step do if s in outgoing[c] {
-			walk(outgoing, meeting, corners, {c % corners.x, c / corners.x}, s, out)
 		}
 	}
 }

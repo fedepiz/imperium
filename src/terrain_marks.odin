@@ -244,8 +244,8 @@ terrain_marks_place :: proc(
 	// Signed distance to the coast per cell, in cells. > 0 on land
 	coast: []f32,
 	// Smoothed, in cells. The ground along them stays free of marks
-	rivers: Polylines,
-	roads: Polylines,
+	rivers: ^Render_Courses,
+	roads: ^Render_Courses,
 	// Atlas rects of the drawings
 	images: ^Render_Mark_Images,
 	out: ^Terrain_Marks,
@@ -276,7 +276,7 @@ terrain_marks_place :: proc(
 	claimed := make([]u8, footprint.x * footprint.y, context.temp_allocator)
 	{
 		Way_Band :: struct {
-			lines: Polylines,
+			lines: ^Render_Courses,
 			band:  f32,
 		}
 		to_way := make([][2]f32, cells, context.temp_allocator)
@@ -464,23 +464,28 @@ terrain_marks_place :: proc(
 	})
 }
 
-// Out: out.
-// A world-space quad per mark overlapping visible (in cells), in draw order. Returns how many were
-// written. Quads past len(out) are dropped
-terrain_marks_quads :: proc(marks: ^Terrain_Marks, visible: Extents, out: []Render_Quad) -> (count: int) {
+// Out: out, appended to.
+// A world-space quad per mark overlapping visible (in cells), in draw order. Quads past the
+// capacity are dropped
+terrain_marks_quads :: proc(
+	marks: ^Terrain_Marks,
+	visible: Extents,
+	out: ^[dynamic; TERRAIN_MARKS_MAX]Render_Quad,
+) {
 	for mark in marks.marks {
-		if count == len(out) do break
+		if len(out) == cap(out) do break
 		lo := mark.pos - mark.size / 2
 		hi := mark.pos + mark.size / 2
 		if hi.x < visible.x_min || lo.x > visible.x_max do continue
 		if hi.y < visible.y_min || lo.y > visible.y_max do continue
 		color := [4]u8{255, 255, 255, mark.alpha}
-		out[count] = {
-			rect   = {lo.x, lo.y, hi.x, hi.y},
-			source = mark.source,
-			colors = {color, color, color, color},
-		}
-		count += 1
+		append(
+			out,
+			Render_Quad {
+				rect = {lo.x, lo.y, hi.x, hi.y},
+				source = mark.source,
+				colors = {color, color, color, color},
+			},
+		)
 	}
-	return
 }

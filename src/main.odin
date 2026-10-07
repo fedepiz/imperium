@@ -7,9 +7,10 @@ import "core:mem"
 import sdl "vendor:sdl3"
 
 GLOBAL: struct {
-	assets:      Assets,
-	game:        Game,
-	render_data: Render_Data,
+	assets:           Assets,
+	game:             Game,
+	render_geography: Render_Geography,
+	render_data:      Render_Data,
 }
 
 // Asset budgets must fit the renderer's
@@ -20,6 +21,8 @@ GLOBAL: struct {
 // The map must match the renderer's terrain grid
 #assert(MAP_WIDTH == RENDER_TERRAIN_WIDTH)
 #assert(MAP_HEIGHT == RENDER_TERRAIN_HEIGHT)
+#assert(REGIONS_MAX <= RENDER_TERRAIN_REGIONS_MAX)
+#assert(WAY_PER_TYPE_MAX <= RENDER_TERRAIN_COURSE_RUNS_MAX)
 
 // Camera: zoom per wheel notch, and the zoom range in logical pixels per cell
 CAMERA_ZOOM_STEP :: 1.15
@@ -73,8 +76,7 @@ main :: proc() {
 
 	{
 		game_init(&GLOBAL.game)
-		game_loaded := game_load(&GLOBAL.game, "roman")
-		if !game_loaded.success {
+		if !game_load(&GLOBAL.game, "roman", &GLOBAL.render_geography) {
 			fmt.eprintln("Failed to load game")
 			return
 		}
@@ -90,7 +92,7 @@ main :: proc() {
 		}
 		renderer_terrain_build(
 			&renderer,
-			game_loaded.geography,
+			&GLOBAL.render_geography,
 			RENDER_TERRAIN_STYLE_DEFAULT,
 			marks,
 		)
@@ -150,8 +152,6 @@ main :: proc() {
 
 		render_data_clear(&GLOBAL.render_data)
 
-		regions: [REGIONS_MAX]Render_Region
-
 		// Terrain: every region in its color, the one under the cursor highlighted
 		{
 			hovered := 0
@@ -170,18 +170,15 @@ main :: proc() {
 					)
 				}
 			}
-			for &region, id in regions {
-				color := GLOBAL.game.regions[id].color
-				region = {
+			for region, id in GLOBAL.game.regions {
+				color := region.color
+				GLOBAL.render_data.terrain.regions[id] = {
 					color       = [3]f32{f32(color.r), f32(color.g), f32(color.b)} / 255,
 					highlighted = id == hovered,
 				}
 			}
-			GLOBAL.render_data.terrain = {
-				region_display = .Filled_When_Far,
-				regions        = regions[:],
-				dt             = dt,
-			}
+			GLOBAL.render_data.terrain.region_display = .Filled_When_Far
+			GLOBAL.render_data.terrain.dt = dt
 		}
 
 		if !renderer_draw(&renderer, &GLOBAL.render_data) {
