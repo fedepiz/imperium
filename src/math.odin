@@ -185,6 +185,35 @@ grid_blur :: proc(values: []f32, size: [2]int, sigma: f32, reach: int) {
 }
 
 // Out: out.
+// Sum over the (2 * reach + 1) square around each cell, clipped at the grid edges.
+// Separable, with running totals: the cost does not depend on reach
+box_sum :: proc(values: []f32, size: [2]int, reach: int, out: []f32) {
+	assert(len(values) == size.x * size.y && len(out) == len(values))
+	assert(reach >= 0)
+
+	// Running totals along one row or column: totals[k] = sum of its first k values.
+	// f64: f32 would drift over a long line
+	totals := make([]f64, max(size.x, size.y) + 1, context.temp_allocator)
+
+	// Step: Rows. Each cell's sum along its row
+	rows := make([]f32, len(values), context.temp_allocator)
+	for y in 0 ..< size.y {
+		for x in 0 ..< size.x do totals[x + 1] = totals[x] + f64(values[y * size.x + x])
+		for x in 0 ..< size.x {
+			rows[y * size.x + x] = f32(totals[min(x + reach + 1, size.x)] - totals[max(x - reach, 0)])
+		}
+	}
+
+	// Step: Columns. Each cell's sum of the row sums along its column
+	for x in 0 ..< size.x {
+		for y in 0 ..< size.y do totals[y + 1] = totals[y] + f64(rows[y * size.x + x])
+		for y in 0 ..< size.y {
+			out[y * size.x + x] = f32(totals[min(y + reach + 1, size.y)] - totals[max(y - reach, 0)])
+		}
+	}
+}
+
+// Out: out.
 // Thickens the parts of a mask thinner than about 2 * widen + 1 cells, so threads become bands.
 // Does not extend past the ends of threads, nor grow isolated cells.
 // support: cells of the mask a cell needs within widen of it to be added. A straight 1-cell thread gives 3

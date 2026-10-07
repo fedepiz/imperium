@@ -12,6 +12,7 @@ REGIONS_MAX :: 256
 
 MAP_WIDTH :: 1024
 MAP_HEIGHT :: 1024
+MAP_SIZE: [2]int : {MAP_WIDTH, MAP_HEIGHT}
 MAP_CELLS :: MAP_WIDTH * MAP_HEIGHT
 
 NAME_CAPACITY :: 64
@@ -19,6 +20,10 @@ NAME_CAPACITY :: 64
 WAY_PER_TYPE_MAX :: 256
 WAY_LENGTH_MAX :: 1024
 WAY_MAX_STEPS_PER_TYPE :: WAY_LENGTH_MAX * 4
+
+RIVER_DIST_MAX :: 12
+ROAD_DIST_MAX :: 1.5
+BASIN_DIST_MAX :: 24
 
 Game :: struct {
 	terrain: Terrain,
@@ -123,18 +128,27 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 		out.success &= load_map_bitmap_3_channels(path, region_colors)
 	}
 
-	// Load river and road data
+	// Process river and road data
+
 	{
 		Desc :: struct {
-			kind_name: string,
-			smoothing: Polyline_Smoothing,
-			out:       ^Polylines,
+			kind_name:    string,
+			smoothing:    Polyline_Smoothing,
+			polyline_out: ^Polylines,
 		}
 		descs: []Desc = {
 			// Rivers: wide curves
-			{kind_name = "rivers", smoothing = {cut_iter = 3, cut_ratio = 0.25}, out = &out.geography.rivers},
+			{
+				kind_name = "rivers",
+				smoothing = {cut_iter = 3, cut_ratio = 0.25},
+				polyline_out = &out.geography.rivers,
+			},
 			// Roads: straight, tight bends
-			{kind_name = "roads", smoothing = {cut_iter = 2, cut_ratio = 0.25, cut_max = 1.5}, out = &out.geography.roads},
+			{
+				kind_name = "roads",
+				smoothing = {cut_iter = 2, cut_ratio = 0.25, cut_max = 1.5},
+				polyline_out = &out.geography.roads,
+			},
 		}
 
 		lines_in := polylines_make(
@@ -143,25 +157,20 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 			context.temp_allocator,
 		)
 
-
 		for desc in descs {
+			// Load in the data from the way description file
 			path := fmt.tprintf("assets/scenarios/%s/%s.txt", scenario_name, desc.kind_name)
 			source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
 			root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
 
 			polylines_clear(&lines_in)
 
-
-			// Reserve the first line for the zero-way
-			polylines_reserve(0, false, &lines_in)
-
 			// Load the data points
 			for entry in root.children {
 				points_in := tbl.get_children(entry, "points")
 				points_out := polylines_reserve(len(points_in), false, &lines_in)
 				for pt, i in points_in {
-					points_out[i].x = pt.children[0].num
-					points_out[i].y = pt.children[1].num
+					points_out[i] = {pt.children[0].num, pt.children[1].num} + 0.5
 				}
 			}
 
@@ -175,7 +184,40 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 			// Perform smoothing
 			polylines_smooth(lines_in, desc.smoothing, &lines_out)
 
-			desc.out^ = lines_out
+			if desc.polyline_out != nil {
+				desc.polyline_out^ = lines_out
+			}
+
+		}
+	}
+
+	// Calculate signed distance field to river
+	ways_sdf := new([Way_Type][MAP_CELLS]f32, context.temp_allocator)
+	{
+		Desc :: struct {
+			lines: Polylines,
+			reach: f32,
+		}
+
+		descs: [Way_Type]Desc = {
+			.River = {lines = out.geography.rivers, reach = RIVER_DIST_MAX},
+			.Road = {lines = out.geography.roads, reach = ROAD_DIST_MAX},
+		}
+
+		for desc, kind in descs {
+			offsets := new([MAP_CELLS][2]f32, context.temp_allocator)
+
+			// Must initialise offsets with high value, as the stamp algorithm only
+			// *reduces* distances
+			for &p in offsets {
+				p.x = desc.reach
+			}
+
+			polylines_stamp(desc.lines, desc.reach, MAP_SIZE, offsets[:], nil)
+
+			for v, i in offsets {
+				ways_sdf[kind][i] = linalg.length(v)
+			}
 		}
 	}
 
@@ -184,10 +226,40 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 	out.geography.moisture = game.terrain.moisture[:]
 
 	// Assign water
+	sea_mask := new([MAP_CELLS]bool, context.temp_allocator)
 	{
 		out.geography.water = make_slice([]bool, MAP_CELLS, allocator = context.temp_allocator)
 		for x, i in game.terrain.surface {
 			out.geography.water[i] = x > 0
+			sea_mask[i] = x == 255
+		}
+	}
+
+	// Calculate distance to sea
+	sea_sdf := new([MAP_CELLS]f32, context.temp_allocator)
+	distance_transform(sea_mask[:], MAP_SIZE, sea_sdf[:])
+
+	// Calculate basin depth: mean land elevation around each cell, minus its own. > 0 in basins and valleys
+	basin := new([MAP_CELLS]f32, context.temp_allocator)
+	{
+		// Water adds neither elevation nor land, so the mean is over land only
+		land_elevation := new([MAP_CELLS]f32, context.temp_allocator)
+		land := new([MAP_CELLS]f32, context.temp_allocator)
+		for x, i in game.terrain.elevation {
+			if out.geography.water[i] do continue
+			land_elevation[i] = f32(x) / 255
+			land[i] = 1
+		}
+
+		elevation_around := new([MAP_CELLS]f32, context.temp_allocator)
+		land_around := new([MAP_CELLS]f32, context.temp_allocator)
+		box_sum(land_elevation[:], MAP_SIZE, BASIN_DIST_MAX, elevation_around[:])
+		box_sum(land[:], MAP_SIZE, BASIN_DIST_MAX, land_around[:])
+
+		// Land only. land_around counts the cell itself, so it is at least 1
+		for e, i in land_elevation {
+			if land[i] == 0 do continue
+			basin[i] = elevation_around[i] / land_around[i] - e
 		}
 	}
 
@@ -223,15 +295,23 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 				cell = {.Mountains, 255}
 			} else {
 				low := smoothstep(0.22, 0.12, e)
-				// Suitability per kind; the best wins, earlier kinds win ties.
-				// Left out until rivers and the sea distance exist: Fertile (dry_river, valley), Marsh's delta term
+				// Dry land near a river
+				dry_river := smoothstep(0.62, 0.52, m) * smoothstep(5, 1.5, ways_sdf[.River][i])
+				// Near both a river and the sea
+				delta := smoothstep(6, 2, ways_sdf[.River][i]) * smoothstep(16, 6, sea_sdf[i])
+				// Moist land near a river, lower than the land around it
+				valley :=
+					smoothstep(0.55, 0.65, m) *
+					smoothstep(12, 4, ways_sdf[.River][i]) *
+					smoothstep(0.02, 0.07, basin[i])
+				// Suitability per kind; the best wins, earlier kinds win ties
 				suits := [Render_Cover]f32 {
 					.Open      = 1.0 / 6,
 					.Forest    = smoothstep(0.05, 0.75, t),
 					.Desert    = smoothstep(0.47, 0.35, m),
 					.Steppe    = smoothstep(0.40, 0.47, m) * smoothstep(0.58, 0.48, m),
-					.Fertile   = 0,
-					.Marsh     = 1.5 * low * smoothstep(0.80, 0.88, m),
+					.Fertile   = 1.3 * max(dry_river, valley),
+					.Marsh     = 1.5 * low * max(delta, smoothstep(0.80, 0.88, m)),
 					.Highland  = 1.2 * smoothstep(0.55, 1.0, e),
 					.Mountains = 0,
 					.Fields    = 0.6 * smoothstep(0.52, 0.62, m) * smoothstep(0.3, 0.1, t),
@@ -243,6 +323,11 @@ game_load :: proc(game: ^Game, scenario_name: string) -> (out: Game_Load) {
 			}
 		}
 		out.geography.cover[i] = cell
+	}
+
+	// "Flatten" mountains where roads pass
+	for &cell, idx in out.geography.cover {
+		if cell.kind == .Mountains && ways_sdf[.Road][idx] < ROAD_DIST_MAX do cell.kind = .Highland
 	}
 
 	return
