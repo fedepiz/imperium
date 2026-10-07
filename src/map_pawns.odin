@@ -12,10 +12,25 @@ Map_Pawn :: struct {
 	pos:         [2]f32,
 	icon:        Map_Icon,
 	culture:     Map_Culture,
-	// Tinted in Map_Style.pawn_highlight
+	// Tinted in Map_Pawn_Style.highlight
 	highlighted: bool,
-	// Tint swings to Map_Style.pawn_pulse and back
+	// Tint swings to Map_Pawn_Style.pulse and back
 	pulsing:     bool,
+}
+
+// Colours: straight RGB, 0..1
+Map_Pawn_Style :: struct {
+	// Silhouettes under the drawings
+	paper:     [3]f32,
+	// Tints: when highlighted, and at the peak of a pulse
+	highlight: [3]f32,
+	pulse:     [3]f32,
+}
+
+MAP_PAWN_STYLE_DEFAULT :: Map_Pawn_Style {
+	paper     = {0.840, 0.772, 0.620},
+	highlight = {0.900, 0.350, 0.300},
+	pulse     = {1.000, 0.700, 0.350},
 }
 
 Map_Icon :: enum {
@@ -129,26 +144,36 @@ map_pawns_build :: proc(pawns: ^Map_Pawns, assets: ^Assets) {
 
 }
 
-// Out: quads, passes, appended to. In/out: pawns.
+// Out: data, appended to. In/out: pawns.
 // The scene's pawns as a world-space quad pass
 map_pawns_frame :: proc(
 	pawns: ^Map_Pawns,
-	assets: ^Assets,
 	scene: []Map_Pawn,
 	view: Render_View,
-	// The part of the world in the window, in cells
-	visible: Extents,
-	style: Map_Style,
+	// Size of the window, in logical pixels
+	window: [2]f32,
+	style: Map_Pawn_Style,
 	// Seconds since the last frame
 	dt: f32,
-	quads: ^[dynamic; RENDER_QUADS_MAX]Render_Quad,
-	passes: ^[dynamic; RENDER_PASS_MAX]Render_Pass,
+	data: ^Render_Data,
 ) {
 	// Straight RGB and alpha, 0..1, to a quad colour
 	color_of :: proc(rgb: [3]f32, alpha: f32) -> [4]u8 {
 		c := [4]f32{rgb.r, rgb.g, rgb.b, alpha}
 		c = {clamp(c.r, 0, 1), clamp(c.g, 0, 1), clamp(c.b, 0, 1), clamp(c.a, 0, 1)}
 		return {u8(c.r * 255 + 0.5), u8(c.g * 255 + 0.5), u8(c.b * 255 + 0.5), u8(c.a * 255 + 0.5)}
+	}
+
+	// Phase: Visible. The part of the world in the window, in cells
+	visible: Extents
+	{
+		half := window / 2 / view.zoom
+		visible = {
+			x_min = view.center.x - half.x,
+			y_min = view.center.y - half.y,
+			x_max = view.center.x + half.x,
+			y_max = view.center.y + half.y,
+		}
 	}
 
 	// Phase: Clocks. The pulse, and the fade between pictures and medallions
@@ -166,8 +191,8 @@ map_pawns_frame :: proc(
 	tints := make([][3]f32, len(scene), context.temp_allocator)
 	for pawn, index in scene {
 		tint := [3]f32{1, 1, 1}
-		if pawn.highlighted do tint = style.pawn_highlight
-		if pawn.pulsing do tint += (style.pawn_pulse - tint) * pulse
+		if pawn.highlighted do tint = style.highlight
+		if pawn.pulsing do tint += (style.pulse - tint) * pulse
 		tints[index] = tint
 	}
 
@@ -208,14 +233,14 @@ map_pawns_frame :: proc(
 
 	// Phase: Sprite quads. The silhouette in paper colour, then the drawing over it, both tinted
 	{
-		begin := len(quads)
+		quads := make([dynamic]Render_Quad, 0, 2 * len(sprites), context.temp_allocator)
 		for sprite in sprites {
 			tint := tints[sprite.pawn]
 			paper := color_of(style.paper * tint, sprite.weight)
 			ink := color_of(tint, sprite.weight)
 			rect := Extents{sprite.lo.x, sprite.lo.y, sprite.hi.x, sprite.hi.y}
 			append(
-				quads,
+				&quads,
 				Render_Quad {
 					rect = rect,
 					source = sprite.image.fill,
@@ -228,7 +253,7 @@ map_pawns_frame :: proc(
 				},
 			)
 		}
-		append(passes, Render_Quad_Pass{space = .World, begin = begin, len = len(quads) - begin})
+		render_quads(data, .World, quads[:])
 	}
 }
 

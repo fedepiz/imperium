@@ -1,5 +1,6 @@
 #+private
 package main
+import "core:encoding/base64"
 import "core:math"
 import "core:math/linalg"
 import "core:mem"
@@ -252,7 +253,7 @@ image_halve :: proc(src: []u8, size: [2]int, dst: []u8) {
 // Scalars
 
 // Smoothstep from 0 at from to 1 at full. full < from: decreasing
-ramp :: proc(from, full, value: f32) -> f32 {
+smoothstep :: proc(from, full, value: f32) -> f32 {
 	if full > from do return math.smoothstep(from, full, value)
 	return 1 - math.smoothstep(full, from, value)
 }
@@ -303,6 +304,36 @@ Polylines :: struct {
 // Empty set over caller storage. Capacity = len of each slice
 polylines_over :: proc(points: [][2]f32, runs: []Polyline_Run) -> Polylines {
 	return {mem.buffer_from_slice(points), mem.buffer_from_slice(runs)}
+}
+
+polylines_make :: proc(points: int, runs: int, allocator: mem.Allocator) -> Polylines {
+	points := make_slice([][2]f32, points, allocator)
+	runs := make_slice([]Polyline_Run, runs, allocator)
+	return polylines_over(points, runs)
+}
+
+polylines_clear :: proc(lines: ^Polylines) {
+	clear(&lines.points)
+	clear(&lines.runs)
+}
+
+// Out: lines, appended to.
+// Adds a run of count points, or nothing if the points or the run do not fit.
+// Returns the run's points, zeroed, to be written by the caller
+polylines_reserve :: proc(
+	count: int,
+	closed: bool,
+	lines: ^Polylines,
+) -> (
+	points: [][2]f32,
+	ok: bool,
+) #optional_ok {
+	assert(count >= 0)
+	begin := len(lines.points)
+	if len(lines.runs) == cap(lines.runs) || begin + count > cap(lines.points) do return
+	resize(&lines.points, begin + count)
+	append(&lines.runs, Polyline_Run{begin = begin, len = count, closed = closed})
+	return lines.points[begin:], true
 }
 
 // Neighbour averaging (soften), then Chaikin corner cutting

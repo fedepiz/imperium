@@ -5,20 +5,20 @@ import "core:math"
 import "core:math/linalg"
 import "core:slice"
 
-// Marks: small drawings scattered over the map (mountains, trees, waves). Placed once, drawn as quads.
+// Terrain marks: small drawings scattered over the map (mountains, trees, waves). Placed once, drawn as quads.
 // Each layer is a jittered grid of candidate points. At a point every marking of the layer gets a score from
 // coast distance, elevation, temperature and cover. A mark is kept with probability sum(scores), its marking
 // picked by score. Marks then claim ground, in layer order, so they do not cover ways or each other
 
 // Roman scenario: 42,887 candidates, 38,675 placed
-MAP_MARKS_MAX :: 1 << 16
+TERRAIN_MARKS_MAX :: 1 << 16
 
-Map_Marks :: struct {
+Terrain_Marks :: struct {
 	// Sorted by foot (bottom edge), top to bottom: nearer marks draw over farther ones
-	marks: [dynamic; MAP_MARKS_MAX]Map_Mark,
+	marks: [dynamic; TERRAIN_MARKS_MAX]Terrain_Mark,
 }
 
-Map_Mark :: struct {
+Terrain_Mark :: struct {
 	// Centre, in cells
 	pos:    [2]f32,
 	// In cells
@@ -54,9 +54,6 @@ COAST_WATER_BAND :: f32(3)
 // Reach of the offset-to-way field, in cells. Above the bands
 @(private = "file")
 WAY_REACH :: f32(4)
-
-@(private = "file")
-VARIANTS_MAX :: 4
 
 // Random offset on coast, elevation, temperature, so neighbouring ranges blend instead of meeting at a line
 @(private = "file")
@@ -144,15 +141,14 @@ LAYERS := [Layer]Layer_Def {
 
 @(private = "file")
 Marking :: struct {
-	// Names for assets_image_find. Empty = no more variants
-	images:      [VARIANTS_MAX]string,
+	drawing:     Render_Mark_Drawing,
 	layer:       Layer,
 	// Where it grows
 	coast:       Range,
 	elevation:   Range,
 	temperature: Range,
 	// Density per cover kind, times the cell's cover strength. All zero = density 1 everywhere
-	cover:       [Map_Cover]f32,
+	cover:       [Render_Cover]f32,
 	// Width multiplier at the top of the elevation range
 	grow:        f32,
 	// Opacity over coast distance: 0 at fade_from, 1 at fade_full. Equal = opaque
@@ -161,7 +157,7 @@ Marking :: struct {
 }
 
 @(private = "file")
-TREE_COVER :: #partial [Map_Cover]f32 {
+TREE_COVER :: #partial [Render_Cover]f32 {
 	.Forest  = 1,
 	.Fertile = 0.45,
 }
@@ -169,7 +165,7 @@ TREE_COVER :: #partial [Map_Cover]f32 {
 @(private = "file", rodata)
 MARKINGS := [?]Marking {
 	{
-		images = {"terrain/mountain_0", "terrain/mountain_1", "terrain/mountain_2", "terrain/mountain_3"},
+		drawing = .Mountain,
 		layer = .Mountain,
 		coast = ON_LAND,
 		elevation = {0.7, 1.1},
@@ -177,59 +173,59 @@ MARKINGS := [?]Marking {
 		grow = 0.55,
 	},
 	{
-		images = {"terrain/hill_0", "terrain/hill_1", "terrain/hill_2", "terrain/hill_3"},
+		drawing = .Hill,
 		layer = .Molehill,
 		coast = ON_LAND,
 		elevation = {0.6, 0.85},
 	},
 	{
-		images = {"terrain/conifer_0", "terrain/conifer_1", "terrain/conifer_2", "terrain/conifer_3"},
+		drawing = .Conifer,
 		layer = .Tree,
 		coast = ON_LAND,
 		temperature = {-0.08, 0.02},
 		cover = TREE_COVER,
 	},
 	{
-		images = {"terrain/broadleaf_0", "terrain/broadleaf_1", "terrain/broadleaf_2", "terrain/broadleaf_3"},
+		drawing = .Broadleaf,
 		layer = .Tree,
 		coast = ON_LAND,
 		temperature = {0.02, 0.34},
 		cover = TREE_COVER,
 	},
 	{
-		images = {"terrain/cypress_0", "terrain/cypress_1", "terrain/cypress_2", "terrain/cypress_3"},
+		drawing = .Cypress,
 		layer = .Tree,
 		coast = ON_LAND,
 		temperature = {0.34, 0.5},
 		cover = TREE_COVER,
 	},
 	{
-		images = {"terrain/palm_0", "terrain/palm_1", "terrain/palm_2", "terrain/palm_3"},
+		drawing = .Palm,
 		layer = .Tree,
 		coast = ON_LAND,
 		temperature = {0.5, 10},
 		cover = #partial{.Fertile = 0.45},
 	},
 	{
-		images = {"terrain/tuft_0", "terrain/tuft_1", "terrain/tuft_2", "terrain/tuft_3"},
+		drawing = .Tuft,
 		layer = .Tuft,
 		coast = ON_LAND,
 		cover = #partial{.Steppe = 1},
 	},
 	{
-		images = {"terrain/marsh_0", "terrain/marsh_1", "terrain/marsh_2", "terrain/marsh_3"},
+		drawing = .Marsh,
 		layer = .Marsh,
 		coast = ON_LAND,
 		cover = #partial{.Marsh = 1},
 	},
 	{
-		images = {"terrain/dune_0", "terrain/dune_1", "terrain/dune_2", "terrain/dune_3"},
+		drawing = .Dune,
 		layer = .Dune,
 		coast = ON_LAND,
 		cover = #partial{.Desert = 1},
 	},
 	{
-		images = {"terrain/sea_0", "terrain/sea_1", "", ""},
+		drawing = .Sea,
 		layer = .Sea,
 		coast = OFFSHORE,
 		fade_from = -19,
@@ -239,20 +235,20 @@ MARKINGS := [?]Marking {
 
 // Out: out.
 // Places the marks of a map, replacing out.marks. Grids are row-major, size.x * size.y cells
-map_marks_place :: proc(
+terrain_marks_place :: proc(
 	size: [2]int,
 	// 0..255 per cell
 	elevation: []u8,
 	moisture: []u8,
-	cover: []Map_Cover_Cell,
+	cover: []Render_Cover_Cell,
 	// Signed distance to the coast per cell, in cells. > 0 on land
 	coast: []f32,
 	// Smoothed, in cells. The ground along them stays free of marks
 	rivers: Polylines,
 	roads: Polylines,
-	// Source of the markings' images
-	assets: ^Assets,
-	out: ^Map_Marks,
+	// Atlas rects of the drawings
+	images: ^Render_Mark_Images,
+	out: ^Terrain_Marks,
 ) {
 	cells := size.x * size.y
 	assert(len(elevation) == cells && len(moisture) == cells)
@@ -264,14 +260,13 @@ map_marks_place :: proc(
 		return {int(p.x * FOOTPRINT_RES), int(p.y * FOOTPRINT_RES)}
 	}
 
-	// Step: Images. Atlas rect per marking and variant, empty = missing
-	sources: [len(MARKINGS)][VARIANTS_MAX]Extents
+	// Step: Images. Atlas rect per marking and variant; variants end at the first empty rect
+	sources: [len(MARKINGS)][RENDER_MARK_VARIANTS_MAX]Extents
 	variants: [len(MARKINGS)]int
 	for marking, m in MARKINGS {
-		for name in marking.images {
-			if name == "" do break
-			index, found := assets_image_find(assets, name)
-			if found do sources[m][variants[m]] = assets.image_rects[index]
+		for rect in images[marking.drawing] {
+			if rect.x_max <= rect.x_min do break
+			sources[m][variants[m]] = rect
 			variants[m] += 1
 		}
 	}
@@ -320,12 +315,12 @@ map_marks_place :: proc(
 	}
 
 	// Step: Candidates. Per layer, per grid point: score the layer's markings, roll for a mark.
-	// Capped at MAP_MARKS_MAX like the marks
+	// Capped at TERRAIN_MARKS_MAX like the marks
 	Candidate :: struct {
-		mark:  Map_Mark,
+		mark:  Terrain_Mark,
 		layer: Layer,
 	}
-	candidates := make([dynamic]Candidate, 0, MAP_MARKS_MAX, context.temp_allocator)
+	candidates := make([dynamic]Candidate, 0, TERRAIN_MARKS_MAX, context.temp_allocator)
 	fill: for def, layer in LAYERS {
 		step := [2]f32{def.spacing, def.spacing * def.row_squash}
 		cols := int(f32(size.x) / step.x)
@@ -358,13 +353,15 @@ map_marks_place :: proc(
 					if marking.layer != layer do continue
 					ranges := [3]Range{marking.coast, marking.elevation, marking.temperature}
 					for range, r in ranges {
-						if range.lo != range.hi && (values[r] < range.lo || values[r] >= range.hi) {
+						if range.lo != range.hi &&
+						   (values[r] < range.lo || values[r] >= range.hi) {
 							continue scoring
 						}
 					}
 					scores[m] = 1
 					if marking.cover != {} {
-						scores[m] = marking.cover[cover[cell].kind] * f32(cover[cell].strength) / 255
+						scores[m] =
+							marking.cover[cover[cell].kind] * f32(cover[cell].strength) / 255
 					}
 					total += scores[m]
 				}
@@ -373,9 +370,13 @@ map_marks_place :: proc(
 				marking := MARKINGS[m]
 
 				// Size and look
-				width := def.width * math.lerp(1 - def.vary, 1 + def.vary, random_xy(col, row, stream(layer, 5)))
+				width :=
+					def.width *
+					math.lerp(1 - def.vary, 1 + def.vary, random_xy(col, row, stream(layer, 5)))
 				if marking.grow != 0 {
-					up := (height - marking.elevation.lo) / (marking.elevation.hi - marking.elevation.lo)
+					up :=
+						(height - marking.elevation.lo) /
+						(marking.elevation.hi - marking.elevation.lo)
 					width *= 1 + marking.grow * clamp(up, 0, 1)
 				}
 				variant := int(random_xy(col, row, stream(layer, 6)) * f32(variants[m]))
@@ -385,14 +386,21 @@ map_marks_place :: proc(
 				aspect := (source.y_max - source.y_min) / (source.x_max - source.x_min)
 				alpha := u8(255)
 				if marking.fade_from != marking.fade_full {
-					alpha = u8(ramp(marking.fade_from, marking.fade_full, coast[cell]) * 255 + 0.5)
+					alpha = u8(
+						smoothstep(marking.fade_from, marking.fade_full, coast[cell]) * 255 + 0.5,
+					)
 				}
 
-				if len(candidates) == MAP_MARKS_MAX do break fill
+				if len(candidates) == TERRAIN_MARKS_MAX do break fill
 				append(
 					&candidates,
 					Candidate {
-						mark = {pos = pos, size = {width, width * aspect}, source = source, alpha = alpha},
+						mark = {
+							pos = pos,
+							size = {width, width * aspect},
+							source = source,
+							alpha = alpha,
+						},
 						layer = layer,
 					},
 				)
@@ -416,7 +424,11 @@ map_marks_place :: proc(
 		// Drawn over preclaimed ground
 		{
 			half := mark.size.x * MARK_DRAWN_WIDTH / 2
-			first := linalg.clamp(footprint_square({mark.pos.x - half, foot_y - mark.size.y}), 0, footprint)
+			first := linalg.clamp(
+				footprint_square({mark.pos.x - half, foot_y - mark.size.y}),
+				0,
+				footprint,
+			)
 			last := linalg.clamp(footprint_square({mark.pos.x + half, foot_y}) + 1, 0, footprint)
 			for y in first.y ..< last.y {
 				for x in first.x ..< last.x {
@@ -428,7 +440,11 @@ map_marks_place :: proc(
 
 		if def.footprint_width == 0 && def.footprint_below == 0 do continue
 		half := mark.size.x * def.footprint_width / 2
-		first := linalg.clamp(footprint_square({mark.pos.x - half, foot_y - mark.size.y}), 0, footprint)
+		first := linalg.clamp(
+			footprint_square({mark.pos.x - half, foot_y - mark.size.y}),
+			0,
+			footprint,
+		)
 		last := linalg.clamp(
 			footprint_square({mark.pos.x + half, foot_y + def.footprint_below * mark.size.y}) + 1,
 			0,
@@ -443,28 +459,28 @@ map_marks_place :: proc(
 	}
 
 	// Step: Sort by foot
-	slice.sort_by(out.marks[:], proc(a, b: Map_Mark) -> bool {
+	slice.sort_by(out.marks[:], proc(a, b: Terrain_Mark) -> bool {
 		return a.pos.y + a.size.y / 2 < b.pos.y + b.size.y / 2
 	})
 }
 
-// Out: out, appended to.
-// A world-space quad per mark overlapping visible (in cells), in draw order.
-// Quads past the capacity of out are dropped
-map_marks_quads :: proc(marks: ^Map_Marks, visible: Extents, out: ^[dynamic; RENDER_QUADS_MAX]Render_Quad) {
+// Out: out.
+// A world-space quad per mark overlapping visible (in cells), in draw order. Returns how many were
+// written. Quads past len(out) are dropped
+terrain_marks_quads :: proc(marks: ^Terrain_Marks, visible: Extents, out: []Render_Quad) -> (count: int) {
 	for mark in marks.marks {
+		if count == len(out) do break
 		lo := mark.pos - mark.size / 2
 		hi := mark.pos + mark.size / 2
 		if hi.x < visible.x_min || lo.x > visible.x_max do continue
 		if hi.y < visible.y_min || lo.y > visible.y_max do continue
 		color := [4]u8{255, 255, 255, mark.alpha}
-		append(
-			out,
-			Render_Quad {
-				rect = {lo.x, lo.y, hi.x, hi.y},
-				source = mark.source,
-				colors = {color, color, color, color},
-			},
-		)
+		out[count] = {
+			rect   = {lo.x, lo.y, hi.x, hi.y},
+			source = mark.source,
+			colors = {color, color, color, color},
+		}
+		count += 1
 	}
+	return
 }

@@ -4,11 +4,13 @@ package main
 import "core:math"
 import "core:math/linalg"
 
-// Coast: signed distance from each cell to the smoothed land/water boundary
+// Terrain coast: signed distance from each cell to the smoothed land/water boundary
 
 // Budgets. Raw: cell-corner points of the traced boundary
-MAP_COAST_RAW_POINTS_MAX :: 1 << 16
-MAP_COAST_RUNS_MAX :: 1 << 12
+@(private = "file")
+RAW_POINTS_MAX :: 1 << 16
+@(private = "file")
+RUNS_MAX :: 1 << 12
 
 // Light smoothing: removes cell steps, keeps the shape
 @(private = "file")
@@ -28,7 +30,7 @@ COAST_REACH :: f32(3)
 // Out: coast.
 // coast[i] = signed distance from cell i's centre to the coast, in cells. > 0 on land, < 0 on water.
 // Grids are row-major, size.x * size.y cells
-map_coast_build :: proc(water: []bool, size: [2]int, coast: []f32) {
+terrain_coast_build :: proc(water: []bool, size: [2]int, coast: []f32) {
 	cells := size.x * size.y
 	assert(len(coast) == cells && len(water) == cells)
 
@@ -36,15 +38,15 @@ map_coast_build :: proc(water: []bool, size: [2]int, coast: []f32) {
 	labels := make([]u16, cells, context.temp_allocator)
 	for is_water, i in water do labels[i] = is_water ? 1 : 2
 	raw := polylines_over(
-		make([][2]f32, MAP_COAST_RAW_POINTS_MAX, context.temp_allocator),
-		make([]Polyline_Run, MAP_COAST_RUNS_MAX, context.temp_allocator),
+		make([][2]f32, RAW_POINTS_MAX, context.temp_allocator),
+		make([]Polyline_Run, RUNS_MAX, context.temp_allocator),
 	)
 	boundaries_trace(labels, size, &raw)
 
 	// Step: Smooth
 	smooth := polylines_over(
-		make([][2]f32, MAP_COAST_RAW_POINTS_MAX << uint(COAST_SMOOTHING.cut_iter), context.temp_allocator),
-		make([]Polyline_Run, MAP_COAST_RUNS_MAX, context.temp_allocator),
+		make([][2]f32, RAW_POINTS_MAX << uint(COAST_SMOOTHING.cut_iter), context.temp_allocator),
+		make([]Polyline_Run, RUNS_MAX, context.temp_allocator),
 	)
 	polylines_smooth(raw, COAST_SMOOTHING, &smooth)
 
