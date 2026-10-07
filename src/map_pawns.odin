@@ -5,16 +5,13 @@ import "core:fmt"
 import "core:math"
 
 // Pawns: the pieces drawn on the map, restated by the scene every frame. Nothing is kept per pawn.
-// Near, a pawn is a picture, far a medallion, cross-faded. Its label is drawn under it
+// Near, a pawn is a picture, far a medallion, cross-faded
 
 Map_Pawn :: struct {
 	// Centre, in cells
 	pos:         [2]f32,
 	icon:        Map_Icon,
 	culture:     Map_Culture,
-	// Drawn under the pawn. Empty = none. LF starts a new line. Characters the label font lacks
-	// are skipped
-	label:       string,
 	// Tinted in Map_Style.pawn_highlight
 	highlighted: bool,
 	// Tint swings to Map_Style.pawn_pulse and back
@@ -34,15 +31,9 @@ Map_Culture :: enum {
 	Germanic,
 }
 
-// Font of the labels, as listed in assets_load
-MAP_LABEL_FONT :: "forgotten_uncial"
-MAP_LABEL_SIZE :: 22
-
 // Pawn state kept between frames
 Map_Pawns :: struct {
 	images:      [Pawn_Set][Map_Culture][Map_Icon]Pawn_Image,
-	// Index in Assets.fonts
-	label_font:  int,
 	// 0: pictures. 1: medallions
 	medallion_t: f32,
 	// Seconds. Phase of the pulse, shared by all pawns
@@ -109,27 +100,12 @@ MEDALLION_FADE :: 0.25
 @(private = "file")
 PULSE_PERIOD :: 1.2
 
-// Pawns outside the view by up to this fraction of its size are still drawn: their labels may show
+// Pawns outside the view by up to this fraction of its size are still drawn
 @(private = "file")
 VIEW_TOLERANCE :: 0.1
 
-// A label's halo: copies of it in paper colour, each shifted by one of these times LABEL_HALO
-@(private = "file")
-HALO_SHIFTS :: [8][2]f32{{-1, -1}, {0, -1}, {1, -1}, {-1, 0}, {1, 0}, {-1, 1}, {0, 1}, {1, 1}}
-// Logical pixels
-@(private = "file")
-LABEL_HALO :: 1.5
-
-// Glyphs of all labels drawn in a frame. Labels past it are cut short or dropped
-@(private = "file")
-LABEL_GLYPHS_MAX :: 1 << 12
-
-// Room that never wraps or truncates
-@(private = "file")
-UNBOUNDED :: [2]f32{math.INF_F32, math.INF_F32}
-
 // Out: pawns.
-// Finds the pawn images and the label font
+// Finds the pawn images
 map_pawns_build :: proc(pawns: ^Map_Pawns, assets: ^Assets) {
 	for &cultures, set in pawns.images {
 		for &icons, culture in cultures {
@@ -151,13 +127,10 @@ map_pawns_build :: proc(pawns: ^Map_Pawns, assets: ^Assets) {
 		}
 	}
 
-	font, font_found := assets_font_find(assets, MAP_LABEL_FONT, MAP_LABEL_SIZE)
-	if !font_found do fmt.eprintln("Label font not loaded:", MAP_LABEL_FONT, MAP_LABEL_SIZE)
-	pawns.label_font = font
 }
 
 // Out: quads, passes, appended to. In/out: pawns.
-// The scene's pawns as a world-space quad pass, then their labels as a screen-space one
+// The scene's pawns as a world-space quad pass
 map_pawns_frame :: proc(
 	pawns: ^Map_Pawns,
 	assets: ^Assets,
@@ -199,7 +172,7 @@ map_pawns_frame :: proc(
 	}
 
 	// Phase: Sprites. One per pawn and image set shown: both sets during the fade. In cells.
-	// Kept if in view, or near it: its label may show
+	// Kept if in view, or near it
 	Sprite :: struct {
 		pawn:   int,
 		lo:     [2]f32,
@@ -256,108 +229,6 @@ map_pawns_frame :: proc(
 			)
 		}
 		append(passes, Render_Quad_Pass{space = .World, begin = begin, len = len(quads) - begin})
-	}
-
-	// Phase: Label anchors. Per pawn, the middle of the bottom edge of its sprites, in screen space.
-	// During the fade: between the two sets' by their weights. Weight 0: the pawn has no sprite
-	anchors := make([][2]f32, len(scene), context.temp_allocator)
-	anchor_weights := make([]f32, len(scene), context.temp_allocator)
-	{
-		for sprite in sprites {
-			bottom := [2]f32{(sprite.lo.x + sprite.hi.x) / 2, sprite.hi.y}
-			anchors[sprite.pawn] +=
-				(bottom - {visible.x_min, visible.y_min}) * view.zoom * sprite.weight
-			anchor_weights[sprite.pawn] += sprite.weight
-		}
-		for &anchor, index in anchors {
-			if anchor_weights[index] > 0 do anchor /= anchor_weights[index]
-		}
-	}
-
-	// Phase: Label layouts. One per pawn with a label and a sprite, centred under its anchor on whole
-	// pixels. The glyphs of all labels go in one array
-	Label :: struct {
-		glyphs_begin: int,
-		glyphs_len:   int,
-		// Top-left of the text, in screen space
-		at:           [2]f32,
-	}
-	labels := make([dynamic]Label, 0, len(scene), context.temp_allocator)
-	glyphs := make([]Text_Glyph, LABEL_GLYPHS_MAX, context.temp_allocator)
-	glyph_count := 0
-	{
-		metrics := assets_text_font(assets, pawns.label_font)
-		for pawn, index in scene {
-			if pawn.label == "" || anchor_weights[index] <= 0 do continue
-			run := Text_Run {
-				text = pawn.label,
-			}
-			layout := text_layout({run}, {metrics}, UNBOUNDED, glyphs[glyph_count:], nil)
-			anchor := anchors[index]
-			append(
-				&labels,
-				Label {
-					glyphs_begin = glyph_count,
-					glyphs_len = layout.glyph_count,
-					at = {math.round(anchor.x - layout.size.x / 2), math.round(anchor.y)},
-				},
-			)
-			glyph_count += layout.glyph_count
-		}
-	}
-
-	// Phase: Label copies. Every label 8 times in paper colour, shifted around its place: the halos.
-	// Then every label once in ink
-	Label_Copy :: struct {
-		glyphs_begin: int,
-		glyphs_len:   int,
-		at:           [2]f32,
-		color:        [4]u8,
-	}
-	copies := make(
-		[dynamic]Label_Copy,
-		0,
-		len(labels) * (len(HALO_SHIFTS) + 1),
-		context.temp_allocator,
-	)
-	{
-		paper := color_of(style.paper, 1)
-		ink := color_of(style.ink, 1)
-		for label in labels {
-			for shift in HALO_SHIFTS {
-				at := label.at + shift * LABEL_HALO
-				append(&copies, Label_Copy{label.glyphs_begin, label.glyphs_len, at, paper})
-			}
-		}
-		for label in labels {
-			append(&copies, Label_Copy{label.glyphs_begin, label.glyphs_len, label.at, ink})
-		}
-	}
-
-	// Phase: Label quads. Each glyph's ink box, moved to its copy's place, with its bitmap from the atlas
-	{
-		begin := len(quads)
-		font := &assets.fonts[pawns.label_font]
-		for copy in copies {
-			for glyph in glyphs[copy.glyphs_begin:][:copy.glyphs_len] {
-				// No bitmap
-				if glyph.ink.x_max <= glyph.ink.x_min do continue
-				append(
-					quads,
-					Render_Quad {
-						rect = {
-							copy.at.x + glyph.ink.x_min,
-							copy.at.y + glyph.ink.y_min,
-							copy.at.x + glyph.ink.x_max,
-							copy.at.y + glyph.ink.y_max,
-						},
-						source = font.sources[int(glyph.char) - FONT_FIRST],
-						colors = {copy.color, copy.color, copy.color, copy.color},
-					},
-				)
-			}
-		}
-		append(passes, Render_Quad_Pass{space = .Screen, begin = begin, len = len(quads) - begin})
 	}
 }
 

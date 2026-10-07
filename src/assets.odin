@@ -33,7 +33,6 @@ FONT_LAST :: 126
 FONT_GLYPH_COUNT :: FONT_LAST - FONT_FIRST + 1
 
 // Glyph data is one array per property, indexed by character - FONT_FIRST.
-// The metrics (ascent, descent, line_gap, advances) are what text layout reads: see assets_text_font
 Font :: struct {
 	// As listed in assets_load. size: em height in logical pixels
 	name:     string,
@@ -273,19 +272,4 @@ assets_font_find :: proc(assets: ^Assets, name: string, size: u16) -> (index: in
 		if font.name == name && font.size == size do return i, true
 	}
 	return 0, false
-}
-
-// Metrics of a loaded font, for text layout: in logical pixels, for characters FONT_FIRST..FONT_LAST.
-// It views the font's arrays: valid for as long as assets stays where it is
-assets_text_font :: proc(assets: ^Assets, font: int) -> Text_Font {
-	loaded := &assets.fonts[font]
-	return {
-		ascent = loaded.ascent,
-		descent = loaded.descent,
-		line_gap = loaded.line_gap,
-		first = FONT_FIRST,
-		advances = loaded.advances[:],
-		offsets = loaded.offsets[:],
-		sizes = loaded.sizes[:],
-	}
 }

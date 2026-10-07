@@ -73,7 +73,7 @@ Map_Scene :: struct {
 	highlights:     []Map_Highlight,
 	// Paths as points in cells, tail to head. Each run is drawn with an arrowhead at its end
 	arrows:         Polylines,
-	// Pieces, drawn in order, each over the last. Labels are drawn over all pawns
+	// Pieces, drawn in order, each over the last
 	pawns:          []Map_Pawn,
 	// A value per cell, 0..255, MAP_CELLS long: shown as a wash over the land, from
 	// Map_Style.wash_low at 0 to wash_high at 255. Empty = none. For map modes such as supply
@@ -247,7 +247,7 @@ Map_Style :: struct {
 	wash_low:           [3]f32,
 	wash_high:          [3]f32,
 	wash_strength:      f32,
-	// Tints of pawns: when highlighted, and at the peak of a pulse. Labels are in ink with a paper halo
+	// Tints of pawns: when highlighted, and at the peak of a pulse
 	pawn_highlight:     [3]f32,
 	pawn_pulse:         [3]f32,
 	// Patterns are drawn in ink
@@ -332,7 +332,7 @@ MAP_STYLE :: Map_Style {
 
 // Out: m, and updates, appended to.
 // Builds a map: the ground's grids, strokes and category looks as updates, and the marks in m.
-// Finds the pawn images and the label font in assets
+// Finds the pawn images in assets
 map_build :: proc(
 	m: ^Map,
 	assets: ^Assets,
@@ -385,7 +385,7 @@ map_build :: proc(
 	for look, kind in style.cover_looks do looks[kind] = look
 	append(updates, Render_Update_Category_Looks{looks = looks})
 
-	// Step: Pawn images and label font
+	// Step: Pawn images
 	map_pawns_build(&m.pawns, assets)
 
 	// Step: Marks
@@ -404,7 +404,7 @@ map_build :: proc(
 
 // Out: updates, quads, passes, appended to. In/out: m.
 // A frame of the map. Updates: the area looks, the highlights that changed, the arrows, the wash if it
-// changed. Passes: the ground, the marks in view, the pawns, their labels
+// changed. Passes: the ground, the marks in view, the pawns
 map_frame :: proc(
 	m: ^Map,
 	assets: ^Assets,
@@ -602,7 +602,7 @@ map_frame :: proc(
 		},
 	)
 
-	// Step: Pawns and labels, over the ground
+	// Step: Pawns, over the ground
 	map_pawns_frame(&m.pawns, assets, scene.pawns, scene.view, visible, style, dt, quads, passes)
 }
 
