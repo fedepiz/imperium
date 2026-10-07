@@ -145,7 +145,7 @@ map_pawns_build :: proc(pawns: ^Map_Pawns, assets: ^Assets) {
 }
 
 // Out: data, appended to. In/out: pawns.
-// The scene's pawns as a world-space quad pass
+// The scene's pawns as world-space quads
 map_pawns_frame :: proc(
 	pawns: ^Map_Pawns,
 	scene: []Map_Pawn,
@@ -232,28 +232,20 @@ map_pawns_frame :: proc(
 	}
 
 	// Phase: Sprite quads. The silhouette in paper colour, then the drawing over it, both tinted
-	{
-		quads := make([dynamic]Render_Quad, 0, 2 * len(sprites), context.temp_allocator)
-		for sprite in sprites {
-			tint := tints[sprite.pawn]
-			paper := color_of(style.paper * tint, sprite.weight)
-			ink := color_of(tint, sprite.weight)
-			rect := Extents{sprite.lo.x, sprite.lo.y, sprite.hi.x, sprite.hi.y}
-			append(
-				&quads,
-				Render_Quad {
-					rect = rect,
-					source = sprite.image.fill,
-					colors = {paper, paper, paper, paper},
-				},
-				Render_Quad {
-					rect = rect,
-					source = sprite.image.drawing,
-					colors = {ink, ink, ink, ink},
-				},
-			)
-		}
-		render_quads(data, .World, quads[:])
+	for sprite in sprites {
+		tint := tints[sprite.pawn]
+		paper := color_of(style.paper * tint, sprite.weight)
+		ink := color_of(tint, sprite.weight)
+		rect := Extents{sprite.lo.x, sprite.lo.y, sprite.hi.x, sprite.hi.y}
+		append(
+			&data.quads[.World],
+			Render_Quad {
+				rect = rect,
+				source = sprite.image.fill,
+				colors = {paper, paper, paper, paper},
+			},
+			Render_Quad{rect = rect, source = sprite.image.drawing, colors = {ink, ink, ink, ink}},
+		)
 	}
 }
 

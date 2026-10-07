@@ -10,7 +10,7 @@ import "vendor:wgpu"
 // Terrain: the map's ground, drawn by the renderer. Paper, sea and coast, land cover, regions,
 // rivers, roads, highlights, arrows, a value wash, and marks (mountains, trees, waves).
 // renderer_terrain_build: once per map, from a Render_Terrain.
-// render_terrain: every frame, a Render_Terrain_Frame into the frame's Render_Data.
+// Every frame: a Render_Terrain_Frame, as Render_Data.terrain.
 // Everything else the drawing needs is derived here: the coast's distance field, smoothed courses,
 // region and highlight fields, mark placement, fades.
 // Renderer internals, called by renderer.odin only: terrain_init, terrain_deinit, terrain_resize,
@@ -143,18 +143,6 @@ Render_Highlight_Kind :: enum {
 Render_Circle :: struct {
 	center: [2]f32,
 	radius: f32,
-}
-
-// The terrain over the whole window, under the passes after it
-Render_Terrain_Pass :: struct {
-	frame: Render_Terrain_Frame,
-}
-
-// Out: data, appended to.
-// A terrain pass
-render_terrain :: proc(data: ^Render_Data, frame: Render_Terrain_Frame) {
-	if len(data.passes) == RENDER_PASS_MAX do return
-	append(&data.passes, Render_Terrain_Pass{frame = frame})
 }
 
 // Colours: straight RGB, 0..1. Widths: logical pixels
@@ -441,44 +429,44 @@ STROKE_SHADER :: VIEW_SHADER + #load("stroke.wgsl", string)
 @(private = "file")
 TERRAIN: struct {
 	// Ground pass data. ground_group is group 1: uniforms, sampler, grids
-	ground_pipeline: wgpu.RenderPipeline,
-	ground_uniforms: wgpu.Buffer,
-	ground_grids:    [Ground_Grid]Texture,
+	ground_pipeline:       wgpu.RenderPipeline,
+	ground_uniforms:       wgpu.Buffer,
+	ground_grids:          [Ground_Grid]Texture,
 	// GROUND_CATEGORIES x 2 texels. Row 0: wash colour, wash. Row 1: pattern, pattern ink
 	ground_category_looks: Texture,
 	// Area layers: 2D arrays, one slice per layer. CPU side: GROUND_AREAS.
 	// Owners, fields: one texel per cell, a channel per Ground_Side.
 	// Looks: AREAS_PER_LAYER x 2 texels. Row 0: colour, border. Row 1: thickness, inside
-	ground_area_owners: Texture,
-	ground_area_fields: Texture,
-	ground_area_looks:  Texture,
+	ground_area_owners:    Texture,
+	ground_area_fields:    Texture,
+	ground_area_looks:     Texture,
 	// AREA_CIRCLES_MAX x AREA_LAYERS texels, a row per layer:
 	// centre, radius, area
-	ground_area_circles: Texture,
-	ground_layout:   wgpu.BindGroupLayout,
+	ground_area_circles:   Texture,
+	ground_layout:         wgpu.BindGroupLayout,
 	// Recreated on resize: it binds strokes_target and marks_target
-	ground_group:    wgpu.BindGroup,
+	ground_group:          wgpu.BindGroup,
 	// Strokes. Per stroke: a segment buffer, drawn every frame as distances into one channel of
 	// strokes_target
-	stroke_pipelines: [STROKES]wgpu.RenderPipeline,
-	stroke_buffers:   [STROKES]wgpu.Buffer,
-	stroke_counts:    [STROKES]u32,
+	stroke_pipelines:      [STROKES]wgpu.RenderPipeline,
+	stroke_buffers:        [STROKES]wgpu.Buffer,
+	stroke_counts:         [STROKES]u32,
 	// Window-sized, recreated on resize. Channel i: distance to stroke i's nearest segment, in cells
-	strokes_target:   Texture,
-	// Window-sized, recreated on resize. Quads of passes with target = .Ground, premultiplied
-	marks_target:   Texture,
+	strokes_target:        Texture,
+	// Window-sized, recreated on resize. The marks, premultiplied
+	marks_target:          Texture,
 	// Marks in view this frame, as quads of the quad pipeline, drawn into marks_target
-	marks_buffer:     wgpu.Buffer,
-	marks_count:      u32,
+	marks_buffer:          wgpu.Buffer,
+	marks_count:           u32,
 	// From the last build
-	style:            Render_Terrain_Style,
-	marks:            Terrain_Marks,
+	style:                 Render_Terrain_Style,
+	marks:                 Terrain_Marks,
 	// Region looks as drawn, eased toward the frame's. Index: region
-	region_looks:     [AREAS_PER_LAYER]Ground_Area_Look,
+	region_looks:          [AREAS_PER_LAYER]Ground_Area_Look,
 	// Per highlight slot
-	highlights:       [RENDER_TERRAIN_HIGHLIGHTS_MAX]Highlight_Drawn,
+	highlights:            [RENDER_TERRAIN_HIGHLIGHTS_MAX]Highlight_Drawn,
 	// Hash of the wash last written. 0 = none
-	wash_written:     u64,
+	wash_written:          u64,
 }
 
 @(private = "file")
@@ -552,15 +540,15 @@ GROUND_AREAS: struct {
 @(private = "file")
 Area_Layer :: struct {
 	// Area per cell, 0 = none
-	ids:    [RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT]u8,
+	ids:          [RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT]u8,
 	// Per cell and side: the area whose field the cell holds, 0 = none, and that field.
 	// A cell outside every area holds the field of the area it is least outside of.
 	// Mirrors of ground_area_owners and ground_area_fields
-	owners: [RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT][Ground_Side]u8,
-	fields: [RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT][Ground_Side]f16,
+	owners:       [RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT][Ground_Side]u8,
+	fields:       [RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT][Ground_Side]f16,
 	// Per area: the side it lives on, and the bounds of its cells, [min, max). Empty: max = 0
-	sides:  [AREAS_PER_LAYER]Ground_Side,
-	bounds: [AREAS_PER_LAYER]Area_Bounds,
+	sides:        [AREAS_PER_LAYER]Ground_Side,
+	bounds:       [AREAS_PER_LAYER]Area_Bounds,
 	// Circles last written
 	circle_count: i32,
 }
@@ -584,8 +572,8 @@ Ground_Grid_Format :: struct {
 
 @(private = "file", rodata)
 GROUND_GRID_FORMATS := [Ground_Grid]Ground_Grid_Format {
-	.Value  = {.R8Unorm, 1},
-	.Divide = {.R16Float, 2},
+	.Value    = {.R8Unorm, 1},
+	.Divide   = {.R16Float, 2},
 	.Taper    = {.R8Unorm, 1},
 	.Category = {.RG8Unorm, 2},
 }
@@ -626,10 +614,7 @@ Ground_Uniform :: struct {
 	strokes:           [STROKES]Stroke_Uniform,
 	areas:             [AREA_LAYERS]Area_Layer_Uniform,
 }
-#assert(
-	size_of(Ground_Uniform) ==
-	144 + 48 * STROKES + 48 * AREA_LAYERS,
-)
+#assert(size_of(Ground_Uniform) == 144 + 48 * STROKES + 48 * AREA_LAYERS)
 
 // Must match struct Area_Layer in ground.wgsl
 @(private = "file")
@@ -708,8 +693,16 @@ terrain_init :: proc(rend: ^Renderer) {
 				size:    [2]u32,
 			}
 			area_textures := [?]Area_Texture {
-				{&TERRAIN.ground_area_owners, .RG8Unorm, {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}},
-				{&TERRAIN.ground_area_fields, .RG16Float, {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT}},
+				{
+					&TERRAIN.ground_area_owners,
+					.RG8Unorm,
+					{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
+				},
+				{
+					&TERRAIN.ground_area_fields,
+					.RG16Float,
+					{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
+				},
 				{&TERRAIN.ground_area_looks, .RGBA32Float, {AREAS_PER_LAYER, 2}},
 			}
 			for area_texture in area_textures {
@@ -719,11 +712,7 @@ terrain_init :: proc(rend: ^Renderer) {
 						label = "ground areas",
 						usage = {.TextureBinding, .CopyDst},
 						dimension = ._2D,
-						size = {
-							area_texture.size.x,
-							area_texture.size.y,
-							AREA_LAYERS,
-						},
+						size = {area_texture.size.x, area_texture.size.y, AREA_LAYERS},
 						format = area_texture.format,
 						mipLevelCount = 1,
 						sampleCount = 1,
@@ -869,7 +858,11 @@ terrain_init :: proc(rend: ^Renderer) {
 		attributes := [?]wgpu.VertexAttribute {
 			{format = .Float32x2, offset = u64(offset_of(Stroke_Segment, a)), shaderLocation = 0},
 			{format = .Float32x2, offset = u64(offset_of(Stroke_Segment, b)), shaderLocation = 1},
-			{format = .Float32x2, offset = u64(offset_of(Stroke_Segment, head)), shaderLocation = 2},
+			{
+				format = .Float32x2,
+				offset = u64(offset_of(Stroke_Segment, head)),
+				shaderLocation = 2,
+			},
 		}
 		// Keeps the smallest distance written to a pixel
 		nearest := wgpu.BlendState {
@@ -904,12 +897,12 @@ terrain_init :: proc(rend: ^Renderer) {
 					primitive = {topology = .TriangleList},
 					multisample = {count = 1, mask = ~u32(0)},
 					fragment = &wgpu.FragmentState {
-						module = module,
-						entryPoint = "fs_main",
+						module      = module,
+						entryPoint  = "fs_main",
 						targetCount = 1,
-						targets = &wgpu.ColorTargetState {
-							format = STROKES_TARGET_FORMAT,
-							blend = &nearest,
+						targets     = &wgpu.ColorTargetState {
+							format    = STROKES_TARGET_FORMAT,
+							blend     = &nearest,
 							// Channel = stroke index
 							writeMask = {wgpu.ColorWriteMask(stroke)},
 						},
@@ -1150,7 +1143,8 @@ terrain_frame :: proc(
 								if other_slot == slot || HIGHLIGHT_LAYERS[other.kind] != layer do continue
 								at := cell - other.corner
 								if at.x < 0 || at.y < 0 || at.x >= other.size.x || at.y >= other.size.y do continue
-								if len(other.cells) > 0 && other.cells[at.y * other.size.x + at.x] {
+								if len(other.cells) > 0 &&
+								   other.cells[at.y * other.size.x + at.x] {
 									inside = false
 									break
 								}
@@ -1282,13 +1276,7 @@ terrain_frame :: proc(
 			}
 		}
 	}
-	wgpu.QueueWriteBuffer(
-		rend.queue,
-		TERRAIN.ground_uniforms,
-		0,
-		&uniform,
-		size_of(uniform),
-	)
+	wgpu.QueueWriteBuffer(rend.queue, TERRAIN.ground_uniforms, 0, &uniform, size_of(uniform))
 
 	// Step: Marks in view
 	{
@@ -1357,13 +1345,7 @@ terrain_encode :: proc(rend: ^Renderer, encoder: wgpu.CommandEncoder) {
 				},
 			},
 		)
-		if TERRAIN.marks_count > 0 {
-			wgpu.RenderPassEncoderSetPipeline(pass, rend.quad_pipeline)
-			wgpu.RenderPassEncoderSetVertexBuffer(pass, 0, TERRAIN.marks_buffer, 0, wgpu.WHOLE_SIZE)
-			wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.view_groups[.World])
-			wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.atlas_group)
-			wgpu.RenderPassEncoderDraw(pass, 4, TERRAIN.marks_count, 0, 0)
-		}
+		quads_draw(rend, pass, TERRAIN.marks_buffer, .World, 0, int(TERRAIN.marks_count))
 		wgpu.RenderPassEncoderEnd(pass)
 		wgpu.RenderPassEncoderRelease(pass)
 	}
@@ -1504,14 +1486,23 @@ ground_areas_write :: proc(
 	for area in 1 ..< AREAS_PER_LAYER {
 		if bounds[area].max == {} do continue
 		areas.sides[area] = side
-		area_field_build(areas, u8(area), bounds[area].min - AREA_MARGIN, bounds[area].max + AREA_MARGIN)
+		area_field_build(
+			areas,
+			u8(area),
+			bounds[area].min - AREA_MARGIN,
+			bounds[area].max + AREA_MARGIN,
+		)
 	}
 
 	// Step: Upload the layer
 	extent := wgpu.Extent3D{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT, 1}
 	wgpu.QueueWriteTexture(
 		rend.queue,
-		&{texture = TERRAIN.ground_area_owners.texture, origin = {0, 0, u32(layer)}, aspect = .All},
+		&{
+			texture = TERRAIN.ground_area_owners.texture,
+			origin = {0, 0, u32(layer)},
+			aspect = .All,
+		},
 		&areas.owners,
 		size_of(areas.owners),
 		&{bytesPerRow = RENDER_TERRAIN_WIDTH * 2, rowsPerImage = RENDER_TERRAIN_HEIGHT},
@@ -1519,7 +1510,11 @@ ground_areas_write :: proc(
 	)
 	wgpu.QueueWriteTexture(
 		rend.queue,
-		&{texture = TERRAIN.ground_area_fields.texture, origin = {0, 0, u32(layer)}, aspect = .All},
+		&{
+			texture = TERRAIN.ground_area_fields.texture,
+			origin = {0, 0, u32(layer)},
+			aspect = .All,
+		},
 		&areas.fields,
 		size_of(areas.fields),
 		&{bytesPerRow = RENDER_TERRAIN_WIDTH * 4, rowsPerImage = RENDER_TERRAIN_HEIGHT},
@@ -1618,7 +1613,11 @@ ground_area_write :: proc(
 		&{texture = TERRAIN.ground_area_owners.texture, origin = origin, aspect = .All},
 		&areas.owners,
 		size_of(areas.owners),
-		&{offset = u64(first * 2), bytesPerRow = RENDER_TERRAIN_WIDTH * 2, rowsPerImage = extent.height},
+		&{
+			offset = u64(first * 2),
+			bytesPerRow = RENDER_TERRAIN_WIDTH * 2,
+			rowsPerImage = extent.height,
+		},
 		&extent,
 	)
 	wgpu.QueueWriteTexture(
@@ -1626,7 +1625,11 @@ ground_area_write :: proc(
 		&{texture = TERRAIN.ground_area_fields.texture, origin = origin, aspect = .All},
 		&areas.fields,
 		size_of(areas.fields),
-		&{offset = u64(first * 4), bytesPerRow = RENDER_TERRAIN_WIDTH * 4, rowsPerImage = extent.height},
+		&{
+			offset = u64(first * 4),
+			bytesPerRow = RENDER_TERRAIN_WIDTH * 4,
+			rowsPerImage = extent.height,
+		},
 		&extent,
 	)
 }
@@ -1634,11 +1637,7 @@ ground_area_write :: proc(
 // Overwrites the circles of a layer. A circle adds a disc to its area's shape, cut at the divide like
 // the area. Circles of one area must be consecutive. Circles past the budget are dropped
 @(private = "file")
-ground_area_circles_write :: proc(
-	rend: ^Renderer,
-	layer: int,
-	circles: []Ground_Area_Circle,
-) {
+ground_area_circles_write :: proc(rend: ^Renderer, layer: int, circles: []Ground_Area_Circle) {
 	if !(.Ready in rend.flags) do return
 	assert(layer >= 0 && layer < AREA_LAYERS)
 
@@ -1651,7 +1650,11 @@ ground_area_circles_write :: proc(
 	}
 	wgpu.QueueWriteTexture(
 		rend.queue,
-		&{texture = TERRAIN.ground_area_circles.texture, origin = {0, u32(layer), 0}, aspect = .All},
+		&{
+			texture = TERRAIN.ground_area_circles.texture,
+			origin = {0, u32(layer), 0},
+			aspect = .All,
+		},
 		&texels,
 		uint(count * size_of([4]f32)),
 		&{bytesPerRow = AREA_CIRCLES_MAX * size_of([4]f32), rowsPerImage = 1},
@@ -1661,11 +1664,7 @@ ground_area_circles_write :: proc(
 
 // Overwrites the look of every area of a layer: looks[i] for area i, none past len(looks)
 @(private = "file")
-ground_area_looks_write :: proc(
-	rend: ^Renderer,
-	layer: int,
-	looks: []Ground_Area_Look,
-) {
+ground_area_looks_write :: proc(rend: ^Renderer, layer: int, looks: []Ground_Area_Look) {
 	if !(.Ready in rend.flags) do return
 	assert(layer >= 0 && layer < AREA_LAYERS)
 	assert(len(looks) <= AREAS_PER_LAYER)
@@ -1781,7 +1780,12 @@ ground_category_looks_write :: proc(rend: ^Renderer, looks: []Render_Cover_Look)
 	}
 	texels: [2][GROUND_CATEGORIES][4]u8
 	for look, i in looks {
-		texels[0][i] = {to_u8(look.color.r), to_u8(look.color.g), to_u8(look.color.b), to_u8(look.wash)}
+		texels[0][i] = {
+			to_u8(look.color.r),
+			to_u8(look.color.g),
+			to_u8(look.color.b),
+			to_u8(look.wash),
+		}
 		texels[1][i] = {u8(look.pattern), to_u8(look.pattern_ink), 0, 0}
 	}
 	wgpu.QueueWriteTexture(
@@ -1873,11 +1877,11 @@ Ground :: struct {
 	base:     Ground_Base,
 	category: Ground_Category,
 	divide:   Ground_Divide,
-	// Layer 0: here, under the strokes. Layers 1 and up: in order, over the quads of passes with
-	// target = .Ground, under the value layer
+	// Layer 0: here, under the strokes. Layers 1 and up: in order, over the marks, under the value
+	// layer
 	areas:    [AREA_LAYERS]Ground_Area_Layer,
 	// Drawn in index order. Line and Double: under the divide's line. Arrow: over every layer.
-	// Over the divide's line: the quads of passes with target = .Ground
+	// Over the divide's line: the marks
 	strokes:  [STROKES]Ground_Stroke,
 	value:    Ground_Value,
 }
@@ -2036,3 +2040,4 @@ Ground_Value :: struct {
 	strength: f32,
 	clip:     Ground_Clip,
 }
+

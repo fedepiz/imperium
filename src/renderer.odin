@@ -28,37 +28,37 @@ RENDER_ATLAS_MIPS :: 5
 // smallest level then never covers two images
 RENDER_ATLAS_SPACING :: 1 << (RENDER_ATLAS_MIPS - 1)
 
+// Per space
 RENDER_QUADS_MAX :: 1 << 16
-RENDER_PASS_MAX :: 256
 
 Renderer_Flag :: enum {
 	Ready,
 }
 
 Renderer :: struct {
-	flags:           bit_set[Renderer_Flag],
-	window:          ^sdl.Window,
-	instance:        wgpu.Instance,
-	adapter:         wgpu.Adapter,
-	surface:         wgpu.Surface,
-	device:          wgpu.Device,
-	queue:           wgpu.Queue,
-	format:          Surface_Format,
+	flags:         bit_set[Renderer_Flag],
+	window:        ^sdl.Window,
+	instance:      wgpu.Instance,
+	adapter:       wgpu.Adapter,
+	surface:       wgpu.Surface,
+	device:        wgpu.Device,
+	queue:         wgpu.Queue,
+	format:        Surface_Format,
 	// Cached window size
-	window_size:     [2]i32,
-	// Quad pass data
-	quad_pipeline:   wgpu.RenderPipeline,
-	quad_buffer:     wgpu.Buffer,
+	window_size:   [2]i32,
+	// Quads. The buffer has RENDER_QUADS_MAX slots per space, in Render_Space order
+	quad_pipeline: wgpu.RenderPipeline,
+	quad_buffer:   wgpu.Buffer,
 	// View uniforms per space. Group 0 of every pipeline
-	view_layout:     wgpu.BindGroupLayout,
-	view_buffers:    [Render_Space]wgpu.Buffer,
-	view_groups:     [Render_Space]wgpu.BindGroup,
+	view_layout:   wgpu.BindGroupLayout,
+	view_buffers:  [Render_Space]wgpu.Buffer,
+	view_groups:   [Render_Space]wgpu.BindGroup,
 	// Linear filter, also between mip levels, clamp to edge. Used by the atlas and the terrain's grids
-	sampler:         wgpu.Sampler,
+	sampler:       wgpu.Sampler,
 	// Images
-	atlas_texture:   wgpu.Texture,
-	atlas_view:      wgpu.TextureView,
-	atlas_group:     wgpu.BindGroup,
+	atlas_texture: wgpu.Texture,
+	atlas_view:    wgpu.TextureView,
+	atlas_group:   wgpu.BindGroup,
 }
 
 @(private = "file")
@@ -70,8 +70,8 @@ Texture :: struct {
 // Must match struct View in view.wgsl
 @(private = "file")
 View_Uniform :: struct {
-	size:   [2]f32,
-	center: [2]f32,
+	size:          [2]f32,
+	center:        [2]f32,
 	zoom:          f32,
 	pixel_density: f32,
 }
@@ -340,7 +340,7 @@ renderer_init :: proc(
 		&{
 			label = "quads",
 			usage = {.Vertex, .CopyDst},
-			size = u64(size_of(Render_Quad) * RENDER_QUADS_MAX),
+			size = u64(size_of(Render_Quad) * RENDER_QUADS_MAX * len(Render_Space)),
 		},
 	)
 
@@ -398,7 +398,11 @@ renderer_init :: proc(
 
 			for level in 0 ..< RENDER_ATLAS_MIPS {
 				if level > 0 {
-					halved := make([]u8, ((size.x + 1) / 2) * ((size.y + 1) / 2) * 4, context.temp_allocator)
+					halved := make(
+						[]u8,
+						((size.x + 1) / 2) * ((size.y + 1) / 2) * 4,
+						context.temp_allocator,
+					)
 					image_halve(image_pixels, size, halved)
 					image_pixels = halved
 					size = (size + 1) / 2
@@ -480,10 +484,8 @@ renderer_deinit :: proc(rend: Renderer) {
 
 renderer_draw :: proc(
 	rend: ^Renderer,
-	// World-space view for this frame
-	view: Render_View,
-	quads: []Render_Quad,
-	passes: []Render_Pass,
+	// What this frame draws
+	data: ^Render_Data,
 ) -> (
 	drawn: bool,
 ) {
@@ -559,11 +561,16 @@ renderer_draw :: proc(
 		size := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)}
 		density := pixel_density(rend)
 		views := [Render_Space]View_Uniform {
-			.Screen = {size = size, center = size / density / 2, zoom = density, pixel_density = density},
+			.Screen = {
+				size = size,
+				center = size / density / 2,
+				zoom = density,
+				pixel_density = density,
+			},
 			.World = {
 				size = size,
-				center = view.center,
-				zoom = view.zoom * density,
+				center = data.view.center,
+				zoom = data.view.zoom * density,
 				pixel_density = density,
 			},
 		}
@@ -578,36 +585,28 @@ renderer_draw :: proc(
 		}
 	}
 
-	// Quads
-	if len(quads) > 0 {
-		quad_count := min(RENDER_QUADS_MAX, len(quads))
+	// Quads, each space at its slots
+	for &quads, space in data.quads {
+		if len(quads) == 0 do continue
 		wgpu.QueueWriteBuffer(
 			rend.queue,
 			rend.quad_buffer,
-			0,
-			raw_data(quads),
-			uint(quad_count * size_of(Render_Quad)),
+			u64(int(space) * RENDER_QUADS_MAX * size_of(Render_Quad)),
+			raw_data(quads[:]),
+			uint(len(quads) * size_of(Render_Quad)),
 		)
 	}
 
-	// Terrain: this frame's looks, highlights, arrows, wash and marks in view. The first terrain
-	// pass counts
-	terrain: ^Render_Terrain_Frame
-	for &command in passes {
-		if c, is_terrain := &command.(Render_Terrain_Pass); is_terrain {
-			terrain = &c.frame
-			break
-		}
-	}
-	if terrain != nil {
+	// Terrain: this frame's looks, highlights, arrows, wash and marks in view
+	{
 		window := [2]f32{f32(rend.window_size.x), f32(rend.window_size.y)} / pixel_density(rend)
-		terrain_frame(rend, terrain^, view, window)
+		terrain_frame(rend, data.terrain, data.view, window)
 	}
 
 	encoder := wgpu.DeviceCreateCommandEncoder(rend.device)
 
 	// Terrain: its offscreen passes, read by its draw below
-	if terrain != nil do terrain_encode(rend, encoder)
+	terrain_encode(rend, encoder)
 
 	{
 		// Clear pass
@@ -625,19 +624,18 @@ renderer_draw :: proc(
 			},
 		)
 
-		wgpu.RenderPassEncoderSetVertexBuffer(pass, 0, rend.quad_buffer, 0, wgpu.WHOLE_SIZE)
+		terrain_draw(rend, pass)
 
-		for command in passes {
-			switch c in command {
-			case Render_Quad_Pass:
-				wgpu.RenderPassEncoderSetPipeline(pass, rend.quad_pipeline)
-				wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.view_groups[c.space])
-				wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.atlas_group)
-				wgpu.RenderPassEncoderDraw(pass, 4, u32(c.len), 0, u32(c.begin))
-
-			case Render_Terrain_Pass:
-				terrain_draw(rend, pass)
-			}
+		// Quads over it, space by space
+		for &quads, space in data.quads {
+			quads_draw(
+				rend,
+				pass,
+				rend.quad_buffer,
+				space,
+				int(space) * RENDER_QUADS_MAX,
+				len(quads),
+			)
 		}
 
 		wgpu.RenderPassEncoderEnd(pass)
@@ -655,6 +653,22 @@ renderer_draw :: proc(
 	return true
 }
 
+// count quads of buffer from first, in space
+quads_draw :: proc(
+	rend: ^Renderer,
+	pass: wgpu.RenderPassEncoder,
+	buffer: wgpu.Buffer,
+	space: Render_Space,
+	first, count: int,
+) {
+	if count == 0 do return
+	wgpu.RenderPassEncoderSetPipeline(pass, rend.quad_pipeline)
+	wgpu.RenderPassEncoderSetVertexBuffer(pass, 0, buffer, 0, wgpu.WHOLE_SIZE)
+	wgpu.RenderPassEncoderSetBindGroup(pass, 0, rend.view_groups[space])
+	wgpu.RenderPassEncoderSetBindGroup(pass, 1, rend.atlas_group)
+	wgpu.RenderPassEncoderDraw(pass, 4, u32(count), 0, u32(first))
+}
+
 // Physical pixels per logical pixel of the window. The renderer's interface is in logical pixels
 // throughout: this stays inside it
 @(private = "file")
@@ -663,12 +677,12 @@ pixel_density :: proc(rend: ^Renderer) -> f32 {
 	return density > 0 ? density : 1
 }
 
-// Coordinate space of a quad pass
+// Coordinate space of quads. Drawn over the terrain in this order
 Render_Space :: enum {
-	// Logical pixels, origin at the window top-left
-	Screen,
 	// World units, mapped to the window by the frame's Render_View
 	World,
+	// Logical pixels, origin at the window top-left
+	Screen,
 }
 
 // World to window, in logical pixels: pixel = (p - center) * zoom + window_size / 2
@@ -679,11 +693,11 @@ Render_View :: struct {
 	zoom:   f32,
 }
 
-// rect, radii, thickness, softness: units of the pass's space
+// rect, radii, thickness, softness: units of the quad's space
 Render_Quad :: struct {
 	// Unrotated rectangle
 	rect:      Extents,
-	// Clip rectangle, in screen space (logical pixels) whatever the pass's space. Zero = none
+	// Clip rectangle, in screen space (logical pixels) whatever the quad's space. Zero = none
 	clip:      Extents,
 	// Per corner, 4 colours. TL clockwise winding order
 	colors:    [4][4]u8,
@@ -700,35 +714,16 @@ Render_Quad :: struct {
 	axis:      [2]f32,
 }
 
-Render_Quad_Pass :: struct {
-	space: Render_Space,
-	begin: int,
-	len:   int,
-}
-
-// What a frame gives renderer_draw. Filled with render_quads and render_terrain.
-// Fixed capacity: past it, entries are dropped
+// What a frame gives renderer_draw. Quads past a space's capacity are dropped
 Render_Data :: struct {
-	quads:  [dynamic; RENDER_QUADS_MAX]Render_Quad,
-	passes: [dynamic; RENDER_PASS_MAX]Render_Pass,
+	view:    Render_View,
+	terrain: Render_Terrain_Frame,
+	quads:   [Render_Space][dynamic; RENDER_QUADS_MAX]Render_Quad,
 }
 
+// Keeps the view
 render_data_clear :: proc(data: ^Render_Data) {
-	clear(&data.quads)
-	clear(&data.passes)
+	data.terrain = {}
+	for space in Render_Space do clear(&data.quads[space])
 }
 
-// Out: data, appended to.
-// A quad pass of quads, copied. Quads past the budget are dropped
-render_quads :: proc(data: ^Render_Data, space: Render_Space, quads: []Render_Quad) {
-	if len(data.passes) == RENDER_PASS_MAX do return
-	begin := len(data.quads)
-	count := append(&data.quads, ..quads)
-	append(&data.passes, Render_Quad_Pass{space = space, begin = begin, len = count})
-}
-
-// Executed in order
-Render_Pass :: union {
-	Render_Quad_Pass,
-	Render_Terrain_Pass,
-}

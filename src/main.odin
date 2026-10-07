@@ -8,9 +8,8 @@ import sdl "vendor:sdl3"
 
 GLOBAL: struct {
 	assets:      Assets,
-	render_data: Render_Data,
 	game:        Game,
-	camera:      Render_View,
+	render_data: Render_Data,
 }
 
 // Asset budgets must fit the renderer's
@@ -89,11 +88,16 @@ main :: proc() {
 				if found do rect = GLOBAL.assets.image_rects[index]
 			}
 		}
-		renderer_terrain_build(&renderer, game_loaded.geography, RENDER_TERRAIN_STYLE_DEFAULT, marks)
+		renderer_terrain_build(
+			&renderer,
+			game_loaded.geography,
+			RENDER_TERRAIN_STYLE_DEFAULT,
+			marks,
+		)
 	}
 
 	// Whole world in view
-	GLOBAL.camera = {
+	GLOBAL.render_data.view = {
 		center = {RENDER_TERRAIN_WIDTH / 2, RENDER_TERRAIN_HEIGHT / 2},
 		zoom   = 2,
 	}
@@ -125,7 +129,7 @@ main :: proc() {
 				}
 			// Camera: the wheel zooms about the cursor, a left drag pans
 			case .MOUSE_WHEEL:
-				camera := &GLOBAL.camera
+				camera := &GLOBAL.render_data.view
 				from_centre := [2]f32{event.wheel.mouse_x, event.wheel.mouse_y} - window_size / 2
 				under_cursor := camera.center + from_centre / camera.zoom
 				camera.zoom = clamp(
@@ -136,7 +140,7 @@ main :: proc() {
 				camera.center = under_cursor - from_centre / camera.zoom
 			case .MOUSE_MOTION:
 				if .LEFT in event.motion.state {
-					camera := &GLOBAL.camera
+					camera := &GLOBAL.render_data.view
 					camera.center -= [2]f32{event.motion.xrel, event.motion.yrel} / camera.zoom
 				}
 			}
@@ -146,18 +150,26 @@ main :: proc() {
 
 		render_data_clear(&GLOBAL.render_data)
 
+		regions: [REGIONS_MAX]Render_Region
+
 		// Terrain: every region in its color, the one under the cursor highlighted
 		{
 			hovered := 0
 			{
 				cursor: [2]f32
 				_ = sdl.GetMouseState(&cursor.x, &cursor.y)
-				cell := GLOBAL.camera.center + (cursor - window_size / 2) / GLOBAL.camera.zoom
-				if cell.x >= 0 && cell.y >= 0 && cell.x < RENDER_TERRAIN_WIDTH && cell.y < RENDER_TERRAIN_HEIGHT {
-					hovered = int(GLOBAL.game.terrain.regions[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)])
+				cell :=
+					GLOBAL.render_data.view.center +
+					(cursor - window_size / 2) / GLOBAL.render_data.view.zoom
+				if cell.x >= 0 &&
+				   cell.y >= 0 &&
+				   cell.x < RENDER_TERRAIN_WIDTH &&
+				   cell.y < RENDER_TERRAIN_HEIGHT {
+					hovered = int(
+						GLOBAL.game.terrain.regions[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)],
+					)
 				}
 			}
-			regions: [REGIONS_MAX]Render_Region
 			for &region, id in regions {
 				color := GLOBAL.game.regions[id].color
 				region = {
@@ -165,19 +177,16 @@ main :: proc() {
 					highlighted = id == hovered,
 				}
 			}
-			render_terrain(
-				&GLOBAL.render_data,
-				{region_display = .Filled_When_Far, regions = regions[:], dt = dt},
-			)
+			GLOBAL.render_data.terrain = {
+				region_display = .Filled_When_Far,
+				regions        = regions[:],
+				dt             = dt,
+			}
 		}
 
-		if !renderer_draw(
-			&renderer,
-			GLOBAL.camera,
-			GLOBAL.render_data.quads[:],
-			GLOBAL.render_data.passes[:],
-		) {
+		if !renderer_draw(&renderer, &GLOBAL.render_data) {
 			sdl.Delay(16)
 		}
 	}
 }
+
