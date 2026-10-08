@@ -20,7 +20,9 @@ GLOBAL: struct {
 #assert(MAP_HEIGHT == RENDER_TERRAIN_HEIGHT)
 #assert(REGIONS_MAX <= RENDER_TERRAIN_REGIONS_MAX)
 #assert(WAY_PER_TYPE_MAX <= RENDER_TERRAIN_COURSE_RUNS_MAX)
-#assert(WAY_MAX_STEPS_PER_TYPE << uint(RIVER_SMOOTHING.cut_iter) <= RENDER_TERRAIN_COURSE_POINTS_MAX)
+#assert(
+	WAY_MAX_STEPS_PER_TYPE << uint(RIVER_SMOOTHING.cut_iter) <= RENDER_TERRAIN_COURSE_POINTS_MAX,
+)
 
 // Camera: zoom per wheel notch, and the zoom range in logical pixels per cell
 CAMERA_ZOOM_STEP :: 1.15
@@ -62,7 +64,7 @@ main :: proc() {
 	renderer: Renderer
 	{
 		// Fonts, by Text_Font_Id: 0 is the default
-		fonts := [?]Text_Source{{"aniron", 18}, {"forgotten_uncial", 22}}
+		fonts := [?]Text_Source{{"aniron", 24}, {"forgotten_uncial", 26}}
 
 		init := new(Render_Init, context.temp_allocator)
 		render_init_reset(init)
@@ -71,6 +73,10 @@ main :: proc() {
 		renderer = renderer_init(window, init)
 	}
 	defer renderer_deinit(renderer)
+
+	// UI: font 0 is its base font. Typed characters arrive as text input events
+	ui_init(0)
+	_ = sdl.StartTextInput(window)
 
 	{
 		game_init(&GLOBAL.game)
@@ -101,6 +107,13 @@ main :: proc() {
 	}
 	frame_ticks := sdl.GetTicksNS()
 
+	// DEMO begin: the UI demo's state
+	demo: Demo_Ui
+	// DEMO end
+
+	// A left drag that started on the map, not on the UI, pans the camera
+	map_drag := false
+
 	running := true
 	for running {
 		free_all(context.temp_allocator)
@@ -116,17 +129,35 @@ main :: proc() {
 			window_size = {f32(size.x), f32(size.y)}
 		}
 
+		// Input: the UI's, and the camera's where the UI is not under the mouse
+		input: UI_Input
 		event: sdl.Event
 		for sdl.PollEvent(&event) {
 			#partial switch event.type {
 			case .QUIT:
 				running = false
 			case .KEY_DOWN:
-				if event.key.scancode == .ESCAPE {
-					running = false
+				if event.key.scancode == .ESCAPE do input.escape = true
+				if len(input.events) < UI_EVENTS_MAX {
+					append(&input.events, UI_Event{kind = .Key, key = event.key.scancode})
 				}
+			case .TEXT_INPUT:
+				for char in string(event.text.text) {
+					if len(input.events) < UI_EVENTS_MAX {
+						append(&input.events, UI_Event{kind = .Char, char = char})
+					}
+				}
+			case .MOUSE_BUTTON_DOWN:
+				if event.button.button == sdl.BUTTON_LEFT {
+					input.press = true
+					map_drag = !ui_hovered_any()
+				}
+			case .MOUSE_BUTTON_UP:
+				if event.button.button == sdl.BUTTON_LEFT do map_drag = false
 			// Camera: the wheel zooms about the cursor, a left drag pans
 			case .MOUSE_WHEEL:
+				input.wheel += {event.wheel.x, event.wheel.y}
+				if ui_hovered_any() do continue
 				camera := &GLOBAL.render_data.view
 				from_centre := [2]f32{event.wheel.mouse_x, event.wheel.mouse_y} - window_size / 2
 				under_cursor := camera.center + from_centre / camera.zoom
@@ -137,12 +168,22 @@ main :: proc() {
 				)
 				camera.center = under_cursor - from_centre / camera.zoom
 			case .MOUSE_MOTION:
-				if .LEFT in event.motion.state {
+				if map_drag {
 					camera := &GLOBAL.render_data.view
 					camera.center -= [2]f32{event.motion.xrel, event.motion.yrel} / camera.zoom
 				}
 			}
 		}
+
+		{
+			cursor: [2]f32
+			buttons := sdl.GetMouseState(&cursor.x, &cursor.y)
+			input.cursor = cursor
+			input.cursor_valid = sdl.GetMouseFocus() == window
+			input.press_down = .LEFT in buttons
+		}
+		// Escape drops the UI's focus first, and quits when nothing is focused
+		if input.escape && !ui_focused_any() do running = false
 
 		game_tick(&GLOBAL.game)
 
@@ -158,7 +199,8 @@ main :: proc() {
 				cell :=
 					GLOBAL.render_data.view.center +
 					(cursor - window_size / 2) / GLOBAL.render_data.view.zoom
-				if cell.x >= 0 &&
+				if !ui_hovered_any() &&
+				   cell.x >= 0 &&
 				   cell.y >= 0 &&
 				   cell.x < RENDER_TERRAIN_WIDTH &&
 				   cell.y < RENDER_TERRAIN_HEIGHT {
@@ -178,25 +220,12 @@ main :: proc() {
 			GLOBAL.render_data.terrain.dt = dt
 		}
 
-		// DEMO begin: text. A title, a line with a coloured link, and that line cut short with "..."
-		{
-			ink := [4]f32{0.18, 0.12, 0.06, 1}
-			title := text_make({{text = "Imperium Romanum", font = 1, color = ink}})
-			line := text_make(
-				{
-					{text = "The legion marches north to ", font = 0, color = ink},
-					{text = "Mogontiacum", font = 1, color = {0.62, 0.12, 0.06, 1}, tag = 1},
-				},
-			)
-			screen := &GLOBAL.render_data.quads[.Screen]
-			pos := [2]f32{40, 40}
-			text_quads(title, pos, math.INF_F32, true, {}, screen)
-			pos.y += text_size(title).y
-			text_quads(line, pos, math.INF_F32, true, {}, screen)
-			pos.y += text_size(line).y
-			text_quads(line, pos, 230, true, {}, screen)
-		}
+		// UI, over everything
+		ui_begin(window_size)
+		// DEMO begin: the UI demo
+		demo_ui(&demo)
 		// DEMO end
+		ui_end(input, dt, &GLOBAL.render_data.quads[.Screen])
 
 		if !renderer_draw(&renderer, &GLOBAL.render_data) {
 			sdl.Delay(16)

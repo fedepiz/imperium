@@ -29,6 +29,11 @@ Axis :: enum {
 	Y,
 }
 
+// Fraction of the way to its target a value eases in dt seconds, at rate per second
+ease_step :: proc(rate, dt: f32) -> f32 {
+	return 1 - math.exp(-rate * dt)
+}
+
 // A half-open range of indices into a table: [begin, begin + len)
 Span :: struct {
 	begin: int,

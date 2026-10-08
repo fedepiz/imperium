@@ -280,6 +280,18 @@ text_make :: proc(parts: []Text_Part) -> Text_Id {
 	return id
 }
 
+// A font's size, as in its Text_Source, and its ascent and descent. Logical pixels, descent negative
+Text_Metrics :: struct {
+	size:    f32,
+	ascent:  f32,
+	descent: f32,
+}
+
+text_font_metrics :: proc(font: Text_Font_Id) -> Text_Metrics {
+	f := &TEXT.fonts[font]
+	return {f32(f.size), f.ascent, f.descent}
+}
+
 // Width, and height from the tallest ascent to the lowest descent, in logical pixels
 text_size :: proc(text: Text_Id) -> [2]f32 {
 	t := TEXT.texts[text]
