@@ -119,6 +119,13 @@ UI: struct {
 	anim_free_count:   int,
 	// Key -> Anim id hashmap
 	anim_hash_table:   Anim_Hashtable,
+	// Open tooltips, kept between frames
+	tooltips:          [TOOLTIPS_MAX]Tooltip,
+	// The tooltips being built, innermost last: the one a tooltip opened now is opened from
+	tooltip_stack:     [TOOLTIPS_MAX]Key,
+	tooltip_depth:     int,
+	// The topmost tooltip under the mouse, as of the last end
+	tooltip_under:     Key,
 }
 
 // The short live id for the ui boxes. Doubles up as the index in the table
@@ -167,6 +174,9 @@ UI_Box_Flag :: enum {
 	Floating,
 	// Its text has keyed runs, which take the mouse like boxes; set by the box's text
 	Hover_Text,
+	// A tooltip: takes the mouse from what is under it without becoming hot, and is kept open while the
+	// mouse is over it; set by ui_tooltip
+	Tooltip,
 }
 
 // Distance moved per wheel notch, in multiples of the scrolled box's font size
@@ -521,6 +531,12 @@ ui_begin :: proc(viewport: [2]f32) {
 
 	clear(&UI.lines)
 
+	// Tooltips: what keeps them open is seen again while they are built
+	UI.tooltip_depth = 0
+	for &tooltip in UI.tooltips {
+		tooltip.built = false
+		tooltip.wanted = false
+	}
 
 	// Keyed boxes built last frame keep their slot and are ready to be built again; the rest are freed.
 	UI.boxes[0] = {}
@@ -590,6 +606,32 @@ ui_end :: proc(input: UI_Input, dt: f32, quads: ^[dynamic; $N]Render_Quad) {
 
 	update_interaction(input)
 
+	// Tooltips: kept open while wanted open, or while the mouse is over them or one opened from them, and for
+	// TOOLTIP_GRACE after, to cross the gap. Closed when no longer built
+	{
+		// The hovered tooltip, and those it was opened from
+		chain: [TOOLTIPS_MAX]Key
+		chain_len := 0
+		for key := UI.tooltip_under; key != KEY_NIL && chain_len < TOOLTIPS_MAX; {
+			chain[chain_len] = key
+			chain_len += 1
+			parent := KEY_NIL
+			for tooltip in UI.tooltips do if tooltip.key == key do parent = tooltip.parent
+			key = parent
+		}
+		for &tooltip in UI.tooltips {
+			if tooltip.key == KEY_NIL {continue}
+			if !tooltip.built {
+				tooltip = {}
+				continue
+			}
+			hovered := false
+			for key in chain[:chain_len] do if key == tooltip.key do hovered = true
+			tooltip.idle = (tooltip.wanted || hovered) ? 0 : tooltip.idle + dt
+			if tooltip.idle > TOOLTIP_GRACE {tooltip = {}}
+		}
+	}
+
 	// Ease the persistent state of every keyed box built this frame, and every live anim
 	rate := ease_step(16, dt)
 	for i := 0; i < UI.box_order_count; i += 1 {
@@ -645,6 +687,17 @@ update_interaction :: proc(input: UI_Input) {
 	UI.wheel = input.wheel
 	UI.hot = {}
 	UI.hovered_any = false
+
+	// The topmost tooltip under the mouse
+	UI.tooltip_under = {}
+	for i := UI.box_order_count; i > 0 && input.cursor_valid; i -= 1 {
+		box := &UI.boxes[UI.box_order[i - 1]]
+		if .Tooltip in box.flags && rect_contains(box.clip, mouse_pos) {
+			UI.tooltip_under = box.key
+			break
+		}
+	}
+
 	// Only boxes can be pressed or focused; keyed text is only hovered.
 	hot_is_box, hot_focusable := false, false
 	// From the top down, the first clickable box or keyed run of text under the mouse is hot, and the wheel
@@ -677,6 +730,13 @@ update_interaction :: proc(input: UI_Input) {
 				hot_focusable = .Focusable in box.flags
 			}
 			hot_found = true
+		}
+		// A tooltip stops the search without becoming hot: the mouse is over it, not what is under it.
+		// Nor does the wheel reach through it
+		if !hot_found && .Tooltip in box.flags {
+			UI.hovered_any = true
+			hot_found = true
+			if under == 0 {under = id}
 		}
 		if hot_found && under != 0 {break}
 	}
@@ -1489,15 +1549,59 @@ ui_overlay :: proc() -> bool {
 	return true
 }
 
-// A column floating over everything near the mouse, kept inside the window. Build it while its anchor is hovered.
+// Tooltips open at once, nested ones included
+@(private = "file")
+TOOLTIPS_MAX :: 8
+// Seconds a tooltip stays open once nothing keeps it, to cross the gap from what opened it
+@(private = "file")
+TOOLTIP_GRACE :: 0.3
+
+// A tooltip kept open between frames
+@(private = "file")
+Tooltip :: struct {
+	key:       Key,
+	// The tooltip it was opened from. KEY_NIL: none
+	parent:    Key,
+	// The mouse when it opened: it sits next to this
+	opened_at: [2]f32,
+	// This frame: built, and wanted open
+	built:     bool,
+	wanted:    bool,
+	// Seconds since it was last wanted open, or the mouse was last over it or a tooltip opened from it
+	idle:      f32,
+}
+
+// A column floating over everything next to where the mouse was when it opened, kept inside the window.
+// Opens while want_open, and stays open while the mouse is over it, or over a tooltip opened from
+// it, and for a moment after. Returns true while open: build its contents then. Built inside another
+// tooltip, it is opened from that one. The label is only the key
 @(deferred_out = tooltip_end)
-ui_tooltip :: proc(style := UI_Style{}) -> bool {
+ui_tooltip :: proc(label: string, want_open: bool, style := UI_Style{}) -> bool {
+	key := key_from_string(label)
+	assert(key != KEY_NIL, "tooltips need a non-empty label")
+
+	// Open already, or opening now
+	tooltip: ^Tooltip
+	for &open in UI.tooltips do if open.key == key do tooltip = &open
+	if tooltip == nil {
+		if !want_open {return false}
+		for &free in UI.tooltips do if free.key == KEY_NIL && tooltip == nil do tooltip = &free
+		// Too many open
+		if tooltip == nil {return false}
+		tooltip^ = {
+			key    = key,
+			parent = UI.tooltip_depth > 0 ? UI.tooltip_stack[UI.tooltip_depth - 1] : KEY_NIL,
+			opened_at = UI.mouse,
+		}
+	}
+	tooltip.built = true
+	if want_open {tooltip.wanted = true}
+
 	parent_push(UI.overlay)
-	key := key_from_string("tooltip")
-	// Last frame's size decides whether it fits to the right of and below the mouse.
+	// Last frame's size decides whether it fits to the right of and below where it opened.
 	size := UI.boxes[hashtable_find(&UI.key_hash_table, key)].size_computed
-	position := UI.mouse + TOOLTIP_OFFSET
-	flipped := UI.mouse - TOOLTIP_OFFSET - size
+	position := tooltip.opened_at + TOOLTIP_OFFSET
+	flipped := tooltip.opened_at - TOOLTIP_OFFSET - size
 	for axis in Axis {
 		if position[axis] + size[axis] > UI.viewport[axis] {
 			position[axis] = flipped[axis]
@@ -1507,15 +1611,20 @@ ui_tooltip :: proc(style := UI_Style{}) -> bool {
 	ui_style_next(style)
 	id, _ := box_make(key, {position = position})
 	box := &UI.boxes[id]
-	box.flags += {.Floating, .Background, .Border}
+	box.flags += {.Floating, .Background, .Border, .Tooltip}
 	box.child_axis = .Y
 	parent_push(id)
+
+	assert(UI.tooltip_depth < TOOLTIPS_MAX)
+	UI.tooltip_stack[UI.tooltip_depth] = key
+	UI.tooltip_depth += 1
 	return true
 }
 
 @(private = "file")
 tooltip_end :: proc(open: bool) {
 	if open {
+		UI.tooltip_depth -= 1
 		// Ends the tooltip
 		parent_pop()
 		// And ends the UI.overlay scope

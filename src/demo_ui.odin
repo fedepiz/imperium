@@ -126,17 +126,46 @@ demo_ui :: proc(demo: ^Demo_Ui) {
 					if press.pressed {
 						demo.presses += 1
 					}
-					if press.hovered {
-						if ui_tooltip(MIDNIGHT_PANEL_STYLE) {
-							demo_label("Lorem ipsum dolor sit amet.")
-							demo_label(
-								"Consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+					// Tooltips in tooltips: hover a gold word to open the next one
+					if ui_tooltip("press me tip", press.hovered, MIDNIGHT_PANEL_STYLE) {
+						demo_label("Lorem ipsum dolor sit amet.")
+						demo_label(
+							"Consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+							{
+								width = ui_em(14),
+								height = ui_text_dim(),
+								text_color = MIDNIGHT_MUTED,
+							},
+						)
+						ui_label_text(
+							{
+								{text = "Hover the "},
+								{text = "legion", color = MIDNIGHT_GOLD, key = "legion"},
+								{text = " for more."},
+							},
+							{width = ui_text_dim()},
+						)
+						if ui_tooltip(
+							"legion",
+							ui_signal("legion").hovered,
+							MIDNIGHT_PANEL_STYLE,
+						) {
+							demo_label("About five thousand men.")
+							ui_label_text(
 								{
-									width = ui_em(14),
-									height = ui_text_dim(),
-									text_color = MIDNIGHT_MUTED,
+									{text = "Led by a "},
+									{text = "legatus", color = MIDNIGHT_GOLD, key = "legatus"},
+									{text = "."},
 								},
+								{width = ui_text_dim()},
 							)
+							if ui_tooltip(
+								"legatus",
+								ui_signal("legatus").hovered,
+								MIDNIGHT_PANEL_STYLE,
+							) {
+								demo_label("A senator, appointed by the emperor.")
+							}
 						}
 					}
 					if demo_button("Reset", MIDNIGHT_DANGER_BUTTON).pressed {
@@ -155,9 +184,16 @@ demo_ui :: proc(demo: ^Demo_Ui) {
 					},
 					{width = ui_text_dim(), text_color = MIDNIGHT_MUTED},
 				)
-				if ui_signal("tempor").hovered {
-					if ui_tooltip(MIDNIGHT_PANEL_STYLE) {
-						demo_label("Lorem ipsum dolor sit amet.")
+				if ui_tooltip("tempor tip", ui_signal("tempor").hovered, MIDNIGHT_PANEL_STYLE) {
+					ui_label_text(
+						{
+							{text = "Lorem ipsum "},
+							{text = "dolor", color = MIDNIGHT_GOLD, key = "tempor2"},
+							{text = " sit amet."},
+						},
+					)
+					if ui_tooltip("nested_tip", true, MIDNIGHT_PANEL_STYLE) {
+						demo_button("A button!")
 					}
 				}
 			}
