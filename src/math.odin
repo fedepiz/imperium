@@ -29,6 +29,17 @@ Axis :: enum {
 	Y,
 }
 
+// A half-open range of indices into a table: [begin, begin + len)
+Span :: struct {
+	begin: int,
+	len:   int,
+}
+
+// The part of table span covers
+span_slice :: proc(table: []$T, span: Span) -> []T {
+	return table[span.begin:][:span.len]
+}
+
 // Out: pos.
 //  Shelf packing algorithm
 shelf_pack :: proc(region: [2]int, sizes: [][2]int, padding: int, pos: [][2]int) -> bool {

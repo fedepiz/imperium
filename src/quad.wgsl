@@ -1,7 +1,12 @@
 // Quad shader. Compiled with view.wgsl prepended (View, view_* functions)
 
-@group(1) @binding(0) var atlas:         texture_2d<f32>;
+// Atlases, as bound in renderer.odin
+@group(1) @binding(0) var images:        texture_2d<f32>;
 @group(1) @binding(1) var atlas_sampler: sampler;
+@group(1) @binding(2) var glyphs:        texture_2d<f32>;
+
+// Render_Atlas
+const ATLAS_IMAGES = 0u;
 
 // Added to the mip level. Negative: sharper, and less steady when shrunk
 const LEVEL_BIAS = 0.0;
@@ -18,6 +23,7 @@ struct Quad_In {
     @location(8)  softness:  f32,
     @location(9)  source:    vec4f,
     @location(10) axis:      vec2f,
+    @location(11) atlas:     u32,
 }
 
 // All lengths in physical pixels
@@ -30,6 +36,7 @@ struct Vertex_Out {
     @location(3) @interpolate(flat) clip:      vec4f,
     @location(4) @interpolate(flat) shape:     vec3f,
     @location(5) @interpolate(flat) source:    vec4f,
+    @location(6) @interpolate(flat) atlas:     u32,
 }
 
 @vertex
@@ -64,6 +71,7 @@ fn vs_main(@builtin(vertex_index) index:u32, quad: Quad_In) -> Vertex_Out {
     out.clip      = quad.clip * view.pixel_density;
     out.shape     = shape;
     out.source    = quad.source;
+    out.atlas     = quad.atlas;
     return out;
 }
 
@@ -100,13 +108,23 @@ fn fs_main(in: Vertex_Out) -> @location(0) vec4f {
         coverage *= smoothstep(-edge, edge, dist + thickness);
     }
 
-    let t     = clamp(in.local / (in.half_size * 2.0) + 0.5, vec2f(0.0), vec2f(1.0));
-    let uv    = mix(in.source.xy, in.source.zw, t) / vec2f(textureDimensions(atlas));
-    // Mip level: source texels per pixel of the quad, as a power of two
-    let texels = (in.source.zw - in.source.xy) / (in.half_size * 2.0);
-    let level  = log2(max(max(texels.x, texels.y), 1.0)) + LEVEL_BIAS;
-    let texel  = textureSampleLevel(atlas, atlas_sampler, uv, max(level, 0.0));
-    let tex   = select(vec4f(1.0), texel, in.source.z > in.source.x);
+    // Texel: none, an image's, or a glyph's coverage as premultiplied white.
+    // Sampled at an explicit level, so the branch on the quad's atlas is allowed
+    var tex = vec4f(1.0);
+    if in.source.z > in.source.x {
+        let t      = clamp(in.local / (in.half_size * 2.0) + 0.5, vec2f(0.0), vec2f(1.0));
+        let source = mix(in.source.xy, in.source.zw, t);
+        if in.atlas == ATLAS_IMAGES {
+            // Mip level: source texels per pixel of the quad, as a power of two
+            let texels = (in.source.zw - in.source.xy) / (in.half_size * 2.0);
+            let level  = log2(max(max(texels.x, texels.y), 1.0)) + LEVEL_BIAS;
+            let uv     = source / vec2f(textureDimensions(images));
+            tex = textureSampleLevel(images, atlas_sampler, uv, max(level, 0.0));
+        } else {
+            let uv = source / vec2f(textureDimensions(glyphs));
+            tex = vec4f(textureSampleLevel(glyphs, atlas_sampler, uv, 0.0).r);
+        }
+    }
 
     // Premultiply alpha
     let alpha = in.color.a * coverage;

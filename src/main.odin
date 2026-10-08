@@ -7,22 +7,20 @@ import "core:mem"
 import sdl "vendor:sdl3"
 
 GLOBAL: struct {
-	assets:           Assets,
-	game:             Game,
-	render_geography: Render_Geography,
-	render_data:      Render_Data,
+	assets:      Assets,
+	game:        Game,
+	render_data: Render_Data,
 }
 
-// Asset budgets must fit the renderer's
-#assert(ASSETS_IMAGES_MAX <= RENDER_IMAGES_MAX)
-#assert(ASSETS_ATLAS_SIZE <= RENDER_ATLAS_SIZE_MAX)
-#assert(ASSETS_ATLAS_SPACING % RENDER_ATLAS_SPACING == 0)
+// Asset budgets must fit the renderer's: one write per image
+#assert(ASSETS_IMAGES_MAX <= RENDER_ATLAS_WRITES_MAX)
 
 // The map must match the renderer's terrain grid
 #assert(MAP_WIDTH == RENDER_TERRAIN_WIDTH)
 #assert(MAP_HEIGHT == RENDER_TERRAIN_HEIGHT)
 #assert(REGIONS_MAX <= RENDER_TERRAIN_REGIONS_MAX)
 #assert(WAY_PER_TYPE_MAX <= RENDER_TERRAIN_COURSE_RUNS_MAX)
+#assert(WAY_MAX_STEPS_PER_TYPE << uint(RIVER_SMOOTHING.cut_iter) <= RENDER_TERRAIN_COURSE_POINTS_MAX)
 
 // Camera: zoom per wheel notch, and the zoom range in logical pixels per cell
 CAMERA_ZOOM_STEP :: 1.15
@@ -60,23 +58,26 @@ main :: proc() {
 	}
 	defer sdl.DestroyWindow(window)
 
-	// Load assets, pixels live in temporary memory until uploaded
+	// Load images and fonts into the atlases' writes. Pixels live in temporary memory until uploaded
 	renderer: Renderer
 	{
-		loaded := new(Assets_Loaded, context.temp_allocator)
-		assets_load(&GLOBAL.assets, sdl.GetWindowPixelDensity(window), loaded)
-		renderer = renderer_init(
-			window,
-			{ASSETS_ATLAS_SIZE, ASSETS_ATLAS_SIZE},
-			GLOBAL.assets.image_rects[:],
-			loaded.pixels[:],
-		)
+		// Fonts, by Text_Font_Id: 0 is the default
+		fonts := [?]Text_Source{{"aniron", 18}, {"forgotten_uncial", 22}}
+
+		init := new(Render_Init, context.temp_allocator)
+		render_init_reset(init)
+		assets_load(&GLOBAL.assets, init)
+		text_load(fonts[:], sdl.GetWindowPixelDensity(window), init)
+		renderer = renderer_init(window, init)
 	}
 	defer renderer_deinit(renderer)
 
 	{
 		game_init(&GLOBAL.game)
-		if !game_load(&GLOBAL.game, "roman", &GLOBAL.render_geography) {
+
+		geography := new(Render_Geography, context.temp_allocator)
+
+		if !game_load(&GLOBAL.game, "roman", geography) {
 			fmt.eprintln("Failed to load game")
 			return
 		}
@@ -90,12 +91,7 @@ main :: proc() {
 				if found do rect = GLOBAL.assets.image_rects[index]
 			}
 		}
-		renderer_terrain_build(
-			&renderer,
-			&GLOBAL.render_geography,
-			RENDER_TERRAIN_STYLE_DEFAULT,
-			marks,
-		)
+		renderer_terrain_build(&renderer, geography, RENDER_TERRAIN_STYLE_DEFAULT, marks)
 	}
 
 	// Whole world in view
@@ -151,6 +147,7 @@ main :: proc() {
 		game_tick(&GLOBAL.game)
 
 		render_data_clear(&GLOBAL.render_data)
+		text_reset()
 
 		// Terrain: every region in its color, the one under the cursor highlighted
 		{
@@ -181,9 +178,28 @@ main :: proc() {
 			GLOBAL.render_data.terrain.dt = dt
 		}
 
+		// DEMO begin: text. A title, a line with a coloured link, and that line cut short with "..."
+		{
+			ink := [4]f32{0.18, 0.12, 0.06, 1}
+			title := text_make({{text = "Imperium Romanum", font = 1, color = ink}})
+			line := text_make(
+				{
+					{text = "The legion marches north to ", font = 0, color = ink},
+					{text = "Mogontiacum", font = 1, color = {0.62, 0.12, 0.06, 1}, tag = 1},
+				},
+			)
+			screen := &GLOBAL.render_data.quads[.Screen]
+			pos := [2]f32{40, 40}
+			text_quads(title, pos, math.INF_F32, true, {}, screen)
+			pos.y += text_size(title).y
+			text_quads(line, pos, math.INF_F32, true, {}, screen)
+			pos.y += text_size(line).y
+			text_quads(line, pos, 230, true, {}, screen)
+		}
+		// DEMO end
+
 		if !renderer_draw(&renderer, &GLOBAL.render_data) {
 			sdl.Delay(16)
 		}
 	}
 }
-

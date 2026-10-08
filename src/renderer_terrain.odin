@@ -1362,7 +1362,7 @@ terrain_encode :: proc(rend: ^Renderer, encoder: wgpu.CommandEncoder) {
 				},
 			},
 		)
-		quads_draw(rend, pass, TERRAIN.marks_buffer, .World, 0, len(TERRAIN.marks_quads))
+		renderer_quads_draw(rend, pass, TERRAIN.marks_buffer, .World, 0, len(TERRAIN.marks_quads))
 		wgpu.RenderPassEncoderEnd(pass)
 		wgpu.RenderPassEncoderRelease(pass)
 	}
@@ -2057,4 +2057,3 @@ Ground_Value :: struct {
 	strength: f32,
 	clip:     Ground_Clip,
 }
-

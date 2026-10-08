@@ -21,6 +21,18 @@ WAY_PER_TYPE_MAX :: 256
 WAY_LENGTH_MAX :: 1024
 WAY_MAX_STEPS_PER_TYPE :: WAY_LENGTH_MAX * 4
 
+// Rivers: wide curves
+RIVER_SMOOTHING :: Polyline_Smoothing {
+	cut_iter  = 3,
+	cut_ratio = 0.25,
+}
+// Roads: straight, tight bends
+ROAD_SMOOTHING :: Polyline_Smoothing {
+	cut_iter  = 2,
+	cut_ratio = 0.25,
+	cut_max   = 1.5,
+}
+
 RIVER_DIST_MAX :: 12
 ROAD_DIST_MAX :: 1.5
 BASIN_DIST_MAX :: 24
@@ -137,18 +149,8 @@ game_load :: proc(
 			polyline_out: ^Render_Courses,
 		}
 		descs: []Desc = {
-			// Rivers: wide curves
-			{
-				kind_name = "rivers",
-				smoothing = {cut_iter = 3, cut_ratio = 0.25},
-				polyline_out = &geo_out.rivers,
-			},
-			// Roads: straight, tight bends
-			{
-				kind_name = "roads",
-				smoothing = {cut_iter = 2, cut_ratio = 0.25, cut_max = 1.5},
-				polyline_out = &geo_out.roads,
-			},
+			{kind_name = "rivers", smoothing = RIVER_SMOOTHING, polyline_out = &geo_out.rivers},
+			{kind_name = "roads", smoothing = ROAD_SMOOTHING, polyline_out = &geo_out.roads},
 		}
 
 		lines_in := new(
@@ -355,4 +357,3 @@ load_map_bitmap_3_channels :: proc(file: string, out: ^[MAP_CELLS][3]u8) -> bool
 }
 
 game_tick :: proc(game: ^Game) {}
-

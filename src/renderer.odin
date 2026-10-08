@@ -18,15 +18,17 @@ VIEW_SHADER :: #load("view.wgsl", string)
 QUAD_SHADER :: VIEW_SHADER + #load("quad.wgsl", string)
 
 // Budgets
-RENDER_IMAGES_MAX :: 4000
+// Writes into one atlas, at init
+RENDER_ATLAS_WRITES_MAX :: 4096
 // Largest texture every WebGPU device supports
 RENDER_ATLAS_SIZE_MAX :: 8192
-// Mip levels of the atlas: level n is the images at 1 / 2^n size. Quads drawn smaller than their
-// source read the level that matches
-RENDER_ATLAS_MIPS :: 5
-// Atlas images must sit on multiples of this, and at least this far apart: a texel of the
-// smallest level then never covers two images
-RENDER_ATLAS_SPACING :: 1 << (RENDER_ATLAS_MIPS - 1)
+
+// Texture format of each atlas. Must match RENDER_ATLAS_INFOS texel_bytes
+@(private = "file", rodata)
+ATLAS_FORMATS := [Render_Atlas]wgpu.TextureFormat {
+	.Images = .RGBA8Unorm,
+	.Glyphs = .R8Unorm,
+}
 
 // Per space
 RENDER_QUADS_MAX :: 1 << 16
@@ -36,29 +38,29 @@ Renderer_Flag :: enum {
 }
 
 Renderer :: struct {
-	flags:         bit_set[Renderer_Flag],
-	window:        ^sdl.Window,
-	instance:      wgpu.Instance,
-	adapter:       wgpu.Adapter,
-	surface:       wgpu.Surface,
-	device:        wgpu.Device,
-	queue:         wgpu.Queue,
-	format:        Surface_Format,
+	flags:          bit_set[Renderer_Flag],
+	window:         ^sdl.Window,
+	instance:       wgpu.Instance,
+	adapter:        wgpu.Adapter,
+	surface:        wgpu.Surface,
+	device:         wgpu.Device,
+	queue:          wgpu.Queue,
+	format:         Surface_Format,
 	// Cached window size
-	window_size:   [2]i32,
+	window_size:    [2]i32,
 	// Quads. The buffer has RENDER_QUADS_MAX slots per space, in Render_Space order
-	quad_pipeline: wgpu.RenderPipeline,
-	quad_buffer:   wgpu.Buffer,
+	quad_pipeline:  wgpu.RenderPipeline,
+	quad_buffer:    wgpu.Buffer,
 	// View uniforms per space. Group 0 of every pipeline
-	view_layout:   wgpu.BindGroupLayout,
-	view_buffers:  [Render_Space]wgpu.Buffer,
-	view_groups:   [Render_Space]wgpu.BindGroup,
-	// Linear filter, also between mip levels, clamp to edge. Used by the atlas and the terrain's grids
-	sampler:       wgpu.Sampler,
-	// Images
-	atlas_texture: wgpu.Texture,
-	atlas_view:    wgpu.TextureView,
-	atlas_group:   wgpu.BindGroup,
+	view_layout:    wgpu.BindGroupLayout,
+	view_buffers:   [Render_Space]wgpu.Buffer,
+	view_groups:    [Render_Space]wgpu.BindGroup,
+	// Linear filter, also between mip levels, clamp to edge. Used by the atlases and the terrain's grids
+	sampler:        wgpu.Sampler,
+	// Atlases, and their bind group with the sampler: group 1 of the quad pipeline
+	atlas_textures: [Render_Atlas]wgpu.Texture,
+	atlas_views:    [Render_Atlas]wgpu.TextureView,
+	atlas_group:    wgpu.BindGroup,
 }
 
 @(private = "file")
@@ -93,17 +95,13 @@ SURFACE_FORMATS :: [?]Surface_Format {
 
 renderer_init :: proc(
 	window: ^sdl.Window,
-	// Atlas size and, per image, its rect in the atlas and RGBA8 premultiplied pixels
-	atlas_size: [2]int,
-	extents: []Extents,
-	pixels: [][]u8,
+	// The atlases' contents: render_init_reset, then filled by the loaders
+	init: ^Render_Init,
 ) -> (
 	out: Renderer,
 ) {
 	assert(window != nil)
-	assert(len(extents) == len(pixels))
-	assert(len(extents) <= RENDER_IMAGES_MAX)
-	assert(atlas_size.x <= RENDER_ATLAS_SIZE_MAX && atlas_size.y <= RENDER_ATLAS_SIZE_MAX)
+	for atlas in Render_Atlas do assert(init.atlases[atlas] == RENDER_ATLAS_INFOS[atlas])
 
 	out.window = window
 	// Create instance
@@ -246,6 +244,7 @@ renderer_init :: proc(
 			},
 		},
 	)
+	// Binding 0: images, 1: the sampler, 2: glyphs. Must match quad.wgsl
 	atlas_layout_entries := [?]wgpu.BindGroupLayoutEntry {
 		{
 			binding = 0,
@@ -253,6 +252,11 @@ renderer_init :: proc(
 			texture = {sampleType = .Float, viewDimension = ._2D},
 		},
 		{binding = 1, visibility = {.Fragment}, sampler = {type = .Filtering}},
+		{
+			binding = 2,
+			visibility = {.Fragment},
+			texture = {sampleType = .Float, viewDimension = ._2D},
+		},
 	}
 	atlas_layout := wgpu.DeviceCreateBindGroupLayout(
 		out.device,
@@ -291,6 +295,7 @@ renderer_init :: proc(
 		{format = .Float32, offset = u64(offset_of(Render_Quad, softness)), shaderLocation = 8},
 		{format = .Float32x4, offset = u64(offset_of(Render_Quad, source)), shaderLocation = 9},
 		{format = .Float32x2, offset = u64(offset_of(Render_Quad, axis)), shaderLocation = 10},
+		{format = .Uint32, offset = u64(offset_of(Render_Quad, atlas)), shaderLocation = 11},
 	}
 
 	out.quad_pipeline = wgpu.DeviceCreateRenderPipeline(
@@ -368,63 +373,71 @@ renderer_init :: proc(
 		}
 	}
 
-	// Prepare images
-	{
-		// Create texture, starts zeroed so gaps are transparent
-		out.atlas_texture = wgpu.DeviceCreateTexture(
+	// Atlases. Each texture starts zeroed, so gaps are transparent
+	for atlas in Render_Atlas {
+		info := RENDER_ATLAS_INFOS[atlas]
+		assert(info.size.x <= RENDER_ATLAS_SIZE_MAX && info.size.y <= RENDER_ATLAS_SIZE_MAX)
+		assert(info.texel_bytes == (ATLAS_FORMATS[atlas] == .R8Unorm ? 1 : 4))
+		// Smaller levels are made by halving RGBA8 pixels, and stay apart down to the last
+		assert(info.mips == 1 || info.texel_bytes == 4)
+		assert(info.spacing >= 1 << uint(info.mips - 1))
+		out.atlas_textures[atlas] = wgpu.DeviceCreateTexture(
 			out.device,
 			&{
 				label = "atlas",
 				usage = {.TextureBinding, .CopyDst},
 				dimension = ._2D,
-				size = {u32(atlas_size.x), u32(atlas_size.y), 1},
-				format = .RGBA8Unorm,
-				mipLevelCount = RENDER_ATLAS_MIPS,
+				size = {u32(info.size.x), u32(info.size.y), 1},
+				format = ATLAS_FORMATS[atlas],
+				mipLevelCount = u32(info.mips),
 				sampleCount = 1,
 			},
 		)
 
-		// Upload each image at its source position, then its halvings to the smaller levels
-		for extent, i in extents {
-			image_pixels := pixels[i]
-			pos := [2]int{int(extent.x_min), int(extent.y_min)}
-			size := [2]int{int(extent.x_max) - pos.x, int(extent.y_max) - pos.y}
+		// Each write at its rect, then its halvings at the smaller levels
+		for write in init.writes[atlas] {
+			pixels := write.pixels
+			pos := write.pos
+			size := write.size
 			if size.x <= 0 || size.y <= 0 do continue
 
 			assert(pos.x >= 0 && pos.y >= 0)
-			assert(pos.x + size.x <= atlas_size.x && pos.y + size.y <= atlas_size.y)
-			assert(len(image_pixels) == size.x * size.y * 4)
-			assert(pos.x % RENDER_ATLAS_SPACING == 0 && pos.y % RENDER_ATLAS_SPACING == 0)
+			assert(pos.x + size.x <= info.size.x && pos.y + size.y <= info.size.y)
+			assert(pos.x % info.spacing == 0 && pos.y % info.spacing == 0)
+			assert(len(pixels) == size.x * size.y * info.texel_bytes)
 
-			for level in 0 ..< RENDER_ATLAS_MIPS {
+			for level in 0 ..< info.mips {
 				if level > 0 {
 					halved := make(
 						[]u8,
 						((size.x + 1) / 2) * ((size.y + 1) / 2) * 4,
 						context.temp_allocator,
 					)
-					image_halve(image_pixels, size, halved)
-					image_pixels = halved
+					image_halve(pixels, size, halved)
+					pixels = halved
 					size = (size + 1) / 2
 				}
 				wgpu.QueueWriteTexture(
 					out.queue,
 					&{
-						texture = out.atlas_texture,
+						texture = out.atlas_textures[atlas],
 						mipLevel = u32(level),
 						origin = {u32(pos.x >> uint(level)), u32(pos.y >> uint(level)), 0},
 						aspect = .All,
 					},
-					raw_data(image_pixels),
-					uint(len(image_pixels)),
-					&{bytesPerRow = u32(size.x * 4), rowsPerImage = u32(size.y)},
+					raw_data(pixels),
+					uint(len(pixels)),
+					&{bytesPerRow = u32(size.x * info.texel_bytes), rowsPerImage = u32(size.y)},
 					&{u32(size.x), u32(size.y), 1},
 				)
 			}
 		}
 
-		// View, sampler and bind group for the shader
-		out.atlas_view = wgpu.TextureCreateView(out.atlas_texture)
+		out.atlas_views[atlas] = wgpu.TextureCreateView(out.atlas_textures[atlas])
+	}
+
+	// Sampler, and the atlases' bind group for the quad shader
+	{
 		out.sampler = wgpu.DeviceCreateSampler(
 			out.device,
 			&{
@@ -440,8 +453,9 @@ renderer_init :: proc(
 		)
 
 		entries := [?]wgpu.BindGroupEntry {
-			{binding = 0, textureView = out.atlas_view},
+			{binding = 0, textureView = out.atlas_views[.Images]},
 			{binding = 1, sampler = out.sampler},
+			{binding = 2, textureView = out.atlas_views[.Glyphs]},
 		}
 		out.atlas_group = wgpu.DeviceCreateBindGroup(
 			out.device,
@@ -465,8 +479,8 @@ renderer_deinit :: proc(rend: Renderer) {
 
 	if rend.atlas_group != nil do wgpu.BindGroupRelease(rend.atlas_group)
 	if rend.sampler != nil do wgpu.SamplerRelease(rend.sampler)
-	if rend.atlas_view != nil do wgpu.TextureViewRelease(rend.atlas_view)
-	if rend.atlas_texture != nil do wgpu.TextureRelease(rend.atlas_texture)
+	for view in rend.atlas_views do if view != nil do wgpu.TextureViewRelease(view)
+	for texture in rend.atlas_textures do if texture != nil do wgpu.TextureRelease(texture)
 
 	for group in rend.view_groups do if group != nil do wgpu.BindGroupRelease(group)
 	for buffer in rend.view_buffers do if buffer != nil do wgpu.BufferRelease(buffer)
@@ -628,7 +642,7 @@ renderer_draw :: proc(
 
 		// Quads over it, space by space
 		for &quads, space in data.quads {
-			quads_draw(
+			renderer_quads_draw(
 				rend,
 				pass,
 				rend.quad_buffer,
@@ -654,7 +668,7 @@ renderer_draw :: proc(
 }
 
 // count quads of buffer from first, in space
-quads_draw :: proc(
+renderer_quads_draw :: proc(
 	rend: ^Renderer,
 	pass: wgpu.RenderPassEncoder,
 	buffer: wgpu.Buffer,
@@ -701,8 +715,10 @@ Render_Quad :: struct {
 	clip:      Extents,
 	// Per corner, 4 colours. TL clockwise winding order
 	colors:    [4][4]u8,
-	// Source area of texture to process
+	// Area sampled, in texels of atlas. Empty: untextured, the colours alone
 	source:    Extents,
+	// Atlas texture pixels are sampled from
+	atlas:     Render_Atlas,
 	// Corner radii (uniform)
 	radii:     f32,
 	// Border thickness (uniform)
@@ -731,3 +747,63 @@ render_data_clear :: proc(data: ^Render_Data) {
 	for space in Render_Space do clear(&data.quads[space])
 }
 
+// Textures a quad samples: Render_Quad.atlas
+Render_Atlas :: enum u32 {
+	// Premultiplied RGBA8, mipmapped: pictures, drawn at any scale
+	Images,
+	// Coverage, drawn as premultiplied white: font glyphs, drawn near their rasterised size
+	Glyphs,
+}
+
+// What loaders pack an atlas against
+Render_Atlas_Info :: struct {
+	// In texels
+	size:        [2]int,
+	// Of the pixels written: 4 for RGBA8, 1 for coverage
+	texel_bytes: int,
+	// Level n holds the writes at 1 / 2^n size, made by the renderer
+	mips:        int,
+	// Writes sit on multiples of this, and at least this far apart: filtering never mixes two writes,
+	// at any level
+	spacing:     int,
+}
+
+@(rodata)
+RENDER_ATLAS_INFOS := [Render_Atlas]Render_Atlas_Info {
+	.Images = {size = {4096, 4096}, texel_bytes = 4, mips = 5, spacing = 16},
+	.Glyphs = {size = {1024, 1024}, texel_bytes = 1, mips = 1, spacing = 2},
+}
+
+// Out: positions.
+// Shelf-packs sizes into an atlas: each at a multiple of its spacing, and at least that far from the
+// others. False: they do not fit
+render_atlas_pack :: proc(info: Render_Atlas_Info, sizes: [][2]int, positions: [][2]int) -> bool {
+	spaced := make([][2]int, len(sizes), context.temp_allocator)
+	for size, i in sizes do spaced[i] = (size + info.spacing - 1) / info.spacing * info.spacing
+	return shelf_pack(info.size, spaced, info.spacing, positions)
+}
+
+// Pixels for a rect of an atlas
+Render_Write_Pixels :: struct {
+	// Top-left and size, in texels. Top-left on a multiple of the atlas's spacing
+	pos:    [2]int,
+	size:   [2]int,
+	// size.x * size.y texels of the atlas's texel_bytes, row by row from the top-left.
+	// Read during renderer_init only: may be temporary memory
+	pixels: []u8,
+}
+
+// What renderer_init uploads into the atlases. render_init_reset, then the loaders append writes,
+// packing against atlases
+Render_Init :: struct {
+	// As in RENDER_ATLAS_INFOS. Read only
+	atlases: [Render_Atlas]Render_Atlas_Info,
+	writes:  [Render_Atlas][dynamic; RENDER_ATLAS_WRITES_MAX]Render_Write_Pixels,
+}
+
+// Out: init.
+// No writes, and the atlases' properties
+render_init_reset :: proc(init: ^Render_Init) {
+	init.atlases = RENDER_ATLAS_INFOS
+	for &writes in init.writes do clear(&writes)
+}
