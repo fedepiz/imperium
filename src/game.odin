@@ -35,6 +35,25 @@ ROAD_SMOOTHING :: Polyline_Smoothing {
 
 RIVER_DIST_MAX :: 12
 ROAD_DIST_MAX :: 1.5
+
+// Movement cost of entering a cell, by its cover. 0: impassable
+@(rodata)
+MOVE_COSTS := [Render_Cover]f32 {
+	.Open      = 1,
+	.Forest    = 2,
+	.Desert    = 1.5,
+	.Steppe    = 1,
+	.Fertile   = 1,
+	.Marsh     = 2.5,
+	.Highland  = 3,
+	.Mountains = 0,
+	.Fields    = 1,
+}
+// Entering a road cell, whatever its cover
+ROAD_COST :: 0.4
+// A road crosses the cells whose centre is this near it: half a cell's diagonal
+ROAD_CELL_REACH :: 0.71
+#assert(ROAD_CELL_REACH <= ROAD_DIST_MAX)
 BASIN_DIST_MAX :: 24
 
 Game :: struct {
@@ -314,6 +333,35 @@ game_load :: proc(
 		if cell.kind == .Mountains && ways_sdf[.Road][idx] < ROAD_DIST_MAX do cell.kind = .Highland
 	}
 
+	// Pathfinding: the cost of entering each cell, by land and by sea, then what is derived from them.
+	// Derived unless cached for these grids, and cached when derived
+	{
+		// Land: by cover, or along a road. Water is impassable
+		Desc :: struct {
+			domain: Pathfind_Domain,
+			suffix: string,
+		}
+
+		descs: []Desc = {{.Land, "land"}, {.Sea, "sea"}}
+
+		for desc in descs {
+			cells := pathfind_build_begin(desc.domain)
+			switch (desc.domain) {
+			case .Land:
+				for cell, i in geo_out.cover {
+					cost := MOVE_COSTS[cell.kind]
+					on_road := ways_sdf[.Road][i] < ROAD_CELL_REACH
+					cost = geo_out.water[i] ? 0 : on_road ? ROAD_COST : cost
+				}
+			case .Sea:
+				for w, i in geo_out.water do cells[i] = w ? 1 : 0
+			}
+			file_path := fmt.tprintf("%s_%s", scenario_name, desc.suffix)
+			fingerprint, cached := cache_read(file_path)
+			fingerprint_out, derived := pathfind_build_end(desc.domain, fingerprint, cached)
+			if len(derived) > 0 do cache_write(file_path, fingerprint_out, derived)
+		}
+	}
 	return
 }
 

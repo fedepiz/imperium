@@ -12,6 +12,7 @@ DEMO_FONT_BODY :: Text_Font_Id(0)
 DEMO_FONT_HEADING :: Text_Font_Id(1)
 
 Demo_Ui :: struct {
+	visible:         bool,
 	presses:         int,
 	locked:          bool,
 	difficulty:      int,
@@ -111,6 +112,7 @@ VELLUM_ACTION :: UI_Style {
 DEMO_DIFFICULTIES := []string{"Easy", "Normal", "Hard"}
 
 demo_ui :: proc(demo: ^Demo_Ui) {
+	if !demo.visible {return}
 	if ui_column({width = ui_grow(), height = ui_grow(), padding = [2]f32{24, 20}, gap = 16}) {
 		if ui_column({width = ui_fit(), height = ui_fit(), gap = 2}) {
 			demo_label("Imperium", MIDNIGHT_HEADING)

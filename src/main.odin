@@ -138,6 +138,7 @@ main :: proc() {
 				running = false
 			case .KEY_DOWN:
 				if event.key.scancode == .ESCAPE do input.escape = true
+				if event.key.scancode == .SPACE do demo.visible = !demo.visible
 				if len(input.events) < UI_EVENTS_MAX {
 					append(&input.events, UI_Event{kind = .Key, key = event.key.scancode})
 				}

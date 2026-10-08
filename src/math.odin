@@ -34,6 +34,59 @@ ease_step :: proc(rate, dt: f32) -> f32 {
 	return 1 - math.exp(-rate * dt)
 }
 
+// Grids of cells. A cell (x, y) covers [x, x + 1) x [y, y + 1)
+
+// Cells in [min, max). Iterate with `for y in r.min.y ..< r.max.y do for x in r.min.x ..< r.max.x`
+Cell_Rect :: struct {
+	min, max: [2]int,
+}
+
+grid_contains :: proc(pos, size: [2]int) -> bool {
+	return pos.x >= 0 && pos.y >= 0 && pos.x < size.x && pos.y < size.y
+}
+
+grid_index :: proc(pos, size: [2]int) -> int {
+	return pos.y * size.x + pos.x
+}
+
+grid_pos :: proc(index: int, size: [2]int) -> [2]int {
+	return {index % size.x, index / size.x}
+}
+
+cell_center :: proc(cell: [2]int) -> [2]f32 {
+	return {f32(cell.x), f32(cell.y)} + 0.5
+}
+
+// The cell p is in
+cell_of :: proc(p: [2]f32) -> [2]int {
+	return {int(math.floor(p.x)), int(math.floor(p.y))}
+}
+
+// The cells within reach of center along each axis, center included
+cell_rect_around :: proc(center: [2]int, reach: int) -> Cell_Rect {
+	return {center - reach, center + reach + 1}
+}
+
+// The cells the box lo..hi touches
+cell_rect_covering :: proc(lo, hi: [2]f32) -> Cell_Rect {
+	return {cell_of(lo), cell_of(hi) + 1}
+}
+
+cell_rect_clip :: proc(r: Cell_Rect, size: [2]int) -> Cell_Rect {
+	return {linalg.clamp(r.min, 0, size), linalg.clamp(r.max, 0, size)}
+}
+
+// In cells
+Disc :: struct {
+	center: [2]f32,
+	radius: f32,
+}
+
+// Strictly inside
+disc_contains :: proc(disc: Disc, p: [2]f32) -> bool {
+	return linalg.distance(p, disc.center) < disc.radius
+}
+
 // A half-open range of indices into a table: [begin, begin + len)
 Span :: struct {
 	begin: int,
