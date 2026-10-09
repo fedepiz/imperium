@@ -8,8 +8,6 @@ import "core:os"
 
 import tbl "tabula"
 
-REGIONS_MAX :: 256
-
 MAP_WIDTH :: 1024
 MAP_HEIGHT :: 1024
 MAP_SIZE: [2]int : {MAP_WIDTH, MAP_HEIGHT}
@@ -56,16 +54,30 @@ ROAD_CELL_REACH :: 0.71
 #assert(ROAD_CELL_REACH <= ROAD_DIST_MAX)
 BASIN_DIST_MAX :: 24
 
+REGIONS_MAX :: 256
+PIECE_MAX :: 1024
+
 Game :: struct {
 	terrain: Terrain,
 	ways:    [Way_Type][WAY_PER_TYPE_MAX]Way,
 	regions: [REGIONS_MAX]Region,
+	pieces:  Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
 }
 
 Region_Id :: distinct u8
 
+Piece_Id :: distinct Slot_Map_Key
+
 Name :: struct {
 	buffer: [NAME_CAPACITY]u8,
+}
+
+Piece_Flag :: enum {}
+
+Piece_Data :: struct {
+	flags: bit_set[Piece_Flag],
+	name:  Name,
+	pos:   [2]f32,
 }
 
 Way_Type :: enum {
