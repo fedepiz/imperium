@@ -67,6 +67,7 @@ Fact :: enum u8 {
 	Temperament_Steady,
 	Temperament_Cautious,
 	Temperament_Cunning,
+	Spent,
 	Strength_Superior,
 	Strength_Ahead,
 	Strength_Even,
@@ -91,6 +92,7 @@ FACT_TITLES := [Fact]string {
 	.Temperament_Steady   = "Steady",
 	.Temperament_Cautious = "Cautious",
 	.Temperament_Cunning  = "Cunning",
+	.Spent                = "Spent",
 	.Strength_Superior    = "Superior",
 	.Strength_Ahead       = "Ahead",
 	.Strength_Even        = "Even",
@@ -179,6 +181,7 @@ Rule :: struct {
 @(private = "file")
 RULES := [Decision][]Rule {
 	.Contact = {
+		{all = {.Spent}, choice = .Contact_Decline},
 		{all = {.Temperament_Bold, .Contact_Ordered}, choice = .Contact_Attack},
 		{
 			all = {.Temperament_Bold, .Contact_Intercepting},
@@ -459,6 +462,7 @@ Battle_Side :: struct {
 	men_max:     f32,
 	proficiency: f32,
 	readiness:   f32,
+	spent:       bool,
 	stock:       f32,
 	baggage:     f32,
 	mobility:    f32,
@@ -516,9 +520,6 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	rng := battle.seed
 	report := &result.report
 	for side, i in battle.sides do result.names[i] = report_text(report, side.name)
-	roll_2d6 :: proc(rng: ^u64) -> f32 {
-		return 1 + 6 * random_unit(rng) + 6 * random_unit(rng)
-	}
 
 	initiator := battle.sides[0]
 	other := battle.sides[1]
@@ -846,7 +847,9 @@ choose :: proc(report: ^Report, names: [Role]string, verbs: [Role]Report_Note) {
 @(private = "file")
 facts :: proc(side, other: Battle_Side) -> bit_set[Fact] {
 	gap := power(side, other).total - power(other, side).total
-	return {TEMPERAMENT_FACTS[side.temperament], ladder(gap, STRENGTH_LADDER[:])}
+	held := bit_set[Fact]{TEMPERAMENT_FACTS[side.temperament], ladder(gap, STRENGTH_LADDER[:])}
+	if side.spent do held += {.Spent}
+	return held
 }
 
 @(private = "file")

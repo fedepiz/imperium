@@ -48,6 +48,12 @@ CHASE_BUDGET :: 15
 FORAGE_RADIUS :: 12
 @(private = "file")
 NO_GENERAL_TEMPERAMENT :: Temperament.Steady
+@(private = "file")
+SPENT_READINESS :: 25
+@(private = "file")
+SPENT_ROLL_TARGET :: 6
+@(private = "file")
+SPENT_ROLL_PER_READINESS :: 0.2
 
 @(private = "file", rodata)
 FORAGE_YIELD := [Render_Cover]f32 {
@@ -209,6 +215,23 @@ Event_Army :: struct {
 	army:    Army,
 }
 
+Event_Spent :: struct {
+	piece:     Piece_Id,
+	readiness: f32,
+}
+
+Event_Spent_Roll :: struct {
+	piece:     Piece_Id,
+	readiness: f32,
+	roll:      f32,
+	total:     f32,
+	target:    f32,
+}
+
+Event_Unspent :: struct {
+	piece: Piece_Id,
+}
+
 Event_Turn :: struct {
 	turn:   int,
 	player: Faction_Id,
@@ -225,6 +248,9 @@ Game_Event :: union {
 	Event_Conquered,
 	Event_Removed,
 	Event_Army,
+	Event_Spent,
+	Event_Spent_Roll,
+	Event_Unspent,
 	Event_Turn,
 }
 
@@ -471,6 +497,7 @@ game_step :: proc(
 				men_max     = f32(army.men_max),
 				proficiency = army.proficiency,
 				readiness   = army.readiness,
+				spent       = army.spent,
 				stock       = army.stock,
 				baggage     = army.baggage,
 				mobility    = army.mobility,
@@ -787,10 +814,25 @@ game_step :: proc(
 			} else {
 				readiness = max(readiness_cap, readiness - SUPPLY_DRAG)
 			}
+			if army.spent && readiness >= SPENT_READINESS {
+				seed_source := [3]u64{u64(game.turn), u64(game.player), transmute(u64)id}
+				rng := hash.fnv64a(mem.slice_to_bytes(seed_source[:]))
+				roll := roll_2d6(&rng)
+				total := roll + (readiness - SPENT_READINESS) * SPENT_ROLL_PER_READINESS
+				append(events, Event_Spent_Roll{id, readiness, roll, total, SPENT_ROLL_TARGET})
+				if total > SPENT_ROLL_TARGET {
+					army.spent = false
+					append(events, Event_Unspent{id})
+				}
+			}
 		}
 
 		army.readiness = clamp(readiness, 0, 100)
 		army.stock = clamp(stock, 0, army.baggage)
+		if army.readiness < SPENT_READINESS && !army.spent {
+			army.spent = true
+			append(events, Event_Spent{id, army.readiness})
+		}
 		if changes != {} do append(events, Event_Army{id, changes, army^})
 	}
 

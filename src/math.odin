@@ -370,6 +370,11 @@ random_unit :: proc(state: ^u64) -> f32 {
 	return f32(z >> 40) / (1 << 24)
 }
 
+// Two continuous dice, each uniform on [0.5, 6.5)
+roll_2d6 :: proc(rng: ^u64) -> f32 {
+	return 1 + 6 * random_unit(rng) + 6 * random_unit(rng)
+}
+
 // Index drawn with probability proportional to its weight. roll: 0..1. picked = false if no weight is > 0
 pick_weighted :: proc(weights: []f32, roll: f32) -> (index: int, picked: bool) {
 	total: f32

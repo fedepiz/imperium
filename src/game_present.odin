@@ -319,6 +319,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 			append(&card.stats, Card_Field{label = "Men", value = men})
 			append(&card.stats, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
 			append(&card.stats, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
+			append(&card.stats, Card_Field{label = "Spent", value = army.spent ? "Yes" : "No"})
 			append(&card.stats, Card_Field{label = "Supply", value = fmt.tprintf("%.0f%%", supply)})
 			append(&card.stats, Card_Field{label = "Stock", value = stock})
 			append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.resupply_source)})

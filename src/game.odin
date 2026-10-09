@@ -122,6 +122,7 @@ Army :: struct {
 	men_max:             int,
 	proficiency:         f32,
 	readiness:           f32,
+	spent:               bool,
 	foraging:            f32,
 	mobility:            f32,
 	stock:               f32,
