@@ -3,7 +3,9 @@ package main
 import "core:fmt"
 import "core:math"
 
-CARD_LINES_MAX :: 16
+CARD_LINES_MAX :: REPORT_LINES_MAX
+CARD_PARTS_MAX :: REPORT_PARTS_MAX
+CARD_BREAKDOWNS_MAX :: 48
 CARD_FIELDS_MAX :: 16
 CARD_ACTIONS_MAX :: 4
 
@@ -41,52 +43,35 @@ ICON_TITLES := [Map_Icon]string {
 }
 
 @(private = "file", rodata)
-ROLE_TITLES := [Battle_Role]string {
-	.Attacker = "Attacker",
-	.Defender = "Defender",
+COLUMN_TITLES := [2]string{"Attacker", "Defender"}
+
+Game_Ask :: enum u8 {
+	End_Turn,
+	Conquer,
+	Leave,
+	Next,
 }
 
-@(private = "file", rodata)
-OUTCOME_TITLES := [Battle_Outcome]string {
-	.Avoided      = "Avoided",
-	.Stalemate    = "Stalemate",
-	.Probed       = "Probed",
-	.Withdrew     = "Withdrew",
-	.Repulsed     = "Repulsed",
-	.Defeat       = "Defeat",
-	.Heavy_Defeat = "Heavy defeat",
-	.Rout         = "Rout",
-}
-
-@(private = "file", rodata)
-POSTURE_VERBS := [Posture]string {
-	.Press    = "presses",
-	.Standard = "stands",
-	.Probe    = "probes",
-}
-
-@(private = "file", rodata)
-CHOICE_VERBS := [Crisis_Choice]string {
-	.Hold      = "holds",
-	.Commit    = "commits",
-	.Break_Off = "breaks off",
-}
-
-@(private = "file", rodata)
-LOSER_FATES := [Battle_Outcome]string {
-	.Avoided      = "gets away",
-	.Stalemate    = "holds its ground",
-	.Probed       = "pulls out",
-	.Withdrew     = "withdraws",
-	.Repulsed     = "is repulsed",
-	.Defeat       = "is defeated",
-	.Heavy_Defeat = "is heavily defeated",
-	.Rout         = "is routed",
+Card_Part :: struct {
+	text:      string,
+	breakdown: Maybe(int),
 }
 
 Card_Field :: struct {
+	label:     string,
+	value:     string,
+	breakdown: Maybe(int),
+}
+
+Card_Term :: struct {
 	label: string,
 	value: string,
+}
+
+Card_Breakdown :: struct {
+	note:  string,
+	terms: [dynamic; REPORT_TALLY_FACTORS_MAX]Card_Term,
+	total: string,
 }
 
 Card_Action :: struct {
@@ -96,18 +81,19 @@ Card_Action :: struct {
 }
 
 Card :: struct {
-	title:   string,
-	lines:   [dynamic; CARD_LINES_MAX]string,
-	fields:  [dynamic; CARD_FIELDS_MAX]Card_Field,
-	stats:   [dynamic; CARD_FIELDS_MAX]Card_Field,
-	actions: [dynamic; CARD_ACTIONS_MAX]Card_Action,
+	title:      string,
+	lines:      [dynamic; CARD_LINES_MAX]Span,
+	parts:      [dynamic; CARD_PARTS_MAX]Card_Part,
+	breakdowns: [dynamic; CARD_BREAKDOWNS_MAX]Card_Breakdown,
+	fields:     [dynamic; CARD_FIELDS_MAX]Card_Field,
+	stats:      [dynamic; CARD_FIELDS_MAX]Card_Field,
+	actions:    [dynamic; CARD_ACTIONS_MAX]Card_Action,
 }
 
 Cards :: struct {
 	status:      Card,
 	focus:       Maybe(Card),
 	interaction: Maybe(Card),
-	battle:      Maybe(Card),
 }
 
 game_present_map :: proc(
@@ -191,7 +177,7 @@ game_present_pawns :: proc(
 ) {
 	it := slot_map_iterator(&game.pieces)
 	for piece, id in slot_map_iterate(&it) {
-		engaged := id == game.engagement.attacker || id == game.engagement.defender
+		engaged := id == game.interaction.actor || id == game.interaction.target
 		pawn := Map_Pawn {
 			pos         = piece.pos,
 			icon        = piece.icon,
@@ -205,8 +191,7 @@ game_present_pawns :: proc(
 	}
 }
 
-@(private = "file")
-piece_title :: proc(piece: ^Piece_Data) -> string {
+game_piece_title :: proc(piece: ^Piece_Data) -> string {
 	name := name_to_string(&piece.name)
 	return name != "" ? name : ICON_TITLES[piece.icon]
 }
@@ -238,271 +223,175 @@ compact_number :: proc(value: f64) -> string {
 	return fmt.tprintf("%s%.0f%s", sign, magnitude, suffixes[tier])
 }
 
+@(private = "file")
+card_breakdown :: proc(card: ^Card, tally: ^Report_Tally, total: string) -> Maybe(int) {
+	breakdown := Card_Breakdown {
+		total = total,
+	}
+	for &factor, i in tally.factors {
+		value: string
+		switch factor.unit {
+		case .Points:
+			value = i == 0 ? fmt.tprintf("%.1f", factor.value) : fmt.tprintf("%+.1f", factor.value)
+		case .Men:
+			value = compact_number(f64(factor.value))
+		case .Percent:
+			value = fmt.tprintf("%.0f%%", 100 * factor.value)
+		case .Ratio:
+			value = fmt.tprintf("%.2f", factor.value)
+		}
+		if factor.op == .Scale do value = fmt.tprintf("x %s", value)
+		append(&breakdown.terms, Card_Term{string(factor.label[:]), value})
+	}
+	if append(&card.breakdowns, breakdown) == 0 do return nil
+	return len(card.breakdowns) - 1
+}
+
+@(private = "file")
+card_note :: proc(card: ^Card, note: string) -> Maybe(int) {
+	if append(&card.breakdowns, Card_Breakdown{note = note}) == 0 do return nil
+	return len(card.breakdowns) - 1
+}
+
+@(private = "file")
+card_tally_field :: proc(card: ^Card, label: string, tally: ^Report_Tally, total: string) -> Card_Field {
+	if len(tally.factors) == 0 do return {label = label, value = total}
+	return {label = label, value = total, breakdown = card_breakdown(card, tally, total)}
+}
+
+@(private = "file")
+card_report :: proc(card: ^Card, report: ^Report) {
+	for line in report.lines {
+		begin := len(card.parts)
+		for part in span_slice(report.parts[:], line) {
+			text := report_string(report, part.text)
+			shown := Card_Part {
+				text = text,
+			}
+			if tally, has_tally := part.tally.?; has_tally {
+				shown.breakdown = card_breakdown(card, &report.tallies[tally], text)
+			}
+			if part.note.len > 0 do shown.breakdown = card_note(card, report_string(report, part.note))
+			append(&card.parts, shown)
+		}
+		append(&card.lines, Span{begin, len(card.parts) - begin})
+	}
+}
+
 game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 	cards^ = {}
 
 	status := &cards.status
 	status.title = fmt.tprintf("Turn %d", game.turn)
-	append(&status.fields, Card_Field{"Playing", faction_title(game, game.player)})
+	append(&status.fields, Card_Field{label = "Playing", value = faction_title(game, game.player)})
 	append(&status.actions, Card_Action{"End turn", .End_Turn, game_turn_endable(game)})
 
 	if piece := slot_map_get_ptr(&game.pieces, focus); piece != nil {
 		card := Card {
-			title = piece_title(piece),
+			title = game_piece_title(piece),
 		}
-		append(&card.fields, Card_Field{"Type", ICON_TITLES[piece.icon]})
-		append(&card.fields, Card_Field{"Faction", faction_title(game, piece.owner)})
-		append(&card.fields, Card_Field{"Culture", fmt.tprint(piece.culture)})
+		append(&card.fields, Card_Field{label = "Type", value = ICON_TITLES[piece.icon]})
+		append(&card.fields, Card_Field{label = "Faction", value = faction_title(game, piece.owner)})
+		append(&card.fields, Card_Field{label = "Culture", value = fmt.tprint(piece.culture)})
 		if piece.general != 0 {
 			general := name_to_string(&game.characters[piece.general].name)
-			append(&card.fields, Card_Field{"General", general})
+			append(&card.fields, Card_Field{label = "General", value = general})
 		}
 		army, is_army := piece.army.?
 		if is_army {
-			append(&card.fields, Card_Field{"Baggage", fmt.tprintf("%.0f turns", army.baggage)})
+			append(&card.fields, Card_Field{label = "Baggage", value = fmt.tprintf("%.0f turns", army.baggage)})
 		}
 		if piece.domain != nil {
-			left := compact_number(f64(game_movement_left(game, piece^)))
+			left := compact_number(f64(game_movement_left(piece^)))
 			per_turn := compact_number(f64(piece.movement_per_turn))
-			append(&card.stats, Card_Field{"Movement", fmt.tprintf("%s of %s", left, per_turn)})
+			append(&card.stats, Card_Field{label = "Movement", value = fmt.tprintf("%s of %s", left, per_turn)})
 		}
 		if is_army {
 			men := fmt.tprintf("%s of %s", compact_number(f64(army.men)), compact_number(f64(army.men_max)))
 			supply: f32 = army.baggage > 0 ? 100 * army.stock / army.baggage : 0
-			append(&card.stats, Card_Field{"Men", men})
-			append(&card.stats, Card_Field{"Proficiency", fmt.tprintf("%.0f%%", army.proficiency)})
-			append(&card.stats, Card_Field{"Readiness", fmt.tprintf("%.0f%%", army.readiness)})
-			append(&card.stats, Card_Field{"Supply", fmt.tprintf("%.0f%%", supply)})
-			append(&card.stats, Card_Field{"Stock", fmt.tprintf("%.1f (%+.1f)", army.stock, army.resupply)})
-			append(&card.stats, Card_Field{"Source", fmt.tprint(army.resupply_source)})
-			append(
-				&card.stats,
-				Card_Field{"Efficiency", fmt.tprintf("%.0f%%", 100 * army.resupply_efficiency)},
-			)
+			stock := fmt.tprintf("%.1f (%+.1f)", army.stock, army.resupply)
+			efficiency := fmt.tprintf("%.0f%%", 100 * army.resupply_efficiency)
+			append(&card.stats, Card_Field{label = "Men", value = men})
+			append(&card.stats, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
+			append(&card.stats, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
+			append(&card.stats, Card_Field{label = "Supply", value = fmt.tprintf("%.0f%%", supply)})
+			append(&card.stats, Card_Field{label = "Stock", value = stock})
+			append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.resupply_source)})
+			append(&card.stats, Card_Field{label = "Efficiency", value = efficiency})
 		}
 		cards.focus = card
 	}
 
-	interaction := game.interaction
-	actor := slot_map_get_ptr(&game.pieces, interaction.actor)
-	met := slot_map_get_ptr(&game.pieces, interaction.target)
-	if actor != nil && met != nil {
+	open := &game.interaction
+	if open.actor == {} do return
+
+	if open.stage == .Meet_Town {
+		actor := slot_map_get_ptr(&game.pieces, open.actor)
+		met := slot_map_get_ptr(&game.pieces, open.target)
+		if actor == nil || met == nil do return
 		card := Card {
-			title = piece_title(met),
+			title = game_piece_title(met),
 		}
-		append(&card.fields, Card_Field{"Met by", piece_title(actor)})
-		append(&card.fields, Card_Field{"Faction", faction_title(game, met.owner)})
-		append(&card.actions, Card_Action{"Conquer", .Conquer, interaction.conquerable})
+		append(&card.fields, Card_Field{label = "Met by", value = game_piece_title(actor)})
+		append(&card.fields, Card_Field{label = "Faction", value = faction_title(game, met.owner)})
+		append(&card.actions, Card_Action{"Conquer", .Conquer, open.conquerable})
 		append(&card.actions, Card_Action{"Back", .Leave, true})
 		cards.interaction = card
+		return
 	}
 
-	engagement := &game.engagement
-	attacker := slot_map_get_ptr(&game.pieces, engagement.attacker)
-	defender := slot_map_get_ptr(&game.pieces, engagement.defender)
-	if engagement.attacker != {} {
-		result := engagement.result
-		names := [Battle_Role]string {
-			.Attacker = attacker != nil ? piece_title(attacker) : "",
-			.Defender = defender != nil ? piece_title(defender) : "",
-		}
-		winner := names[result.winner]
-		loser := names[BATTLE_OTHER_ROLE[result.winner]]
-		card: Card
-
-		switch engagement.stage {
-		case .Announce:
-			card.title = fmt.tprintf("%s attacks %s", names[.Attacker], names[.Defender])
-		case .Outcome:
-			card.title = fmt.tprintf("Battle: %s", OUTCOME_TITLES[result.outcome])
-		case .Fall_Back:
-			card.title = fmt.tprintf("%s falls back", loser)
-		case .Pursuit:
-			card.title = fmt.tprintf("%s pursues", winner)
-		case .Report:
-			card.title = "Battle report"
-			lines := &card.lines
-			a := result.sides[.Attacker]
-			d := result.sides[.Defender]
-			append(
-				lines,
-				fmt.tprintf(
-					"%s attacks %s, power %.1f against %.1f.",
-					names[.Attacker],
-					names[.Defender],
-					a.power,
-					d.power,
-				),
-			)
-
-			if roll := result.avoid; roll.rolled {
-				escape := result.outcome == .Avoided ? "gets away" : "is caught"
-				append(
-					lines,
-					fmt.tprintf(
-						"%s tries to avoid battle: rolls %.0f, total %.0f against %.0f, and %s.",
-						names[.Defender],
-						roll.dice,
-						roll.total,
-						roll.target,
-						escape,
-					),
-				)
-			}
-			if result.outcome == .Avoided do break
-
-			append(
-				lines,
-				fmt.tprintf(
-					"%s %s; %s %s.",
-					names[.Attacker],
-					POSTURE_VERBS[a.posture],
-					names[.Defender],
-					POSTURE_VERBS[d.posture],
-				),
-			)
-			if a.onset.rolled {
-				append(
-					lines,
-					fmt.tprintf(
-						"Onset: %s rolls %.0f for %.1f, %s rolls %.0f for %.1f.",
-						names[.Attacker],
-						a.onset.dice,
-						a.onset.total,
-						names[.Defender],
-						d.onset.dice,
-						d.onset.total,
-					),
-				)
-				ahead: Battle_Role = a.onset.total > d.onset.total ? .Attacker : .Defender
-				behind := BATTLE_OTHER_ROLE[ahead]
-				margin := result.onset_margin
-				switch {
-				case a.onset.total == d.onset.total:
-					append(lines, "Neither gains the upper hand.")
-				case !result.crisis_chosen && !result.pulled_out:
-					append(
-						lines,
-						fmt.tprintf(
-							"%s wins by %.1f, and %s %s.",
-							names[ahead],
-							margin,
-							names[behind],
-							LOSER_FATES[result.outcome],
-						),
-					)
-				case result.sides[ahead].edge == 0:
-					append(lines, fmt.tprintf("%s wins by %.1f but gains no edge.", names[ahead], margin))
-				case:
-					append(
-						lines,
-						fmt.tprintf(
-							"%s wins by %.1f and gains an edge of %.0f.",
-							names[ahead],
-							margin,
-							result.sides[ahead].edge,
-						),
-					)
-				}
-			}
-			if result.pulled_out {
-				append(lines, fmt.tprintf("%s, probing and behind, pulls out.", loser))
-			}
-
-			if result.crisis_chosen {
-				append(
-					lines,
-					fmt.tprintf(
-						"%s %s; %s %s.",
-						names[.Attacker],
-						CHOICE_VERBS[a.choice],
-						names[.Defender],
-						CHOICE_VERBS[d.choice],
-					),
-				)
-				if a.crisis.rolled {
-					append(
-						lines,
-						fmt.tprintf(
-							"Crisis: %s rolls %.0f for %.1f, %s rolls %.0f for %.1f, a margin of %.1f.",
-							names[.Attacker],
-							a.crisis.dice,
-							a.crisis.total,
-							names[.Defender],
-							d.crisis.dice,
-							d.crisis.total,
-							result.crisis_margin,
-						),
-					)
-				}
-				if result.outcome == .Stalemate {
-					append(lines, "Stalemate.")
-				} else {
-					append(lines, fmt.tprintf("%s %s.", loser, LOSER_FATES[result.outcome]))
-				}
-				if result.worsened {
-					append(lines, fmt.tprintf("Having pressed or committed, %s fares worse.", loser))
-				}
-			}
-
-			if roll := result.pursuit; roll.rolled {
-				caught := result.pursued ? "catches them" : "they get away"
-				append(
-					lines,
-					fmt.tprintf(
-						"%s pursues: rolls %.0f, total %.0f against %.0f, and %s.",
-						winner,
-						roll.dice,
-						roll.total,
-						roll.target,
-						caught,
-					),
-				)
-			}
-			for side, role in result.sides {
-				if !side.hold.rolled do continue
-				fate := side.dissolved ? "it dissolves" : "it holds"
-				append(
-					lines,
-					fmt.tprintf(
-						"%s rolls %.0f to hold together, total %.1f against %.1f: %s.",
-						names[role],
-						side.hold.dice,
-						side.hold.total,
-						side.hold.target,
-						fate,
-					),
-				)
-			}
-		}
-
-		if engagement.stage != .Report {
-			for role in Battle_Role {
-				column := role == .Attacker ? &card.fields : &card.stats
-				append(column, Card_Field{ROLE_TITLES[role], names[role]})
-				if engagement.stage == .Announce {
-					side := engagement.battle.sides[role]
-					other := engagement.battle.sides[BATTLE_OTHER_ROLE[role]]
-					append(column, Card_Field{"Commander", fmt.tprint(side.temperament)})
-					append(column, Card_Field{"Men", compact_number(f64(side.men))})
-					append(column, Card_Field{"Proficiency", fmt.tprintf("%.0f%%", side.proficiency)})
-					append(column, Card_Field{"Readiness", fmt.tprintf("%.0f%%", side.readiness)})
-					append(
-						column,
-						Card_Field{"Power", fmt.tprintf("%.1f", battle_strength(side, other))},
-					)
-				} else {
-					side := result.sides[role]
-					append(column, Card_Field{"Posture", fmt.tprint(side.posture)})
-					append(column, Card_Field{"Men", compact_number(f64(side.men_change))})
-					append(column, Card_Field{"Readiness", fmt.tprintf("%+.0f", side.readiness_change)})
-					append(column, Card_Field{"Supply", fmt.tprintf("%+.1f", side.stock_change)})
-					if side.dissolved do append(column, Card_Field{"Fate", "Dissolved"})
-				}
-			}
-		}
-
-		append(&card.actions, Card_Action{"Next", .Battle_Next, game.movement.walker == {}})
-		cards.battle = card
+	result := &open.result
+	report := &result.report
+	names := [2]string{open.battle.sides[0].name, open.battle.sides[1].name}
+	attacker := result.attacker
+	defender := 1 - attacker
+	card: Card
+	#partial switch open.stage {
+	case .Announce:
+		card.title = fmt.tprintf("%s attacks %s", names[attacker], names[defender])
+	case .Refused:
+		card.title = fmt.tprintf("%s won't attack %s", names[attacker], names[defender])
+		card_report(&card, report)
+	case .Report:
+		card.title = "Battle report"
+		card_report(&card, report)
+	case .Outcome:
+		card.title = fmt.tprintf("Battle: %s", report_string(report, result.outcome_title))
+	case .Fall_Back:
+		card.title = report_string(report, result.follow_title)
 	}
+
+	if open.stage != .Report {
+		for side_index, column in ([2]int{attacker, defender}) {
+			fields := column == 0 ? &card.fields : &card.stats
+			append(fields, Card_Field{label = COLUMN_TITLES[column], value = names[side_index]})
+			side := &result.sides[side_index]
+			#partial switch open.stage {
+			case .Announce, .Refused:
+				battle_side := open.battle.sides[side_index]
+				power := fmt.tprintf("%.1f", side.power.total)
+				append(fields, Card_Field{label = "Commander", value = fmt.tprint(battle_side.temperament)})
+				append(fields, Card_Field{label = "Men", value = compact_number(f64(battle_side.men))})
+				append(fields, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", battle_side.proficiency)})
+				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", battle_side.readiness)})
+				append(fields, card_tally_field(&card, "Power", &side.power, power))
+			case .Fall_Back:
+				if !result.caught || side_index == result.winner do continue
+				men := compact_number(f64(side.pursuit_men.total))
+				append(fields, card_tally_field(&card, "Men", &side.pursuit_men, men))
+				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.pursuit_readiness)})
+			case:
+				men := compact_number(f64(side.men.total))
+				stock := fmt.tprintf("%+.1f", side.stock.total)
+				append(fields, Card_Field{label = "Posture", value = report_string(report, side.posture)})
+				append(fields, card_tally_field(&card, "Men", &side.men, men))
+				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.readiness)})
+				append(fields, card_tally_field(&card, "Supply", &side.stock, stock))
+				if side.dissolved do append(fields, Card_Field{label = "Fate", value = "Dissolved"})
+			}
+		}
+	}
+
+	append(&card.actions, Card_Action{"Next", .Next, game.movement.walker == {}})
+	cards.interaction = card
 }

@@ -507,6 +507,7 @@ box_set_text :: proc(box: ^Box, parts: []UI_Text) {
 			font  = font,
 			color = color,
 			tag   = tag,
+			underline = part.underline,
 		}
 	}
 	box.text = text_make(made[:len(parts)])
@@ -1655,6 +1656,7 @@ UI_Text :: struct {
 	hot_color: Maybe([4]f32),
 	// Makes the run take the mouse; ui_signal(key) in the same scope reads it
 	key:       string,
+	underline: bool,
 }
 
 // A label made of parts, which may mix fonts and colors.

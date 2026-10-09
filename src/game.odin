@@ -77,7 +77,6 @@ Game :: struct {
 	ending:      bool,
 	contacts:    [dynamic; CONTACTS_MAX]Contact,
 	interaction: Interaction,
-	engagement:  Engagement,
 	movement:    Movement,
 	supply:      [MAP_CELLS]u8,
 	unstepped:   f32,
@@ -110,8 +109,7 @@ Piece_Data :: struct {
 	general:           Character_Id,
 	domain:            Maybe(Pathfind_Domain),
 	movement_per_turn: f32,
-	movement_spent:    f32,
-	movement_turn:     int,
+	this_turn:         Piece_Turn,
 	contact_radius:    f32,
 	contact_domains:   bit_set[Pathfind_Domain],
 	body_radius:       f32,
@@ -127,13 +125,16 @@ Army :: struct {
 	readiness:           f32,
 	foraging:            f32,
 	mobility:            f32,
-	temperament:         Temperament,
 	stock:               f32,
 	baggage:             f32,
 	resupply:            f32,
 	resupply_source:     Resupply_Source,
 	resupply_efficiency: f32,
-	attacked_turn:       int,
+}
+
+Piece_Turn :: struct {
+	attacked:       bool,
+	movement_spent: f32,
 }
 
 Resupply_Source :: enum u8 {
@@ -148,7 +149,8 @@ Faction :: struct {
 }
 
 Character :: struct {
-	name: Name,
+	name:        Name,
+	temperament: Temperament,
 }
 
 Way_Type :: enum {
@@ -526,8 +528,16 @@ game_load :: proc(
 					piece.pos = tbl.get_num_array(entry, "at", 2)
 
 					if general, has_general := tbl.get_text(entry, "general"); has_general {
+						character := Character {
+							name        = name_from_string(general),
+							temperament = .Steady,
+						}
+						if temperament, has_temperament := tbl.get_text(entry, "temperament");
+						   has_temperament {
+							character.temperament = enum_from_text(Temperament, temperament)
+						}
 						piece.general = Character_Id(len(game.characters))
-						append(&game.characters, Character{name = name_from_string(general)})
+						append(&game.characters, character)
 					}
 
 					if men, has_men := tbl.get_num(entry, "men"); has_men {
@@ -539,11 +549,6 @@ game_load :: proc(
 							foraging    = tbl.get_num(entry, "foraging", ARMY_FORAGING_DEFAULT),
 							baggage     = tbl.get_num(entry, "baggage", ARMY_BAGGAGE_DEFAULT),
 							mobility    = tbl.get_num(entry, "mobility", ARMY_MOBILITY_DEFAULT),
-							temperament = .Steady,
-						}
-						if temperament, has_temperament := tbl.get_text(entry, "temperament");
-						   has_temperament {
-							army.temperament = enum_from_text(Temperament, temperament)
 						}
 						army.stock = army.baggage
 						piece.army = army

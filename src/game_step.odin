@@ -21,11 +21,13 @@ WALK_SMOOTHING :: Polyline_Smoothing {
 WALK_POINTS_MAX :: (PATHFIND_PATH_MAX + 1) << uint(WALK_SMOOTHING.cut_iter)
 
 @(private = "file")
-WALK_CELLS_PER_SECOND :: 10
+WALK_CELLS_PER_STEP :: 10 * STEP_SECONDS
 @(private = "file")
 ROAD_READINESS_PER_MOVEMENT :: 0.1
 @(private = "file")
 READINESS_PER_MOVEMENT :: 1
+@(private = "file")
+OVERDRAW_READINESS :: 2
 @(private = "file")
 READINESS_RECOVERY :: 20
 @(private = "file")
@@ -39,17 +41,15 @@ STOCK_PER_MOVEMENT :: 0.01
 @(private = "file")
 SUPPLY_DECAY :: 2
 @(private = "file")
-MEN_PER_SUPPLY :: 200
-@(private = "file")
-ORDERED_ATTACK_BONUS :: 2
+MEN_PER_SUPPLY :: 250
 @(private = "file")
 FALL_BACK_BUDGET :: 10
 @(private = "file")
-PURSUIT_BUDGET :: 15
-@(private = "file")
-PURSUIT_SNAP :: 9
+CHASE_BUDGET :: 15
 @(private = "file")
 FORAGE_RADIUS :: 12
+@(private = "file")
+NO_GENERAL_TEMPERAMENT :: Temperament.Steady
 
 @(private = "file", rodata)
 FORAGE_YIELD := [Render_Cover]f32 {
@@ -64,11 +64,11 @@ FORAGE_YIELD := [Render_Cover]f32 {
 	.Fields    = 1,
 }
 
-Game_Ask :: enum u8 {
-	End_Turn,
+Game_Answer :: enum u8 {
+	None,
+	Next,
 	Conquer,
 	Leave,
-	Battle_Next,
 }
 
 Game_Order :: struct {
@@ -79,8 +79,9 @@ Game_Order :: struct {
 }
 
 Game_Input :: struct {
-	asks:  bit_set[Game_Ask],
-	order: Maybe(Game_Order),
+	end_turn: bool,
+	answer:   Game_Answer,
+	order:    Maybe(Game_Order),
 }
 
 Contact :: struct {
@@ -89,45 +90,59 @@ Contact :: struct {
 	targeted:  bool,
 }
 
-Interaction :: struct {
-	actor:       Piece_Id,
-	target:      Piece_Id,
-	conquerable: bool,
-}
-
-Engagement_Stage :: enum u8 {
+Interaction_Stage :: enum u8 {
+	Meet_Town,
 	Announce,
 	Report,
 	Outcome,
 	Fall_Back,
-	Pursuit,
+	Refused,
 }
 
-Engagement :: struct {
-	attacker:    Piece_Id,
-	defender:    Piece_Id,
+Interaction :: struct {
+	actor:       Piece_Id,
+	target:      Piece_Id,
+	stage:       Interaction_Stage,
+	conquerable: bool,
 	battle:      Battle,
 	result:      Battle_Result,
-	stage:       Engagement_Stage,
-	loser_start: [2]f32,
 }
 
 Movement :: struct {
-	walker:       Piece_Id,
-	target:       Piece_Id,
-	path:         Polylines(WALK_POINTS_MAX, 1),
-	path_costs:   [dynamic; WALK_POINTS_MAX]f32,
-	next:         int,
-	flood:        Pathfind_Flood,
-	flooded:      Piece_Id,
-	flood_key:    u64,
-	enemy_zones:  [dynamic; PIECE_MAX]Pathfind_Zone,
-	friend_zones: [dynamic; PIECE_MAX]Disc,
-	bodies:       [dynamic; PIECE_MAX]Disc,
+	walker:         Piece_Id,
+	target:         Piece_Id,
+	path:           Polylines(WALK_POINTS_MAX, 1),
+	path_costs:     [dynamic; WALK_POINTS_MAX]f32,
+	next:           int,
+	clear_of:       Piece_Id,
+	chaser:         Piece_Id,
+	chaser_next:    int,
+	chaser_follows: bool,
+	chaser_budget:  f32,
+	flood:          Pathfind_Flood,
+	flooded:        Piece_Id,
+	flood_key:      u64,
+	enemy_zones:    [dynamic; PIECE_MAX]Pathfind_Zone,
+	friend_zones:   [dynamic; PIECE_MAX]Disc,
+	bodies:         [dynamic; PIECE_MAX]Disc,
+}
+
+@(private = "file")
+Walk_Order :: struct {
+	piece:          Piece_Id,
+	target:         Piece_Id,
+	destination:    [2]f32,
+	snap:           int,
+	budget:         f32,
+	unhindered_by:  Piece_Id,
+	clear_of:       Piece_Id,
+	chaser:         Piece_Id,
+	chaser_follows: bool,
+	chaser_budget:  f32,
 }
 
 game_ordering :: proc(game: ^Game) -> Faction_Id {
-	settled := game.interaction.actor == {} && game.engagement.attacker == {} && !game.ending
+	settled := game.interaction.actor == {} && !game.ending
 	return settled ? game.player : 0
 }
 
@@ -136,14 +151,12 @@ game_turn_endable :: proc(game: ^Game) -> bool {
 		!game.ending &&
 		game.movement.walker == {} &&
 		len(game.contacts) == 0 &&
-		game.interaction.actor == {} &&
-		game.engagement.attacker == {} \
+		game.interaction.actor == {} \
 	)
 }
 
-game_movement_left :: proc(game: ^Game, piece: Piece_Data) -> f32 {
-	if piece.movement_turn != game.turn do return piece.movement_per_turn
-	return max(0, piece.movement_per_turn - piece.movement_spent)
+game_movement_left :: proc(piece: Piece_Data) -> f32 {
+	return max(0, piece.movement_per_turn - piece.this_turn.movement_spent)
 }
 
 game_supply_build :: proc(game: ^Game) {
@@ -167,11 +180,47 @@ pieces_friendly :: proc(a, b: ^Piece_Data) -> bool {
 	return a.owner != 0 && a.owner == b.owner
 }
 
+@(private = "file")
+walk_along :: proc(
+	pos: [2]f32,
+	path: [][2]f32,
+	costs: []f32,
+	next, last: int,
+	stride, max_due: f32,
+) -> (
+	moved: [2]f32,
+	reached: int,
+	road, off_road: f32,
+) {
+	moved = pos
+	reached = next
+	stride := stride
+	for stride > 0 && reached <= last && road + off_road < max_due {
+		target := path[reached]
+		cost := costs[clamp(reached, 1, len(costs) - 1)]
+		distance := linalg.distance(moved, target)
+		walked := min(stride, distance)
+		if cost > 0 do walked = min(walked, (max_due - road - off_road) / cost)
+		if walked < distance {
+			moved += linalg.normalize(target - moved) * walked
+		} else {
+			moved = target
+			reached += 1
+		}
+		stride -= walked
+		if cost == ROAD_COST {
+			road += walked * cost
+		} else {
+			off_road += walked * cost
+		}
+	}
+	return
+}
+
 game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 	movement := &game.movement
-	engagement := &game.engagement
 
-	if .End_Turn in input.asks && game_turn_endable(game) {
+	if input.end_turn && game_turn_endable(game) {
 		game.ending = true
 		own := slot_map_iterator(&game.pieces)
 		for piece, piece_id in slot_map_iterate(&own) {
@@ -185,18 +234,73 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 		}
 	}
 
-	if game.interaction.actor != {} {
-		if .Conquer in input.asks && game.interaction.conquerable {
-			actor := slot_map_get_ptr(&game.pieces, game.interaction.actor)
-			conquered := slot_map_get_ptr(&game.pieces, game.interaction.target)
-			if actor != nil && conquered != nil do conquered.owner = actor.owner
-			game.interaction = {}
-		} else if .Leave in input.asks {
-			game.interaction = {}
+	order: Walk_Order
+	losses: [2]struct {
+		army:      Piece_Id,
+		men:       f32,
+		readiness: f32,
+		stock:     f32,
+	}
+	if open := &game.interaction; open.actor != {} {
+		if open.stage == .Meet_Town {
+			if input.answer == .Conquer && open.conquerable {
+				actor := slot_map_get_ptr(&game.pieces, open.actor)
+				conquered := slot_map_get_ptr(&game.pieces, open.target)
+				if actor != nil && conquered != nil do conquered.owner = actor.owner
+				open^ = {}
+			} else if input.answer == .Leave {
+				open^ = {}
+			}
+		} else if input.answer == .Next && movement.walker == {} {
+			result := &open.result
+			ids := [2]Piece_Id{open.actor, open.target}
+			fallen := 1 - result.winner
+			loser := ids[fallen]
+			winner := ids[result.winner]
+			closed := true
+			#partial switch open.stage {
+			case .Announce:
+				for side, i in result.sides {
+					losses[i] = {ids[i], side.men.total, side.readiness, side.stock.total}
+				}
+				open.stage = .Report
+				closed = false
+			case .Report:
+				open.stage = .Outcome
+				closed = false
+			case .Outcome:
+				for side, i in result.sides do if side.dissolved do slot_map_remove(&game.pieces, ids[i])
+				beaten := slot_map_get_ptr(&game.pieces, loser)
+				victor := slot_map_get_ptr(&game.pieces, winner)
+				if !result.sides[fallen].falls_back || beaten == nil || victor == nil do break
+
+				reach: f32 = result.caught ? CHASE_BUDGET : FALL_BACK_BUDGET
+				away := linalg.normalize0(beaten.pos - victor.pos)
+				order = {
+					piece         = loser,
+					destination   = beaten.pos + away * reach,
+					snap          = 2 * int(reach) + 1,
+					budget        = reach,
+					unhindered_by = winner,
+				}
+				if !result.caught do order.clear_of = winner
+				if result.follows {
+					order.chaser = winner
+					order.chaser_follows = result.caught
+					order.chaser_budget = game_movement_left(victor^) + result.follow_overdraw
+				}
+				if result.caught {
+					side := result.sides[fallen]
+					losses[fallen] = {loser, side.pursuit_men.total, side.pursuit_readiness, 0}
+				}
+				open.stage = .Fall_Back
+				closed = false
+			}
+			if closed do open^ = {}
 		}
 	}
 
-	for len(game.contacts) > 0 && engagement.attacker == {} && game.interaction.actor == {} {
+	for len(game.contacts) > 0 && game.interaction.actor == {} {
 		contact := game.contacts[0]
 		ordered_remove(&game.contacts, 0)
 		initiator := slot_map_get_ptr(&game.pieces, contact.initiator)
@@ -205,22 +309,33 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 		reach := max(initiator.contact_radius, other.contact_radius)
 		if linalg.distance(initiator.pos, other.pos) >= reach do continue
 
-		initiator_army, initiator_is_army := &initiator.army.?
-		other_army, other_is_army := &other.army.?
-		if !initiator_is_army || !other_is_army {
+		if initiator.army == nil || other.army == nil {
 			game.interaction = {
 				actor       = contact.initiator,
 				target      = contact.other,
+				stage       = .Meet_Town,
 				conquerable = .Captures in initiator.flags && .Capturable in other.flags,
 			}
 			continue
 		}
 
 		ids := [2]Piece_Id{contact.initiator, contact.other}
-		armies := [2]^Army{initiator_army, other_army}
-		sides: [2]Battle_Side
-		for army, i in armies {
-			sides[i] = {
+		pieces := [2]^Piece_Data{initiator, other}
+		seed_source := [4]u64 {
+			u64(game.turn),
+			u64(game.player),
+			transmute(u64)ids[0],
+			transmute(u64)ids[1],
+		}
+		battle := Battle {
+			ordered = contact.targeted,
+			seed    = hash.fnv64a(mem.slice_to_bytes(seed_source[:])),
+		}
+		for piece, i in pieces {
+			army, _ := piece.army.?
+			temperament := NO_GENERAL_TEMPERAMENT
+			if piece.general != 0 do temperament = game.characters[piece.general].temperament
+			battle.sides[i] = {
 				men         = f32(army.men),
 				men_max     = f32(army.men_max),
 				proficiency = army.proficiency,
@@ -228,96 +343,35 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 				stock       = army.stock,
 				baggage     = army.baggage,
 				mobility    = army.mobility,
-				temperament = army.temperament,
+				temperament = temperament,
+				can_attack  = !piece.this_turn.attacked,
+				name        = game_piece_title(piece),
 			}
 		}
-		strength_gap := battle_strength(sides[0], sides[1]) - battle_strength(sides[1], sides[0])
-		eagerness: f32 = contact.targeted ? ORDERED_ATTACK_BONUS : 0
-		initiator_fresh := armies[0].attacked_turn != game.turn
-		other_fresh := armies[1].attacked_turn != game.turn
-		switch {
-		case initiator_fresh && strength_gap + eagerness >= BATTLE_ATTACK_THRESHOLD[sides[0].temperament]:
-		case other_fresh && -strength_gap >= BATTLE_ATTACK_THRESHOLD[sides[1].temperament]:
-			ids[0], ids[1] = ids[1], ids[0]
-			armies[0], armies[1] = armies[1], armies[0]
-			sides[0], sides[1] = sides[1], sides[0]
-		case:
-			continue
-		}
-		armies[0].attacked_turn = game.turn
 
-		seed_source := [3]u64{u64(game.turn), transmute(u64)ids[0], transmute(u64)ids[1]}
-		engagement^ = {
-			attacker = ids[0],
-			defender = ids[1],
-			stage = .Announce,
-			battle = {
-				sides = {.Attacker = sides[0], .Defender = sides[1]},
-				seed = hash.fnv64a(mem.slice_to_bytes(seed_source[:])),
-			},
+		result := battle_resolve(battle)
+		if !result.fought && !result.refused do continue
+		if result.fought do pieces[result.attacker].this_turn.attacked = true
+		game.interaction = {
+			actor  = ids[0],
+			target = ids[1],
+			stage  = result.fought ? .Announce : .Refused,
+			battle = battle,
 		}
-	}
-
-	fought: struct {
-		roles:  [Battle_Role]Piece_Id,
-		result: Battle_Result,
-	}
-	order: Game_Order
-	order_budget: f32
-	if engagement.attacker != {} && .Battle_Next in input.asks && movement.walker == {} {
-		result := engagement.result
-		roles := [Battle_Role]Piece_Id {
-			.Attacker = engagement.attacker,
-			.Defender = engagement.defender,
-		}
-		winner := roles[result.winner]
-		loser := roles[BATTLE_OTHER_ROLE[result.winner]]
-		closed := true
-		switch engagement.stage {
-		case .Announce:
-			engagement.result = battle_resolve(engagement.battle)
-			fought = {roles, engagement.result}
-			engagement.stage = .Report
-			closed = false
-		case .Report:
-			engagement.stage = .Outcome
-			closed = false
-		case .Outcome:
-			for side, role in result.sides do if side.dissolved do slot_map_remove(&game.pieces, roles[role])
-			beaten := slot_map_get_ptr(&game.pieces, loser)
-			victor := slot_map_get_ptr(&game.pieces, winner)
-			if beaten == nil || victor == nil do break
-			if !result.sides[BATTLE_OTHER_ROLE[result.winner]].falls_back do break
-			engagement.loser_start = beaten.pos
-			away := linalg.normalize0(beaten.pos - victor.pos)
-			order = {
-				piece       = loser,
-				destination = beaten.pos + away * FALL_BACK_BUDGET,
-				snap        = 2 * FALL_BACK_BUDGET + 1,
-			}
-			order_budget = FALL_BACK_BUDGET
-			engagement.stage = .Fall_Back
-			closed = false
-		case .Fall_Back:
-			if !result.pursued do break
-			if slot_map_get_ptr(&game.pieces, winner) == nil || slot_map_get_ptr(&game.pieces, loser) == nil do break
-			order = {
-				piece       = winner,
-				destination = engagement.loser_start,
-				snap        = PURSUIT_SNAP,
-			}
-			order_budget = PURSUIT_BUDGET
-			engagement.stage = .Pursuit
-			closed = false
-		case .Pursuit:
-		}
-		if closed do engagement^ = {}
+		game.interaction.result = result
 	}
 
 	if player_order, ordered := input.order.?; ordered && order.piece == {} {
 		piece := slot_map_get_ptr(&game.pieces, player_order.piece)
 		ordering := game_ordering(game)
-		if piece != nil && ordering != 0 && piece.owner == ordering do order = player_order
+		if piece != nil && ordering != 0 && piece.owner == ordering {
+			order = {
+				piece       = player_order.piece,
+				target      = player_order.target,
+				destination = player_order.destination,
+				snap        = player_order.snap,
+			}
+		}
 	}
 
 	{
@@ -332,7 +386,7 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 			movement.flooded = {}
 			movement.flood_key = 0
 		} else {
-			budget := order.piece != {} && order_budget > 0 ? order_budget : game_movement_left(game, subject^)
+			budget := order.piece != {} && order.budget > 0 ? order.budget : game_movement_left(subject^)
 			half: f32 = PATHFIND_FLOOD_SIZE / 2 + 1
 			lo := subject.pos - half
 			hi := subject.pos + half
@@ -346,7 +400,7 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 				if !disc_overlaps_box(zone, lo, hi) do continue
 				if pieces_friendly(subject, other) {
 					append(&movement.friend_zones, zone)
-				} else {
+				} else if other_id != order.unhindered_by {
 					append(&movement.enemy_zones, Pathfind_Zone{zone, other.hindrance})
 				}
 			}
@@ -399,6 +453,9 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 
 			polylines_clear(&movement.path)
 			polylines_smooth(raw, WALK_SMOOTHING, &movement.path)
+			if len(movement.path.points) == 0 {
+				polylines_reserve(1, false, &movement.path)[0] = walker.pos
+			}
 
 			clear(&movement.path_costs)
 			for _, point in movement.path.points {
@@ -409,82 +466,93 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 			movement.walker = order.piece
 			movement.target = order.target
 			movement.next = 1
+			movement.clear_of = order.clear_of
+			movement.chaser = order.chaser
+			movement.chaser_next = 0
+			movement.chaser_follows = order.chaser_follows
+			movement.chaser_budget = order.chaser_budget
 		} else {
 			fmt.eprintln("No way for", order.piece)
 		}
 	}
 
-	walk: struct {
-		piece:          Piece_Id,
-		spent_road:     f32,
-		spent_off_road: f32,
+	walks: [2]struct {
+		piece:            Piece_Id,
+		marched_road:     f32,
+		marched_off_road: f32,
+		overdrawn:        f32,
 	}
-	if walker := slot_map_get_ptr(&game.pieces, movement.walker); walker != nil {
-		walk.piece = movement.walker
-		start := walker.pos
+	walker := slot_map_get_ptr(&game.pieces, movement.walker)
+	walk_done := walker == nil
+	if walker != nil {
 		path := movement.path.points[:]
-		stride: f32 = WALK_CELLS_PER_SECOND * STEP_SECONDS
-		for stride > 0 && movement.next < len(path) {
-			next_point := path[movement.next]
-			cost := movement.path_costs[movement.next]
-			distance := linalg.distance(walker.pos, next_point)
-			walked := min(stride, distance)
-			stride -= walked
-			if walked < distance {
-				walker.pos += linalg.normalize(next_point - walker.pos) * walked
-			} else {
-				walker.pos = next_point
-				movement.next += 1
-			}
+		costs := movement.path_costs[:]
+		last := len(path) - 1
 
-			spent := min(walked * cost, game_movement_left(game, walker^))
-			if walker.movement_turn != game.turn {
-				walker.movement_turn = game.turn
-				walker.movement_spent = 0
-			}
-			walker.movement_spent += spent
-			if cost == ROAD_COST {
-				walk.spent_road += spent
-			} else {
-				walk.spent_off_road += spent
+		clear_of := slot_map_get_ptr(&game.pieces, movement.clear_of)
+		got_clear := clear_of != nil && !disc_contains({clear_of.pos, clear_of.contact_radius}, walker.pos)
+		if !got_clear {
+			moved, reached, road, off_road := walk_along(
+				walker.pos,
+				path,
+				costs,
+				movement.next,
+				last,
+				WALK_CELLS_PER_STEP,
+				math.INF_F32,
+			)
+			walker.pos = moved
+			movement.next = reached
+			walks[0] = {movement.walker, road, off_road, 0}
+		}
+
+		chasing := false
+		if chaser := slot_map_get_ptr(&game.pieces, movement.chaser); chaser != nil {
+			until := movement.chaser_follows ? last : 0
+			touching := linalg.distance(chaser.pos, walker.pos) <= chaser.body_radius + walker.body_radius
+			chasing = !touching && movement.chaser_next <= until && movement.chaser_budget > 0
+			if chasing {
+				moved, reached, road, off_road := walk_along(
+					chaser.pos,
+					path,
+					costs,
+					movement.chaser_next,
+					until,
+					WALK_CELLS_PER_STEP,
+					movement.chaser_budget,
+				)
+				chaser.pos = moved
+				movement.chaser_next = reached
+				movement.chaser_budget -= road + off_road
+				walks[1] = {movement.chaser, road, off_road, 0}
 			}
 		}
 
-		met: Piece_Id
-		domain, _ := walker.domain.?
-		if engagement.attacker == {} {
-			others := slot_map_iterator(&game.pieces)
-			for other, other_id in slot_map_iterate(&others) {
-				if other_id == walk.piece || pieces_friendly(walker, other) do continue
-				if other.contact_radius == 0 || domain not_in other.contact_domains do continue
-				zone := Disc{other.pos, other.contact_radius}
-				if disc_contains(zone, walker.pos) && !disc_contains(zone, start) {
-					met = other_id
-					break
-				}
-			}
+		for &walk in walks {
+			piece := slot_map_get_ptr(&game.pieces, walk.piece)
+			if piece == nil do continue
+			due := walk.marched_road + walk.marched_off_road
+			spent := min(due, game_movement_left(piece^))
+			piece.this_turn.movement_spent += spent
+			walk.overdrawn = due - spent
 		}
 
-		arrived := movement.next >= len(path)
-		if met != {} || arrived {
-			if met == {} do met = movement.target
-			if met != {} {
-				append(&game.contacts, Contact{walk.piece, met, met == movement.target})
-			}
-			movement.walker = {}
-			movement.target = {}
-			movement.next = 0
+		walk_done = (movement.next > last || got_clear) && !chasing
+		if walk_done && movement.target != {} {
+			append(&game.contacts, Contact{movement.walker, movement.target, true})
 		}
-	} else {
+	}
+	if walk_done {
 		movement.walker = {}
 		movement.target = {}
 		movement.next = 0
+		movement.clear_of = {}
+		movement.chaser = {}
 	}
 
 	turn_ending :=
 		game.ending &&
 		len(game.contacts) == 0 &&
-		engagement.attacker == {} &&
 		game.interaction.actor == {} &&
 		movement.walker == {}
 
@@ -495,12 +563,11 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 		readiness := army.readiness
 		stock := army.stock
 
-		for fought_id, role in fought.roles {
-			if fought_id != id do continue
-			side := fought.result.sides[role]
-			army.men = max(0, army.men + int(math.round(side.men_change)))
-			readiness += side.readiness_change
-			stock += side.stock_change
+		for loss in losses {
+			if loss.army != id do continue
+			army.men = max(0, army.men + int(math.round(loss.men)))
+			readiness += loss.readiness
+			stock += loss.stock
 		}
 
 		if piece.owner == game.player {
@@ -545,18 +612,20 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 			army.resupply = min(fed, 1 + SUPPLY_REFILL_MAX) - 1
 		}
 
-		if walk.piece == id {
-			readiness -= walk.spent_road * ROAD_READINESS_PER_MOVEMENT
-			readiness -= walk.spent_off_road * READINESS_PER_MOVEMENT
-			stock -= walk.spent_road * ROAD_STOCK_PER_MOVEMENT
-			stock -= walk.spent_off_road * STOCK_PER_MOVEMENT
+		for walk in walks {
+			if walk.piece != id do continue
+			readiness -= walk.marched_road * ROAD_READINESS_PER_MOVEMENT
+			readiness -= walk.marched_off_road * READINESS_PER_MOVEMENT
+			readiness -= walk.overdrawn * OVERDRAW_READINESS
+			stock -= walk.marched_road * ROAD_STOCK_PER_MOVEMENT
+			stock -= walk.marched_off_road * STOCK_PER_MOVEMENT
 		}
 
 		if turn_ending && piece.owner == game.player {
 			stock = clamp(stock + army.resupply, 0, army.baggage)
 			readiness_cap: f32 = army.baggage > 0 ? 100 * stock / army.baggage : 0
 			exertion: f32 =
-				piece.movement_per_turn > 0 ? 1 - game_movement_left(game, piece^) / piece.movement_per_turn : 0
+				piece.movement_per_turn > 0 ? 1 - game_movement_left(piece^) / piece.movement_per_turn : 0
 			rest := (1 - exertion) * (1 - exertion)
 			if readiness < readiness_cap {
 				readiness = min(readiness_cap, readiness + READINESS_RECOVERY * rest)
@@ -577,6 +646,9 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 			game.turn += 1
 		}
 		game.player = Faction_Id(next_player)
+
+		all := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&all) do piece.this_turn = {}
 		game_supply_build(game)
 	}
 }

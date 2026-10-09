@@ -310,7 +310,7 @@ main :: proc() {
 
 		// UI, over everything
 		ui_begin(window_size)
-		game_input.asks += cards_ui(cards, FONT_MAP, FONT_CARD_TITLE, &map_mode)
+		cards_ui(cards, FONT_MAP, FONT_CARD_TITLE, &map_mode, &game_input)
 		tweak_ui(tweaks_toggled, FONT_TWEAK)
 		ui_end(input, dt, &GLOBAL.render_data.quads[.Screen])
 

@@ -373,6 +373,15 @@ random_xy :: proc(x, y: int, stream: u32) -> f32 {
 	return f32(z >> 40) / (1 << 24)
 }
 
+random_unit :: proc(state: ^u64) -> f32 {
+	state^ += 0x9e3779b97f4a7c15
+	z := state^
+	z = (z ~ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ~ (z >> 27)) * 0x94d049bb133111eb
+	z = z ~ (z >> 31)
+	return f32(z >> 40) / (1 << 24)
+}
+
 // Index drawn with probability proportional to its weight. roll: 0..1. picked = false if no weight is > 0
 pick_weighted :: proc(weights: []f32, roll: f32) -> (index: int, picked: bool) {
 	total: f32

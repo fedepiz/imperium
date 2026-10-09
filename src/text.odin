@@ -2,6 +2,7 @@ package main
 
 import "core:c"
 import "core:fmt"
+import "core:math"
 import "core:math/linalg"
 import "core:os"
 
@@ -56,6 +57,7 @@ Text_Part :: struct {
 	color: [4]f32,
 	// Metadata tag
 	tag:   u64,
+	underline: bool,
 }
 
 // A character of a text as kept, once shaped. Blanks included
@@ -430,6 +432,35 @@ text_quads :: proc(
 		if quad, drawn := glyph_quad(font, int(glyph.glyph), pen, part.color, snap, clip); drawn {
 			append(quads, quad)
 		}
+	}
+
+	run_start := 0
+	for run_start < kept {
+		run_part := glyphs[run_start].part
+		run_end := run_start + 1
+		for run_end < kept && glyphs[run_end].part == run_part do run_end += 1
+		part := TEXT.parts[run_part]
+		if part.underline {
+			size := f32(TEXT.fonts[part.font].size)
+			thickness := max(1, math.round(size / 16))
+			lo := baseline + {glyphs[run_start].x, math.round(size / 12)}
+			hi := baseline + {glyph_end(glyphs[run_end - 1]), math.round(size / 12) + thickness}
+			if snap {
+				lo = linalg.round(lo * TEXT.pixel_density) / TEXT.pixel_density
+				hi = linalg.round(hi * TEXT.pixel_density) / TEXT.pixel_density
+			}
+			c := linalg.clamp(part.color, 0, 1) * 255 + 0.5
+			bytes := [4]u8{u8(c.r), u8(c.g), u8(c.b), u8(c.a)}
+			append(
+				quads,
+				Render_Quad {
+					rect = {lo.x, lo.y, hi.x, hi.y},
+					clip = clip,
+					colors = {bytes, bytes, bytes, bytes},
+				},
+			)
+		}
+		run_start = run_end
 	}
 
 	// Phase: Ellipsis. Three dots from the end of the last glyph kept
