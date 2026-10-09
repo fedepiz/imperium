@@ -67,7 +67,6 @@ ARMY_MOBILITY_DEFAULT :: 2
 
 Game :: struct {
 	terrain:     Terrain,
-	ways:        [Way_Type][WAY_PER_TYPE_MAX]Way,
 	regions:     [REGIONS_MAX]Region,
 	pieces:      Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
 	factions:    [dynamic; FACTIONS_MAX]Faction,
@@ -158,10 +157,6 @@ Way_Type :: enum {
 	Road,
 }
 
-Way :: struct {
-	name: Name,
-}
-
 name_from_string :: proc(txt: string) -> (name: Name, ok: bool) #optional_ok {
 	count := copy_from_string(name.buffer[:], txt)
 	ok = count == len(txt)
@@ -178,8 +173,6 @@ Region :: struct {
 	color:   [3]u8,
 	capital: Piece_Id,
 }
-
-game_init :: proc(game: ^Game) {}
 
 // Out: game, geography
 game_load :: proc(
@@ -424,34 +417,17 @@ game_load :: proc(
 	}
 	game.terrain.cover = geo_out.cover
 
-	// Pathfinding: the cost of entering each cell, by land and by sea, then what is derived from them.
-	// Derived unless cached for these grids, and cached when derived
+	// Pathfinding: the cost of entering each cell, by land and by sea
 	{
 		// Land: by cover, or along a road. Water is impassable
-		Desc :: struct {
-			domain: Pathfind_Domain,
-			suffix: string,
+		land := pathfind_grid(.Land)
+		for cell, i in geo_out.cover {
+			on_road := ways_sdf[.Road][i] < ROAD_CELL_REACH
+			land[i] = geo_out.water[i] ? 0 : on_road ? ROAD_COST : MOVE_COSTS[cell.kind]
 		}
 
-		descs: []Desc = {{.Land, "land"}, {.Sea, "sea"}}
-
-		for desc in descs {
-			cells := pathfind_build_begin(desc.domain)
-			switch (desc.domain) {
-			case .Land:
-				for cell, i in geo_out.cover {
-					cost := MOVE_COSTS[cell.kind]
-					on_road := ways_sdf[.Road][i] < ROAD_CELL_REACH
-					cells[i] = geo_out.water[i] ? 0 : on_road ? ROAD_COST : cost
-				}
-			case .Sea:
-				for w, i in geo_out.water do cells[i] = w ? 1 : 0
-			}
-			file_path := fmt.tprintf("%s_%s", scenario_name, desc.suffix)
-			fingerprint, cached := cache_read(file_path)
-			fingerprint_out, derived := pathfind_build_end(desc.domain, fingerprint, cached)
-			if len(derived) > 0 do cache_write(file_path, fingerprint_out, derived)
-		}
+		sea := pathfind_grid(.Sea)
+		for water, i in geo_out.water do sea[i] = water ? 1 : 0
 	}
 
 	{

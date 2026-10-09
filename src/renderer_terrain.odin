@@ -334,10 +334,10 @@ renderer_terrain_build :: proc(
 	ground_stroke_write(rend, STROKE_RIVERS, &geography.rivers)
 	ground_stroke_write(rend, STROKE_ROADS, &geography.roads)
 	// Rivers thin with elevation
-	ground_taper_write(rend, geography.elevation[:])
+	ground_grid_write(rend, .Taper, raw_data(geography.elevation[:]), len(geography.elevation))
 
 	// Step: Cover
-	ground_category_write(rend, geography.cover[:])
+	ground_grid_write(rend, .Category, raw_data(geography.cover[:]), len(geography.cover))
 	looks := style.cover_looks
 	ground_category_looks_write(rend, slice.enumerated_array(&looks))
 
@@ -430,8 +430,6 @@ STROKE_FAR :: 1000
 @(private = "file")
 BLEND_MIN :: wgpu.BlendOperation(4)
 
-@(private = "file")
-VIEW_SHADER :: #load("view.wgsl", string)
 @(private = "file")
 GROUND_SHADER :: VIEW_SHADER + #load("ground.wgsl", string)
 @(private = "file")
@@ -544,7 +542,7 @@ AREA_OWN_MIN :: 0.1
 // CPU side of the area layers. Not in Renderer: too large to pass by value
 @(private = "file")
 GROUND_AREAS: struct {
-	// Per cell: on the land side of the divide. From the last Render_Update_Divide
+	// Per cell: on the land side of the divide. From the last ground_divide_write
 	land:   [RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT]bool,
 	layers: [AREA_LAYERS]Area_Layer,
 }
@@ -952,6 +950,7 @@ terrain_deinit :: proc() {
 		if grid.texture != nil do wgpu.TextureRelease(grid.texture)
 	}
 	for texture in ([?]Texture {
+			TERRAIN.ground_category_looks,
 			TERRAIN.ground_area_owners,
 			TERRAIN.ground_area_fields,
 			TERRAIN.ground_area_looks,
@@ -959,12 +958,6 @@ terrain_deinit :: proc() {
 		}) {
 		if texture.view != nil do wgpu.TextureViewRelease(texture.view)
 		if texture.texture != nil do wgpu.TextureRelease(texture.texture)
-	}
-	if TERRAIN.ground_category_looks.view != nil {
-		wgpu.TextureViewRelease(TERRAIN.ground_category_looks.view)
-	}
-	if TERRAIN.ground_category_looks.texture != nil {
-		wgpu.TextureRelease(TERRAIN.ground_category_looks.texture)
 	}
 }
 
@@ -1218,7 +1211,7 @@ terrain_frame :: proc(
 		assert(len(frame.wash) == RENDER_TERRAIN_CELLS)
 		content := max(u64(xxhash.XXH3_64_default(frame.wash[:])), 1)
 		if content != TERRAIN.wash_written {
-			ground_value_write(rend, frame.wash[:])
+			ground_grid_write(rend, .Value, raw_data(frame.wash[:]), len(frame.wash))
 			TERRAIN.wash_written = content
 		}
 		ground.value = {
@@ -1438,17 +1431,6 @@ ground_from_style :: proc(style: Render_Terrain_Style) -> (ground: Ground) {
 	return
 }
 
-// Overwrites the Value grid: input of Ground.value
-@(private = "file")
-ground_value_write :: proc(
-	rend: ^Renderer,
-	// 1 byte per cell, read as 0..1. Row-major from the top-left
-	cells: []u8,
-) {
-	if !(.Ready in rend.flags) do return
-	ground_grid_write(rend, .Value, raw_data(cells), len(cells))
-}
-
 // Overwrites the Divide grid: input of Ground.divide
 @(private = "file")
 ground_divide_write :: proc(
@@ -1456,7 +1438,6 @@ ground_divide_write :: proc(
 	// Signed distance per cell, in cells. > 0 land side, < 0 water side. Row-major from the top-left
 	distances: []f32,
 ) {
-	if !(.Ready in rend.flags) do return
 	// Stored as 16-bit floats
 	halves := make([]f16, len(distances), context.temp_allocator)
 	for distance, i in distances do halves[i] = f16(distance)
@@ -1476,7 +1457,6 @@ ground_areas_write :: proc(
 	ids: []u8,
 	side: Ground_Side,
 ) {
-	if !(.Ready in rend.flags) do return
 	assert(layer >= 0 && layer < AREA_LAYERS)
 	assert(len(ids) == RENDER_TERRAIN_WIDTH * RENDER_TERRAIN_HEIGHT)
 	areas := &GROUND_AREAS.layers[layer]
@@ -1552,7 +1532,6 @@ ground_area_write :: proc(
 	size: [2]int,
 	mask: []bool,
 ) {
-	if !(.Ready in rend.flags) do return
 	assert(layer >= 0 && layer < AREA_LAYERS)
 	assert(area != 0)
 	assert(len(mask) == size.x * size.y)
@@ -1561,7 +1540,6 @@ ground_area_write :: proc(
 
 	// Step: Cells. Drop the old ones, take the new ones. Areas losing cells are rebuilt too
 	before := areas.bounds[area]
-	before_side := areas.sides[area]
 	for y in before.min.y ..< before.max.y {
 		for x in before.min.x ..< before.max.x {
 			if areas.ids[y * GRID.x + x] == area do areas.ids[y * GRID.x + x] = 0
@@ -1655,7 +1633,6 @@ ground_area_write :: proc(
 // the area. Circles of one area must be consecutive. Circles past the budget are dropped
 @(private = "file")
 ground_area_circles_write :: proc(rend: ^Renderer, layer: int, circles: []Ground_Area_Circle) {
-	if !(.Ready in rend.flags) do return
 	assert(layer >= 0 && layer < AREA_LAYERS)
 
 	count := min(len(circles), AREA_CIRCLES_MAX)
@@ -1682,7 +1659,6 @@ ground_area_circles_write :: proc(rend: ^Renderer, layer: int, circles: []Ground
 // Overwrites the look of every area of a layer: looks[i] for area i, none past len(looks)
 @(private = "file")
 ground_area_looks_write :: proc(rend: ^Renderer, layer: int, looks: []Ground_Area_Look) {
-	if !(.Ready in rend.flags) do return
 	assert(layer >= 0 && layer < AREA_LAYERS)
 	assert(len(looks) <= AREAS_PER_LAYER)
 
@@ -1774,21 +1750,9 @@ area_field_build :: proc(areas: ^Area_Layer, area: u8, lo: [2]int, hi: [2]int) {
 	}
 }
 
-// Overwrites the Category grid: input of Ground.category
-@(private = "file")
-ground_category_write :: proc(
-	rend: ^Renderer,
-	// Row-major from the top-left
-	cells: []Render_Cover_Cell,
-) {
-	if !(.Ready in rend.flags) do return
-	ground_grid_write(rend, .Category, raw_data(cells), len(cells))
-}
-
 // Overwrites the look of every category: looks[i] for category i, none past len(looks)
 @(private = "file")
 ground_category_looks_write :: proc(rend: ^Renderer, looks: []Render_Cover_Look) {
-	if !(.Ready in rend.flags) do return
 	assert(len(looks) <= GROUND_CATEGORIES)
 
 	// 0..1 to 0..255, rounded
@@ -1815,17 +1779,6 @@ ground_category_looks_write :: proc(rend: ^Renderer, looks: []Render_Cover_Look)
 	)
 }
 
-// Overwrites the Taper grid: thins strokes of kind Ground_Stroke_Line
-@(private = "file")
-ground_taper_write :: proc(
-	rend: ^Renderer,
-	// 1 byte per cell, read as 0..1. Row-major from the top-left
-	cells: []u8,
-) {
-	if !(.Ready in rend.flags) do return
-	ground_grid_write(rend, .Taper, raw_data(cells), len(cells))
-}
-
 // Overwrites the line geometry of a stroke: input of Ground.strokes[stroke].
 // Segments past STROKE_SEGMENTS_MAX are dropped
 @(private = "file")
@@ -1837,7 +1790,6 @@ ground_stroke_write :: proc(
 	// Arrowhead at the end of each open run: length, width, in logical pixels. Zero = none
 	head: [2]f32 = {},
 ) {
-	if !(.Ready in rend.flags) do return
 	assert(stroke >= 0 && stroke < STROKES)
 
 	total := 0
@@ -1914,7 +1866,7 @@ Ground_Base :: struct {
 }
 
 // Category layer. Category grid: (category, strength) per cell. Each category has a look, written
-// with Render_Update_Category_Looks. The looks of the 4 cells around a pixel are blended
+// with ground_category_looks_write. The looks of the 4 cells around a pixel are blended
 @(private = "file")
 Ground_Category :: struct {
 	// Colour of the looks' patterns
@@ -1946,7 +1898,7 @@ Ground_Divide :: struct {
 	wobble:     f32,
 }
 
-// Stroke layer: draws along the lines written with Render_Update_Stroke.
+// Stroke layer: draws along the lines written with ground_stroke_write.
 // d = distance to the stroke's nearest segment. Widths: logical pixels. nil = off
 @(private = "file")
 Ground_Stroke :: union {
@@ -1956,7 +1908,7 @@ Ground_Stroke :: union {
 }
 
 // A filled line with an edge line either side, the same width on screen at any zoom.
-// Heads: see Render_Update_Stroke
+// Heads: see ground_stroke_write
 @(private = "file")
 Ground_Stroke_Arrow :: struct {
 	// Outer width, edges included
@@ -1995,7 +1947,7 @@ Ground_Stroke_Double :: struct {
 }
 
 // Area layer: a wash per area, and a line where two areas meet.
-// Areas: Render_Update_Areas or Render_Update_Area. Their looks: Render_Update_Area_Looks
+// Areas: ground_areas_write or ground_area_write. Their looks: ground_area_looks_write
 @(private = "file")
 Ground_Area_Layer :: struct {
 	// Line where two areas meet

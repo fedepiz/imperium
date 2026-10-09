@@ -11,7 +11,6 @@ import "vendor:wgpu"
 import "vendor:wgpu/sdl3glue"
 
 // Prepended to every shader
-@(private = "file")
 VIEW_SHADER :: #load("view.wgsl", string)
 
 @(private = "file")
@@ -61,12 +60,6 @@ Renderer :: struct {
 	atlas_textures: [Render_Atlas]wgpu.Texture,
 	atlas_views:    [Render_Atlas]wgpu.TextureView,
 	atlas_group:    wgpu.BindGroup,
-}
-
-@(private = "file")
-Texture :: struct {
-	texture: wgpu.Texture,
-	view:    wgpu.TextureView,
 }
 
 // Must match struct View in view.wgsl

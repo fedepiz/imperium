@@ -102,8 +102,6 @@ main :: proc() {
 	_ = sdl.StartTextInput(window)
 
 	{
-		game_init(&GLOBAL.game)
-
 		geography := new(Render_Geography, context.temp_allocator)
 
 		if !game_load(&GLOBAL.game, "roman", geography) {
@@ -286,11 +284,9 @@ main :: proc() {
 
 		// Terrain: every region in its color, the one under the cursor highlighted
 		{
-			hovered: Region_Id
-			if !ui_hovered_any() && grid_contains(cell_of(cursor_cell), MAP_SIZE) {
-				hovered = Region_Id(GLOBAL.game.terrain.regions[grid_index(cell_of(cursor_cell), MAP_SIZE)])
-			}
-			game_present_map(&GLOBAL.game, focus, hovered, map_mode, &GLOBAL.render_data.terrain)
+			pointer: Maybe([2]f32)
+			if !ui_hovered_any() do pointer = cursor_cell
+			game_present_map(&GLOBAL.game, focus, pointer, map_mode, &GLOBAL.render_data.terrain)
 			GLOBAL.render_data.terrain.dt = dt
 		}
 

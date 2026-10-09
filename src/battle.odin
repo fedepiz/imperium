@@ -486,6 +486,7 @@ Battle_Side_Result :: struct {
 }
 
 Battle_Result :: struct {
+	names:           [2]Span,
 	fought:          bool,
 	refused:         bool,
 	attacker:        int,
@@ -514,6 +515,7 @@ power :: proc(side, other: Battle_Side) -> (power: Report_Tally) {
 battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	rng := battle.seed
 	report := &result.report
+	for side, i in battle.sides do result.names[i] = report_text(report, side.name)
 	roll_2d6 :: proc(rng: ^u64) -> f32 {
 		return 1 + 6 * random_unit(rng) + 6 * random_unit(rng)
 	}

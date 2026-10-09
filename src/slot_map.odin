@@ -48,21 +48,7 @@ slot_map_remove :: proc(sm: ^$SM/Slot_Map($T, $N, $HT), key: HT) -> (ok: bool) {
 	return
 }
 
-slot_map_get :: proc(
-	sm: ^$SM/Slot_Map($T, $N, $HT),
-	key: HT,
-) -> (
-	value: T,
-	ok: bool,
-) #optional_ok {
-	if key.generation != 0 && key.index < N && sm.generations[key.index] == key.generation {
-		value = sm.payloads[key.index]
-		ok = true
-	}
-	return
-}
-
-slot_map_get_ptr :: proc(sm: ^$SM/Slot_Map($T, $N, $HT), key: HT) -> ^T {
+slot_map_get :: proc(sm: ^$SM/Slot_Map($T, $N, $HT), key: HT) -> ^T {
 	if key.generation == 0 || key.index >= N || sm.generations[key.index] != key.generation do return nil
 	return &sm.payloads[key.index]
 }

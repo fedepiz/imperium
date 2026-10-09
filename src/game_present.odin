@@ -99,18 +99,23 @@ Cards :: struct {
 game_present_map :: proc(
 	game: ^Game,
 	focus: Piece_Id,
-	pointed: Region_Id,
+	pointer: Maybe([2]f32),
 	mode: Map_Mode,
 	frame: ^Render_Terrain_Frame,
 ) {
 	movement := &game.movement
+
+	pointed: Region_Id
+	if at, on_map := pointer.?; on_map && grid_contains(cell_of(at), MAP_SIZE) {
+		pointed = Region_Id(game.terrain.regions[grid_index(cell_of(at), MAP_SIZE)])
+	}
 	reach_shown :=
 		movement.flood_key != 0 && movement.flooded == focus && movement.flooded != movement.walker
 
 	frame.region_display = mode == .Control ? .Filled_When_Far : .Hidden
 	for &region, id in game.regions {
 		color := REGION_UNHELD_COLOR
-		capital := slot_map_get_ptr(&game.pieces, region.capital)
+		capital := slot_map_get(&game.pieces, region.capital)
 		if mode == .Control && capital != nil && capital.owner != 0 {
 			color = game.factions[capital.owner].color
 		}
@@ -123,7 +128,7 @@ game_present_map :: proc(
 	if reach_shown {
 		flood := &movement.flood
 		on_water := flood.domain != .Land
-		piece := slot_map_get_ptr(&game.pieces, focus)
+		piece := slot_map_get(&game.pieces, focus)
 		controlled := piece != nil && game_ordering(game) != 0 && piece.owner == game_ordering(game)
 
 		frame.highlights[REACH_SLOT] = {
@@ -158,7 +163,7 @@ game_present_map :: proc(
 		enemies.circles_len = len(frame.highlight_circles) - enemies.circles_begin
 	}
 
-	if walker := slot_map_get_ptr(&game.pieces, movement.walker); walker != nil {
+	if walker := slot_map_get(&game.pieces, movement.walker); walker != nil {
 		append(&frame.arrow, walker.pos)
 		append(&frame.arrow, ..movement.path.points[movement.next:])
 	}
@@ -286,7 +291,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 	append(&status.fields, Card_Field{label = "Playing", value = faction_title(game, game.player)})
 	append(&status.actions, Card_Action{"End turn", .End_Turn, game_turn_endable(game)})
 
-	if piece := slot_map_get_ptr(&game.pieces, focus); piece != nil {
+	if piece := slot_map_get(&game.pieces, focus); piece != nil {
 		card := Card {
 			title = game_piece_title(piece),
 		}
@@ -326,8 +331,8 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 	if open.actor == {} do return
 
 	if open.stage == .Meet_Town {
-		actor := slot_map_get_ptr(&game.pieces, open.actor)
-		met := slot_map_get_ptr(&game.pieces, open.target)
+		actor := slot_map_get(&game.pieces, open.actor)
+		met := slot_map_get(&game.pieces, open.target)
 		if actor == nil || met == nil do return
 		card := Card {
 			title = game_piece_title(met),
@@ -342,7 +347,8 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 
 	result := &open.result
 	report := &result.report
-	names := [2]string{open.battle.sides[0].name, open.battle.sides[1].name}
+	names := [2]string{report_string(report, result.names[0]), report_string(report, result.names[1])}
+	pieces := [2]^Piece_Data{slot_map_get(&game.pieces, open.actor), slot_map_get(&game.pieces, open.target)}
 	attacker := result.attacker
 	defender := 1 - attacker
 	card: Card
@@ -368,12 +374,16 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 			side := &result.sides[side_index]
 			#partial switch open.stage {
 			case .Announce, .Refused:
-				battle_side := open.battle.sides[side_index]
+				piece := pieces[side_index]
+				if piece == nil do continue
+				army, is_army := piece.army.?
+				if !is_army do continue
+				temperament := game_commander_temperament(game, piece)
 				power := fmt.tprintf("%.1f", side.power.total)
-				append(fields, Card_Field{label = "Commander", value = fmt.tprint(battle_side.temperament)})
-				append(fields, Card_Field{label = "Men", value = compact_number(f64(battle_side.men))})
-				append(fields, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", battle_side.proficiency)})
-				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", battle_side.readiness)})
+				append(fields, Card_Field{label = "Commander", value = fmt.tprint(temperament)})
+				append(fields, Card_Field{label = "Men", value = compact_number(f64(army.men))})
+				append(fields, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
+				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
 				append(fields, card_tally_field(&card, "Power", &side.power, power))
 			case .Fall_Back:
 				if !result.caught || side_index == result.winner do continue
