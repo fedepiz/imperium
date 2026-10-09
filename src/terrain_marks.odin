@@ -51,9 +51,7 @@ ROAD_BAND :: f32(1.2)
 @(private = "file")
 COAST_WATER_BAND :: f32(3)
 
-// Reach of the offset-to-way field, in cells. Above the bands
-@(private = "file")
-WAY_REACH :: f32(4)
+#assert(RIVER_BAND + 1 <= RENDER_TERRAIN_COURSE_REACH && ROAD_BAND + 1 <= RENDER_TERRAIN_COURSE_REACH)
 
 // Random offset on coast, elevation, temperature, so neighbouring ranges blend instead of meeting at a line
 @(private = "file")
@@ -243,9 +241,10 @@ terrain_marks_place :: proc(
 	cover: []Render_Cover_Cell,
 	// Signed distance to the coast per cell, in cells. > 0 on land
 	coast: []f32,
-	// Smoothed, in cells. The ground along them stays free of marks
-	rivers: ^Render_Courses,
-	roads: ^Render_Courses,
+	// Offset from each cell centre to the nearest river, and road, point. The ground along them stays free
+	// of marks
+	to_river: [][2]f32,
+	to_road: [][2]f32,
 	// Atlas rects of the drawings
 	images: ^Render_Mark_Images,
 	out: ^Terrain_Marks,
@@ -253,6 +252,7 @@ terrain_marks_place :: proc(
 	cells := size.x * size.y
 	assert(len(elevation) == cells && len(moisture) == cells)
 	assert(len(cover) == cells && len(coast) == cells)
+	assert(len(to_river) == cells && len(to_road) == cells)
 
 	// Random streams per layer
 	stream :: proc(layer: Layer, use: u32) -> u32 {return u32(layer) * 16 + use}
@@ -276,14 +276,11 @@ terrain_marks_place :: proc(
 	claimed := make([]u8, footprint.x * footprint.y, context.temp_allocator)
 	{
 		Way_Band :: struct {
-			lines: ^Render_Courses,
-			band:  f32,
+			to_way: [][2]f32,
+			band:   f32,
 		}
-		to_way := make([][2]f32, cells, context.temp_allocator)
-		for way in ([?]Way_Band{{rivers, RIVER_BAND}, {roads, ROAD_BAND}}) {
-			for &offset in to_way do offset = WAY_REACH
-			polylines_stamp(way.lines, WAY_REACH, size, to_way, nil)
-			for offset, i in to_way {
+		for way in ([?]Way_Band{{to_river, RIVER_BAND}, {to_road, ROAD_BAND}}) {
+			for offset, i in way.to_way {
 				if linalg.length(offset) > way.band + 1 do continue
 				cell := [2]int{i % size.x, i / size.x}
 				nearest := [2]f32{f32(cell.x), f32(cell.y)} + 0.5 + offset

@@ -78,7 +78,6 @@ Game :: struct {
 	interaction: Interaction,
 	movement:    Movement,
 	supply:      [MAP_CELLS]u8,
-	unstepped:   f32,
 }
 
 Region_Id :: distinct u8
@@ -287,25 +286,27 @@ game_load :: proc(
 	ways_sdf := new([Way_Type][MAP_CELLS]f32, context.temp_allocator)
 	{
 		Desc :: struct {
-			lines: ^Render_Courses,
-			reach: f32,
+			lines:   ^Render_Courses,
+			reach:   f32,
+			offsets: ^[MAP_CELLS][2]f32,
 		}
 
 		descs: [Way_Type]Desc = {
-			.River = {lines = &geo_out.rivers, reach = RIVER_DIST_MAX},
-			.Road = {lines = &geo_out.roads, reach = ROAD_DIST_MAX},
+			.River = {lines = &geo_out.rivers, reach = RIVER_DIST_MAX, offsets = &geo_out.to_river},
+			.Road = {lines = &geo_out.roads, reach = ROAD_DIST_MAX, offsets = &geo_out.to_road},
 		}
 
 		for desc, kind in descs {
-			offsets := new([MAP_CELLS][2]f32, context.temp_allocator)
+			offsets := desc.offsets
+			reach := max(desc.reach, RENDER_TERRAIN_COURSE_REACH)
 
 			// Must initialise offsets with high value, as the stamp algorithm only
 			// *reduces* distances
 			for &p in offsets {
-				p.x = desc.reach
+				p.x = reach
 			}
 
-			polylines_stamp(desc.lines, desc.reach, MAP_SIZE, offsets[:], nil)
+			polylines_stamp(desc.lines, reach, MAP_SIZE, offsets[:], nil)
 
 			for v, i in offsets {
 				ways_sdf[kind][i] = linalg.length(v)
@@ -596,10 +597,8 @@ load_map_bitmap_3_channels :: proc(file: string, out: ^[MAP_CELLS][3]u8) -> bool
 	return true
 }
 
-game_tick :: proc(game: ^Game, focus: Piece_Id, input: ^Game_Input, dt: f32) {
-	game.unstepped = min(game.unstepped + dt, STEPS_PER_FRAME_MAX * STEP_SECONDS)
-	for game.unstepped >= STEP_SECONDS {
-		game.unstepped -= STEP_SECONDS
+game_tick :: proc(game: ^Game, focus: Piece_Id, input: ^Game_Input, steps: int) {
+	for _ in 0 ..< steps {
 		game_step(game, focus, input^)
 		input^ = {}
 	}

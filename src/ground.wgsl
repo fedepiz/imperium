@@ -2,7 +2,7 @@
 // Full-window triangle. fs_main outputs the ground colour of each pixel.
 // Positions are in cells, origin at the grid's top-left. Grids: one texel per cell.
 
-// Must match Ground_Uniform in renderer.odin
+// Must match Ground_Uniform in renderer_terrain.odin
 struct Ground {
     base_color:        vec3f,
     stain_amount:      f32,
@@ -17,7 +17,7 @@ struct Ground {
     value_low:         vec3f,
     value_strength:    f32,
     value_high:        vec3f,
-    // Render_Ground_Clip
+    // Ground_Clip
     value_clip:        i32,
     // Grid size in cells
     grid:              vec2f,
@@ -29,25 +29,25 @@ struct Ground {
     areas:             array<Area_Layer, AREA_LAYER_COUNT>,
 }
 
-// RENDER_GROUND_AREA_LAYERS
+// AREA_LAYERS
 const AREA_LAYER_COUNT = 4;
 
-// Must match Area_Layer_Uniform in renderer.odin
+// Must match Area_Layer_Uniform in renderer_terrain.odin
 struct Area_Layer {
     border_color:    vec3f,
     border_strength: f32,
     border_width:    f32,
-    // Render_Ground_Clip
+    // Ground_Clip
     border_clip:     i32,
     wander:          f32,
     strength:        f32,
     circle_count:    i32,
 }
 
-// RENDER_GROUND_STROKES
+// STROKES
 const STROKE_COUNT = 3;
 
-// Must match Stroke_Uniform in renderer.odin
+// Must match Stroke_Uniform in renderer_terrain.odin
 struct Stroke {
     color:      vec3f,
     width:      f32,
@@ -55,7 +55,7 @@ struct Stroke {
     strength:   f32,
     // Stroke_Kind
     kind:       i32,
-    // Render_Ground_Clip
+    // Ground_Clip
     clip:       i32,
     edge_width: f32,
     wander:     f32,
@@ -67,7 +67,7 @@ const STROKE_LINE   = 1;
 const STROKE_DOUBLE = 2;
 const STROKE_ARROW  = 3;
 
-// Render_Ground_Clip
+// Ground_Clip
 const CLIP_NONE  = 0;
 const CLIP_LAND  = 1;
 const CLIP_WATER = 2;
@@ -81,11 +81,11 @@ const CLIP_WATER = 2;
 @group(1) @binding(4) var taper_grid:  texture_2d<f32>;
 // rg: category / 255, strength
 @group(1) @binding(5) var category_grid: texture_2d<f32>;
-// x: category. Row 0: wash colour rgb, wash. Row 1: Render_Ground_Pattern / 255, pattern ink
+// x: category. Row 0: wash colour rgb, wash. Row 1: Render_Pattern / 255, pattern ink
 @group(1) @binding(6) var category_looks: texture_2d<f32>;
 // Window-sized. Channel i: distance to stroke i's nearest segment, in cells
 @group(1) @binding(7) var strokes_target: texture_2d<f32>;
-// Window-sized. Quads of passes with target = Ground, premultiplied
+// Window-sized. The marks in view, premultiplied
 @group(1) @binding(8) var sprites_target: texture_2d<f32>;
 
 // Area layers: one array slice per layer.
@@ -93,12 +93,12 @@ const CLIP_WATER = 2;
 @group(1) @binding(9) var area_owners: texture_2d_array<f32>;
 // Fields, per cell and side: how far the cell centre is inside that area, in cells, negative outside
 @group(1) @binding(10) var area_fields: texture_2d_array<f32>;
-// x: area. Row 0: colour rgb, border. Row 1: thickness, inside, Render_Ground_Side
+// x: area. Row 0: colour rgb, border. Row 1: thickness, inside, Ground_Side
 @group(1) @binding(11) var area_looks: texture_2d_array<f32>;
 // Row: layer. xy: centre, z: radius, w: area. Circles of one area are consecutive
 @group(1) @binding(12) var area_circles: texture_2d<f32>;
 
-// Render_Ground_Pattern
+// Render_Pattern
 const PATTERN_STIPPLE = 1;
 
 // Full-window triangle

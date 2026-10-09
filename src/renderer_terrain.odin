@@ -32,6 +32,7 @@ RENDER_TERRAIN_ARROW_POINTS_MAX :: 4096
 // Points, and runs, of the courses of one kind
 RENDER_TERRAIN_COURSE_POINTS_MAX :: 1 << 16
 RENDER_TERRAIN_COURSE_RUNS_MAX :: 256
+RENDER_TERRAIN_COURSE_REACH :: 4
 // Variants of a mark drawing
 RENDER_MARK_VARIANTS_MAX :: 4
 
@@ -47,9 +48,12 @@ Render_Geography :: struct {
 	// Gives the cover washes and stipple. Places trees, tufts, marsh and dune marks
 	cover:     [RENDER_TERRAIN_CELLS]Render_Cover_Cell,
 	// Courses as points in cells, smoothed by the caller. Drawn as segments between the points.
-	// Marks keep off them
+	// Marks keep off them, by to_river and to_road: per cell, the offset from its centre to the
+	// nearest point, within RENDER_TERRAIN_COURSE_REACH cells
 	rivers:    Render_Courses,
 	roads:     Render_Courses,
+	to_river:  [RENDER_TERRAIN_CELLS][2]f32,
+	to_road:   [RENDER_TERRAIN_CELLS][2]f32,
 	// Region per cell, 0 = none. On land only. Gives the region washes and the borders between
 	// regions. Their colours: Render_Terrain_Frame.regions
 	regions:   [RENDER_TERRAIN_CELLS]u8,
@@ -349,8 +353,8 @@ renderer_terrain_build :: proc(
 		geography.moisture[:],
 		geography.cover[:],
 		coast,
-		&geography.rivers,
-		&geography.roads,
+		geography.to_river[:],
+		geography.to_road[:],
 		&images,
 		&TERRAIN.marks,
 	)
@@ -598,20 +602,41 @@ Ground_Grid :: enum {
 }
 
 // Must match struct Ground in ground.wgsl.
-// WGSL vec3f: align 16, size 12. Each [3]f32 is followed by one f32 (scalar or padding)
+// WGSL vec3f: align 16, size 12. Each [3]f32 is followed by one f32 (scalar or padding).
+// The ground's layers, composited in this order. Colours: straight RGB, 0..1. A zeroed layer has no effect.
+// Base layer: colour with noise stains. Outside the grid: color * 0.72.
+// Category layer. Category grid: (category, strength) per cell. Each category has a look, written
+// with ground_category_looks_write. The looks of the 4 cells around a pixel are blended.
+// Divide layer. d = Divide grid (bilinear) + noise: signed distance in cells, > 0 land, < 0 water.
+// On the water side it shows the tinted base, covering the category layer.
+// Draws a line at d = 0, and defines the sides other layers clip to.
+// The line is drawn over the layers between divide and value.
+// Area layer 0: under the strokes. Layers 1 and up: in order, over the marks, under the value layer.
+// Strokes: drawn in index order. Line and Double: under the divide's line. Arrow: over every layer.
+// Over the divide's line: the marks.
+// Value layer: multiplies the colour by mix(low, high, v). v: Value grid, bilinear
 @(private = "file")
 Ground_Uniform :: struct {
 	base_color:        [3]f32,
+	// Mix toward stain at full noise, 0..1
 	stain_amount:      f32,
+	// Stain colour. Stain pattern: fbm noise in world space
 	base_stain:        [3]f32,
+	// Peak-to-peak noise displacement of the lookup per axis, in cells
 	category_jitter:   f32,
+	// Water side: base multiplied by mix(shallow, deep, t), t = 0 at depth_from cells from the line,
+	// 1 at depth_full
 	divide_shallow:    [3]f32,
+	// Blend factor of the multiply at the line, 0..1. Falls to 0.65 of it away from the line
 	divide_tint:       f32,
 	divide_deep:       [3]f32,
+	// Peak-to-peak amplitude of the noise added to d, in cells
 	divide_wobble:     f32,
 	divide_line_color: [3]f32,
+	// Logical pixels. Varies along the line by a factor 0.8..1.2
 	divide_line_width: f32,
 	value_low:         [3]f32,
+	// Blend factor of the multiply, 0..1. 0 = layer off
 	value_strength:    f32,
 	value_high:        [3]f32,
 	value_clip:        i32,
@@ -619,27 +644,37 @@ Ground_Uniform :: struct {
 	grid:              [2]f32,
 	divide_depth_from: f32,
 	divide_depth_full: f32,
+	// Colour of the looks' patterns
 	category_pattern:  [3]f32,
+	// Scales washes and patterns, 0..1. 0 = layer off
 	category_strength: f32,
 	strokes:           [STROKES]Stroke_Uniform,
 	areas:             [AREA_LAYERS]Area_Layer_Uniform,
 }
 #assert(size_of(Ground_Uniform) == 144 + 48 * STROKES + 48 * AREA_LAYERS)
 
-// Must match struct Area_Layer in ground.wgsl
+// Must match struct Area_Layer in ground.wgsl.
+// Area layer: a wash per area, and a line where two areas meet.
+// Areas: ground_areas_write or ground_area_write. Their looks: ground_area_looks_write
 @(private = "file")
 Area_Layer_Uniform :: struct {
+	// Line where two areas meet
 	border_color:    [3]f32,
+	// 0..1
 	border_strength: f32,
+	// Logical pixels
 	border_width:    f32,
 	border_clip:     i32,
+	// Peak-to-peak noise displacement of the edges per axis, in cells
 	wander:          f32,
+	// Scales the washes, 0..1. 0 = no washes
 	strength:        f32,
 	circle_count:    i32,
 	_:               [3]i32,
 }
 
-// Must match struct Stroke in ground.wgsl. Field use per kind: see the Ground_Stroke variants
+// Must match struct Stroke in ground.wgsl. Draws along the lines written with ground_stroke_write.
+// d = distance to the stroke's nearest segment. Widths: logical pixels. Field use per kind: see Stroke_Kind
 @(private = "file")
 Stroke_Uniform :: struct {
 	color:      [3]f32,
@@ -655,8 +690,16 @@ Stroke_Uniform :: struct {
 @(private = "file")
 Stroke_Kind :: enum i32 {
 	None,
+	// One line, with a wash either side of it. width: scaled by 1..0.4 as the Taper grid goes 0.2..0.8,
+	// capped at 1/3 cell. fill, strength: multiplies the colour by fill, by strength at d = 0 falling to 0
+	// at 1.2 cells. wander: peak-to-peak noise displacement of the line per axis, in cells
 	Line,
+	// Two edge lines (color, edge_width) with a fill between. Closes to a single line as width goes from
+	// 6 to 3. width: outer, edges included, capped at 1/2 cell. edge_width: varies along the stroke by a
+	// factor 0.6..1.4. Mixed toward fill * base colour by strength
 	Double,
+	// A filled line (fill) with an edge line either side (color, edge_width), the same width on screen at
+	// any zoom. width: outer, edges included. Heads: see ground_stroke_write
 	Arrow,
 }
 
@@ -1206,7 +1249,6 @@ terrain_frame :: proc(
 	}
 
 	// Step: Wash. Its values are written when they change
-	ground := ground_from_style(style^)
 	if len(frame.wash) > 0 {
 		assert(len(frame.wash) == RENDER_TERRAIN_CELLS)
 		content := max(u64(xxhash.XXH3_64_default(frame.wash[:])), 1)
@@ -1214,79 +1256,11 @@ terrain_frame :: proc(
 			ground_grid_write(rend, .Value, raw_data(frame.wash[:]), len(frame.wash))
 			TERRAIN.wash_written = content
 		}
-		ground.value = {
-			low      = style.wash_low,
-			high     = style.wash_high,
-			strength = style.wash_strength,
-			clip     = .Land,
-		}
 	}
 
 	// Step: Uniforms
-	uniform := Ground_Uniform {
-		base_color        = ground.base.color,
-		stain_amount      = ground.base.stain_amount,
-		base_stain        = ground.base.stain,
-		category_jitter   = ground.category.jitter,
-		category_pattern  = ground.category.pattern_color,
-		category_strength = ground.category.strength,
-		divide_shallow    = ground.divide.shallow,
-		divide_tint       = ground.divide.tint,
-		divide_deep       = ground.divide.deep,
-		divide_wobble     = ground.divide.wobble,
-		divide_line_color = ground.divide.line_color,
-		divide_line_width = ground.divide.line_width,
-		value_low         = ground.value.low,
-		value_strength    = ground.value.strength,
-		value_high        = ground.value.high,
-		value_clip        = i32(ground.value.clip),
-		grid              = {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
-		divide_depth_from = ground.divide.depth_from,
-		divide_depth_full = ground.divide.depth_full,
-	}
-	for layer, i in ground.areas {
-		uniform.areas[i] = {
-			border_color    = layer.border_color,
-			border_strength = layer.border_strength,
-			border_width    = layer.border_width,
-			border_clip     = i32(layer.border_clip),
-			wander          = layer.wander,
-			strength        = layer.strength,
-			circle_count    = GROUND_AREAS.layers[i].circle_count,
-		}
-	}
-	for stroke, i in ground.strokes {
-		switch look in stroke {
-		case Ground_Stroke_Line:
-			uniform.strokes[i] = {
-				kind     = .Line,
-				color    = look.color,
-				width    = look.width,
-				fill     = look.wash_color,
-				strength = look.wash_strength,
-				wander   = look.wander,
-				clip     = i32(look.clip),
-			}
-		case Ground_Stroke_Double:
-			uniform.strokes[i] = {
-				kind       = .Double,
-				color      = look.edge_color,
-				width      = look.width,
-				fill       = look.fill_color,
-				strength   = look.fill_strength,
-				edge_width = look.edge_width,
-				clip       = i32(look.clip),
-			}
-		case Ground_Stroke_Arrow:
-			uniform.strokes[i] = {
-				kind       = .Arrow,
-				color      = look.edge_color,
-				width      = look.width,
-				fill       = look.fill_color,
-				edge_width = look.edge_width,
-			}
-		}
-	}
+	uniform := ground_uniform_from_style(style^, len(frame.wash) > 0)
+	for &layer, i in uniform.areas do layer.circle_count = GROUND_AREAS.layers[i].circle_count
 	wgpu.QueueWriteBuffer(rend.queue, TERRAIN.ground_uniforms, 0, &uniform, size_of(uniform))
 
 	// Step: Marks in view
@@ -1369,69 +1343,75 @@ terrain_draw :: proc(rend: ^Renderer, pass: wgpu.RenderPassEncoder) {
 	wgpu.RenderPassEncoderDraw(pass, 3, 1, 0, 0)
 }
 
-// The ground's layers for a style. Value layer: off, see the wash in terrain_frame
 @(private = "file")
-ground_from_style :: proc(style: Render_Terrain_Style) -> (ground: Ground) {
-	ground.base = {
-		color        = style.paper,
-		stain        = style.paper_stain,
-		stain_amount = style.paper_stain_amount,
+ground_uniform_from_style :: proc(style: Render_Terrain_Style, wash_shown: bool) -> (uniform: Ground_Uniform) {
+	wobble := style.wobble * EDGE_WOBBLE
+	uniform = {
+		base_color        = style.paper,
+		stain_amount      = style.paper_stain_amount,
+		base_stain        = style.paper_stain,
+		category_jitter   = style.cover_jitter,
+		category_pattern  = style.ink,
+		category_strength = 1,
+		divide_shallow    = style.sea_shallow,
+		divide_tint       = style.sea_tint,
+		divide_deep       = style.sea_deep,
+		divide_wobble     = wobble,
+		divide_line_color = style.ink,
+		divide_line_width = style.coast_width,
+		divide_depth_from = style.sea_depth_from,
+		divide_depth_full = style.sea_depth_full,
+		grid              = {RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
 	}
-	ground.category = {
-		pattern_color = style.ink,
-		strength      = 1,
-		jitter        = style.cover_jitter,
+	if wash_shown {
+		uniform.value_low = style.wash_low
+		uniform.value_high = style.wash_high
+		uniform.value_strength = style.wash_strength
+		uniform.value_clip = i32(Ground_Clip.Land)
 	}
-	ground.divide = {
-		shallow    = style.sea_shallow,
-		deep       = style.sea_deep,
-		depth_from = style.sea_depth_from,
-		depth_full = style.sea_depth_full,
-		tint       = style.sea_tint,
-		line_color = style.ink,
-		line_width = style.coast_width,
-		wobble     = style.wobble * EDGE_WOBBLE,
-	}
-	ground.areas[LAYER_REGIONS] = {
+	uniform.areas[LAYER_REGIONS] = {
 		border_color    = style.border_ink,
 		border_strength = style.border_strength,
 		border_width    = style.border_width,
-		border_clip     = .Land,
-		wander          = style.wobble * EDGE_WOBBLE,
+		border_clip     = i32(Ground_Clip.Land),
+		wander          = wobble,
 		strength        = 1,
 	}
 	for layer in HIGHLIGHT_AREA_LAYERS {
-		ground.areas[layer] = {
-			wander   = style.wobble * EDGE_WOBBLE,
+		uniform.areas[layer] = {
+			wander   = wobble,
 			strength = 1,
 		}
 	}
-	ground.strokes[STROKE_ARROWS] = Ground_Stroke_Arrow {
+	uniform.strokes[STROKE_RIVERS] = {
+		kind     = .Line,
+		color    = style.ink + (style.sea_shallow - style.ink) * 0.3,
+		width    = style.river_width,
+		fill     = style.sea_shallow,
+		strength = style.sea_tint * 0.5,
+		wander   = style.wobble,
+		clip     = i32(Ground_Clip.Land),
+	}
+	uniform.strokes[STROKE_ROADS] = {
+		kind       = .Double,
+		color      = style.ink,
+		width      = style.road_width,
+		fill       = style.road_fill,
+		strength   = style.road_fill_strength,
+		edge_width = style.road_stroke,
+		clip       = i32(Ground_Clip.Land),
+	}
+	uniform.strokes[STROKE_ARROWS] = {
+		kind       = .Arrow,
+		color      = style.ink,
 		width      = style.arrow_width,
-		fill_color = style.arrow_fill,
-		edge_color = style.ink,
+		fill       = style.arrow_fill,
 		edge_width = 1,
-	}
-	ground.strokes[STROKE_RIVERS] = Ground_Stroke_Line {
-		color         = style.ink + (style.sea_shallow - style.ink) * 0.3,
-		width         = style.river_width,
-		wash_color    = style.sea_shallow,
-		wash_strength = style.sea_tint * 0.5,
-		wander        = style.wobble,
-		clip          = .Land,
-	}
-	ground.strokes[STROKE_ROADS] = Ground_Stroke_Double {
-		width         = style.road_width,
-		edge_color    = style.ink,
-		edge_width    = style.road_stroke,
-		fill_color    = style.road_fill,
-		fill_strength = style.road_fill_strength,
-		clip          = .Land,
 	}
 	return
 }
 
-// Overwrites the Divide grid: input of Ground.divide
+// Overwrites the Divide grid: input of the divide layer
 @(private = "file")
 ground_divide_write :: proc(
 	rend: ^Renderer,
@@ -1779,7 +1759,7 @@ ground_category_looks_write :: proc(rend: ^Renderer, looks: []Render_Cover_Look)
 	)
 }
 
-// Overwrites the line geometry of a stroke: input of Ground.strokes[stroke].
+// Overwrites the line geometry of a stroke: input of Ground_Uniform.strokes[stroke].
 // Segments past STROKE_SEGMENTS_MAX are dropped
 @(private = "file")
 ground_stroke_write :: proc(
@@ -1838,131 +1818,6 @@ ground_grid_write :: proc(rend: ^Renderer, grid: Ground_Grid, texels: rawptr, co
 	)
 }
 
-// Ground pass parameters. The ground shader outputs one colour per window pixel, computed from the
-// grids (RENDER_TERRAIN_WIDTH x RENDER_TERRAIN_HEIGHT cells) and these layers.
-// Layers are composited in field order. Colours: straight RGB, 0..1. A zeroed layer has no effect
-@(private = "file")
-Ground :: struct {
-	base:     Ground_Base,
-	category: Ground_Category,
-	divide:   Ground_Divide,
-	// Layer 0: here, under the strokes. Layers 1 and up: in order, over the marks, under the value
-	// layer
-	areas:    [AREA_LAYERS]Ground_Area_Layer,
-	// Drawn in index order. Line and Double: under the divide's line. Arrow: over every layer.
-	// Over the divide's line: the marks
-	strokes:  [STROKES]Ground_Stroke,
-	value:    Ground_Value,
-}
-
-// Base layer: colour with noise stains. Outside the grid: color * 0.72
-@(private = "file")
-Ground_Base :: struct {
-	color:        [3]f32,
-	// Stain colour. Stain pattern: fbm noise in world space
-	stain:        [3]f32,
-	// Mix toward stain at full noise, 0..1
-	stain_amount: f32,
-}
-
-// Category layer. Category grid: (category, strength) per cell. Each category has a look, written
-// with ground_category_looks_write. The looks of the 4 cells around a pixel are blended
-@(private = "file")
-Ground_Category :: struct {
-	// Colour of the looks' patterns
-	pattern_color: [3]f32,
-	// Scales washes and patterns, 0..1. 0 = layer off
-	strength:      f32,
-	// Peak-to-peak noise displacement of the lookup per axis, in cells
-	jitter:        f32,
-}
-
-// Divide layer. d = Divide grid (bilinear) + noise: signed distance in cells, > 0 land, < 0 water.
-// On the water side it shows the tinted base, covering the category layer.
-// Draws a line at d = 0, and defines the sides other layers clip to.
-// The line is drawn over the layers between divide and value
-@(private = "file")
-Ground_Divide :: struct {
-	// Water side: base multiplied by mix(shallow, deep, t), t = 0 at depth_from cells from the line,
-	// 1 at depth_full
-	shallow:    [3]f32,
-	deep:       [3]f32,
-	depth_from: f32,
-	depth_full: f32,
-	// Blend factor of the multiply at the line, 0..1. Falls to 0.65 of it away from the line
-	tint:       f32,
-	line_color: [3]f32,
-	// Logical pixels. Varies along the line by a factor 0.8..1.2
-	line_width: f32,
-	// Peak-to-peak amplitude of the noise added to d, in cells
-	wobble:     f32,
-}
-
-// Stroke layer: draws along the lines written with ground_stroke_write.
-// d = distance to the stroke's nearest segment. Widths: logical pixels. nil = off
-@(private = "file")
-Ground_Stroke :: union {
-	Ground_Stroke_Line,
-	Ground_Stroke_Double,
-	Ground_Stroke_Arrow,
-}
-
-// A filled line with an edge line either side, the same width on screen at any zoom.
-// Heads: see ground_stroke_write
-@(private = "file")
-Ground_Stroke_Arrow :: struct {
-	// Outer width, edges included
-	width:      f32,
-	fill_color: [3]f32,
-	edge_color: [3]f32,
-	edge_width: f32,
-}
-
-// One line, with a wash either side of it
-@(private = "file")
-Ground_Stroke_Line :: struct {
-	color:         [3]f32,
-	// Scaled by 1..0.4 as the Taper grid goes 0.2..0.8. Capped at 1/3 cell
-	width:         f32,
-	// Multiplies the colour by wash_color, by wash_strength at d = 0 falling to 0 at 1.2 cells
-	wash_color:    [3]f32,
-	wash_strength: f32,
-	// Peak-to-peak noise displacement of the line per axis, in cells
-	wander:        f32,
-	clip:          Ground_Clip,
-}
-
-// Two edge lines with a fill between. Closes to a single line as width goes from 6 to 3
-@(private = "file")
-Ground_Stroke_Double :: struct {
-	// Outer width, edges included. Capped at 1/2 cell
-	width:         f32,
-	edge_color:    [3]f32,
-	// Varies along the stroke by a factor 0.6..1.4
-	edge_width:    f32,
-	// Mixed toward fill_color * base colour by fill_strength
-	fill_color:    [3]f32,
-	fill_strength: f32,
-	clip:          Ground_Clip,
-}
-
-// Area layer: a wash per area, and a line where two areas meet.
-// Areas: ground_areas_write or ground_area_write. Their looks: ground_area_looks_write
-@(private = "file")
-Ground_Area_Layer :: struct {
-	// Line where two areas meet
-	border_color:    [3]f32,
-	// 0..1
-	border_strength: f32,
-	// Logical pixels
-	border_width:    f32,
-	border_clip:     Ground_Clip,
-	// Peak-to-peak noise displacement of the edges per axis, in cells
-	wander:          f32,
-	// Scales the washes, 0..1. 0 = no washes
-	strength:        f32,
-}
-
 // Look of one area. The colour under it is multiplied toward color:
 // by border at the area's edge, easing to inside over thickness cells inward
 @(private = "file")
@@ -1998,14 +1853,4 @@ Ground_Clip :: enum i32 {
 	None,
 	Land,
 	Water,
-}
-
-// Value layer: multiplies the colour by mix(low, high, v). v: Value grid, bilinear
-@(private = "file")
-Ground_Value :: struct {
-	low:      [3]f32,
-	high:     [3]f32,
-	// Blend factor of the multiply, 0..1. 0 = layer off
-	strength: f32,
-	clip:     Ground_Clip,
 }

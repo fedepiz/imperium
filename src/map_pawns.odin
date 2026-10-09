@@ -33,10 +33,8 @@ Map_Pawn_Style :: struct {
 }
 
 MAP_PAWN_STYLE_DEFAULT :: Map_Pawn_Style {
-	paper     = {0.840, 0.772, 0.620},
 	highlight = {0.900, 0.350, 0.300},
 	pulse     = {1.000, 0.700, 0.350},
-	ink       = {0.150, 0.105, 0.070},
 }
 
 Map_Icon :: enum {
@@ -136,30 +134,23 @@ LABEL_HALO :: 1.5
 @(private = "file", rodata)
 LABEL_HALO_SHIFTS := [8][2]f32{{-1, -1}, {0, -1}, {1, -1}, {-1, 0}, {1, 0}, {-1, 1}, {0, 1}, {1, 1}}
 
-// Out: pawns.
-// Finds the pawn images
-map_pawns_build :: proc(pawns: ^Map_Pawns, assets: ^Assets, label_font: Text_Font_Id) {
-	pawns.label_font = label_font
-	for &cultures, set in pawns.images {
-		for &icons, culture in cultures {
-			for &image, icon in icons {
-				name := fmt.tprintf(
-					"%s/%s_%s",
-					SET_NAMES[set],
-					CULTURE_NAMES[culture],
-					ICON_NAMES[icon],
-				)
-				drawing, drawing_found := assets_image_find(assets, name)
-				fill, fill_found := assets_image_find(assets, fmt.tprintf("%s_fill", name))
-				if !drawing_found || !fill_found {
-					fmt.eprintln("Pawn image not loaded:", name)
-					continue
-				}
-				image = {assets.image_rects[drawing], assets.image_rects[fill]}
-			}
-		}
+map_pawns_image_paths :: proc(paths: ^[dynamic; ASSETS_IMAGES_MAX]string) {
+	for set in Pawn_Set do for culture in Map_Culture do for icon in Map_Icon {
+		drawing := fmt.tprintf("%s/%s_%s", SET_NAMES[set], CULTURE_NAMES[culture], ICON_NAMES[icon])
+		append(paths, drawing, fmt.tprintf("%s_fill", drawing))
 	}
+}
 
+map_pawns_build :: proc(pawns: ^Map_Pawns, image_rects: []Extents, label_font: Text_Font_Id) {
+	pawns.label_font = label_font
+	next := 0
+	for &cultures in pawns.images do for &icons in cultures do for &image in icons {
+		drawing := image_rects[next]
+		fill := image_rects[next + 1]
+		next += 2
+		if drawing.x_max <= drawing.x_min || fill.x_max <= fill.x_min do continue
+		image = {drawing, fill}
+	}
 }
 
 // Empties the scene. Keeps the rest

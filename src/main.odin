@@ -8,7 +8,6 @@ import "core:mem"
 import sdl "vendor:sdl3"
 
 GLOBAL: struct {
-	assets:      Assets,
 	game:        Game,
 	render_data: Render_Data,
 	pawns:       Map_Pawns,
@@ -39,6 +38,8 @@ CAMERA_PAN_EASE :: 6
 
 CLICK_MOVE_SNAP :: 9
 
+STEPS_PER_FRAME_MAX :: 4
+
 FPS_PERIOD :: 0.5
 
 FONT_TWEAK :: Text_Font_Id(1)
@@ -46,18 +47,23 @@ FONT_MAP :: Text_Font_Id(2)
 FONT_CARD_TITLE :: Text_Font_Id(3)
 
 // Images of the terrain's mark drawings: terrain/<name>_<variant>
+Mark_Drawing_Files :: struct {
+	name:     string,
+	variants: int,
+}
+
 @(rodata)
-MARK_DRAWING_NAMES := [Render_Mark_Drawing]string {
-	.Mountain  = "mountain",
-	.Hill      = "hill",
-	.Conifer   = "conifer",
-	.Broadleaf = "broadleaf",
-	.Cypress   = "cypress",
-	.Palm      = "palm",
-	.Tuft      = "tuft",
-	.Marsh     = "marsh",
-	.Dune      = "dune",
-	.Sea       = "sea",
+MARK_DRAWING_FILES := [Render_Mark_Drawing]Mark_Drawing_Files {
+	.Mountain  = {"mountain", 4},
+	.Hill      = {"hill", 4},
+	.Conifer   = {"conifer", 4},
+	.Broadleaf = {"broadleaf", 4},
+	.Cypress   = {"cypress", 4},
+	.Palm      = {"palm", 4},
+	.Tuft      = {"tuft", 4},
+	.Marsh     = {"marsh", 4},
+	.Dune      = {"dune", 4},
+	.Sea       = {"sea", 2},
 }
 
 main :: proc() {
@@ -78,6 +84,7 @@ main :: proc() {
 
 	// Load images and fonts into the atlases' writes. Pixels live in temporary memory until uploaded
 	renderer: Renderer
+	marks: Render_Mark_Images
 	{
 		// Fonts, by Text_Font_Id: 0 is the default
 		fonts := [?]Text_Source {
@@ -89,13 +96,37 @@ main :: proc() {
 
 		init := new(Render_Init, context.temp_allocator)
 		render_init_reset(init)
-		assets_load(&GLOBAL.assets, init)
+
+		image_paths: [dynamic; ASSETS_IMAGES_MAX]string
+		for files in MARK_DRAWING_FILES {
+			for variant in 0 ..< files.variants {
+				append(&image_paths, fmt.tprintf("terrain/%s_%d", files.name, variant))
+			}
+		}
+		pawn_images_first := len(image_paths)
+		map_pawns_image_paths(&image_paths)
+
+		image_rects := make([]Extents, len(image_paths), context.temp_allocator)
+		assets_load(image_paths[:], init, image_rects)
+
+		next_rect := 0
+		for files, drawing in MARK_DRAWING_FILES {
+			for variant in 0 ..< files.variants {
+				marks[drawing][variant] = image_rects[next_rect]
+				next_rect += 1
+			}
+		}
+		map_pawns_build(&GLOBAL.pawns, image_rects[pawn_images_first:], FONT_MAP)
+
 		text_load(fonts[:], sdl.GetWindowPixelDensity(window), init)
 		renderer = renderer_init(window, init)
 	}
 	defer renderer_deinit(renderer)
 
-	map_pawns_build(&GLOBAL.pawns, &GLOBAL.assets, FONT_MAP)
+	map_style := RENDER_TERRAIN_STYLE_DEFAULT
+	pawn_style := MAP_PAWN_STYLE_DEFAULT
+	pawn_style.paper = map_style.paper
+	pawn_style.ink = map_style.ink
 
 	// UI: font 0 is its base font. Typed characters arrive as text input events
 	ui_init(0)
@@ -109,16 +140,7 @@ main :: proc() {
 			return
 		}
 
-		// The mark drawings, from the assets
-		marks: Render_Mark_Images
-		for &variants, drawing in marks {
-			for &rect, variant in variants {
-				name := fmt.tprintf("terrain/%s_%d", MARK_DRAWING_NAMES[drawing], variant)
-				index, found := assets_image_find(&GLOBAL.assets, name)
-				if found do rect = GLOBAL.assets.image_rects[index]
-			}
-		}
-		renderer_terrain_build(&renderer, geography, RENDER_TERRAIN_STYLE_DEFAULT, marks)
+		renderer_terrain_build(&renderer, geography, map_style, marks)
 	}
 
 	// Whole world in view
@@ -135,6 +157,7 @@ main :: proc() {
 	focus: Piece_Id
 	map_mode: Map_Mode
 	game_input: Game_Input
+	unstepped: f32
 
 	fps_frames: int
 	fps_time: f32
@@ -275,7 +298,10 @@ main :: proc() {
 			game_input.order = order
 		}
 
-		game_tick(&GLOBAL.game, focus, &game_input, dt)
+		unstepped = min(unstepped + dt, STEPS_PER_FRAME_MAX * STEP_SECONDS)
+		steps := int(unstepped / STEP_SECONDS)
+		unstepped -= f32(steps) * STEP_SECONDS
+		game_tick(&GLOBAL.game, focus, &game_input, steps)
 
 		render_data_clear(&GLOBAL.render_data)
 		text_reset()
@@ -295,7 +321,7 @@ main :: proc() {
 			&GLOBAL.pawns,
 			view,
 			window_size,
-			MAP_PAWN_STYLE_DEFAULT,
+			pawn_style,
 			dt,
 			&GLOBAL.render_data.quads[.World],
 			&GLOBAL.render_data.quads[.Screen],
@@ -306,7 +332,7 @@ main :: proc() {
 
 		// UI, over everything
 		ui_begin(window_size)
-		cards_ui(cards, FONT_MAP, FONT_CARD_TITLE, &map_mode, &game_input)
+		cards_ui(cards, FONT_MAP, FONT_CARD_TITLE, map_style.paper, map_style.ink, &map_mode, &game_input)
 		tweak_ui(tweaks_toggled, FONT_TWEAK)
 		ui_end(input, dt, &GLOBAL.render_data.quads[.Screen])
 
