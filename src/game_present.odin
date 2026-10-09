@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import "core:strings"
 
 CARD_LINES_MAX :: REPORT_LINES_MAX
 CARD_PARTS_MAX :: REPORT_PARTS_MAX
@@ -306,6 +307,13 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 		if is_army {
 			append(&card.fields, Card_Field{label = "Baggage", value = fmt.tprintf("%.0f turns", army.baggage)})
 		}
+		statuses := make([dynamic]string, context.temp_allocator)
+		if is_army && army.spent do append(&statuses, "Spent")
+		if piece.inside != {} do append(&statuses, "Garrisoning")
+		if piece.contains != {} do append(&statuses, "Garrisoned")
+		status := "None"
+		if len(statuses) > 0 do status = strings.join(statuses[:], ", ", context.temp_allocator)
+		append(&card.fields, Card_Field{label = "Status", value = status})
 		if piece.domain != nil {
 			left := compact_number(f64(game_movement_left(piece^)))
 			per_turn := compact_number(f64(piece.movement_per_turn))
@@ -319,7 +327,6 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 			append(&card.stats, Card_Field{label = "Men", value = men})
 			append(&card.stats, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
 			append(&card.stats, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
-			append(&card.stats, Card_Field{label = "Spent", value = army.spent ? "Yes" : "No"})
 			append(&card.stats, Card_Field{label = "Supply", value = fmt.tprintf("%.0f%%", supply)})
 			append(&card.stats, Card_Field{label = "Stock", value = stock})
 			append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.resupply_source)})

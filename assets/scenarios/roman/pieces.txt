@@ -3,7 +3,7 @@
 # kind: name, icon, moves (domain; omit = static), per_turn (movement points), contact (radius), contact_on (domains),
 #       body (radius), hindrance (enemy movement cost multiplier inside its contact zone, default 1; roads don't
 #       count there), supply (supply source value 0..100, default 0 = not a source), traits (Captures can conquer
-#       Capturable)
+#       Capturable; Can_Enter can enter an empty Can_Contain of its faction)
 # faction: name, culture, color [r, g, b] 0..255. Factions play in file order. Then one piece row per piece:
 #   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
 #   region), general (creates a character), men + proficiency 0..100 (optional; makes it an army, starting at
@@ -11,11 +11,11 @@
 #   (turns of supply carried at most, default 4; starts full), mobility (1..4, default 2), temperament (the general's:
 #   Bold, Steady, Cautious or Cunning; default Steady)
 
-kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    hindrance = 2    supply = 50  traits = [Capturable] }
-kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  hindrance = 2.5  supply = 65  traits = [Capturable] }
-kind = { name = city        icon = City                                  contact = 8  contact_on = [Land]  body = 3    hindrance = 3    supply = 80  traits = [Capturable] }
-kind = { name = large_city  icon = Large_City                            contact = 9  contact_on = [Land]  body = 3.5  hindrance = 3.5  supply = 90  traits = [Capturable] }
-kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 8  contact_on = [Land]  body = 2    hindrance = 3                traits = [Captures] }
+kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    hindrance = 2    supply = 50  traits = [Capturable, Can_Contain] }
+kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  hindrance = 2.5  supply = 65  traits = [Capturable, Can_Contain] }
+kind = { name = city        icon = City                                  contact = 8  contact_on = [Land]  body = 3    hindrance = 3    supply = 80  traits = [Capturable, Can_Contain] }
+kind = { name = large_city  icon = Large_City                            contact = 9  contact_on = [Land]  body = 3.5  hindrance = 3.5  supply = 90  traits = [Capturable, Can_Contain] }
+kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 8  contact_on = [Land]  body = 2    hindrance = 3                traits = [Captures, Can_Enter] }
 kind = { name = fleet       icon = Fleet       moves = Sea   per_turn = 80  contact = 8  contact_on = [Sea]   body = 2    hindrance = 2 }
 
 faction = {

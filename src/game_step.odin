@@ -114,6 +114,7 @@ Interaction :: struct {
 Movement :: struct {
 	walker:         Piece_Id,
 	target:         Piece_Id,
+	into:           Piece_Id,
 	path:           Polylines(WALK_POINTS_MAX, 1),
 	path_costs:     [dynamic; WALK_POINTS_MAX]f32,
 	next:           int,
@@ -184,6 +185,16 @@ Event_Arrived :: struct {
 	pos:   [2]f32,
 }
 
+Event_Enter :: struct {
+	piece:      Piece_Id,
+	settlement: Piece_Id,
+}
+
+Event_Exit :: struct {
+	piece:      Piece_Id,
+	settlement: Piece_Id,
+}
+
 Event_Contact :: struct {
 	initiator: Piece_Id,
 	other:     Piece_Id,
@@ -243,6 +254,8 @@ Game_Event :: union {
 	Event_March,
 	Event_Moved,
 	Event_Arrived,
+	Event_Enter,
+	Event_Exit,
 	Event_Contact,
 	Event_Interaction,
 	Event_Conquered,
@@ -258,6 +271,7 @@ Game_Event :: union {
 Walk_Order :: struct {
 	piece:          Piece_Id,
 	target:         Piece_Id,
+	into:           Piece_Id,
 	destination:    [2]f32,
 	snap:           int,
 	budget:         f32,
@@ -387,7 +401,10 @@ game_step :: proc(
 				actor := slot_map_get(&game.pieces, open.actor)
 				conquered := slot_map_get(&game.pieces, open.target)
 				if actor != nil && conquered != nil {
-					append(events, Event_Conquered{open.target, open.actor, conquered.owner, actor.owner})
+					append(
+						events,
+						Event_Conquered{open.target, open.actor, conquered.owner, actor.owner},
+					)
 					conquered.owner = actor.owner
 				}
 				append(events, Event_Interaction{open.actor, open.target, open.stage, true})
@@ -415,9 +432,19 @@ game_step :: proc(
 				closed = false
 			case .Outcome:
 				for side, i in result.sides {
-					if side.dissolved && slot_map_remove(&game.pieces, ids[i]) {
-						append(events, Event_Removed{ids[i]})
+					removed := slot_map_get(&game.pieces, ids[i])
+					if !side.dissolved || removed == nil do continue
+					settlement := slot_map_get(&game.pieces, removed.inside)
+					occupant := slot_map_get(&game.pieces, removed.contains)
+					if settlement != nil {
+						settlement.contains = {}
+						append(events, Event_Exit{ids[i], removed.inside})
 					}
+					if occupant != nil {
+						occupant.inside = {}
+						append(events, Event_Exit{removed.contains, ids[i]})
+					}
+					if slot_map_remove(&game.pieces, ids[i]) do append(events, Event_Removed{ids[i]})
 				}
 				beaten := slot_map_get(&game.pieces, loser)
 				victor := slot_map_get(&game.pieces, winner)
@@ -440,7 +467,13 @@ game_step :: proc(
 				}
 				if result.caught {
 					side := result.sides[fallen]
-					losses[fallen] = {loser, .Chase, side.pursuit_men.total, side.pursuit_readiness, 0}
+					losses[fallen] = {
+						loser,
+						.Chase,
+						side.pursuit_men.total,
+						side.pursuit_readiness,
+						0,
+					}
 				}
 				open.stage = .Fall_Back
 				closed = false
@@ -467,11 +500,13 @@ game_step :: proc(
 		}
 
 		if initiator.army == nil || other.army == nil {
+			// TODO: proper solution to conquering of garrisoned settlement
+			empty := other.contains == {}
 			game.interaction = {
 				actor       = contact.initiator,
 				target      = contact.other,
 				stage       = .Meet_Town,
-				conquerable = .Captures in initiator.flags && .Capturable in other.flags,
+				conquerable = .Captures in initiator.flags && .Capturable in other.flags && empty,
 			}
 			event.outcome = .Met
 			append(events, event)
@@ -498,6 +533,7 @@ game_step :: proc(
 				proficiency = army.proficiency,
 				readiness   = army.readiness,
 				spent       = army.spent,
+				garrisoning = piece.inside != {},
 				stock       = army.stock,
 				baggage     = army.baggage,
 				mobility    = army.mobility,
@@ -543,6 +579,14 @@ game_step :: proc(
 				destination = player_order.destination,
 				snap        = player_order.snap,
 			}
+			target := slot_map_get(&game.pieces, player_order.target)
+			enters :=
+				target != nil &&
+				.Can_Enter in piece.flags &&
+				.Can_Contain in target.flags &&
+				target.contains == {} &&
+				pieces_friendly(piece, target)
+			if enters do order.target, order.into = {}, player_order.target
 		}
 	}
 
@@ -558,7 +602,8 @@ game_step :: proc(
 			movement.flooded = {}
 			movement.flood_key = 0
 		} else {
-			budget := order.piece != {} && order.budget > 0 ? order.budget : game_movement_left(subject^)
+			budget :=
+				order.piece != {} && order.budget > 0 ? order.budget : game_movement_left(subject^)
 			half: f32 = PATHFIND_FLOOD_SIZE / 2 + 1
 			lo := subject.pos - half
 			hi := subject.pos + half
@@ -606,7 +651,10 @@ game_step :: proc(
 	} else if order.piece != {} {
 		stop: [2]int
 		stoppable := false
-		if target := slot_map_get(&game.pieces, order.target); target != nil {
+		settlement := slot_map_get(&game.pieces, order.into)
+		if settlement != nil {
+			stop, stoppable = cell_of(settlement.pos), true
+		} else if target := slot_map_get(&game.pieces, order.target); target != nil {
 			if movement.flood.domain in target.contact_domains {
 				target_zone := Disc{target.pos, target.contact_radius}
 				stop, stoppable = pathfind_flood_stop_within(&movement.flood, target_zone)
@@ -617,9 +665,12 @@ game_step :: proc(
 
 		cells: [dynamic; PATHFIND_PATH_MAX][2]f32
 		cell_costs: [dynamic; PATHFIND_PATH_MAX]f32
-		traced := stoppable && pathfind_flood_trace(&movement.flood, cell_center(stop), &cells, &cell_costs)
+		traced :=
+			stoppable &&
+			pathfind_flood_trace(&movement.flood, cell_center(stop), &cells, &cell_costs)
 		if traced {
 			walker := slot_map_get(&game.pieces, order.piece)
+			if settlement != nil && len(cells) > 0 do cells[len(cells) - 1] = settlement.pos
 			raw := new(Polylines(PATHFIND_PATH_MAX + 1, 1), context.temp_allocator)
 			raw_points := polylines_reserve(len(cells) + 1, false, raw)
 			raw_points[0] = walker.pos
@@ -639,6 +690,7 @@ game_step :: proc(
 
 			movement.walker = order.piece
 			movement.target = order.target
+			movement.into = order.into
 			movement.next = 1
 			movement.clear_of = order.clear_of
 			movement.chaser = order.chaser
@@ -666,7 +718,8 @@ game_step :: proc(
 		last := len(path) - 1
 
 		clear_of := slot_map_get(&game.pieces, movement.clear_of)
-		got_clear := clear_of != nil && !disc_contains({clear_of.pos, clear_of.contact_radius}, walker.pos)
+		got_clear :=
+			clear_of != nil && !disc_contains({clear_of.pos, clear_of.contact_radius}, walker.pos)
 		if !got_clear {
 			moved, reached, road, off_road := walk_along(
 				walker.pos,
@@ -685,7 +738,8 @@ game_step :: proc(
 		chasing := false
 		if chaser := slot_map_get(&game.pieces, movement.chaser); chaser != nil {
 			until := movement.chaser_follows ? last : 0
-			touching := linalg.distance(chaser.pos, walker.pos) <= chaser.body_radius + walker.body_radius
+			touching :=
+				linalg.distance(chaser.pos, walker.pos) <= chaser.body_radius + walker.body_radius
 			chasing = !touching && movement.chaser_next <= until && movement.chaser_budget > 0
 			if chasing {
 				moved, reached, road, off_road := walk_along(
@@ -708,10 +762,20 @@ game_step :: proc(
 			piece := slot_map_get(&game.pieces, walk.piece)
 			if piece == nil do continue
 			due := walk.marched_road + walk.marched_off_road
+			if piece.inside != {} {
+				if settlement := slot_map_get(&game.pieces, piece.inside); settlement != nil {
+					settlement.contains = {}
+				}
+				append(events, Event_Exit{walk.piece, piece.inside})
+				piece.inside = {}
+			}
 			spent := min(due, game_movement_left(piece^))
 			piece.this_turn.movement_spent += spent
 			walk.overdrawn = due - spent
-			append(events, Event_Moved{walk.piece, piece.pos, game_movement_left(piece^), walk.overdrawn})
+			append(
+				events,
+				Event_Moved{walk.piece, piece.pos, game_movement_left(piece^), walk.overdrawn},
+			)
 		}
 
 		walk_done = (movement.next > last || got_clear) && !chasing
@@ -719,10 +783,18 @@ game_step :: proc(
 		if walk_done && movement.target != {} {
 			append(&game.contacts, Contact{movement.walker, movement.target, true})
 		}
+		settlement := slot_map_get(&game.pieces, movement.into)
+		if walk_done && settlement != nil && settlement.contains == {} {
+			walker.pos = settlement.pos
+			walker.inside = movement.into
+			settlement.contains = movement.walker
+			append(events, Event_Enter{movement.walker, movement.into})
+		}
 	}
 	if walk_done {
 		movement.walker = {}
 		movement.target = {}
+		movement.into = {}
 		movement.next = 0
 		movement.clear_of = {}
 		movement.chaser = {}
@@ -775,7 +847,11 @@ game_step :: proc(
 				yield: f32
 				if game.terrain.surface[at] == 0 {
 					cover := game.terrain.cover[at]
-					yield = math.lerp(FORAGE_YIELD[.Open], FORAGE_YIELD[cover.kind], f32(cover.strength) / 255)
+					yield = math.lerp(
+						FORAGE_YIELD[.Open],
+						FORAGE_YIELD[cover.kind],
+						f32(cover.strength) / 255,
+					)
 				}
 				forage_efficiency = men / all_men
 				forage = army.foraging * yield * MEN_PER_SUPPLY / men * forage_efficiency
@@ -851,3 +927,4 @@ game_step :: proc(
 		game_supply_build(game)
 	}
 }
+

@@ -96,6 +96,8 @@ Name :: struct {
 Piece_Flag :: enum {
 	Captures,
 	Capturable,
+	Can_Enter,
+	Can_Contain,
 }
 
 Piece_Data :: struct {
@@ -114,6 +116,8 @@ Piece_Data :: struct {
 	body_radius:       f32,
 	hindrance:         f32,
 	supply:            f32,
+	inside:            Piece_Id,
+	contains:          Piece_Id,
 	army:              Maybe(Army),
 }
 

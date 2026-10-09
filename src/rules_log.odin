@@ -15,6 +15,8 @@ Rules_Tag :: enum u32 {
 	March,
 	Moved,
 	Arrived,
+	Enter,
+	Exit,
 	Contact,
 	Interaction,
 	Conquered,
@@ -123,6 +125,10 @@ rules_log_events :: proc(game: ^Game, events: []Game_Event) {
 			push_event(.Moved, game.step, e)
 		case Event_Arrived:
 			push_event(.Arrived, game.step, e)
+		case Event_Enter:
+			push_event(.Enter, game.step, e)
+		case Event_Exit:
+			push_event(.Exit, game.step, e)
 		case Event_Contact:
 			push_event(.Contact, game.step, e)
 			if e.outcome == .Battle || e.outcome == .Refused {
@@ -287,6 +293,8 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		json_field_float(w, "hindrance", piece.hindrance)
 		json_field_float(w, "supply", piece.supply)
 		field_set(w, "traits", piece.flags)
+		field_piece(w, "inside", piece.inside)
+		field_piece(w, "contains", piece.contains)
 		json_key(w, "general")
 		if piece.general != 0 {
 			json_object_begin(w)
@@ -385,6 +393,18 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		write_header(w, record.step, "arrived")
 		field_piece(w, "piece", record.event.piece)
 		json_field_vec2(w, "pos", record.event.pos)
+
+	case .Enter:
+		record := (^Event_Record(Event_Enter))(raw_data(payload))
+		write_header(w, record.step, "enter")
+		field_piece(w, "piece", record.event.piece)
+		field_piece(w, "settlement", record.event.settlement)
+
+	case .Exit:
+		record := (^Event_Record(Event_Exit))(raw_data(payload))
+		write_header(w, record.step, "exit")
+		field_piece(w, "piece", record.event.piece)
+		field_piece(w, "settlement", record.event.settlement)
 
 	case .Contact:
 		record := (^Event_Record(Event_Contact))(raw_data(payload))

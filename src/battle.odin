@@ -68,6 +68,7 @@ Fact :: enum u8 {
 	Temperament_Cautious,
 	Temperament_Cunning,
 	Spent,
+	Garrisoning,
 	Strength_Superior,
 	Strength_Ahead,
 	Strength_Even,
@@ -93,6 +94,7 @@ FACT_TITLES := [Fact]string {
 	.Temperament_Cautious = "Cautious",
 	.Temperament_Cunning  = "Cunning",
 	.Spent                = "Spent",
+	.Garrisoning          = "Garrisoning",
 	.Strength_Superior    = "Superior",
 	.Strength_Ahead       = "Ahead",
 	.Strength_Even        = "Even",
@@ -463,6 +465,7 @@ Battle_Side :: struct {
 	proficiency: f32,
 	readiness:   f32,
 	spent:       bool,
+	garrisoning: bool,
 	stock:       f32,
 	baggage:     f32,
 	mobility:    f32,
@@ -849,6 +852,7 @@ facts :: proc(side, other: Battle_Side) -> bit_set[Fact] {
 	gap := power(side, other).total - power(other, side).total
 	held := bit_set[Fact]{TEMPERAMENT_FACTS[side.temperament], ladder(gap, STRENGTH_LADDER[:])}
 	if side.spent do held += {.Spent}
+	if side.garrisoning do held += {.Garrisoning}
 	return held
 }
 
