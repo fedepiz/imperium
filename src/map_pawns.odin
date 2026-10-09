@@ -19,6 +19,7 @@ Map_Pawn :: struct {
 	highlighted: bool,
 	// Tint swings to Map_Pawn_Style.pulse and back
 	pulsing:     bool,
+	label:       string,
 }
 
 // Colours: straight RGB, 0..1
@@ -28,12 +29,14 @@ Map_Pawn_Style :: struct {
 	// Tints: when highlighted, and at the peak of a pulse
 	highlight: [3]f32,
 	pulse:     [3]f32,
+	ink:       [3]f32,
 }
 
 MAP_PAWN_STYLE_DEFAULT :: Map_Pawn_Style {
 	paper     = {0.840, 0.772, 0.620},
 	highlight = {0.900, 0.350, 0.300},
 	pulse     = {1.000, 0.700, 0.350},
+	ink       = {0.150, 0.105, 0.070},
 }
 
 Map_Icon :: enum {
@@ -42,6 +45,7 @@ Map_Icon :: enum {
 	City,
 	Large_City,
 	Army,
+	Fleet,
 }
 
 Map_Culture :: enum {
@@ -54,6 +58,7 @@ Map_Pawns :: struct {
 	// This frame's pawns. Past the capacity, pawns are dropped
 	scene:       [dynamic; MAP_PAWNS_MAX]Map_Pawn,
 	images:      [Pawn_Set][Map_Culture][Map_Icon]Pawn_Image,
+	label_font:  Text_Font_Id,
 	// 0: pictures. 1: medallions
 	medallion_t: f32,
 	// Seconds. Phase of the pulse, shared by all pawns
@@ -92,6 +97,7 @@ ICON_NAMES := [Map_Icon]string {
 	.City       = "town_2",
 	.Large_City = "town_3",
 	.Army       = "army",
+	.Fleet      = "fleet",
 }
 
 // Size on the map: image pixels * CELLS_PER_PIXEL[set] * ICON_SIZES[icon].
@@ -108,6 +114,7 @@ ICON_SIZES := [Map_Icon]f32 {
 	.City       = 2.1,
 	.Large_City = 2.55,
 	.Army       = 1.1,
+	.Fleet      = 1.0,
 }
 
 // Zoom, in logical pixels per cell, under which pawns are medallions. Cross-fade: seconds
@@ -124,9 +131,15 @@ PULSE_PERIOD :: 1.2
 @(private = "file")
 VIEW_TOLERANCE :: 0.1
 
+@(private = "file")
+LABEL_HALO :: 1.5
+@(private = "file", rodata)
+LABEL_HALO_SHIFTS := [8][2]f32{{-1, -1}, {0, -1}, {1, -1}, {-1, 0}, {1, 0}, {-1, 1}, {0, 1}, {1, 1}}
+
 // Out: pawns.
 // Finds the pawn images
-map_pawns_build :: proc(pawns: ^Map_Pawns, assets: ^Assets) {
+map_pawns_build :: proc(pawns: ^Map_Pawns, assets: ^Assets, label_font: Text_Font_Id) {
+	pawns.label_font = label_font
 	for &cultures, set in pawns.images {
 		for &icons, culture in cultures {
 			for &image, icon in icons {
@@ -154,6 +167,37 @@ map_pawns_clear :: proc(pawns: ^Map_Pawns) {
 	clear(&pawns.scene)
 }
 
+@(private = "file")
+sprite_half_size :: proc(image: Pawn_Image, set: Pawn_Set, icon: Map_Icon) -> [2]f32 {
+	pixels := [2]f32 {
+		image.drawing.x_max - image.drawing.x_min,
+		image.drawing.y_max - image.drawing.y_min,
+	}
+	return pixels * CELLS_PER_PIXEL[set] * ICON_SIZES[icon] / 2
+}
+
+map_pawns_pick :: proc(
+	pawns: ^Map_Pawns,
+	view: Render_View,
+	window: [2]f32,
+	point: [2]f32,
+	skipped: int,
+) -> (
+	index: int,
+	found: bool,
+) {
+	set: Pawn_Set = pawns.medallion_t < 0.5 ? .Picture : .Medallion
+	world := view.center + (point - window / 2) / view.zoom
+	for pawn, i in pawns.scene {
+		if i == skipped do continue
+		half := sprite_half_size(pawns.images[set][pawn.culture][pawn.icon], set, pawn.icon)
+		if abs(world.x - pawn.pos.x) > half.x || abs(world.y - pawn.pos.y) > half.y do continue
+		index = i
+		found = true
+	}
+	return
+}
+
 // Out: data, appended to. In/out: pawns.
 // The scene's pawns as world-space quads
 map_pawns_quads :: proc(
@@ -165,6 +209,7 @@ map_pawns_quads :: proc(
 	// Seconds since the last frame
 	dt: f32,
 	quads_out: ^[dynamic; RENDER_QUADS_MAX]Render_Quad,
+	labels_out: ^[dynamic; RENDER_QUADS_MAX]Render_Quad,
 ) {
 	// Straight RGB and alpha, 0..1, to a quad colour
 	color_of :: proc(rgb: [3]f32, alpha: f32) -> [4]u8 {
@@ -223,11 +268,7 @@ map_pawns_quads :: proc(
 			for weight, set in weights {
 				image := pawns.images[set][pawn.culture][pawn.icon]
 				if weight <= 0 || image.drawing.x_max <= image.drawing.x_min do continue
-				pixels := [2]f32 {
-					image.drawing.x_max - image.drawing.x_min,
-					image.drawing.y_max - image.drawing.y_min,
-				}
-				half := pixels * CELLS_PER_PIXEL[set] * ICON_SIZES[pawn.icon] / 2
+				half := sprite_half_size(image, set, pawn.icon)
 				lo := pawn.pos - half
 				hi := pawn.pos + half
 				if hi.x < visible.x_min - margin.x || lo.x > visible.x_max + margin.x do continue
@@ -256,5 +297,38 @@ map_pawns_quads :: proc(
 			Render_Quad{rect = rect, source = sprite.image.drawing, colors = {ink, ink, ink, ink}},
 		)
 	}
-}
 
+	label_anchors := make([][2]f32, len(pawns.scene), context.temp_allocator)
+	label_weights := make([]f32, len(pawns.scene), context.temp_allocator)
+	for sprite in sprites {
+		bottom_middle := [2]f32{(sprite.lo.x + sprite.hi.x) / 2, sprite.hi.y}
+		on_screen := (bottom_middle - view.center) * view.zoom + window / 2
+		label_anchors[sprite.pawn] += on_screen * sprite.weight
+		label_weights[sprite.pawn] += sprite.weight
+	}
+
+	Label :: struct {
+		ink:     Text_Id,
+		halo:    Text_Id,
+		top_left: [2]f32,
+	}
+	labels := make([dynamic]Label, 0, len(pawns.scene), context.temp_allocator)
+	for pawn, index in pawns.scene {
+		if pawn.label == "" || label_weights[index] <= 0 do continue
+		ink_color := [4]f32{style.ink.r, style.ink.g, style.ink.b, 1}
+		halo_color := [4]f32{style.paper.r, style.paper.g, style.paper.b, 1}
+		ink := text_make({{text = pawn.label, font = pawns.label_font, color = ink_color}})
+		halo := text_make({{text = pawn.label, font = pawns.label_font, color = halo_color}})
+		anchor := label_anchors[index] / label_weights[index]
+		append(&labels, Label{ink, halo, anchor - {text_size(ink).x / 2, 0}})
+	}
+
+	for label in labels {
+		for shift in LABEL_HALO_SHIFTS {
+			text_quads(label.halo, label.top_left + shift * LABEL_HALO, math.INF_F32, true, {}, labels_out)
+		}
+	}
+	for label in labels {
+		text_quads(label.ink, label.top_left, math.INF_F32, true, {}, labels_out)
+	}
+}

@@ -1,0 +1,56 @@
+# Starting factions and pieces. Distances in cells; enum values written as declared (Large_City, Land).
+#
+# kind: name, icon, moves (domain; omit = static), per_turn (movement points), contact (radius), contact_on (domains),
+#       body (radius), hindrance (enemy movement cost multiplier inside its contact zone, default 1; roads don't
+#       count there), supply (supply source value 0..100, default 0 = not a source), traits (Captures can conquer
+#       Capturable)
+# faction: name, culture, color [r, g, b] 0..255. Factions play in file order. Then one piece row per piece:
+#   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
+#   region), general (creates a character), men + proficiency 0..100 (optional; makes it an army, starting at
+#   full strength and 100% readiness), foraging 0..100 (army skill at living off the land, default 40), baggage
+#   (turns of supply carried at most, default 4; starts full), mobility (1..4, default 2), temperament (the general's:
+#   Bold, Steady, Cautious or Cunning; default Steady)
+
+kind = { name = village     icon = Village                               contact = 6  contact_on = [Land]  body = 2    hindrance = 2    supply = 50  traits = [Capturable] }
+kind = { name = town        icon = Town                                  contact = 7  contact_on = [Land]  body = 2.5  hindrance = 2.5  supply = 65  traits = [Capturable] }
+kind = { name = city        icon = City                                  contact = 8  contact_on = [Land]  body = 3    hindrance = 3    supply = 80  traits = [Capturable] }
+kind = { name = large_city  icon = Large_City                            contact = 9  contact_on = [Land]  body = 3.5  hindrance = 3.5  supply = 90  traits = [Capturable] }
+kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 8  contact_on = [Land]  body = 2    hindrance = 3                traits = [Captures] }
+kind = { name = fleet       icon = Fleet       moves = Sea   per_turn = 80  contact = 8  contact_on = [Sea]   body = 2    hindrance = 2 }
+
+faction = {
+	name = "Rome"
+	culture = Roman
+	color = [190, 80, 70]
+	piece = { kind = large_city  name = "Roma"        at = [342, 432]  capital_of = roma }
+	piece = { kind = large_city  name = "Mediolanum"  at = [296, 374]  capital_of = mediolanum }
+	piece = { kind = city        name = "Ravenna"     at = [351, 400]  capital_of = ravenna }
+	piece = { kind = city        name = "Tarentum"    at = [412, 462]  capital_of = tarentum }
+	piece = { kind = town        name = "Aquileia"    at = [367, 369]  capital_of = aquileia }
+	piece = { kind = town        name = "Neapolis"    at = [367, 449]  capital_of = neapolis }
+	piece = { kind = town        name = "Florentia"   at = [330, 401]  capital_of = florentia }
+	piece = { kind = town        name = "Genua"       at = [296, 391]  capital_of = genua }
+	piece = { kind = town        name = "Verona"      at = [327, 374]  capital_of = verona }
+	piece = { kind = town        name = "Segusio"     at = [260, 379]  capital_of = segusio }
+	piece = { kind = town        name = "Rhegium"     at = [393, 506]  capital_of = rhegium }
+	piece = { kind = town        name = "Syracusae"   at = [385, 527]  capital_of = syracusae }
+	piece = { kind = town        name = "Siscia"      at = [419, 374]  capital_of = siscia }
+	piece = { kind = town        name = "Domavia"     at = [470, 396]  capital_of = domavia }
+	piece = { kind = city        name = "Salona"      at = [421, 405]  capital_of = salona }
+	piece = { kind = army        name = "Legio I"     at = [334, 419]  general = "Flavius Aetius"  men = 20000  proficiency = 70  temperament = Cunning }
+	piece = { kind = army        name = "Legio II"    at = [338, 410]  general = "Bonifacius"      men = 15000  proficiency = 50 }
+	piece = { kind = fleet   at = [353, 455] }
+	piece = { kind = fleet   at = [355, 393] }
+}
+
+faction = {
+	name = "Alamanni"
+	culture = Germanic
+	color = [80, 120, 170]
+	piece = { kind = large_city  name = "Augusta Vindelicorum"  at = [325, 327]  capital_of = augusta_vindelicorum }
+	piece = { kind = city        name = "Vesontio"              at = [242, 345]  capital_of = vesontio }
+	piece = { kind = city        name = "Virunum"               at = [385, 354]  capital_of = virunum }
+	piece = { kind = town        name = "Octodurum"             at = [253, 367]  capital_of = octodurum }
+	piece = { kind = town        name = "Iuvavum"               at = [362, 336]  capital_of = iuvavum }
+	piece = { kind = army        name = "Cuneus Gibuldi"        at = [316, 342]  general = "Gibuld"  men = 12000  proficiency = 55  foraging = 60  temperament = Bold  mobility = 3 }
+}

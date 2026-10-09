@@ -133,7 +133,7 @@ Render_Highlight :: struct {
 	kind:          Render_Highlight_Kind,
 	// The set is of water cells. Otherwise of land cells
 	on_water:      bool,
-	// Cell corner + {x, y} is highlight_cells[cells_begin + y * size.x + x]. Zero size = not shown
+	// Cell corner + {x, y} is highlight_cells[cells_begin + y * size.x + x]. Zero size and no circles = not shown
 	corner:        [2]int,
 	size:          [2]int,
 	cells_begin:   int,
@@ -1121,7 +1121,7 @@ terrain_frame :: proc(
 			area := u8(slot + 1)
 			highlight := frame.highlights[slot]
 			cells := cells_of(frame, highlight)
-			shown := len(cells) > 0
+			shown := len(cells) > 0 || highlight.circles_len > 0
 			layer := HIGHLIGHT_LAYERS[highlight.kind]
 			look := style.highlight_looks[highlight.kind]
 

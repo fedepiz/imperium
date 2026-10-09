@@ -5,6 +5,8 @@ import img "core:image"
 import _ "core:image/png"
 import "core:math/linalg"
 import "core:os"
+import "core:reflect"
+import "core:strings"
 
 import tbl "tabula"
 
@@ -56,28 +58,97 @@ BASIN_DIST_MAX :: 24
 
 REGIONS_MAX :: 256
 PIECE_MAX :: 1024
+FACTIONS_MAX :: 16
+CHARACTERS_MAX :: 1024
+
+ARMY_FORAGING_DEFAULT :: 40
+ARMY_BAGGAGE_DEFAULT :: 4
+ARMY_MOBILITY_DEFAULT :: 2
 
 Game :: struct {
-	terrain: Terrain,
-	ways:    [Way_Type][WAY_PER_TYPE_MAX]Way,
-	regions: [REGIONS_MAX]Region,
-	pieces:  Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
+	terrain:     Terrain,
+	ways:        [Way_Type][WAY_PER_TYPE_MAX]Way,
+	regions:     [REGIONS_MAX]Region,
+	pieces:      Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
+	factions:    [dynamic; FACTIONS_MAX]Faction,
+	characters:  [dynamic; CHARACTERS_MAX]Character,
+	turn:        int,
+	player:      Faction_Id,
+	ending:      bool,
+	contacts:    [dynamic; CONTACTS_MAX]Contact,
+	interaction: Interaction,
+	engagement:  Engagement,
+	movement:    Movement,
+	supply:      [MAP_CELLS]u8,
+	unstepped:   f32,
 }
 
 Region_Id :: distinct u8
 
 Piece_Id :: distinct Slot_Map_Key
 
+Faction_Id :: distinct u8
+
+Character_Id :: distinct u16
+
 Name :: struct {
 	buffer: [NAME_CAPACITY]u8,
 }
 
-Piece_Flag :: enum {}
+Piece_Flag :: enum {
+	Captures,
+	Capturable,
+}
 
 Piece_Data :: struct {
-	flags: bit_set[Piece_Flag],
-	name:  Name,
-	pos:   [2]f32,
+	flags:             bit_set[Piece_Flag],
+	name:              Name,
+	pos:               [2]f32,
+	icon:              Map_Icon,
+	culture:           Map_Culture,
+	owner:             Faction_Id,
+	general:           Character_Id,
+	domain:            Maybe(Pathfind_Domain),
+	movement_per_turn: f32,
+	movement_spent:    f32,
+	movement_turn:     int,
+	contact_radius:    f32,
+	contact_domains:   bit_set[Pathfind_Domain],
+	body_radius:       f32,
+	hindrance:         f32,
+	supply:            f32,
+	army:              Maybe(Army),
+}
+
+Army :: struct {
+	men:                 int,
+	men_max:             int,
+	proficiency:         f32,
+	readiness:           f32,
+	foraging:            f32,
+	mobility:            f32,
+	temperament:         Temperament,
+	stock:               f32,
+	baggage:             f32,
+	resupply:            f32,
+	resupply_source:     Resupply_Source,
+	resupply_efficiency: f32,
+	attacked_turn:       int,
+}
+
+Resupply_Source :: enum u8 {
+	Network,
+	Foraging,
+}
+
+Faction :: struct {
+	name:    Name,
+	culture: Map_Culture,
+	color:   [3]f32,
+}
+
+Character :: struct {
+	name: Name,
 }
 
 Way_Type :: enum {
@@ -95,10 +166,15 @@ name_from_string :: proc(txt: string) -> (name: Name, ok: bool) #optional_ok {
 	return
 }
 
+name_to_string :: proc(name: ^Name) -> string {
+	return strings.truncate_to_byte(string(name.buffer[:]), 0)
+}
+
 Region :: struct {
-	id:    Name,
-	name:  Name,
-	color: [3]u8,
+	id:      Name,
+	name:    Name,
+	color:   [3]u8,
+	capital: Piece_Id,
 }
 
 game_init :: proc(game: ^Game) {}
@@ -344,6 +420,7 @@ game_load :: proc(
 	for &cell, idx in geo_out.cover {
 		if cell.kind == .Mountains && ways_sdf[.Road][idx] < ROAD_DIST_MAX do cell.kind = .Highland
 	}
+	game.terrain.cover = geo_out.cover
 
 	// Pathfinding: the cost of entering each cell, by land and by sea, then what is derived from them.
 	// Derived unless cached for these grids, and cached when derived
@@ -363,7 +440,7 @@ game_load :: proc(
 				for cell, i in geo_out.cover {
 					cost := MOVE_COSTS[cell.kind]
 					on_road := ways_sdf[.Road][i] < ROAD_CELL_REACH
-					cost = geo_out.water[i] ? 0 : on_road ? ROAD_COST : cost
+					cells[i] = geo_out.water[i] ? 0 : on_road ? ROAD_COST : cost
 				}
 			case .Sea:
 				for w, i in geo_out.water do cells[i] = w ? 1 : 0
@@ -374,7 +451,128 @@ game_load :: proc(
 			if len(derived) > 0 do cache_write(file_path, fingerprint_out, derived)
 		}
 	}
+
+	{
+		path := fmt.tprintf("assets/scenarios/%s/pieces.txt", scenario_name)
+		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
+		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+
+		Kind :: struct {
+			name:  string,
+			piece: Piece_Data,
+		}
+		kinds := make([dynamic]Kind, 0, len(root.children), context.temp_allocator)
+
+		append(&game.factions, Faction{})
+		append(&game.characters, Character{})
+
+		for row in root.children {
+			switch row.key {
+			case "kind":
+				kind := Kind {
+					name = tbl.get_text(row, "name"),
+				}
+				piece := &kind.piece
+				piece.icon = enum_from_text(Map_Icon, tbl.get_text(row, "icon"))
+				if moves, moving := tbl.get_text(row, "moves"); moving {
+					piece.domain = enum_from_text(Pathfind_Domain, moves)
+				}
+				piece.movement_per_turn = tbl.get_num(row, "per_turn")
+				piece.contact_radius = tbl.get_num(row, "contact")
+				contact_on := tbl.get_children(row, "contact_on")
+				for domain in contact_on {
+					piece.contact_domains += {enum_from_text(Pathfind_Domain, domain.text)}
+				}
+				piece.body_radius = tbl.get_num(row, "body")
+				piece.hindrance = tbl.get_num(row, "hindrance", 1)
+				piece.supply = tbl.get_num(row, "supply")
+				traits := tbl.get_children(row, "traits")
+				for flag in traits {
+					piece.flags += {enum_from_text(Piece_Flag, flag.text)}
+				}
+				append(&kinds, kind)
+
+			case "faction":
+				owner := Faction_Id(len(game.factions))
+				culture := enum_from_text(Map_Culture, tbl.get_text(row, "culture"))
+				append(
+					&game.factions,
+					Faction {
+						name = name_from_string(tbl.get_text(row, "name")),
+						culture = culture,
+						color = tbl.get_num_array(row, "color", 3) / 255,
+					},
+				)
+
+				for entry in row.children {
+					if entry.key != "piece" do continue
+
+					kind_name := tbl.get_text(entry, "kind")
+					piece: Piece_Data
+					kind_found := false
+					for kind in kinds {
+						if kind.name != kind_name do continue
+						piece = kind.piece
+						kind_found = true
+					}
+					fmt.assertf(kind_found, "%s: no piece kind %q", path, kind_name)
+
+					piece.name = name_from_string(tbl.get_text(entry, "name"))
+					piece.owner = owner
+					piece.culture = culture
+					if own_culture, has_own := tbl.get_text(entry, "culture"); has_own {
+						piece.culture = enum_from_text(Map_Culture, own_culture)
+					}
+					piece.pos = tbl.get_num_array(entry, "at", 2)
+
+					if general, has_general := tbl.get_text(entry, "general"); has_general {
+						piece.general = Character_Id(len(game.characters))
+						append(&game.characters, Character{name = name_from_string(general)})
+					}
+
+					if men, has_men := tbl.get_num(entry, "men"); has_men {
+						army := Army {
+							men         = int(men),
+							men_max     = int(men),
+							proficiency = tbl.get_num(entry, "proficiency"),
+							readiness   = 100,
+							foraging    = tbl.get_num(entry, "foraging", ARMY_FORAGING_DEFAULT),
+							baggage     = tbl.get_num(entry, "baggage", ARMY_BAGGAGE_DEFAULT),
+							mobility    = tbl.get_num(entry, "mobility", ARMY_MOBILITY_DEFAULT),
+							temperament = .Steady,
+						}
+						if temperament, has_temperament := tbl.get_text(entry, "temperament");
+						   has_temperament {
+							army.temperament = enum_from_text(Temperament, temperament)
+						}
+						army.stock = army.baggage
+						piece.army = army
+					}
+
+					id := slot_map_insert(&game.pieces, piece)
+
+					if capital_of, is_capital := tbl.get_text(entry, "capital_of"); is_capital {
+						for &region in game.regions {
+							if name_to_string(&region.id) == capital_of do region.capital = id
+						}
+					}
+				}
+			}
+		}
+	}
+
+	success &= len(game.factions) > 1
+	game.turn = 1
+	game.player = 1
+	game_supply_build(game)
 	return
+}
+
+@(private = "file")
+enum_from_text :: proc($T: typeid, text: string) -> T {
+	value, ok := reflect.enum_from_name(T, text)
+	fmt.assertf(ok, "%q is not a %v", text, typeid_of(T))
+	return value
 }
 
 Terrain :: struct {
@@ -383,6 +581,7 @@ Terrain :: struct {
 	surface:   [MAP_CELLS]u8,
 	trees:     [MAP_CELLS]u8,
 	regions:   [MAP_CELLS]u8,
+	cover:     [MAP_CELLS]Render_Cover_Cell,
 }
 
 @(private = "file")
@@ -416,4 +615,11 @@ load_map_bitmap_3_channels :: proc(file: string, out: ^[MAP_CELLS][3]u8) -> bool
 	return true
 }
 
-game_tick :: proc(game: ^Game) {}
+game_tick :: proc(game: ^Game, focus: Piece_Id, input: ^Game_Input, dt: f32) {
+	game.unstepped = min(game.unstepped + dt, STEPS_PER_FRAME_MAX * STEP_SECONDS)
+	for game.unstepped >= STEP_SECONDS {
+		game.unstepped -= STEP_SECONDS
+		game_step(game, focus, input^)
+		input^ = {}
+	}
+}

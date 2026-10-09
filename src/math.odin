@@ -87,6 +87,10 @@ disc_contains :: proc(disc: Disc, p: [2]f32) -> bool {
 	return linalg.distance(p, disc.center) < disc.radius
 }
 
+disc_overlaps_box :: proc(disc: Disc, lo, hi: [2]f32) -> bool {
+	return linalg.distance(linalg.clamp(disc.center, lo, hi), disc.center) <= disc.radius
+}
+
 // A half-open range of indices into a table: [begin, begin + len)
 Span :: struct {
 	begin: int,

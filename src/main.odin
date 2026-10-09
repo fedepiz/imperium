@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import "core:math/linalg"
 import "core:mem"
 
 import sdl "vendor:sdl3"
@@ -10,6 +11,8 @@ GLOBAL: struct {
 	assets:      Assets,
 	game:        Game,
 	render_data: Render_Data,
+	pawns:       Map_Pawns,
+	pawn_pieces: [dynamic; MAP_PAWNS_MAX]Piece_Id,
 }
 
 // Asset budgets must fit the renderer's: one write per image
@@ -23,11 +26,24 @@ GLOBAL: struct {
 #assert(
 	WAY_MAX_STEPS_PER_TYPE << uint(RIVER_SMOOTHING.cut_iter) <= RENDER_TERRAIN_COURSE_POINTS_MAX,
 )
+#assert(WALK_POINTS_MAX + 1 <= RENDER_TERRAIN_ARROW_POINTS_MAX)
+#assert(PATHFIND_FLOOD_CELLS <= RENDER_TERRAIN_HIGHLIGHT_CELLS_MAX)
+#assert(PIECE_MAX <= MAP_PAWNS_MAX)
 
 // Camera: zoom per wheel notch, and the zoom range in logical pixels per cell
 CAMERA_ZOOM_STEP :: 1.15
 CAMERA_ZOOM_MIN :: 1
 CAMERA_ZOOM_MAX :: 40
+CAMERA_PAN_SPEED :: 900
+CAMERA_PAN_EASE :: 6
+
+CLICK_MOVE_SNAP :: 9
+
+FPS_PERIOD :: 0.5
+
+FONT_TWEAK :: Text_Font_Id(1)
+FONT_MAP :: Text_Font_Id(2)
+FONT_CARD_TITLE :: Text_Font_Id(3)
 
 // Images of the terrain's mark drawings: terrain/<name>_<variant>
 @(rodata)
@@ -64,7 +80,12 @@ main :: proc() {
 	renderer: Renderer
 	{
 		// Fonts, by Text_Font_Id: 0 is the default
-		fonts := [?]Text_Source{{"aniron", 24}, {"forgotten_uncial", 26}}
+		fonts := [?]Text_Source {
+			{"aniron", 24},
+			{"aniron", 18},
+			{"forgotten_uncial", 22},
+			{"forgotten_uncial", 36},
+		}
 
 		init := new(Render_Init, context.temp_allocator)
 		render_init_reset(init)
@@ -73,6 +94,8 @@ main :: proc() {
 		renderer = renderer_init(window, init)
 	}
 	defer renderer_deinit(renderer)
+
+	map_pawns_build(&GLOBAL.pawns, &GLOBAL.assets, FONT_MAP)
 
 	// UI: font 0 is its base font. Typed characters arrive as text input events
 	ui_init(0)
@@ -107,12 +130,17 @@ main :: proc() {
 	}
 	frame_ticks := sdl.GetTicksNS()
 
-	// DEMO begin: the UI demo's state
-	demo: Demo_Ui
-	// DEMO end
-
 	// A left drag that started on the map, not on the UI, pans the camera
 	map_drag := false
+	camera_velocity: [2]f32
+
+	focus: Piece_Id
+	map_mode: Map_Mode
+	game_input: Game_Input
+
+	fps_frames: int
+	fps_time: f32
+	fps: f32
 
 	running := true
 	for running {
@@ -131,6 +159,9 @@ main :: proc() {
 
 		// Input: the UI's, and the camera's where the UI is not under the mouse
 		input: UI_Input
+		select_click := false
+		order_click := false
+		tweaks_toggled := false
 		event: sdl.Event
 		for sdl.PollEvent(&event) {
 			#partial switch event.type {
@@ -138,7 +169,7 @@ main :: proc() {
 				running = false
 			case .KEY_DOWN:
 				if event.key.scancode == .ESCAPE do input.escape = true
-				if event.key.scancode == .SPACE do demo.visible = !demo.visible
+				if event.key.scancode == .SPACE && !ui_keyboard_captured() do tweaks_toggled = true
 				if len(input.events) < UI_EVENTS_MAX {
 					append(&input.events, UI_Event{kind = .Key, key = event.key.scancode})
 				}
@@ -152,7 +183,9 @@ main :: proc() {
 				if event.button.button == sdl.BUTTON_LEFT {
 					input.press = true
 					map_drag = !ui_hovered_any()
+					select_click = !ui_hovered_any()
 				}
+				if event.button.button == sdl.BUTTON_RIGHT do order_click = !ui_hovered_any()
 			case .MOUSE_BUTTON_UP:
 				if event.button.button == sdl.BUTTON_LEFT do map_drag = false
 			// Camera: the wheel zooms about the cursor, a left drag pans
@@ -186,46 +219,99 @@ main :: proc() {
 		// Escape drops the UI's focus first, and quits when nothing is focused
 		if input.escape && !ui_focused_any() do running = false
 
-		game_tick(&GLOBAL.game)
+		{
+			pan: [2]f32
+			if !ui_keyboard_captured() {
+				keys := sdl.GetKeyboardState(nil)
+				if keys[sdl.Scancode.A] || keys[sdl.Scancode.LEFT] do pan.x -= 1
+				if keys[sdl.Scancode.D] || keys[sdl.Scancode.RIGHT] do pan.x += 1
+				if keys[sdl.Scancode.W] || keys[sdl.Scancode.UP] do pan.y -= 1
+				if keys[sdl.Scancode.S] || keys[sdl.Scancode.DOWN] do pan.y += 1
+			}
+			camera := &GLOBAL.render_data.view
+			target_velocity := pan * CAMERA_PAN_SPEED / camera.zoom
+			camera_velocity += (target_velocity - camera_velocity) * ease_step(CAMERA_PAN_EASE, dt)
+			camera.center += camera_velocity * dt
+			camera.center = linalg.clamp(
+				camera.center,
+				0,
+				[2]f32{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
+			)
+		}
+
+		fps_frames += 1
+		fps_time += dt
+		if fps_time >= FPS_PERIOD {
+			fps = f32(fps_frames) / fps_time
+			fps_frames = 0
+			fps_time = 0
+		}
+
+		tweak_begin()
+		tweak_label("Info/fps", fmt.tprintf("%.0f (%.2f ms)", fps, 1000 / max(fps, 1e-6)))
+		if tweak_button("Sys/quit", "Quit") do running = false
+		GLOBAL.render_data.view.zoom = tweak_slider(
+			"Camera/Zoom",
+			GLOBAL.render_data.view.zoom,
+			CAMERA_ZOOM_MIN,
+			CAMERA_ZOOM_MAX,
+		)
+
+		view := GLOBAL.render_data.view
+		cursor_cell := view.center + (input.cursor - window_size / 2) / view.zoom
+
+		if select_click {
+			index, found := map_pawns_pick(&GLOBAL.pawns, view, window_size, input.cursor, -1)
+			focus = found ? GLOBAL.pawn_pieces[index] : {}
+		}
+		if order_click && focus != {} {
+			focus_index := -1
+			for piece, index in GLOBAL.pawn_pieces do if piece == focus do focus_index = index
+			order := Game_Order {
+				piece       = focus,
+				destination = cursor_cell,
+				snap        = CLICK_MOVE_SNAP,
+			}
+			index, found := map_pawns_pick(&GLOBAL.pawns, view, window_size, input.cursor, focus_index)
+			if found do order.target = GLOBAL.pawn_pieces[index]
+			game_input.order = order
+		}
+
+		game_tick(&GLOBAL.game, focus, &game_input, dt)
 
 		render_data_clear(&GLOBAL.render_data)
 		text_reset()
+		map_pawns_clear(&GLOBAL.pawns)
+		clear(&GLOBAL.pawn_pieces)
 
 		// Terrain: every region in its color, the one under the cursor highlighted
 		{
-			hovered := 0
-			{
-				cursor: [2]f32
-				_ = sdl.GetMouseState(&cursor.x, &cursor.y)
-				cell :=
-					GLOBAL.render_data.view.center +
-					(cursor - window_size / 2) / GLOBAL.render_data.view.zoom
-				if !ui_hovered_any() &&
-				   cell.x >= 0 &&
-				   cell.y >= 0 &&
-				   cell.x < RENDER_TERRAIN_WIDTH &&
-				   cell.y < RENDER_TERRAIN_HEIGHT {
-					hovered = int(
-						GLOBAL.game.terrain.regions[int(cell.y) * RENDER_TERRAIN_WIDTH + int(cell.x)],
-					)
-				}
+			hovered: Region_Id
+			if !ui_hovered_any() && grid_contains(cell_of(cursor_cell), MAP_SIZE) {
+				hovered = Region_Id(GLOBAL.game.terrain.regions[grid_index(cell_of(cursor_cell), MAP_SIZE)])
 			}
-			for region, id in GLOBAL.game.regions {
-				color := region.color
-				GLOBAL.render_data.terrain.regions[id] = {
-					color       = [3]f32{f32(color.r), f32(color.g), f32(color.b)} / 255,
-					highlighted = id == hovered,
-				}
-			}
-			GLOBAL.render_data.terrain.region_display = .Filled_When_Far
+			game_present_map(&GLOBAL.game, focus, hovered, map_mode, &GLOBAL.render_data.terrain)
 			GLOBAL.render_data.terrain.dt = dt
 		}
 
+		game_present_pawns(&GLOBAL.game, focus, &GLOBAL.pawns, &GLOBAL.pawn_pieces)
+		map_pawns_quads(
+			&GLOBAL.pawns,
+			view,
+			window_size,
+			MAP_PAWN_STYLE_DEFAULT,
+			dt,
+			&GLOBAL.render_data.quads[.World],
+			&GLOBAL.render_data.quads[.Screen],
+		)
+
+		cards := new(Cards, context.temp_allocator)
+		game_cards(&GLOBAL.game, focus, cards)
+
 		// UI, over everything
 		ui_begin(window_size)
-		// DEMO begin: the UI demo
-		demo_ui(&demo)
-		// DEMO end
+		game_input.asks += cards_ui(cards, FONT_MAP, FONT_CARD_TITLE, &map_mode)
+		tweak_ui(tweaks_toggled, FONT_TWEAK)
 		ui_end(input, dt, &GLOBAL.render_data.quads[.Screen])
 
 		if !renderer_draw(&renderer, &GLOBAL.render_data) {

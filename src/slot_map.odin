@@ -62,6 +62,11 @@ slot_map_get :: proc(
 	return
 }
 
+slot_map_get_ptr :: proc(sm: ^$SM/Slot_Map($T, $N, $HT), key: HT) -> ^T {
+	if key.generation == 0 || key.index >= N || sm.generations[key.index] != key.generation do return nil
+	return &sm.payloads[key.index]
+}
+
 // Walks the used slots: `it := slot_map_iterator(&sm); for value, key in slot_map_iterate(&it)`.
 // Removing while iterating is safe; inserting is not (a reused slot may be visited or not)
 Slot_Map_Iterator :: struct($T: typeid, $N: u32, $HT: typeid) {

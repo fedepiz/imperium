@@ -57,7 +57,7 @@ assets_load :: proc(assets: ^Assets, init: ^Render_Init) {
 		// Pawns: <set>/<culture>_<icon>, and its silhouette <set>/<culture>_<icon>_fill
 		for set in ([?]string{"pawns", "medallions"}) {
 			for culture in ([?]string{"roman", "germanic"}) {
-				for icon in ([?]string{"town_0", "town_1", "town_2", "town_3", "army"}) {
+				for icon in ([?]string{"town_0", "town_1", "town_2", "town_3", "army", "fleet"}) {
 					append(&image_sources, fmt.tprintf("%s/%s_%s", set, culture, icon))
 					append(&image_sources, fmt.tprintf("%s/%s_%s_fill", set, culture, icon))
 				}
