@@ -1,6 +1,5 @@
 package main
 
-import "core:fmt"
 import "core:hash"
 import "core:math"
 import "core:math/linalg"
@@ -125,6 +124,110 @@ Movement :: struct {
 	bodies:         [dynamic; PIECE_MAX]Disc,
 }
 
+GAME_EVENTS_MAX :: 2048
+
+Order_Refusal :: enum u8 {
+	Superseded,
+	No_Such_Piece,
+	Not_Now,
+	Not_Yours,
+	Cannot_Move,
+	No_Route,
+}
+
+Contact_Outcome :: enum u8 {
+	Lapsed,
+	Met,
+	Battle,
+	Refused,
+	Declined,
+}
+
+Army_Change :: enum u8 {
+	Battle,
+	Chase,
+	March,
+	Turn_End,
+}
+
+Event_End_Turn :: struct {
+	accepted: bool,
+}
+
+Event_Order_Refused :: struct {
+	piece:  Piece_Id,
+	reason: Order_Refusal,
+}
+
+Event_March :: struct {
+	piece:  Piece_Id,
+	target: Piece_Id,
+	to:     [2]f32,
+	chaser: Piece_Id,
+}
+
+Event_Moved :: struct {
+	piece:         Piece_Id,
+	pos:           [2]f32,
+	movement_left: f32,
+	overdrawn:     f32,
+}
+
+Event_Arrived :: struct {
+	piece: Piece_Id,
+	pos:   [2]f32,
+}
+
+Event_Contact :: struct {
+	initiator: Piece_Id,
+	other:     Piece_Id,
+	targeted:  bool,
+	outcome:   Contact_Outcome,
+}
+
+Event_Interaction :: struct {
+	actor:  Piece_Id,
+	target: Piece_Id,
+	stage:  Interaction_Stage,
+	closed: bool,
+}
+
+Event_Conquered :: struct {
+	piece: Piece_Id,
+	by:    Piece_Id,
+	from:  Faction_Id,
+	to:    Faction_Id,
+}
+
+Event_Removed :: struct {
+	piece: Piece_Id,
+}
+
+Event_Army :: struct {
+	piece:   Piece_Id,
+	changes: bit_set[Army_Change],
+	army:    Army,
+}
+
+Event_Turn :: struct {
+	turn:   int,
+	player: Faction_Id,
+}
+
+Game_Event :: union {
+	Event_End_Turn,
+	Event_Order_Refused,
+	Event_March,
+	Event_Moved,
+	Event_Arrived,
+	Event_Contact,
+	Event_Interaction,
+	Event_Conquered,
+	Event_Removed,
+	Event_Army,
+	Event_Turn,
+}
+
 @(private = "file")
 Walk_Order :: struct {
 	piece:          Piece_Id,
@@ -219,10 +322,18 @@ walk_along :: proc(
 	return
 }
 
-game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
+game_step :: proc(
+	game: ^Game,
+	focus: Piece_Id,
+	input: Game_Input,
+	events: ^[dynamic; GAME_EVENTS_MAX]Game_Event,
+) {
+	game.step += 1
 	movement := &game.movement
 
-	if input.end_turn && game_turn_endable(game) {
+	end_turn_accepted := input.end_turn && game_turn_endable(game)
+	if input.end_turn do append(events, Event_End_Turn{end_turn_accepted})
+	if end_turn_accepted {
 		game.ending = true
 		own := slot_map_iterator(&game.pieces)
 		for piece, piece_id in slot_map_iterate(&own) {
@@ -239,6 +350,7 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 	order: Walk_Order
 	losses: [2]struct {
 		army:      Piece_Id,
+		change:    Army_Change,
 		men:       f32,
 		readiness: f32,
 		stock:     f32,
@@ -248,9 +360,14 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 			if input.answer == .Conquer && open.conquerable {
 				actor := slot_map_get(&game.pieces, open.actor)
 				conquered := slot_map_get(&game.pieces, open.target)
-				if actor != nil && conquered != nil do conquered.owner = actor.owner
+				if actor != nil && conquered != nil {
+					append(events, Event_Conquered{open.target, open.actor, conquered.owner, actor.owner})
+					conquered.owner = actor.owner
+				}
+				append(events, Event_Interaction{open.actor, open.target, open.stage, true})
 				open^ = {}
 			} else if input.answer == .Leave {
+				append(events, Event_Interaction{open.actor, open.target, open.stage, true})
 				open^ = {}
 			}
 		} else if input.answer == .Next && movement.walker == {} {
@@ -263,7 +380,7 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 			#partial switch open.stage {
 			case .Announce:
 				for side, i in result.sides {
-					losses[i] = {ids[i], side.men.total, side.readiness, side.stock.total}
+					losses[i] = {ids[i], .Battle, side.men.total, side.readiness, side.stock.total}
 				}
 				open.stage = .Report
 				closed = false
@@ -271,7 +388,11 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 				open.stage = .Outcome
 				closed = false
 			case .Outcome:
-				for side, i in result.sides do if side.dissolved do slot_map_remove(&game.pieces, ids[i])
+				for side, i in result.sides {
+					if side.dissolved && slot_map_remove(&game.pieces, ids[i]) {
+						append(events, Event_Removed{ids[i]})
+					}
+				}
 				beaten := slot_map_get(&game.pieces, loser)
 				victor := slot_map_get(&game.pieces, winner)
 				if !result.sides[fallen].falls_back || beaten == nil || victor == nil do break
@@ -293,11 +414,12 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 				}
 				if result.caught {
 					side := result.sides[fallen]
-					losses[fallen] = {loser, side.pursuit_men.total, side.pursuit_readiness, 0}
+					losses[fallen] = {loser, .Chase, side.pursuit_men.total, side.pursuit_readiness, 0}
 				}
 				open.stage = .Fall_Back
 				closed = false
 			}
+			append(events, Event_Interaction{open.actor, open.target, open.stage, closed})
 			if closed do open^ = {}
 		}
 	}
@@ -305,11 +427,18 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 	for len(game.contacts) > 0 && game.interaction.actor == {} {
 		contact := game.contacts[0]
 		ordered_remove(&game.contacts, 0)
+		event := Event_Contact{contact.initiator, contact.other, contact.targeted, .Lapsed}
 		initiator := slot_map_get(&game.pieces, contact.initiator)
 		other := slot_map_get(&game.pieces, contact.other)
-		if initiator == nil || other == nil || pieces_friendly(initiator, other) do continue
+		if initiator == nil || other == nil || pieces_friendly(initiator, other) {
+			append(events, event)
+			continue
+		}
 		reach := max(initiator.contact_radius, other.contact_radius)
-		if linalg.distance(initiator.pos, other.pos) >= reach do continue
+		if linalg.distance(initiator.pos, other.pos) >= reach {
+			append(events, event)
+			continue
+		}
 
 		if initiator.army == nil || other.army == nil {
 			game.interaction = {
@@ -318,6 +447,8 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 				stage       = .Meet_Town,
 				conquerable = .Captures in initiator.flags && .Capturable in other.flags,
 			}
+			event.outcome = .Met
+			append(events, event)
 			continue
 		}
 
@@ -350,6 +481,8 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 		}
 
 		result := battle_resolve(battle)
+		event.outcome = result.fought ? .Battle : result.refused ? .Refused : .Declined
+		append(events, event)
 		if !result.fought && !result.refused do continue
 		if result.fought do pieces[result.attacker].this_turn.attacked = true
 		game.interaction = {
@@ -360,10 +493,23 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 		game.interaction.result = result
 	}
 
-	if player_order, ordered := input.order.?; ordered && order.piece == {} {
+	if player_order, ordered := input.order.?; ordered {
 		piece := slot_map_get(&game.pieces, player_order.piece)
 		ordering := game_ordering(game)
-		if piece != nil && ordering != 0 && piece.owner == ordering {
+		refusal: Maybe(Order_Refusal)
+		switch {
+		case order.piece != {}:
+			refusal = .Superseded
+		case piece == nil:
+			refusal = .No_Such_Piece
+		case ordering == 0:
+			refusal = .Not_Now
+		case piece.owner != ordering:
+			refusal = .Not_Yours
+		}
+		if reason, refused := refusal.?; refused {
+			append(events, Event_Order_Refused{player_order.piece, reason})
+		} else {
 			order = {
 				piece       = player_order.piece,
 				target      = player_order.target,
@@ -428,7 +574,9 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 		}
 	}
 
-	if order.piece != {} && movement.flooded == order.piece {
+	if order.piece != {} && movement.flooded != order.piece {
+		append(events, Event_Order_Refused{order.piece, .Cannot_Move})
+	} else if order.piece != {} {
 		stop: [2]int
 		stoppable := false
 		if target := slot_map_get(&game.pieces, order.target); target != nil {
@@ -470,8 +618,10 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 			movement.chaser_next = 0
 			movement.chaser_follows = order.chaser_follows
 			movement.chaser_budget = order.chaser_budget
+			march_end := movement.path.points[len(movement.path.points) - 1]
+			append(events, Event_March{order.piece, order.target, march_end, order.chaser})
 		} else {
-			fmt.eprintln("No way for", order.piece)
+			append(events, Event_Order_Refused{order.piece, .No_Route})
 		}
 	}
 
@@ -534,9 +684,11 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 			spent := min(due, game_movement_left(piece^))
 			piece.this_turn.movement_spent += spent
 			walk.overdrawn = due - spent
+			append(events, Event_Moved{walk.piece, piece.pos, game_movement_left(piece^), walk.overdrawn})
 		}
 
 		walk_done = (movement.next > last || got_clear) && !chasing
+		if walk_done do append(events, Event_Arrived{movement.walker, walker.pos})
 		if walk_done && movement.target != {} {
 			append(&game.contacts, Contact{movement.walker, movement.target, true})
 		}
@@ -561,9 +713,11 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 		if !is_army do continue
 		readiness := army.readiness
 		stock := army.stock
+		changes: bit_set[Army_Change]
 
 		for loss in losses {
 			if loss.army != id do continue
+			changes += {loss.change}
 			army.men = max(0, army.men + int(math.round(loss.men)))
 			readiness += loss.readiness
 			stock += loss.stock
@@ -613,6 +767,7 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 
 		for walk in walks {
 			if walk.piece != id do continue
+			changes += {.March}
 			readiness -= walk.marched_road * ROAD_READINESS_PER_MOVEMENT
 			readiness -= walk.marched_off_road * READINESS_PER_MOVEMENT
 			readiness -= walk.overdrawn * OVERDRAW_READINESS
@@ -621,6 +776,7 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 		}
 
 		if turn_ending && piece.owner == game.player {
+			changes += {.Turn_End}
 			stock = clamp(stock + army.resupply, 0, army.baggage)
 			readiness_cap: f32 = army.baggage > 0 ? 100 * stock / army.baggage : 0
 			exertion: f32 =
@@ -635,6 +791,7 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 
 		army.readiness = clamp(readiness, 0, 100)
 		army.stock = clamp(stock, 0, army.baggage)
+		if changes != {} do append(events, Event_Army{id, changes, army^})
 	}
 
 	if turn_ending {
@@ -645,6 +802,7 @@ game_step :: proc(game: ^Game, focus: Piece_Id, input: Game_Input) {
 			game.turn += 1
 		}
 		game.player = Faction_Id(next_player)
+		append(events, Event_Turn{game.turn, game.player})
 
 		all := slot_map_iterator(&game.pieces)
 		for piece in slot_map_iterate(&all) do piece.this_turn = {}

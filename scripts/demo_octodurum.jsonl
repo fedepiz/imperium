@@ -1,0 +1,20 @@
+{"type": "camera_focus_on_location", "x": 300, "y": 388, "zoom": 9}
+{"type": "step", "count": 300}
+{"type": "order_move", "piece": 4294967312, "x": 300, "y": 385}
+{"type": "step", "count": 480}
+{"type": "end_turn"}
+{"type": "step", "count": 90}
+{"type": "end_turn"}
+{"type": "step", "count": 90}
+{"type": "order_move", "piece": 4294967312, "x": 262, "y": 380}
+{"type": "step", "count": 480}
+{"type": "end_turn"}
+{"type": "step", "count": 90}
+{"type": "end_turn"}
+{"type": "step", "count": 90}
+{"type": "camera_focus_on_piece", "piece": 4294967312, "zoom": 16}
+{"type": "step", "count": 60}
+{"type": "order_target", "piece": 4294967312, "target": 4294967318}
+{"type": "step", "count": 360}
+{"type": "conquer"}
+{"type": "step", "count": 60}

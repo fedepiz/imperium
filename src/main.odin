@@ -2,13 +2,15 @@ package main
 
 import "core:fmt"
 import "core:math"
-import "core:math/linalg"
 import "core:mem"
+import "core:os"
 
 import sdl "vendor:sdl3"
 
 GLOBAL: struct {
+	camera:      Camera,
 	game:        Game,
+	game_events: [dynamic; GAME_EVENTS_MAX]Game_Event,
 	render_data: Render_Data,
 	pawns:       Map_Pawns,
 	pawn_pieces: [dynamic; MAP_PAWNS_MAX]Piece_Id,
@@ -28,13 +30,6 @@ GLOBAL: struct {
 #assert(WALK_POINTS_MAX + 1 <= RENDER_TERRAIN_ARROW_POINTS_MAX)
 #assert(PATHFIND_FLOOD_CELLS <= RENDER_TERRAIN_HIGHLIGHT_CELLS_MAX)
 #assert(PIECE_MAX <= MAP_PAWNS_MAX)
-
-// Camera: zoom per wheel notch, and the zoom range in logical pixels per cell
-CAMERA_ZOOM_STEP :: 1.15
-CAMERA_ZOOM_MIN :: 1
-CAMERA_ZOOM_MAX :: 40
-CAMERA_PAN_SPEED :: 900
-CAMERA_PAN_EASE :: 6
 
 CLICK_MOVE_SNAP :: 9
 
@@ -66,9 +61,77 @@ MARK_DRAWING_FILES := [Render_Mark_Drawing]Mark_Drawing_Files {
 	.Sea       = {"sea", 2},
 }
 
+Options :: struct {
+	headless:  bool,
+	commands:  string,
+	rules_log: string,
+}
+
 main :: proc() {
 	context.allocator = mem.panic_allocator()
 
+	options: Options
+	{
+		args := os.args[1:]
+		for i := 0; i < len(args); i += 1 {
+			switch args[i] {
+			case "--headless":
+				options.headless = true
+			case "--commands", "--rules-log":
+				if i + 1 == len(args) {
+					fmt.eprintln(args[i], "needs a path, or - for stdin or stdout")
+					return
+				}
+				if args[i] == "--commands" do options.commands = args[i + 1]
+				else do options.rules_log = args[i + 1]
+				i += 1
+			case:
+				fmt.eprintln("Unknown argument", args[i])
+				return
+			}
+		}
+		if options.headless && options.commands == "" {
+			fmt.eprintln("--headless needs --commands")
+			return
+		}
+	}
+
+	if options.commands != "" && !commands_open(options.commands) do return
+	defer commands_close()
+	if options.rules_log != "" && !rules_log_open(options.rules_log) do return
+	defer if options.rules_log != "" do rules_log_close()
+
+	if options.headless {
+		run_headless(options)
+	} else {
+		run_windowed(options)
+	}
+}
+
+run_headless :: proc(options: Options) {
+	geography := new(Render_Geography, context.temp_allocator)
+	if !game_load(&GLOBAL.game, "roman", geography) {
+		fmt.eprintln("Failed to load game")
+		return
+	}
+	free_all(context.temp_allocator)
+	if options.rules_log != "" do rules_log_begin(&GLOBAL.game)
+
+	input: Game_Input
+	command: Command
+	for commands_next(&command) {
+		steps := command_apply(&GLOBAL.game, command, &input, &GLOBAL.camera)
+		for _ in 0 ..< steps {
+			clear(&GLOBAL.game_events)
+			game_step(&GLOBAL.game, {}, input, &GLOBAL.game_events)
+			input = {}
+			if options.rules_log != "" do rules_log_events(&GLOBAL.game, GLOBAL.game_events[:])
+			free_all(context.temp_allocator)
+		}
+	}
+}
+
+run_windowed :: proc(options: Options) {
 	if !sdl.Init({.VIDEO}) {
 		fmt.eprintln("Failed to initialise SDL", sdl.GetError())
 		return
@@ -142,22 +205,29 @@ main :: proc() {
 
 		renderer_terrain_build(&renderer, geography, map_style, marks)
 	}
+	if options.rules_log != "" do rules_log_begin(&GLOBAL.game)
 
 	// Whole world in view
-	GLOBAL.render_data.view = {
+	GLOBAL.camera.view = {
 		center = {RENDER_TERRAIN_WIDTH / 2, RENDER_TERRAIN_HEIGHT / 2},
 		zoom   = 2,
 	}
+	GLOBAL.camera.target = GLOBAL.camera.view
+	GLOBAL.camera.move_ease = CAMERA_MOVE_EASE
+	GLOBAL.camera.key_ease = CAMERA_KEY_EASE
+	GLOBAL.camera.drag_ease = CAMERA_DRAG_EASE
+	GLOBAL.camera.ease = CAMERA_MOVE_EASE
 	frame_ticks := sdl.GetTicksNS()
 
 	// A left drag that started on the map, not on the UI, pans the camera
 	map_drag := false
-	camera_velocity: [2]f32
 
 	focus: Piece_Id
 	map_mode: Map_Mode
 	game_input: Game_Input
 	unstepped: f32
+	commands_active := options.commands != ""
+	commands_waiting := 0
 
 	fps_frames: int
 	fps_time: f32
@@ -213,19 +283,21 @@ main :: proc() {
 			case .MOUSE_WHEEL:
 				input.wheel += {event.wheel.x, event.wheel.y}
 				if ui_hovered_any() do continue
-				camera := &GLOBAL.render_data.view
+				target := &GLOBAL.camera.target
 				from_centre := [2]f32{event.wheel.mouse_x, event.wheel.mouse_y} - window_size / 2
-				under_cursor := camera.center + from_centre / camera.zoom
-				camera.zoom = clamp(
-					camera.zoom * math.pow(CAMERA_ZOOM_STEP, event.wheel.y),
+				under_cursor := target.center + from_centre / target.zoom
+				target.zoom = clamp(
+					target.zoom * math.pow(CAMERA_ZOOM_STEP, event.wheel.y),
 					CAMERA_ZOOM_MIN,
 					CAMERA_ZOOM_MAX,
 				)
-				camera.center = under_cursor - from_centre / camera.zoom
+				target.center = under_cursor - from_centre / target.zoom
+				GLOBAL.camera.ease = GLOBAL.camera.move_ease
 			case .MOUSE_MOTION:
 				if map_drag {
-					camera := &GLOBAL.render_data.view
-					camera.center -= [2]f32{event.motion.xrel, event.motion.yrel} / camera.zoom
+					motion := [2]f32{event.motion.xrel, event.motion.yrel}
+					GLOBAL.camera.target.center -= motion / GLOBAL.camera.view.zoom
+					GLOBAL.camera.ease = GLOBAL.camera.drag_ease
 				}
 			}
 		}
@@ -249,15 +321,11 @@ main :: proc() {
 				if keys[sdl.Scancode.W] || keys[sdl.Scancode.UP] do pan.y -= 1
 				if keys[sdl.Scancode.S] || keys[sdl.Scancode.DOWN] do pan.y += 1
 			}
-			camera := &GLOBAL.render_data.view
-			target_velocity := pan * CAMERA_PAN_SPEED / camera.zoom
-			camera_velocity += (target_velocity - camera_velocity) * ease_step(CAMERA_PAN_EASE, dt)
-			camera.center += camera_velocity * dt
-			camera.center = linalg.clamp(
-				camera.center,
-				0,
-				[2]f32{RENDER_TERRAIN_WIDTH, RENDER_TERRAIN_HEIGHT},
-			)
+			if pan != {} {
+				target := &GLOBAL.camera.target
+				target.center += pan * CAMERA_PAN_SPEED / target.zoom * dt
+				GLOBAL.camera.ease = GLOBAL.camera.key_ease
+			}
 		}
 
 		fps_frames += 1
@@ -271,14 +339,29 @@ main :: proc() {
 		tweak_begin()
 		tweak_label("Info/fps", fmt.tprintf("%.0f (%.2f ms)", fps, 1000 / max(fps, 1e-6)))
 		if tweak_button("Sys/quit", "Quit") do running = false
-		GLOBAL.render_data.view.zoom = tweak_slider(
-			"Camera/Zoom",
-			GLOBAL.render_data.view.zoom,
-			CAMERA_ZOOM_MIN,
-			CAMERA_ZOOM_MAX,
-		)
+		{
+			camera := &GLOBAL.camera
+			zoom := tweak_slider("Camera/Zoom", camera.target.zoom, CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX)
+			if zoom != camera.target.zoom {
+				camera.target.zoom = zoom
+				camera.ease = camera.move_ease
+			}
+			camera.move_ease = tweak_slider("Camera/Move ease", camera.move_ease, CAMERA_EASE_MIN, CAMERA_EASE_MAX)
+			camera.key_ease = tweak_slider("Camera/Key ease", camera.key_ease, CAMERA_EASE_MIN, CAMERA_EASE_MAX)
+			camera.drag_ease = tweak_slider("Camera/Drag ease", camera.drag_ease, CAMERA_EASE_MIN, CAMERA_EASE_MAX)
+		}
 
-		view := GLOBAL.render_data.view
+		for commands_active && commands_waiting == 0 {
+			command: Command
+			if !commands_next(&command) {
+				commands_active = false
+				break
+			}
+			commands_waiting = command_apply(&GLOBAL.game, command, &game_input, &GLOBAL.camera)
+		}
+
+		camera_tick(&GLOBAL.camera, dt)
+		view := GLOBAL.camera.view
 		cursor_cell := view.center + (input.cursor - window_size / 2) / view.zoom
 
 		if select_click {
@@ -293,7 +376,13 @@ main :: proc() {
 				destination = cursor_cell,
 				snap        = CLICK_MOVE_SNAP,
 			}
-			index, found := map_pawns_pick(&GLOBAL.pawns, view, window_size, input.cursor, focus_index)
+			index, found := map_pawns_pick(
+				&GLOBAL.pawns,
+				view,
+				window_size,
+				input.cursor,
+				focus_index,
+			)
 			if found do order.target = GLOBAL.pawn_pieces[index]
 			game_input.order = order
 		}
@@ -301,9 +390,16 @@ main :: proc() {
 		unstepped = min(unstepped + dt, STEPS_PER_FRAME_MAX * STEP_SECONDS)
 		steps := int(unstepped / STEP_SECONDS)
 		unstepped -= f32(steps) * STEP_SECONDS
-		game_tick(&GLOBAL.game, focus, &game_input, steps)
+		for _ in 0 ..< steps {
+			clear(&GLOBAL.game_events)
+			game_step(&GLOBAL.game, focus, game_input, &GLOBAL.game_events)
+			game_input = {}
+			commands_waiting = max(0, commands_waiting - 1)
+			if options.rules_log != "" do rules_log_events(&GLOBAL.game, GLOBAL.game_events[:])
+		}
 
 		render_data_clear(&GLOBAL.render_data)
+		GLOBAL.render_data.view = view
 		text_reset()
 		map_pawns_clear(&GLOBAL.pawns)
 		clear(&GLOBAL.pawn_pieces)
@@ -332,7 +428,15 @@ main :: proc() {
 
 		// UI, over everything
 		ui_begin(window_size)
-		cards_ui(cards, FONT_MAP, FONT_CARD_TITLE, map_style.paper, map_style.ink, &map_mode, &game_input)
+		cards_ui(
+			cards,
+			FONT_MAP,
+			FONT_CARD_TITLE,
+			map_style.paper,
+			map_style.ink,
+			&map_mode,
+			&game_input,
+		)
 		tweak_ui(tweaks_toggled, FONT_TWEAK)
 		ui_end(input, dt, &GLOBAL.render_data.quads[.Screen])
 

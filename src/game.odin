@@ -69,6 +69,7 @@ Game :: struct {
 	terrain:     Terrain,
 	regions:     [REGIONS_MAX]Region,
 	pieces:      Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
+	step:        int,
 	factions:    [dynamic; FACTIONS_MAX]Faction,
 	characters:  [dynamic; CHARACTERS_MAX]Character,
 	turn:        int,
@@ -597,9 +598,4 @@ load_map_bitmap_3_channels :: proc(file: string, out: ^[MAP_CELLS][3]u8) -> bool
 	return true
 }
 
-game_tick :: proc(game: ^Game, focus: Piece_Id, input: ^Game_Input, steps: int) {
-	for _ in 0 ..< steps {
-		game_step(game, focus, input^)
-		input^ = {}
-	}
-}
+
