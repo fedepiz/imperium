@@ -21,7 +21,7 @@ WALK_POINTS_MAX :: (PATHFIND_PATH_MAX + 1) << uint(WALK_SMOOTHING.cut_iter)
 @(private = "file")
 WALK_CELLS_PER_STEP :: 10 * STEP_SECONDS
 @(private = "file")
-ROAD_READINESS_PER_MOVEMENT :: 0.1
+ROAD_READINESS_PER_MOVEMENT :: 0.2
 @(private = "file")
 READINESS_PER_MOVEMENT :: 1
 @(private = "file")
@@ -33,7 +33,7 @@ SUPPLY_DRAG :: 5
 @(private = "file")
 SUPPLY_REFILL_MAX :: 1
 @(private = "file")
-ROAD_STOCK_PER_MOVEMENT :: 0.002
+ROAD_STOCK_PER_MOVEMENT :: 0.005
 @(private = "file")
 STOCK_PER_MOVEMENT :: 0.01
 @(private = "file")
