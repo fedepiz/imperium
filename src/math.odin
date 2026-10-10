@@ -445,24 +445,28 @@ Polyline_Smoothing :: struct {
 	cut_max:       f32,
 }
 
-// Out: dst, appended to.
+// Out: dst, appended to; values_out (optional), parallel to dst.points.
 // Smooths every run of src into dst. A run of n points becomes n << cut_iter points.
-// Open runs keep their end points. Runs under 2 points, or that do not fit in dst, are dropped
+// Open runs keep their end points. Runs under 2 points, or that do not fit in dst, are dropped.
+// values_in (parallel to src.points) are carried into values_out, blended as the points are cut
 polylines_smooth :: proc(
 	src: ^Polylines($SP, $SR),
 	smoothing: Polyline_Smoothing,
 	dst: ^Polylines($DP, $DR),
+	values_in: [][2]f32 = nil,
+	values_out: [][2]f32 = nil,
 ) {
 	assert(smoothing.softness >= 0 && smoothing.softness <= 1)
 	assert(smoothing.cut_ratio > 0 && smoothing.cut_ratio <= 0.5)
 	assert(smoothing.cut_iter >= 0)
+	assert((values_in == nil) == (values_out == nil))
 
-	cut :: proc(a, b: [2]f32, smoothing: Polyline_Smoothing) -> (near_a, near_b: [2]f32) {
-		t := smoothing.cut_ratio
+	cut :: proc(a, b: [2]f32, smoothing: Polyline_Smoothing) -> (near_a, near_b: [2]f32, t: f32) {
+		t = smoothing.cut_ratio
 		if smoothing.cut_max > 0 {
 			t = min(t, smoothing.cut_max / max(linalg.length(b - a), 1e-6))
 		}
-		return a + (b - a) * t, b + (a - b) * t
+		return a + (b - a) * t, b + (a - b) * t, t
 	}
 
 	for run in src.runs {
@@ -474,6 +478,13 @@ polylines_smooth :: proc(
 		resize(&dst.points, begin + size)
 		p := dst.points[begin:]
 		copy(p, src.points[run.begin:][:n])
+
+		// The run's values. Soften keeps them
+		v: [][2]f32
+		if values_out != nil {
+			v = values_out[begin:][:size]
+			copy(v, values_in[run.begin:][:n])
+		}
 
 		// Soften
 		if n > smoothing.soften_longer {
@@ -494,12 +505,23 @@ polylines_smooth :: proc(
 		for _ in 0 ..< smoothing.cut_iter {
 			if run.closed {
 				for i := n - 1; i >= 0; i -= 1 {
-					p[2 * i], p[2 * i + 1] = cut(p[i], p[(i + 1) % n], smoothing)
+					j := (i + 1) % n
+					t: f32
+					p[2 * i], p[2 * i + 1], t = cut(p[i], p[j], smoothing)
+					if v != nil {
+						v[2 * i], v[2 * i + 1] = math.lerp(v[i], v[j], t), math.lerp(v[j], v[i], t)
+					}
 				}
 			} else {
 				p[2 * n - 1] = p[n - 1]
+				if v != nil do v[2 * n - 1] = v[n - 1]
 				for i := n - 2; i >= 0; i -= 1 {
-					p[2 * i + 1], p[2 * i + 2] = cut(p[i], p[i + 1], smoothing)
+					t: f32
+					p[2 * i + 1], p[2 * i + 2], t = cut(p[i], p[i + 1], smoothing)
+					if v != nil {
+						v[2 * i + 1], v[2 * i + 2] =
+							math.lerp(v[i], v[i + 1], t), math.lerp(v[i + 1], v[i], t)
+					}
 				}
 			}
 			n *= 2

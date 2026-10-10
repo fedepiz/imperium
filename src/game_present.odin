@@ -33,6 +33,10 @@ FRIEND_ZONES_SLOT :: 1
 @(private = "file")
 ENEMY_ZONES_SLOT :: 2
 
+// Movers whose march is drawn as an arrow
+@(private = "file")
+MARCH_ARROWS :: bit_set[Mover]{.Leader, .Chaser}
+
 @(private = "file", rodata)
 ICON_TITLES := [Map_Icon]string {
 	.Village    = "Village",
@@ -110,8 +114,11 @@ game_present_map :: proc(
 	if at, on_map := pointer.?; on_map && grid_contains(cell_of(at), MAP_SIZE) {
 		pointed = Region_Id(game.terrain.regions[grid_index(cell_of(at), MAP_SIZE)])
 	}
+	leader_march := &movement.marches[.Leader]
 	reach_shown :=
-		movement.flood_key != 0 && movement.flooded == focus && movement.flooded != movement.walker
+		movement.flood_key != 0 &&
+		movement.flooded == focus &&
+		movement.flooded != leader_march.piece
 
 	frame.region_display = mode == .Control ? .Filled_When_Far : .Hidden
 	for &region, id in game.regions {
@@ -164,9 +171,13 @@ game_present_map :: proc(
 		enemies.circles_len = len(frame.highlight_circles) - enemies.circles_begin
 	}
 
-	if walker := slot_map_get(&game.pieces, movement.walker); walker != nil {
-		append(&frame.arrow, walker.pos)
-		append(&frame.arrow, ..movement.path.points[movement.next:])
+	for &march, mover in movement.marches {
+		walker := slot_map_get(&game.pieces, march.piece)
+		if walker == nil || mover not_in MARCH_ARROWS do continue
+		ahead := march.path.points[march.next:]
+		arrow := polylines_reserve(len(ahead) + 1, false, &frame.arrows) or_continue
+		arrow[0] = walker.pos
+		copy(arrow[1:], ahead)
 	}
 
 	if mode == .Supply {
@@ -410,6 +421,6 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 		}
 	}
 
-	append(&card.actions, Card_Action{"Next", .Next, game.movement.walker == {}})
+	append(&card.actions, Card_Action{"Next", .Next, game.movement.marches[.Leader].piece == {}})
 	cards.interaction = card
 }

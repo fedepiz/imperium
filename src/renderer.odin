@@ -730,12 +730,12 @@ Render_Data :: struct {
 	quads:   [Render_Space][dynamic; RENDER_QUADS_MAX]Render_Quad,
 }
 
-// Empties the lists: the quads, and the terrain's highlights, arrow and wash. Keeps the rest
+// Empties the lists: the quads, and the terrain's highlights, arrows and wash. Keeps the rest
 render_data_clear :: proc(data: ^Render_Data) {
 	data.terrain.highlights = {}
 	clear(&data.terrain.highlight_cells)
 	clear(&data.terrain.highlight_circles)
-	clear(&data.terrain.arrow)
+	polylines_clear(&data.terrain.arrows)
 	clear(&data.terrain.wash)
 	for space in Render_Space do clear(&data.quads[space])
 }

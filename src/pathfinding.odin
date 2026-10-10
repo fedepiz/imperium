@@ -250,7 +250,8 @@ pathfind_flood_stop_within :: proc(
 	return
 }
 
-// Output as pathfind_trace. False (both empty) if dst isn't reached.
+// Out: out, the cells after the start up to dst's, as centres; costs, of each step into them, as flooded.
+// False (both empty) if dst isn't reached.
 pathfind_flood_trace :: proc(
 	flood: ^Pathfind_Flood,
 	dst: [2]f32,
@@ -263,7 +264,6 @@ pathfind_flood_trace :: proc(
 	clear(costs)
 	to := [2]int{int(math.floor(dst.x)), int(math.floor(dst.y))}
 	if !flood_reaches(flood, to) do return false
-	grid := GRIDS[flood.domain][:]
 	// Walk back from dst, then reverse
 	for cell := to; cell != flood.start; {
 		if len(out) == PATHFIND_PATH_MAX {
@@ -271,13 +271,12 @@ pathfind_flood_trace :: proc(
 			clear(costs)
 			return false
 		}
-		index := grid_index(cell, MAP_SIZE)
 		local := grid_index(cell - flood.corner, FLOOD_SQUARE)
-		cost := grid[index]
-		if hindrance := flood.zone[local]; hindrance > 0 do cost *= hindrance
+		previous := cell + DIR_OFFSET[flood.back[local]]
+		previous_local := grid_index(previous - flood.corner, FLOOD_SQUARE)
 		append(out, cell_center(cell))
-		append(costs, cost)
-		cell += DIR_OFFSET[flood.back[local]]
+		append(costs, flood.cost[local] - flood.cost[previous_local])
+		cell = previous
 	}
 	slice.reverse(out[:])
 	slice.reverse(costs[:])

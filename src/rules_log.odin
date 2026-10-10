@@ -376,9 +376,9 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		record := (^Event_Record(Event_March))(raw_data(payload))
 		write_header(w, record.step, "march")
 		field_piece(w, "piece", record.event.piece)
+		field_enum(w, "mover", record.event.mover)
 		field_piece(w, "target", record.event.target)
 		json_field_vec2(w, "to", record.event.to)
-		field_piece(w, "chaser", record.event.chaser)
 
 	case .Moved:
 		record := (^Event_Record(Event_Moved))(raw_data(payload))

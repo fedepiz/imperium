@@ -27,8 +27,9 @@ RENDER_TERRAIN_HIGHLIGHTS_MAX :: 16
 // Cells, and circles, of all a frame's highlights together
 RENDER_TERRAIN_HIGHLIGHT_CELLS_MAX :: RENDER_TERRAIN_CELLS
 RENDER_TERRAIN_HIGHLIGHT_CIRCLES_MAX :: 512
-// Points of the arrow
-RENDER_TERRAIN_ARROW_POINTS_MAX :: 4096
+// Arrows in a frame, and their points together
+RENDER_TERRAIN_ARROWS_MAX :: 4
+RENDER_TERRAIN_ARROW_POINTS_MAX :: 1 << 14
 // Points, and runs, of the courses of one kind
 RENDER_TERRAIN_COURSE_POINTS_MAX :: 1 << 16
 RENDER_TERRAIN_COURSE_RUNS_MAX :: 256
@@ -108,8 +109,8 @@ Render_Terrain_Frame :: struct {
 	// Of the highlights
 	highlight_cells:   [dynamic; RENDER_TERRAIN_HIGHLIGHT_CELLS_MAX]bool,
 	highlight_circles: [dynamic; RENDER_TERRAIN_HIGHLIGHT_CIRCLES_MAX]Render_Circle,
-	// A path as points in cells, tail to head, drawn with an arrowhead at its end. Empty = none
-	arrow:             [dynamic; RENDER_TERRAIN_ARROW_POINTS_MAX][2]f32,
+	// One open run per arrow: a path as points in cells, tail to head, with an arrowhead at its end
+	arrows:            Polylines(RENDER_TERRAIN_ARROW_POINTS_MAX, RENDER_TERRAIN_ARROWS_MAX),
 	// A value per cell, 0..255, RENDER_TERRAIN_CELLS long: a wash over the land, from the style's
 	// wash_low at 0 to wash_high at 255. Empty = none. For map modes such as supply
 	wash:              [dynamic; RENDER_TERRAIN_CELLS]u8,
@@ -1236,17 +1237,9 @@ terrain_frame :: proc(
 		}
 	}
 
-	// Step: Arrow
-	{
-		arrow := new(Polylines(RENDER_TERRAIN_ARROW_POINTS_MAX, 1), context.temp_allocator)
-		copy(polylines_reserve(len(frame.arrow), false, arrow), frame.arrow[:])
-		ground_stroke_write(
-			rend,
-			STROKE_ARROWS,
-			arrow,
-			{style.arrow_head_length, style.arrow_head_width},
-		)
-	}
+	// Step: Arrows
+	head := [2]f32{style.arrow_head_length, style.arrow_head_width}
+	ground_stroke_write(rend, STROKE_ARROWS, &frame.arrows, head)
 
 	// Step: Wash. Its values are written when they change
 	if len(frame.wash) > 0 {
