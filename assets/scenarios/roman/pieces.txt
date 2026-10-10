@@ -1,9 +1,9 @@
 # Starting factions and pieces. Distances in cells; enum values written as declared (Large_City, Land).
 #
 # kind: name, icon, moves (domain; omit = static), per_turn (movement points), contact (radius), contact_on (domains),
-#       body (radius), hindrance (enemy movement cost multiplier inside its contact zone, default 1; roads don't
-#       count there), supply (supply source value 0..100, default 0 = not a source), traits (Captures can conquer
-#       Capturable; Can_Enter can enter an empty Can_Contain of its faction)
+#       body (radius), hindrance (enemy movement cost multiplier inside its contact zone, default 1), supply (supply
+#       source value 0..100, default 0 = not a source), traits (Captures can conquer Capturable; Can_Enter can enter
+#       an empty Can_Contain of its faction)
 # faction: name, culture, color [r, g, b] 0..255. Factions play in file order. Then one piece row per piece:
 #   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
 #   region), general (creates a character), men + proficiency 0..100 (optional; makes it an army, starting at

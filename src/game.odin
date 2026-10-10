@@ -424,13 +424,16 @@ game_load :: proc(
 	}
 	game.terrain.cover = geo_out.cover
 
+	// Cells crossed by a road
+	for &road, i in game.terrain.road do road = ways_sdf[.Road][i] < ROAD_CELL_REACH
+
 	// Pathfinding: the cost of entering each cell, by land and by sea
 	{
 		// Land: by cover, or along a road. Water is impassable
 		land := pathfind_grid(.Land)
 		for cell, i in geo_out.cover {
-			on_road := ways_sdf[.Road][i] < ROAD_CELL_REACH
-			land[i] = geo_out.water[i] ? 0 : on_road ? ROAD_COST : MOVE_COSTS[cell.kind]
+			land[i] =
+				geo_out.water[i] ? 0 : game.terrain.road[i] ? ROAD_COST : MOVE_COSTS[cell.kind]
 		}
 
 		sea := pathfind_grid(.Sea)
@@ -570,6 +573,7 @@ Terrain :: struct {
 	trees:     [MAP_CELLS]u8,
 	regions:   [MAP_CELLS]u8,
 	cover:     [MAP_CELLS]Render_Cover_Cell,
+	road:      [MAP_CELLS]bool,
 }
 
 @(private = "file")

@@ -117,6 +117,7 @@ Movement :: struct {
 	into:           Piece_Id,
 	path:           Polylines(WALK_POINTS_MAX, 1),
 	path_costs:     [dynamic; WALK_POINTS_MAX]f32,
+	path_roads:     [dynamic; WALK_POINTS_MAX]bool,
 	next:           int,
 	clear_of:       Piece_Id,
 	chaser:         Piece_Id,
@@ -330,6 +331,7 @@ walk_along :: proc(
 	pos: [2]f32,
 	path: [][2]f32,
 	costs: []f32,
+	roads: []bool,
 	next, last: int,
 	stride, max_due: f32,
 ) -> (
@@ -342,7 +344,8 @@ walk_along :: proc(
 	stride := stride
 	for stride > 0 && reached <= last && road + off_road < max_due {
 		target := path[reached]
-		cost := costs[clamp(reached, 1, len(costs) - 1)]
+		segment := clamp(reached, 1, len(costs) - 1)
+		cost := costs[segment]
 		distance := linalg.distance(moved, target)
 		walked := min(stride, distance)
 		if cost > 0 do walked = min(walked, (max_due - road - off_road) / cost)
@@ -353,7 +356,7 @@ walk_along :: proc(
 			reached += 1
 		}
 		stride -= walked
-		if cost == ROAD_COST {
+		if roads[segment] {
 			road += walked * cost
 		} else {
 			off_road += walked * cost
@@ -670,6 +673,10 @@ game_step :: proc(
 			pathfind_flood_trace(&movement.flood, cell_center(stop), &cells, &cell_costs)
 		if traced {
 			walker := slot_map_get(&game.pieces, order.piece)
+			cell_roads: [dynamic; PATHFIND_PATH_MAX]bool
+			for cell in cells {
+				append(&cell_roads, game.terrain.road[grid_index(cell_of(cell), MAP_SIZE)])
+			}
 			if settlement != nil && len(cells) > 0 do cells[len(cells) - 1] = settlement.pos
 			raw := new(Polylines(PATHFIND_PATH_MAX + 1, 1), context.temp_allocator)
 			raw_points := polylines_reserve(len(cells) + 1, false, raw)
@@ -683,9 +690,11 @@ game_step :: proc(
 			}
 
 			clear(&movement.path_costs)
+			clear(&movement.path_roads)
 			for _, point in movement.path.points {
 				raw_point := min(point >> uint(WALK_SMOOTHING.cut_iter), len(cells))
 				append(&movement.path_costs, raw_point == 0 ? 0 : cell_costs[raw_point - 1])
+				append(&movement.path_roads, raw_point > 0 && cell_roads[raw_point - 1])
 			}
 
 			movement.walker = order.piece
@@ -715,6 +724,7 @@ game_step :: proc(
 	if walker != nil {
 		path := movement.path.points[:]
 		costs := movement.path_costs[:]
+		roads := movement.path_roads[:]
 		last := len(path) - 1
 
 		clear_of := slot_map_get(&game.pieces, movement.clear_of)
@@ -725,6 +735,7 @@ game_step :: proc(
 				walker.pos,
 				path,
 				costs,
+				roads,
 				movement.next,
 				last,
 				WALK_CELLS_PER_STEP,
@@ -746,6 +757,7 @@ game_step :: proc(
 					chaser.pos,
 					path,
 					costs,
+					roads,
 					movement.chaser_next,
 					until,
 					WALK_CELLS_PER_STEP,
