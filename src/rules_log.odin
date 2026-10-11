@@ -305,8 +305,8 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 			json_null(w)
 		}
 		json_key(w, "army")
-		if army, is_army := &piece.army.?; is_army {
-			write_army(w, army)
+		if .Has_Army in piece.flags {
+			write_army(w, &piece.army)
 		} else {
 			json_null(w)
 		}

@@ -314,7 +314,8 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 			general := name_to_string(&game.characters[piece.general].name)
 			append(&card.fields, Card_Field{label = "General", value = general})
 		}
-		army, is_army := piece.army.?
+		army := piece.army
+		is_army := .Has_Army in piece.flags
 		if is_army {
 			append(&card.fields, Card_Field{label = "Baggage", value = fmt.tprintf("%.0f turns", army.baggage)})
 		}
@@ -395,8 +396,8 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 			case .Announce, .Refused:
 				piece := pieces[side_index]
 				if piece == nil do continue
-				army, is_army := piece.army.?
-				if !is_army do continue
+				if .Has_Army not_in piece.flags do continue
+				army := piece.army
 				temperament := game_commander_temperament(game, piece)
 				power := fmt.tprintf("%.1f", side.power.total)
 				append(fields, Card_Field{label = "Commander", value = fmt.tprint(temperament)})

@@ -98,6 +98,7 @@ Piece_Flag :: enum {
 	Capturable,
 	Can_Enter,
 	Can_Contain,
+	Has_Army,
 }
 
 Piece_Data :: struct {
@@ -118,7 +119,7 @@ Piece_Data :: struct {
 	supply:            f32,
 	inside:            Piece_Id,
 	contains:          Piece_Id,
-	army:              Maybe(Army),
+	army:              Army,
 }
 
 Army :: struct {
@@ -538,6 +539,7 @@ game_load :: proc(
 						}
 						army.stock = army.baggage
 						piece.army = army
+						piece.flags += {.Has_Army}
 					}
 
 					id := slot_map_insert(&game.pieces, piece)

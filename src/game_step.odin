@@ -533,10 +533,10 @@ game_step :: proc(
 		game.ending = true
 		own := slot_map_iterator(&game.pieces)
 		for piece, piece_id in slot_map_iterate(&own) {
-			if piece.owner != game.player || piece.army == nil do continue
+			if piece.owner != game.player || .Has_Army not_in piece.flags do continue
 			enemies := slot_map_iterator(&game.pieces)
 			for enemy, enemy_id in slot_map_iterate(&enemies) {
-				if enemy.army == nil || pieces_friendly(piece, enemy) do continue
+				if .Has_Army not_in enemy.flags || pieces_friendly(piece, enemy) do continue
 				if linalg.distance(piece.pos, enemy.pos) >= enemy.contact_radius do continue
 				append(&game.contacts, Contact{initiator = piece_id, other = enemy_id})
 			}
@@ -660,7 +660,7 @@ game_step :: proc(
 			continue
 		}
 
-		if initiator.army == nil || other.army == nil {
+		if .Has_Army not_in initiator.flags || .Has_Army not_in other.flags {
 			// TODO: proper solution to conquering of garrisoned settlement
 			empty := other.contains == {}
 			game.interaction = {
@@ -687,7 +687,7 @@ game_step :: proc(
 			seed    = hash.fnv64a(mem.slice_to_bytes(seed_source[:])),
 		}
 		for piece, i in pieces {
-			army, _ := piece.army.?
+			army := piece.army
 			battle.sides[i] = {
 				men         = f32(army.men),
 				men_max     = f32(army.men_max),
@@ -843,8 +843,8 @@ game_step :: proc(
 
 	pieces := slot_map_iterator(&game.pieces)
 	for piece, id in slot_map_iterate(&pieces) {
-		army, is_army := &piece.army.?
-		if !is_army do continue
+		if .Has_Army not_in piece.flags do continue
+		army := &piece.army
 		readiness := army.readiness
 		stock := army.stock
 		changes: bit_set[Army_Change]
@@ -867,11 +867,10 @@ game_step :: proc(
 				friendly_men, all_men: f32
 				others := slot_map_iterator(&game.pieces)
 				for other in slot_map_iterate(&others) {
-					other_army, other_is_army := other.army.?
-					if !other_is_army do continue
+					if .Has_Army not_in other.flags do continue
 					distance := linalg.distance(piece.pos, other.pos)
 					if distance >= FORAGE_RADIUS do continue
-					weighted := f32(other_army.men) * (1 - distance / FORAGE_RADIUS)
+					weighted := f32(other.army.men) * (1 - distance / FORAGE_RADIUS)
 					all_men += weighted
 					if other.owner == piece.owner do friendly_men += weighted
 				}
