@@ -306,6 +306,32 @@ Battle_Outcome :: enum u8 {
 	Rout,
 }
 
+@(private = "file")
+Battle_Kind :: enum u8 {
+	Field,
+	Assault,
+	Sortie,
+}
+
+@(private = "file", rodata)
+KIND_TITLES := [Battle_Kind]string {
+	.Field   = "Battle",
+	.Assault = "Assault",
+	.Sortie  = "Sortie",
+}
+@(private = "file", rodata)
+KIND_VERBS := [Battle_Kind]string {
+	.Field   = "attacks",
+	.Assault = "assaults",
+	.Sortie  = "sorties against",
+}
+@(private = "file", rodata)
+KIND_REFUSALS := [Battle_Kind]string {
+	.Field   = "won't attack",
+	.Assault = "won't assault",
+	.Sortie  = "won't sortie against",
+}
+
 @(private = "file", rodata)
 OUTCOME_TITLES := [Battle_Outcome]string {
 	.Avoided      = "Avoided",
@@ -479,6 +505,8 @@ Battle_Side :: struct {
 	readiness:     f32,
 	spent:         bool,
 	garrisoning:   bool,
+	// Fights from a fortified piece; names the battle
+	behind_walls:  bool,
 	stock:         f32,
 	baggage:       f32,
 	mobility:      f32,
@@ -497,6 +525,7 @@ Battle :: struct {
 }
 
 Battle_Side_Result :: struct {
+	men_engaged:       Report_Tally,
 	power:             Report_Tally,
 	posture:           Span,
 	men:               Report_Tally,
@@ -520,6 +549,8 @@ Battle_Result :: struct {
 	follow_overdraw: f32,
 	caught:          bool,
 	report:          Report,
+	kind_title:      Span,
+	attack_title:    Span,
 	outcome_title:   Span,
 	follow_title:    Span,
 }
@@ -533,7 +564,14 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	men_engaged: [2]f32
 	for side, i in battle.sides {
 		assert(side.engaged_share > 0)
-		men_engaged[i] = min(side.men * side.engaged_share, side.engaged_max)
+		engaged := &result.sides[i].men_engaged
+		report_tally_add(engaged, "Men", side.men, .Men)
+		if side.engaged_share < 1 do report_tally_scale(engaged, "Share", side.engaged_share, .Percent)
+		if engaged.total > side.engaged_max {
+			report_tally_add(engaged, "Cap", side.engaged_max - engaged.total, .Men)
+		}
+		engaged.total = math.round(engaged.total)
+		men_engaged[i] = engaged.total
 	}
 
 	for side, i in battle.sides {
@@ -575,7 +613,6 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		if !battle.sides[0].can_attack do refusal = "It has already attacked this turn."
 		report_say(report, "%", refusal)
 	}
-	if !result.fought do return
 
 	at := [Role]int {
 		.Attacker = result.attacker,
@@ -589,6 +626,14 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		.Attacker = sides[.Attacker].name,
 		.Defender = sides[.Defender].name,
 	}
+	kind := Battle_Kind.Field
+	if sides[.Defender].behind_walls do kind = .Assault
+	if sides[.Attacker].behind_walls do kind = .Sortie
+	result.kind_title = report_text(report, KIND_TITLES[kind])
+	verb := result.fought ? KIND_VERBS[kind] : KIND_REFUSALS[kind]
+	result.attack_title = report_text(report, "% % %", names[.Attacker], verb, names[.Defender])
+	if !result.fought do return
+
 	powers := [Role]Report_Tally {
 		.Attacker = result.sides[at[.Attacker]].power,
 		.Defender = result.sides[at[.Defender]].power,
@@ -601,7 +646,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		report,
 		"% % %.",
 		names[.Attacker],
-		Report_Note{"attacks", reasons[result.attacker]},
+		Report_Note{KIND_VERBS[kind], reasons[result.attacker]},
 		names[.Defender],
 	)
 

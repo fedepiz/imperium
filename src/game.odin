@@ -99,6 +99,7 @@ Piece_Flag :: enum {
 	Can_Enter,
 	Can_Contain,
 	Has_Army,
+	Fortified,
 }
 
 Piece_Data :: struct {

@@ -48,6 +48,9 @@ CHASE_BUDGET :: 15
 FORAGE_RADIUS :: 12
 @(private = "file")
 NO_GENERAL_TEMPERAMENT :: Temperament.Steady
+// Engaged share of the side outside the walls in a sortie
+@(private = "file")
+SORTIE_ENEMY_SHARE :: 0.5
 @(private = "file")
 SPENT_READINESS :: 25
 @(private = "file")
@@ -676,6 +679,25 @@ game_step :: proc(
 
 		ids := [2]Piece_Id{contact.initiator, contact.other}
 		pieces := [2]^Piece_Data{initiator, other}
+
+		// Fighting from a fortified piece: as its garrison, or as an army inside it
+		behind_walls: [2]bool
+		sheltered := false
+		for piece, i in pieces {
+			holder := slot_map_get(&game.pieces, piece.inside)
+			occupant := slot_map_get(&game.pieces, piece.contains)
+			fortified := .Fortified in piece.flags
+			held := holder != nil && .Fortified in holder.flags
+			behind_walls[i] = fortified || held
+			guarded := occupant != nil && .Has_Army in occupant.flags && !occupant.army.spent
+			if (fortified && guarded) || (held && piece.army.spent) do sheltered = true
+		}
+		if sheltered {
+			append(events, event)
+			continue
+		}
+		sortie := behind_walls[0] || behind_walls[1]
+
 		seed_source := [4]u64 {
 			u64(game.turn),
 			u64(game.player),
@@ -688,23 +710,25 @@ game_step :: proc(
 		}
 		for piece, i in pieces {
 			army := piece.army
+			limited := behind_walls[1 - i]
 			battle.sides[i] = {
 				men           = f32(army.men),
 				men_max       = f32(army.men_max),
-				engaged_share = 1,
-				engaged_max   = math.INF_F32,
+				engaged_share = limited ? SORTIE_ENEMY_SHARE : 1,
+				engaged_max   = limited ? f32(pieces[1 - i].army.men) : math.INF_F32,
 				proficiency   = army.proficiency,
 				readiness     = army.readiness,
 				spent         = army.spent,
 				garrisoning   = piece.inside != {},
+				behind_walls  = behind_walls[i],
 				stock         = army.stock,
 				baggage       = army.baggage,
 				mobility      = army.mobility,
 				temperament   = game_commander_temperament(game, piece),
-				can_attack    = !piece.this_turn.attacked,
-				can_avoid     = true,
-				can_fall_back = true,
-				can_pursue    = true,
+				can_attack    = behind_walls[i] || !piece.this_turn.attacked,
+				can_avoid     = !sortie,
+				can_fall_back = !sortie,
+				can_pursue    = !sortie,
 				name          = game_piece_title(piece),
 			}
 		}
@@ -713,7 +737,9 @@ game_step :: proc(
 		event.outcome = result.fought ? .Battle : result.refused ? .Refused : .Declined
 		append(events, event)
 		if !result.fought && !result.refused do continue
-		if result.fought do pieces[result.attacker].this_turn.attacked = true
+		if result.fought && !behind_walls[result.attacker] {
+			pieces[result.attacker].this_turn.attacked = true
+		}
 		game.interaction = {
 			actor  = ids[0],
 			target = ids[1],

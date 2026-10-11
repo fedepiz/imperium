@@ -371,18 +371,19 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 	pieces := [2]^Piece_Data{slot_map_get(&game.pieces, open.actor), slot_map_get(&game.pieces, open.target)}
 	attacker := result.attacker
 	defender := 1 - attacker
+	kind := report_string(report, result.kind_title)
 	card: Card
 	#partial switch open.stage {
 	case .Announce:
-		card.title = fmt.tprintf("%s attacks %s", names[attacker], names[defender])
+		card.title = fmt.tprintf("%s: %s", kind, report_string(report, result.attack_title))
 	case .Refused:
-		card.title = fmt.tprintf("%s won't attack %s", names[attacker], names[defender])
+		card.title = fmt.tprintf("%s: %s", kind, report_string(report, result.attack_title))
 		card_report(&card, report)
 	case .Report:
-		card.title = "Battle report"
+		card.title = fmt.tprintf("%s report", kind)
 		card_report(&card, report)
 	case .Outcome:
-		card.title = fmt.tprintf("Battle: %s", report_string(report, result.outcome_title))
+		card.title = fmt.tprintf("%s: %s", kind, report_string(report, result.outcome_title))
 	case .Fall_Back:
 		card.title = report_string(report, result.follow_title)
 	}
@@ -400,8 +401,17 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 				army := piece.army
 				temperament := game_commander_temperament(game, piece)
 				power := fmt.tprintf("%.1f", side.power.total)
+				men := Card_Field {
+					label = "Men",
+					value = compact_number(f64(army.men)),
+				}
+				if side.men_engaged.total < f32(army.men) {
+					engaged := compact_number(f64(side.men_engaged.total))
+					men.value = fmt.tprintf("%s of %s", engaged, men.value)
+					men.breakdown = card_breakdown(&card, &side.men_engaged, engaged)
+				}
 				append(fields, Card_Field{label = "Commander", value = fmt.tprint(temperament)})
-				append(fields, Card_Field{label = "Men", value = compact_number(f64(army.men))})
+				append(fields, men)
 				append(fields, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
 				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
 				append(fields, card_tally_field(&card, "Power", &side.power, power))

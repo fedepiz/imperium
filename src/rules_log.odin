@@ -331,6 +331,7 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 			json_object_begin(w)
 			field_piece(w, "piece", record.sides[i])
 			json_field_string(w, "name", report_string(report, result.names[i]))
+			field_tally(w, "men_engaged", &side.men_engaged)
 			field_tally(w, "power", &side.power)
 			json_field_string(w, "posture", report_string(report, side.posture))
 			field_tally(w, "men", &side.men)
