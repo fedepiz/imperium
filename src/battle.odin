@@ -354,6 +354,15 @@ OUTCOME_WORSE := [Battle_Outcome]Battle_Outcome {
 OUTCOMES_RETREATING :: bit_set[Battle_Outcome]{.Avoided, .Probed, .Withdrew, .Repulsed, .Defeat, .Heavy_Defeat, .Rout}
 @(private = "file")
 OUTCOMES_PURSUABLE :: bit_set[Battle_Outcome]{.Heavy_Defeat, .Rout}
+@(private = "file")
+OUTCOMES_DEFEATED :: bit_set[Battle_Outcome] {
+	.Probed,
+	.Withdrew,
+	.Repulsed,
+	.Defeat,
+	.Heavy_Defeat,
+	.Rout,
+}
 
 @(private = "file")
 Fate :: enum u8 {
@@ -781,18 +790,28 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		}
 	}
 
-	for side, role in sides {
-		out := &result.sides[at[role]]
+	if result.outcome in OUTCOMES_DEFEATED {
+		side := sides[loser]
+		out := &result.sides[at[loser]]
 		men := side.men + out.men.total
 		readiness := clamp(side.readiness + out.readiness, 0, 100)
 		men_percent: f32 = side.men_max > 0 ? 100 * men / side.men_max : 100
-		if readiness >= COHESION_READINESS_MIN && men_percent >= COHESION_MEN_PERCENT_MIN do continue
-		roll: Report_Tally
-		report_tally_add(&roll, "Roll", roll_2d6(&rng))
-		report_tally_add(&roll, "Proficiency", side.proficiency / 10)
-		report_tally_add(&roll, "Readiness", -max(0, (COHESION_READINESS_MIN - readiness) / 10))
-		report_tally_add(&roll, "Losses", -max(0, (COHESION_MEN_PERCENT_MIN - men_percent) / 10))
-		out.dissolved = !check(report, names[role], roll, COHESION_TARGET, "checks cohesion")
+		if readiness < COHESION_READINESS_MIN || men_percent < COHESION_MEN_PERCENT_MIN {
+			roll: Report_Tally
+			report_tally_add(&roll, "Roll", roll_2d6(&rng))
+			report_tally_add(&roll, "Proficiency", side.proficiency / 10)
+			report_tally_add(
+				&roll,
+				"Readiness",
+				-max(0, (COHESION_READINESS_MIN - readiness) / 10),
+			)
+			report_tally_add(
+				&roll,
+				"Losses",
+				-max(0, (COHESION_MEN_PERCENT_MIN - men_percent) / 10),
+			)
+			out.dissolved = !check(report, names[loser], roll, COHESION_TARGET, "checks cohesion")
+		}
 	}
 
 	{
