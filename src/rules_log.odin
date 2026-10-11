@@ -233,11 +233,9 @@ write_army :: proc(w: ^Json_Writer, army: ^Army) {
 	json_field_bool(w, "spent", army.spent)
 	json_field_float(w, "foraging", army.foraging)
 	json_field_float(w, "mobility", army.mobility)
-	json_field_float(w, "stock", army.stock)
-	json_field_float(w, "baggage", army.baggage)
-	json_field_float(w, "resupply", army.resupply)
-	field_enum(w, "resupply_source", army.resupply_source)
-	json_field_float(w, "resupply_efficiency", army.resupply_efficiency)
+	json_field_float(w, "supply", army.supply)
+	field_enum(w, "supply_source", army.supply_source)
+	json_field_float(w, "supply_efficiency", army.supply_efficiency)
 	json_object_end(w)
 }
 
@@ -336,7 +334,6 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 			json_field_string(w, "posture", report_string(report, side.posture))
 			field_tally(w, "men", &side.men)
 			json_field_float(w, "readiness", side.readiness)
-			field_tally(w, "stock", &side.stock)
 			field_tally(w, "pursuit_men", &side.pursuit_men)
 			json_field_float(w, "pursuit_readiness", side.pursuit_readiness)
 			json_field_bool(w, "dissolved", side.dissolved)

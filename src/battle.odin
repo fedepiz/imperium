@@ -443,28 +443,6 @@ READINESS_CHANGE := [Fate][Battle_Outcome]f32 {
 	},
 }
 @(private = "file", rodata)
-LOSER_STOCK_LOST := [Battle_Outcome]f32 {
-	.Avoided      = 0,
-	.Stalemate    = 0,
-	.Probed       = 0.1,
-	.Withdrew     = 0.2,
-	.Repulsed     = 0.2,
-	.Defeat       = 0.5,
-	.Heavy_Defeat = 1,
-	.Rout         = 2,
-}
-@(private = "file", rodata)
-WINNER_STOCK_CAPTURED_SHARE := [Battle_Outcome]f32 {
-	.Avoided      = 0,
-	.Stalemate    = 0,
-	.Probed       = 0,
-	.Withdrew     = 0,
-	.Repulsed     = 0,
-	.Defeat       = 0.2,
-	.Heavy_Defeat = 0.4,
-	.Rout         = 0.6,
-}
-@(private = "file", rodata)
 PURSUIT_MEN_LOST_SHARE := [Battle_Outcome]f32 {
 	.Avoided      = 0,
 	.Stalemate    = 0,
@@ -507,8 +485,6 @@ Battle_Side :: struct {
 	garrisoning:   bool,
 	// Fights from a fortified piece; names the battle
 	behind_walls:  bool,
-	stock:         f32,
-	baggage:       f32,
 	mobility:      f32,
 	temperament:   Temperament,
 	can_attack:    bool,
@@ -530,7 +506,6 @@ Battle_Side_Result :: struct {
 	posture:           Span,
 	men:               Report_Tally,
 	readiness:         f32,
-	stock:             Report_Tally,
 	pursuit_men:       Report_Tally,
 	pursuit_readiness: f32,
 	dissolved:         bool,
@@ -650,7 +625,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		names[.Defender],
 	)
 
-	// Engaged share of each side's men, scaling its readiness and stock effects
+	// Engaged share of each side's men, scaling its readiness effects
 	scale: [Role]f32
 	for side, role in sides {
 		scale[role] = side.men > 0 ? men_engaged[at[role]] / side.men : 1
@@ -808,30 +783,6 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 				takes_losers_losses[role] &&
 				outcome in OUTCOMES_RETREATING &&
 				sides[role].can_fall_back
-		}
-
-		beaten := sides[loser]
-		victor := sides[winner]
-		lost := &result.sides[at[loser]].stock
-		if table := LOSER_STOCK_LOST[outcome]; table > 0 {
-			report_tally_add(lost, "Lost", -table)
-			if scale[loser] < 1 do report_tally_scale(lost, "Engaged", scale[loser], .Percent)
-			short := -lost.total - beaten.stock
-			if short > 0 do report_tally_add(lost, "Not carried", short)
-		}
-		if share := WINNER_STOCK_CAPTURED_SHARE[outcome];
-		   share > 0 && lost.total < 0 && men_engaged[at[winner]] > 0 {
-			captured := &result.sides[at[winner]].stock
-			report_tally_add(captured, "Lost", -lost.total)
-			report_tally_scale(
-				captured,
-				"Men ratio",
-				men_engaged[at[loser]] / men_engaged[at[winner]],
-				.Ratio,
-			)
-			report_tally_scale(captured, "Share", share, .Percent)
-			room := victor.baggage - victor.stock
-			if captured.total > room do report_tally_add(captured, "Baggage full", room - captured.total)
 		}
 	}
 

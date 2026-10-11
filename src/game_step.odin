@@ -31,12 +31,6 @@ READINESS_RECOVERY :: 20
 @(private = "file")
 SUPPLY_DRAG :: 5
 @(private = "file")
-SUPPLY_REFILL_MAX :: 1
-@(private = "file")
-ROAD_STOCK_PER_MOVEMENT :: 0.005
-@(private = "file")
-STOCK_PER_MOVEMENT :: 0.01
-@(private = "file")
 SUPPLY_DECAY :: 2
 @(private = "file")
 MEN_PER_SUPPLY :: 250
@@ -548,7 +542,6 @@ game_step :: proc(
 		change:    Army_Change,
 		men:       f32,
 		readiness: f32,
-		stock:     f32,
 	}
 	if open := &game.interaction; open.actor != {} {
 		if input.answer == .Next && movement.marches[.Leader].piece == {} {
@@ -561,7 +554,7 @@ game_step :: proc(
 			#partial switch open.stage {
 			case .Announce:
 				for side, i in result.sides {
-					losses[i] = {ids[i], .Battle, side.men.total, side.readiness, side.stock.total}
+					losses[i] = {ids[i], .Battle, side.men.total, side.readiness}
 				}
 				open.stage = .Report
 				closed = false
@@ -631,7 +624,6 @@ game_step :: proc(
 						.Chase,
 						side.pursuit_men.total,
 						side.pursuit_readiness,
-						0,
 					}
 				}
 				open.stage = .Fall_Back
@@ -708,8 +700,6 @@ game_step :: proc(
 				spent         = army.spent,
 				garrisoning   = piece.inside != {},
 				behind_walls  = behind_walls[i],
-				stock         = army.stock,
-				baggage       = army.baggage,
 				mobility      = army.mobility,
 				temperament   = game_commander_temperament(game, piece),
 				can_attack    = behind_walls[i] || !piece.this_turn.attacked,
@@ -859,12 +849,20 @@ game_step :: proc(
 		game.interaction.actor == {} &&
 		movement.marches[.Leader].piece == {}
 
+	// Per piece slot: fed by its own granary, or by the one it is inside
+	granary_fed: [PIECE_MAX]bool
+	it := slot_map_iterator(&game.pieces)
+	for piece, id in slot_map_iterate(&it) {
+		holder := slot_map_get(&game.pieces, piece.inside)
+		held := holder != nil && .Granary in holder.flags
+		granary_fed[id.index] = .Granary in piece.flags || held
+	}
+
 	pieces := slot_map_iterator(&game.pieces)
 	for piece, id in slot_map_iterate(&pieces) {
 		if .Has_Army not_in piece.flags do continue
 		army := &piece.army
 		readiness := army.readiness
-		stock := army.stock
 		changes: bit_set[Army_Change]
 
 		for loss in losses {
@@ -872,20 +870,19 @@ game_step :: proc(
 			changes += {loss.change}
 			army.men = max(0, army.men + int(math.round(loss.men)))
 			readiness += loss.readiness
-			stock += loss.stock
 		}
 
 		if piece.owner == game.player {
 			men := f32(army.men)
 			cell := cell_of(piece.pos)
 			network, network_efficiency, forage, forage_efficiency: f32
-			if grid_contains(cell, MAP_SIZE) && men > 0 {
+			if !granary_fed[id.index] && grid_contains(cell, MAP_SIZE) && men > 0 {
 				at := grid_index(cell, MAP_SIZE)
 
 				friendly_men, all_men: f32
 				others := slot_map_iterator(&game.pieces)
-				for other in slot_map_iterate(&others) {
-					if .Has_Army not_in other.flags do continue
+				for other, other_id in slot_map_iterate(&others) {
+					if .Has_Army not_in other.flags || granary_fed[other_id.index] do continue
 					distance := linalg.distance(piece.pos, other.pos)
 					if distance >= FORAGE_RADIUS do continue
 					weighted := f32(other.army.men) * (1 - distance / FORAGE_RADIUS)
@@ -910,14 +907,19 @@ game_step :: proc(
 			}
 
 			fed := network
-			army.resupply_source = .Network
-			army.resupply_efficiency = network_efficiency
+			army.supply_source = .Network
+			army.supply_efficiency = network_efficiency
 			if forage > network {
 				fed = forage
-				army.resupply_source = .Foraging
-				army.resupply_efficiency = forage_efficiency
+				army.supply_source = .Foraging
+				army.supply_efficiency = forage_efficiency
 			}
-			army.resupply = min(fed, 1 + SUPPLY_REFILL_MAX) - 1
+			if granary_fed[id.index] {
+				fed = 1
+				army.supply_source = .Granary
+				army.supply_efficiency = 1
+			}
+			army.supply = 100 * min(fed, 1)
 		}
 
 		for walk in walks {
@@ -926,21 +928,17 @@ game_step :: proc(
 			readiness -= walk.marched_road * ROAD_READINESS_PER_MOVEMENT
 			readiness -= walk.marched_off_road * READINESS_PER_MOVEMENT
 			readiness -= walk.overdrawn * OVERDRAW_READINESS
-			stock -= walk.marched_road * ROAD_STOCK_PER_MOVEMENT
-			stock -= walk.marched_off_road * STOCK_PER_MOVEMENT
 		}
 
 		if turn_ending && piece.owner == game.player {
 			changes += {.Turn_End}
-			stock = clamp(stock + army.resupply, 0, army.baggage)
-			readiness_cap: f32 = army.baggage > 0 ? 100 * stock / army.baggage : 0
 			exertion: f32 =
 				piece.movement_per_turn > 0 ? 1 - game_movement_left(piece^) / piece.movement_per_turn : 0
 			rest := (1 - exertion) * (1 - exertion)
-			if readiness < readiness_cap {
-				readiness = min(readiness_cap, readiness + READINESS_RECOVERY * rest)
+			if readiness < army.supply {
+				readiness = min(army.supply, readiness + READINESS_RECOVERY * rest)
 			} else {
-				readiness = max(readiness_cap, readiness - SUPPLY_DRAG)
+				readiness = max(army.supply, readiness - SUPPLY_DRAG)
 			}
 			if army.spent && readiness >= SPENT_READINESS {
 				seed_source := [3]u64{u64(game.turn), u64(game.player), transmute(u64)id}
@@ -956,7 +954,6 @@ game_step :: proc(
 		}
 
 		army.readiness = clamp(readiness, 0, 100)
-		army.stock = clamp(stock, 0, army.baggage)
 		if army.readiness < SPENT_READINESS && !army.spent {
 			army.spent = true
 			append(events, Event_Spent{id, army.readiness})

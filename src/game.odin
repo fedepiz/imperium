@@ -62,7 +62,6 @@ FACTIONS_MAX :: 16
 CHARACTERS_MAX :: 1024
 
 ARMY_FORAGING_DEFAULT :: 40
-ARMY_BAGGAGE_DEFAULT :: 4
 ARMY_MOBILITY_DEFAULT :: 2
 
 Game :: struct {
@@ -100,6 +99,7 @@ Piece_Flag :: enum {
 	Can_Contain,
 	Has_Army,
 	Fortified,
+	Granary,
 }
 
 Piece_Data :: struct {
@@ -124,18 +124,17 @@ Piece_Data :: struct {
 }
 
 Army :: struct {
-	men:                 int,
-	men_max:             int,
-	proficiency:         f32,
-	readiness:           f32,
-	spent:               bool,
-	foraging:            f32,
-	mobility:            f32,
-	stock:               f32,
-	baggage:             f32,
-	resupply:            f32,
-	resupply_source:     Resupply_Source,
-	resupply_efficiency: f32,
+	men:               int,
+	men_max:           int,
+	proficiency:       f32,
+	readiness:         f32,
+	spent:             bool,
+	foraging:          f32,
+	mobility:          f32,
+	// Share of needs met, 0..100
+	supply:            f32,
+	supply_source:     Supply_Source,
+	supply_efficiency: f32,
 }
 
 Piece_Turn :: struct {
@@ -143,9 +142,10 @@ Piece_Turn :: struct {
 	movement_spent: f32,
 }
 
-Resupply_Source :: enum u8 {
+Supply_Source :: enum u8 {
 	Network,
 	Foraging,
+	Granary,
 }
 
 Faction :: struct {
@@ -535,10 +535,9 @@ game_load :: proc(
 							proficiency = tbl.get_num(entry, "proficiency"),
 							readiness   = 100,
 							foraging    = tbl.get_num(entry, "foraging", ARMY_FORAGING_DEFAULT),
-							baggage     = tbl.get_num(entry, "baggage", ARMY_BAGGAGE_DEFAULT),
 							mobility    = tbl.get_num(entry, "mobility", ARMY_MOBILITY_DEFAULT),
+							supply      = 100,
 						}
-						army.stock = army.baggage
 						piece.army = army
 						piece.flags += {.Has_Army}
 					}

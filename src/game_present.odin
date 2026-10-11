@@ -314,9 +314,6 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 		}
 		army := piece.army
 		is_army := .Has_Army in piece.flags
-		if is_army {
-			append(&card.fields, Card_Field{label = "Baggage", value = fmt.tprintf("%.0f turns", army.baggage)})
-		}
 		statuses := make([dynamic]string, context.temp_allocator)
 		if is_army && army.spent do append(&statuses, "Spent")
 		if piece.inside != {} do append(&statuses, "Garrisoning")
@@ -331,15 +328,12 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 		}
 		if is_army {
 			men := fmt.tprintf("%s of %s", compact_number(f64(army.men)), compact_number(f64(army.men_max)))
-			supply: f32 = army.baggage > 0 ? 100 * army.stock / army.baggage : 0
-			stock := fmt.tprintf("%.1f (%+.1f)", army.stock, army.resupply)
-			efficiency := fmt.tprintf("%.0f%%", 100 * army.resupply_efficiency)
+			efficiency := fmt.tprintf("%.0f%%", 100 * army.supply_efficiency)
 			append(&card.stats, Card_Field{label = "Men", value = men})
 			append(&card.stats, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
 			append(&card.stats, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
-			append(&card.stats, Card_Field{label = "Supply", value = fmt.tprintf("%.0f%%", supply)})
-			append(&card.stats, Card_Field{label = "Stock", value = stock})
-			append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.resupply_source)})
+			append(&card.stats, Card_Field{label = "Supply", value = fmt.tprintf("%.0f%%", army.supply)})
+			append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.supply_source)})
 			append(&card.stats, Card_Field{label = "Efficiency", value = efficiency})
 		}
 		cards.focus = card
@@ -405,11 +399,9 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.pursuit_readiness)})
 			case:
 				men := compact_number(f64(side.men.total))
-				stock := fmt.tprintf("%+.1f", side.stock.total)
 				append(fields, Card_Field{label = "Posture", value = report_string(report, side.posture)})
 				append(fields, card_tally_field(&card, "Men", &side.men, men))
 				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.readiness)})
-				append(fields, card_tally_field(&card, "Supply", &side.stock, stock))
 				if side.dissolved do append(fields, Card_Field{label = "Fate", value = "Dissolved"})
 			}
 		}
