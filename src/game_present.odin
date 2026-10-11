@@ -52,8 +52,6 @@ COLUMN_TITLES := [2]string{"Attacker", "Defender"}
 
 Game_Ask :: enum u8 {
 	End_Turn,
-	Conquer,
-	Leave,
 	Next,
 }
 
@@ -349,21 +347,6 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 
 	open := &game.interaction
 	if open.actor == {} do return
-
-	if open.stage == .Meet_Town {
-		actor := slot_map_get(&game.pieces, open.actor)
-		met := slot_map_get(&game.pieces, open.target)
-		if actor == nil || met == nil do return
-		card := Card {
-			title = game_piece_title(met),
-		}
-		append(&card.fields, Card_Field{label = "Met by", value = game_piece_title(actor)})
-		append(&card.fields, Card_Field{label = "Faction", value = faction_title(game, met.owner)})
-		append(&card.actions, Card_Action{"Conquer", .Conquer, open.conquerable})
-		append(&card.actions, Card_Action{"Back", .Leave, true})
-		cards.interaction = card
-		return
-	}
 
 	result := &open.result
 	report := &result.report

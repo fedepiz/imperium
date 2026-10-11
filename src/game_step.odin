@@ -74,8 +74,6 @@ FORAGE_YIELD := [Render_Cover]f32 {
 Game_Answer :: enum u8 {
 	None,
 	Next,
-	Conquer,
-	Leave,
 }
 
 Game_Order :: struct {
@@ -98,7 +96,6 @@ Contact :: struct {
 }
 
 Interaction_Stage :: enum u8 {
-	Meet_Town,
 	Announce,
 	Report,
 	Outcome,
@@ -107,11 +104,10 @@ Interaction_Stage :: enum u8 {
 }
 
 Interaction :: struct {
-	actor:       Piece_Id,
-	target:      Piece_Id,
-	stage:       Interaction_Stage,
-	conquerable: bool,
-	result:      Battle_Result,
+	actor:  Piece_Id,
+	target: Piece_Id,
+	stage:  Interaction_Stage,
+	result: Battle_Result,
 }
 
 // The ordered piece, and the piece pursuing it
@@ -555,24 +551,7 @@ game_step :: proc(
 		stock:     f32,
 	}
 	if open := &game.interaction; open.actor != {} {
-		if open.stage == .Meet_Town {
-			if input.answer == .Conquer && open.conquerable {
-				actor := slot_map_get(&game.pieces, open.actor)
-				conquered := slot_map_get(&game.pieces, open.target)
-				if actor != nil && conquered != nil {
-					append(
-						events,
-						Event_Conquered{open.target, open.actor, conquered.owner, actor.owner},
-					)
-					conquered.owner = actor.owner
-				}
-				append(events, Event_Interaction{open.actor, open.target, open.stage, true})
-				open^ = {}
-			} else if input.answer == .Leave {
-				append(events, Event_Interaction{open.actor, open.target, open.stage, true})
-				open^ = {}
-			}
-		} else if input.answer == .Next && movement.marches[.Leader].piece == {} {
+		if input.answer == .Next && movement.marches[.Leader].piece == {} {
 			result := &open.result
 			ids := [2]Piece_Id{open.actor, open.target}
 			fallen := 1 - result.winner
@@ -591,19 +570,35 @@ game_step :: proc(
 				closed = false
 			case .Outcome:
 				for side, i in result.sides {
-					removed := slot_map_get(&game.pieces, ids[i])
-					if !side.dissolved || removed == nil do continue
+					piece := slot_map_get(&game.pieces, ids[i])
+					if !side.dissolved || piece == nil do continue
+					// Capitulates: changes hands, and the army inside surrenders
+					removed_id := ids[i]
+					opponent := slot_map_get(&game.pieces, ids[1 - i])
+					captures := opponent != nil && .Captures in opponent.flags
+					if .Capturable in piece.flags && captures {
+						append(
+							events,
+							Event_Conquered{ids[i], ids[1 - i], piece.owner, opponent.owner},
+						)
+						piece.owner = opponent.owner
+						removed_id = piece.contains
+					}
+					removed := slot_map_get(&game.pieces, removed_id)
+					if removed == nil do continue
 					settlement := slot_map_get(&game.pieces, removed.inside)
 					occupant := slot_map_get(&game.pieces, removed.contains)
 					if settlement != nil {
 						settlement.contains = {}
-						append(events, Event_Exit{ids[i], removed.inside})
+						append(events, Event_Exit{removed_id, removed.inside})
 					}
 					if occupant != nil {
 						occupant.inside = {}
-						append(events, Event_Exit{removed.contains, ids[i]})
+						append(events, Event_Exit{removed.contains, removed_id})
 					}
-					if slot_map_remove(&game.pieces, ids[i]) do append(events, Event_Removed{ids[i]})
+					if slot_map_remove(&game.pieces, removed_id) {
+						append(events, Event_Removed{removed_id})
+					}
 				}
 				beaten := slot_map_get(&game.pieces, loser)
 				victor := slot_map_get(&game.pieces, winner)
@@ -664,14 +659,6 @@ game_step :: proc(
 		}
 
 		if .Has_Army not_in initiator.flags || .Has_Army not_in other.flags {
-			// TODO: proper solution to conquering of garrisoned settlement
-			empty := other.contains == {}
-			game.interaction = {
-				actor       = contact.initiator,
-				target      = contact.other,
-				stage       = .Meet_Town,
-				conquerable = .Captures in initiator.flags && .Capturable in other.flags && empty,
-			}
 			event.outcome = .Met
 			append(events, event)
 			continue

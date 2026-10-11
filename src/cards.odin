@@ -78,8 +78,6 @@ cards_ui :: proc(
 
 	if .End_Turn in asks do input.end_turn = true
 	if .Next in asks do input.answer = .Next
-	if .Conquer in asks do input.answer = .Conquer
-	if .Leave in asks do input.answer = .Leave
 }
 
 @(private = "file")

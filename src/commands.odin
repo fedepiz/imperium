@@ -12,8 +12,6 @@ Command_Type :: enum {
 	Order_Target,
 	Order_Move,
 	Next,
-	Conquer,
-	Leave,
 	End_Turn,
 	Camera_Focus_On_Piece,
 	Camera_Focus_On_Location,
@@ -34,8 +32,6 @@ TYPE_NAMES := [Command_Type]string {
 	.Order_Target = "order_target",
 	.Order_Move   = "order_move",
 	.Next         = "next",
-	.Conquer      = "conquer",
-	.Leave                    = "leave",
 	.End_Turn                 = "end_turn",
 	.Camera_Focus_On_Piece    = "camera_focus_on_piece",
 	.Camera_Focus_On_Location = "camera_focus_on_location",
@@ -67,8 +63,6 @@ REQUIRED := [Command_Type]bit_set[Argument] {
 	.Order_Target = {.Piece, .Target},
 	.Order_Move   = {.Piece, .X, .Y},
 	.Next         = {},
-	.Conquer      = {},
-	.Leave                    = {},
 	.End_Turn                 = {},
 	.Camera_Focus_On_Piece    = {.Piece},
 	.Camera_Focus_On_Location = {.X, .Y},
@@ -171,10 +165,6 @@ command_apply :: proc(
 		}
 	case .Next:
 		input.answer = .Next
-	case .Conquer:
-		input.answer = .Conquer
-	case .Leave:
-		input.answer = .Leave
 	case .End_Turn:
 		input.end_turn = true
 	case .Camera_Focus_On_Piece:

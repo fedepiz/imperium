@@ -16,5 +16,9 @@
 {"type": "step", "count": 60}
 {"type": "order_target", "piece": 4294967312, "target": 4294967318}
 {"type": "step", "count": 360}
-{"type": "conquer"}
+{"type": "next"}
+{"type": "step", "count": 60}
+{"type": "next"}
+{"type": "step", "count": 60}
+{"type": "next"}
 {"type": "step", "count": 60}
