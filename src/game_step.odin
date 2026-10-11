@@ -689,18 +689,23 @@ game_step :: proc(
 		for piece, i in pieces {
 			army := piece.army
 			battle.sides[i] = {
-				men         = f32(army.men),
-				men_max     = f32(army.men_max),
-				proficiency = army.proficiency,
-				readiness   = army.readiness,
-				spent       = army.spent,
-				garrisoning = piece.inside != {},
-				stock       = army.stock,
-				baggage     = army.baggage,
-				mobility    = army.mobility,
-				temperament = game_commander_temperament(game, piece),
-				can_attack  = !piece.this_turn.attacked,
-				name        = game_piece_title(piece),
+				men           = f32(army.men),
+				men_max       = f32(army.men_max),
+				engaged_share = 1,
+				engaged_max   = math.INF_F32,
+				proficiency   = army.proficiency,
+				readiness     = army.readiness,
+				spent         = army.spent,
+				garrisoning   = piece.inside != {},
+				stock         = army.stock,
+				baggage       = army.baggage,
+				mobility      = army.mobility,
+				temperament   = game_commander_temperament(game, piece),
+				can_attack    = !piece.this_turn.attacked,
+				can_avoid     = true,
+				can_fall_back = true,
+				can_pursue    = true,
+				name          = game_piece_title(piece),
 			}
 		}
 

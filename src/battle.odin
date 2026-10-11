@@ -460,18 +460,25 @@ ROLE_LABELS := [Role]string {
 }
 
 Battle_Side :: struct {
-	men:         f32,
-	men_max:     f32,
-	proficiency: f32,
-	readiness:   f32,
-	spent:       bool,
-	garrisoning: bool,
-	stock:       f32,
-	baggage:     f32,
-	mobility:    f32,
-	temperament: Temperament,
-	can_attack:  bool,
-	name:        string,
+	men:           f32,
+	men_max:       f32,
+	// Share of men that can take part, 0..1
+	engaged_share: f32,
+	// Men that can take part at most
+	engaged_max:   f32,
+	proficiency:   f32,
+	readiness:     f32,
+	spent:         bool,
+	garrisoning:   bool,
+	stock:         f32,
+	baggage:       f32,
+	mobility:      f32,
+	temperament:   Temperament,
+	can_attack:    bool,
+	can_avoid:     bool,
+	can_fall_back: bool,
+	can_pursue:    bool,
+	name:          string,
 }
 
 Battle :: struct {
@@ -508,46 +515,58 @@ Battle_Result :: struct {
 	follow_title:    Span,
 }
 
-@(private = "file")
-power :: proc(side, other: Battle_Side) -> (power: Report_Tally) {
-	proficiency := side.proficiency / 10
-	report_tally_add(&power, "Proficiency", proficiency)
-	report_tally_add(&power, "Readiness", -proficiency * (0.5 - side.readiness / 200))
-	men_ratio := other.men > 0 ? side.men / other.men : 1
-	numbers := clamp(NUMBERS_SCALE * math.log2(max(men_ratio, 1e-6)), 0, NUMBERS_MAX)
-	report_tally_add(&power, "Numbers", numbers)
-	return
-}
-
 battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	rng := battle.seed
 	report := &result.report
 	for side, i in battle.sides do result.names[i] = report_text(report, side.name)
 
-	initiator := battle.sides[0]
-	other := battle.sides[1]
-	contact := [2]bit_set[Fact]{facts(initiator, other), facts(other, initiator)}
-	if battle.ordered do contact[0] += {.Contact_Ordered}
-	contact[1] += {.Contact_Intercepting}
+	// Men taking part
+	men_engaged: [2]f32
+	for side, i in battle.sides {
+		assert(side.engaged_share > 0)
+		men_engaged[i] = min(side.men * side.engaged_share, side.engaged_max)
+	}
+
+	for side, i in battle.sides {
+		power := &result.sides[i].power
+		proficiency := side.proficiency / 10
+		report_tally_add(power, "Proficiency", proficiency)
+		report_tally_add(power, "Readiness", -proficiency * (0.5 - side.readiness / 200))
+		men_ratio := men_engaged[1 - i] > 0 ? men_engaged[i] / men_engaged[1 - i] : 1
+		numbers := clamp(NUMBERS_SCALE * math.log2(max(men_ratio, 1e-6)), 0, NUMBERS_MAX)
+		report_tally_add(power, "Numbers", numbers)
+	}
+
+	facts: [2]bit_set[Fact]
+	for side, i in battle.sides {
+		gap := result.sides[i].power.total - result.sides[1 - i].power.total
+		facts[i] = {TEMPERAMENT_FACTS[side.temperament], ladder(gap, STRENGTH_LADDER[:])}
+		if side.spent do facts[i] += {.Spent}
+		if side.garrisoning do facts[i] += {.Garrisoning}
+	}
+
+	if battle.ordered do facts[0] += {.Contact_Ordered}
+	facts[1] += {.Contact_Intercepting}
 	attacking: [2]bool
 	reasons: [2]Span
 	for i in 0 ..< 2 {
-		choice, held, absent := decide(.Contact, contact[i])
+		choice, held, absent := decide(.Contact, facts[i])
 		attacking[i] = choice == .Contact_Attack
 		reasons[i] = report_because(report, held, absent, FACT_TITLES)
 	}
 	switch {
-	case initiator.can_attack && attacking[0]:
+	case battle.sides[0].can_attack && attacking[0]:
 		result.fought = true
-	case other.can_attack && attacking[1]:
+	case battle.sides[1].can_attack && attacking[1]:
 		result.fought = true
 		result.attacker = 1
 	case:
 		result.refused = battle.ordered
 		refusal: Report_Arg = Report_Note{"Its commander declines.", reasons[0]}
-		if !initiator.can_attack do refusal = "It has already attacked this turn."
+		if !battle.sides[0].can_attack do refusal = "It has already attacked this turn."
 		report_say(report, "%", refusal)
 	}
+	if !result.fought do return
 
 	at := [Role]int {
 		.Attacker = result.attacker,
@@ -561,17 +580,14 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		.Attacker = sides[.Attacker].name,
 		.Defender = sides[.Defender].name,
 	}
-
-	powers: [Role]Report_Tally
-	for side, role in sides {
-		powers[role] = power(side, sides[OTHER_ROLE[role]])
-		result.sides[at[role]].power = powers[role]
+	powers := [Role]Report_Tally {
+		.Attacker = result.sides[at[.Attacker]].power,
+		.Defender = result.sides[at[.Defender]].power,
 	}
-	if !result.fought do return
-
-	situation: [Role]bit_set[Fact]
-	for side, role in sides do situation[role] = facts(side, sides[OTHER_ROLE[role]])
-	situation[.Defender] += {.Role_Defending}
+	situation := [Role]bit_set[Fact] {
+		.Attacker = facts[at[.Attacker]],
+		.Defender = facts[at[.Defender]] + {.Role_Defending},
+	}
 	report_say(
 		report,
 		"% % %.",
@@ -579,6 +595,14 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		Report_Note{"attacks", reasons[result.attacker]},
 		names[.Defender],
 	)
+
+	// Engaged share of each side's men, scaling its readiness and stock effects
+	scale: [Role]f32
+	for side, role in sides {
+		scale[role] = side.men > 0 ? men_engaged[at[role]] / side.men : 1
+		if scale[role] >= 1 do continue
+		report_say(report, "% engages % of % men.", names[role], men_engaged[at[role]], side.men)
+	}
 	report_say(report, "Power % against %.", powers[.Attacker], powers[.Defender])
 
 	decided := false
@@ -588,7 +612,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		defender := sides[.Defender]
 		attacker := sides[.Attacker]
 		avoid, held, absent := decide(.Avoid, situation[.Defender])
-		if avoid == .Avoid_Try {
+		if defender.can_avoid && avoid == .Avoid_Try {
 			roll: Report_Tally
 			report_tally_add(&roll, "Roll", roll_2d6(&rng))
 			report_tally_add(&roll, "Mobility", MOBILITY_BONUS * (defender.mobility - attacker.mobility))
@@ -718,16 +742,18 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		takes_losers_losses: [Role]bool
 		takes_losers_losses[loser] = true
 		takes_losers_losses[winner] = outcome == .Stalemate
-		engaged_men := min(sides[.Attacker].men, sides[.Defender].men)
 		for role in Role {
 			fate: Fate = takes_losers_losses[role] ? .Loser : .Winner
 			out := &result.sides[at[role]]
 			if share := MEN_LOST_SHARE[fate][outcome]; share > 0 {
-				report_tally_add(&out.men, "Engaged", -engaged_men, .Men)
+				report_tally_add(&out.men, "Engaged", -min(men_engaged[0], men_engaged[1]), .Men)
 				report_tally_scale(&out.men, "Share", share, .Percent)
 			}
-			out.readiness = READINESS_CHANGE[fate][outcome]
-			out.falls_back = takes_losers_losses[role] && outcome in OUTCOMES_RETREATING
+			out.readiness = READINESS_CHANGE[fate][outcome] * scale[role]
+			out.falls_back =
+				takes_losers_losses[role] &&
+				outcome in OUTCOMES_RETREATING &&
+				sides[role].can_fall_back
 		}
 
 		beaten := sides[loser]
@@ -735,12 +761,20 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		lost := &result.sides[at[loser]].stock
 		if table := LOSER_STOCK_LOST[outcome]; table > 0 {
 			report_tally_add(lost, "Lost", -table)
-			if beaten.stock < table do report_tally_add(lost, "Not carried", table - beaten.stock)
+			if scale[loser] < 1 do report_tally_scale(lost, "Engaged", scale[loser], .Percent)
+			short := -lost.total - beaten.stock
+			if short > 0 do report_tally_add(lost, "Not carried", short)
 		}
-		if share := WINNER_STOCK_CAPTURED_SHARE[outcome]; share > 0 && lost.total < 0 && victor.men > 0 {
+		if share := WINNER_STOCK_CAPTURED_SHARE[outcome];
+		   share > 0 && lost.total < 0 && men_engaged[at[winner]] > 0 {
 			captured := &result.sides[at[winner]].stock
 			report_tally_add(captured, "Lost", -lost.total)
-			report_tally_scale(captured, "Men ratio", beaten.men / victor.men, .Ratio)
+			report_tally_scale(
+				captured,
+				"Men ratio",
+				men_engaged[at[loser]] / men_engaged[at[winner]],
+				.Ratio,
+			)
 			report_tally_scale(captured, "Share", share, .Percent)
 			room := victor.baggage - victor.stock
 			if captured.total > room do report_tally_add(captured, "Baggage full", room - captured.total)
@@ -764,8 +798,8 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	{
 		outcome := result.outcome
 		standing := !result.sides[at[loser]].dissolved && !result.sides[at[winner]].dissolved
-		can_advance := standing && outcome in OUTCOMES_RETREATING
-		can_pursue := standing && outcome in OUTCOMES_PURSUABLE
+		can_advance := standing && result.sides[at[loser]].falls_back
+		can_pursue := standing && outcome in OUTCOMES_PURSUABLE && sides[winner].can_pursue
 		victor := sides[winner]
 		beaten := sides[loser]
 		follow := Choice.Follow_Stay
@@ -845,15 +879,6 @@ contest :: proc(
 @(private = "file")
 choose :: proc(report: ^Report, names: [Role]string, verbs: [Role]Report_Note) {
 	report_say(report, "% %; % %.", names[.Attacker], verbs[.Attacker], names[.Defender], verbs[.Defender])
-}
-
-@(private = "file")
-facts :: proc(side, other: Battle_Side) -> bit_set[Fact] {
-	gap := power(side, other).total - power(other, side).total
-	held := bit_set[Fact]{TEMPERAMENT_FACTS[side.temperament], ladder(gap, STRENGTH_LADDER[:])}
-	if side.spent do held += {.Spent}
-	if side.garrisoning do held += {.Garrisoning}
-	return held
 }
 
 @(private = "file")
