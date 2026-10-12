@@ -114,6 +114,31 @@ FACT_TITLES := [Fact]string {
 }
 
 @(private = "file")
+Fact_Category :: enum u8 {
+	Temperament,
+	Spent,
+	Garrisoning,
+	Strength,
+	Contact,
+	Role,
+	Onset,
+	Victory,
+}
+
+// Facts of each category; a fact may be in several
+@(private = "file", rodata)
+FACT_CATEGORIES := [Fact_Category]bit_set[Fact] {
+	.Temperament = {.Temperament_Bold, .Temperament_Steady, .Temperament_Cautious, .Temperament_Cunning},
+	.Spent       = {.Spent},
+	.Garrisoning = {.Garrisoning},
+	.Strength    = {.Strength_Superior, .Strength_Ahead, .Strength_Even, .Strength_Behind, .Strength_Outmatched},
+	.Contact     = {.Contact_Ordered, .Contact_Intercepting},
+	.Role        = {.Role_Defending},
+	.Onset       = {.Onset_Winning, .Onset_Even, .Onset_Losing, .Onset_Losing_Badly},
+	.Victory     = {.Victory_Slight, .Victory_Clear, .Victory_Heavy, .Victory_Rout},
+}
+
+@(private = "file")
 Rung :: struct {
 	from: f32,
 	fact: Fact,
@@ -920,5 +945,14 @@ decide :: proc(
 		}
 	}
 	assert(choice in DECISION_CHOICES[decision])
+
+	// Fallback fact explanation
+	if held == {} && absent == {} {
+		tested: bit_set[Fact]
+		for rule in RULES[decision] do tested += rule.all | rule.any | rule.none
+		for category in FACT_CATEGORIES {
+			if (category & tested) != {} do held += category & situation
+		}
+	}
 	return
 }
