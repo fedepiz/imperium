@@ -317,7 +317,8 @@ game_movement_left :: proc(piece: Piece_Data) -> f32 {
 
 game_supply_build :: proc(game: ^Game) {
 	sources: [dynamic; PIECE_MAX]Pathfind_Source
-	zones: [dynamic; PIECE_MAX]Pathfind_Zone
+	// Enemy zones block the spread
+	zones: [dynamic; PIECE_MAX]Disc
 	it := slot_map_iterator(&game.pieces)
 	for piece in slot_map_iterate(&it) {
 		if piece.owner == game.player {
@@ -325,22 +326,11 @@ game_supply_build :: proc(game: ^Game) {
 				append(&sources, Pathfind_Source{piece.pos, piece.supply_production})
 			}
 		} else if piece.contact_radius > 0 && .Land in piece.contact_domains {
-			append(&zones, Pathfind_Zone{{piece.pos, piece.contact_radius}, piece.hindrance})
+			append(&zones, Disc{piece.pos, piece.contact_radius})
 		}
 	}
 	spread := make([]f32, MAP_CELLS, context.temp_allocator)
 	pathfind_spread(.Land, sources[:], zones[:], SUPPLY_DECAY, spread)
-	// None inside enemy zones
-	for zone in zones {
-		disc := zone.disc
-		covered := cell_rect_clip(
-			cell_rect_covering(disc.center - disc.radius, disc.center + disc.radius),
-			MAP_SIZE,
-		)
-		for y in covered.min.y ..< covered.max.y do for x in covered.min.x ..< covered.max.x {
-			if disc_contains(disc, cell_center({x, y})) do spread[grid_index({x, y}, MAP_SIZE)] = 0
-		}
-	}
 	for value, i in spread do game.supply_network[i] = u8(clamp(value, 0, 100) + 0.5)
 }
 
@@ -907,22 +897,14 @@ game_step :: proc(
 					)
 				}
 
-				// The settlement whose granary it draws on: its own, or the one it is inside
-				settlement: ^Piece_Data
-				holder := slot_map_get(&game.pieces, piece.inside)
-				if .Granary in piece.flags do settlement = piece
-				if holder != nil && .Granary in holder.flags do settlement = holder
-
 				// Per source: supply points available here, and the men crowding them
 				points := [Supply_Source]f32 {
 					.Network  = f32(game.supply_network[at]),
 					.Foraging = army.foraging * yield,
-					.Granary  = settlement != nil ? settlement.supply_production : 0,
 				}
 				crowd := [Supply_Source]f32 {
 					.Network  = friendly_men,
 					.Foraging = all_men,
-					.Granary  = friendly_men,
 				}
 				for source in Supply_Source {
 					fed[source] = points[source] * MEN_PER_SUPPLY / crowd[source]

@@ -292,11 +292,12 @@ Pathfind_Source :: struct {
 }
 
 // Multi-source decaying spread over a domain: out[cell] = max over sources of value − decay × path cost, 0 where
-// nothing reaches. Enemy zones cost × hindrance, as in the flood. out is MAP_CELLS long.
+// nothing reaches. Cells inside blockers are never reached; a source inside one still holds its own cell. out is
+// MAP_CELLS long.
 pathfind_spread :: proc(
 	domain: Pathfind_Domain,
 	sources: []Pathfind_Source,
-	zones: []Pathfind_Zone,
+	blockers: []Disc,
 	decay: f32,
 	out: []f32,
 ) {
@@ -304,15 +305,12 @@ pathfind_spread :: proc(
 	grid := GRIDS[domain][:]
 	slice.fill(out, 0)
 
-	// Zone hindrance per cell, 0 = none; overlaps take the max
-	hindrance := make([]f32, MAP_CELLS, context.temp_allocator)
-	for zone in zones {
-		disc := zone.disc
+	// Cells inside any blocker
+	blocked := make([]bool, MAP_CELLS, context.temp_allocator)
+	for disc in blockers {
 		covered := cell_rect_clip(cell_rect_covering(disc.center - disc.radius, disc.center + disc.radius), MAP_SIZE)
 		for y in covered.min.y ..< covered.max.y do for x in covered.min.x ..< covered.max.x {
-			if !disc_contains(disc, cell_center({x, y})) do continue
-			cell := &hindrance[grid_index({x, y}, MAP_SIZE)]
-			cell^ = max(cell^, zone.hindrance)
+			if disc_contains(disc, cell_center({x, y})) do blocked[grid_index({x, y}, MAP_SIZE)] = true
 		}
 	}
 
@@ -338,7 +336,7 @@ pathfind_spread :: proc(
 			move := step_cost(grid, at, dir)
 			if move == 0 do continue
 			next := grid_index(at + DIR_OFFSET[dir], MAP_SIZE)
-			if h := hindrance[next]; h > 0 do move *= h
+			if blocked[next] do continue
 			reached := value - decay * move
 			if reached <= out[next] do continue
 			out[next] = reached

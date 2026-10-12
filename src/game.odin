@@ -99,7 +99,6 @@ Piece_Flag :: enum {
 	Can_Contain,
 	Has_Army,
 	Fortified,
-	Granary,
 	Shares_Supply,
 }
 
@@ -146,7 +145,6 @@ Piece_Turn :: struct {
 Supply_Source :: enum u8 {
 	Network,
 	Foraging,
-	Granary,
 }
 
 Faction :: struct {
