@@ -65,19 +65,19 @@ ARMY_FORAGING_DEFAULT :: 40
 ARMY_MOBILITY_DEFAULT :: 2
 
 Game :: struct {
-	terrain:     Terrain,
-	regions:     [REGIONS_MAX]Region,
-	pieces:      Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
-	step:        int,
-	factions:    [dynamic; FACTIONS_MAX]Faction,
-	characters:  [dynamic; CHARACTERS_MAX]Character,
-	turn:        int,
-	player:      Faction_Id,
-	ending:      bool,
-	contacts:    [dynamic; CONTACTS_MAX]Contact,
-	interaction: Interaction,
-	movement:    Movement,
-	supply:      [MAP_CELLS]u8,
+	terrain:        Terrain,
+	regions:        [REGIONS_MAX]Region,
+	pieces:         Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
+	step:           int,
+	factions:       [dynamic; FACTIONS_MAX]Faction,
+	characters:     [dynamic; CHARACTERS_MAX]Character,
+	turn:           int,
+	player:         Faction_Id,
+	ending:         bool,
+	contacts:       [dynamic; CONTACTS_MAX]Contact,
+	interaction:    Interaction,
+	movement:       Movement,
+	supply_network: [MAP_CELLS]u8,
 }
 
 Region_Id :: distinct u8
@@ -100,6 +100,7 @@ Piece_Flag :: enum {
 	Has_Army,
 	Fortified,
 	Granary,
+	Shares_Supply,
 }
 
 Piece_Data :: struct {
@@ -117,7 +118,7 @@ Piece_Data :: struct {
 	contact_domains:   bit_set[Pathfind_Domain],
 	body_radius:       f32,
 	hindrance:         f32,
-	supply:            f32,
+	supply_production: f32,
 	inside:            Piece_Id,
 	contains:          Piece_Id,
 	army:              Army,
@@ -475,7 +476,7 @@ game_load :: proc(
 				}
 				piece.body_radius = tbl.get_num(row, "body")
 				piece.hindrance = tbl.get_num(row, "hindrance", 1)
-				piece.supply = tbl.get_num(row, "supply")
+				piece.supply_production = tbl.get_num(row, "supply")
 				traits := tbl.get_children(row, "traits")
 				for flag in traits {
 					piece.flags += {enum_from_text(Piece_Flag, flag.text)}

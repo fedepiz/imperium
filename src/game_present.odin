@@ -180,7 +180,7 @@ game_present_map :: proc(
 
 	if mode == .Supply {
 		resize(&frame.wash, RENDER_TERRAIN_CELLS)
-		for supply, i in game.supply do frame.wash[i] = u8(u32(supply) * 255 / 100)
+		for supply, i in game.supply_network do frame.wash[i] = u8(u32(supply) * 255 / 100)
 	}
 }
 
@@ -252,8 +252,6 @@ card_breakdown :: proc(card: ^Card, tally: ^Report_Tally, total: string) -> Mayb
 			value = compact_number(f64(factor.value))
 		case .Percent:
 			value = fmt.tprintf("%.0f%%", 100 * factor.value)
-		case .Ratio:
-			value = fmt.tprintf("%.2f", factor.value)
 		}
 		if factor.op == .Scale do value = fmt.tprintf("x %s", value)
 		append(&breakdown.terms, Card_Term{string(factor.label[:]), value})

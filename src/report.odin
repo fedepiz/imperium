@@ -14,7 +14,6 @@ Report_Unit :: enum u8 {
 	Points,
 	Men,
 	Percent,
-	Ratio,
 }
 
 Report_Op :: enum u8 {

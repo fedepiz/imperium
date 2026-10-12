@@ -289,7 +289,7 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		field_set(w, "contact_domains", piece.contact_domains)
 		json_field_float(w, "body_radius", piece.body_radius)
 		json_field_float(w, "hindrance", piece.hindrance)
-		json_field_float(w, "supply", piece.supply)
+		json_field_float(w, "supply_production", piece.supply_production)
 		field_set(w, "traits", piece.flags)
 		field_piece(w, "inside", piece.inside)
 		field_piece(w, "contains", piece.contains)

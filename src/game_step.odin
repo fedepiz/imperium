@@ -39,7 +39,7 @@ FALL_BACK_BUDGET :: 10
 @(private = "file")
 CHASE_BUDGET :: 15
 @(private = "file")
-FORAGE_RADIUS :: 12
+SUPPLY_RADIUS :: 12
 @(private = "file")
 NO_GENERAL_TEMPERAMENT :: Temperament.Steady
 // Engaged share of the side outside the walls in a sortie
@@ -321,14 +321,27 @@ game_supply_build :: proc(game: ^Game) {
 	it := slot_map_iterator(&game.pieces)
 	for piece in slot_map_iterate(&it) {
 		if piece.owner == game.player {
-			if piece.supply > 0 do append(&sources, Pathfind_Source{piece.pos, piece.supply})
+			if piece.supply_production > 0 {
+				append(&sources, Pathfind_Source{piece.pos, piece.supply_production})
+			}
 		} else if piece.contact_radius > 0 && .Land in piece.contact_domains {
 			append(&zones, Pathfind_Zone{{piece.pos, piece.contact_radius}, piece.hindrance})
 		}
 	}
 	spread := make([]f32, MAP_CELLS, context.temp_allocator)
 	pathfind_spread(.Land, sources[:], zones[:], SUPPLY_DECAY, spread)
-	for value, i in spread do game.supply[i] = u8(clamp(value, 0, 100) + 0.5)
+	// None inside enemy zones
+	for zone in zones {
+		disc := zone.disc
+		covered := cell_rect_clip(
+			cell_rect_covering(disc.center - disc.radius, disc.center + disc.radius),
+			MAP_SIZE,
+		)
+		for y in covered.min.y ..< covered.max.y do for x in covered.min.x ..< covered.max.x {
+			if disc_contains(disc, cell_center({x, y})) do spread[grid_index({x, y}, MAP_SIZE)] = 0
+		}
+	}
+	for value, i in spread do game.supply_network[i] = u8(clamp(value, 0, 100) + 0.5)
 }
 
 @(private = "file")
@@ -849,15 +862,6 @@ game_step :: proc(
 		game.interaction.actor == {} &&
 		movement.marches[.Leader].piece == {}
 
-	// Per piece slot: fed by its own granary, or by the one it is inside
-	granary_fed: [PIECE_MAX]bool
-	it := slot_map_iterator(&game.pieces)
-	for piece, id in slot_map_iterate(&it) {
-		holder := slot_map_get(&game.pieces, piece.inside)
-		held := holder != nil && .Granary in holder.flags
-		granary_fed[id.index] = .Granary in piece.flags || held
-	}
-
 	pieces := slot_map_iterator(&game.pieces)
 	for piece, id in slot_map_iterate(&pieces) {
 		if .Has_Army not_in piece.flags do continue
@@ -875,23 +879,23 @@ game_step :: proc(
 		if piece.owner == game.player {
 			men := f32(army.men)
 			cell := cell_of(piece.pos)
-			network, network_efficiency, forage, forage_efficiency: f32
-			if !granary_fed[id.index] && grid_contains(cell, MAP_SIZE) && men > 0 {
+			// Per source: needs met (1 = fully), and the army's share of the men crowding it
+			fed, efficiency: [Supply_Source]f32
+			if grid_contains(cell, MAP_SIZE) && men > 0 {
 				at := grid_index(cell, MAP_SIZE)
 
-				friendly_men, all_men: f32
+				// Its own men, and nearby men sharing supply if it shares too
+				sharing: f32 = .Shares_Supply in piece.flags ? 1 : 0
+				friendly_men, all_men := men, men
 				others := slot_map_iterator(&game.pieces)
 				for other, other_id in slot_map_iterate(&others) {
-					if .Has_Army not_in other.flags || granary_fed[other_id.index] do continue
+					if other_id == id || .Shares_Supply not_in other.flags do continue
 					distance := linalg.distance(piece.pos, other.pos)
-					if distance >= FORAGE_RADIUS do continue
-					weighted := f32(other.army.men) * (1 - distance / FORAGE_RADIUS)
+					if distance >= SUPPLY_RADIUS do continue
+					weighted := sharing * f32(other.army.men) * (1 - distance / SUPPLY_RADIUS)
 					all_men += weighted
 					if other.owner == piece.owner do friendly_men += weighted
 				}
-
-				network_efficiency = men / friendly_men
-				network = f32(game.supply[at]) * MEN_PER_SUPPLY / men * network_efficiency
 
 				yield: f32
 				if game.terrain.surface[at] == 0 {
@@ -902,24 +906,35 @@ game_step :: proc(
 						f32(cover.strength) / 255,
 					)
 				}
-				forage_efficiency = men / all_men
-				forage = army.foraging * yield * MEN_PER_SUPPLY / men * forage_efficiency
+
+				// The settlement whose granary it draws on: its own, or the one it is inside
+				settlement: ^Piece_Data
+				holder := slot_map_get(&game.pieces, piece.inside)
+				if .Granary in piece.flags do settlement = piece
+				if holder != nil && .Granary in holder.flags do settlement = holder
+
+				// Per source: supply points available here, and the men crowding them
+				points := [Supply_Source]f32 {
+					.Network  = f32(game.supply_network[at]),
+					.Foraging = army.foraging * yield,
+					.Granary  = settlement != nil ? settlement.supply_production : 0,
+				}
+				crowd := [Supply_Source]f32 {
+					.Network  = friendly_men,
+					.Foraging = all_men,
+					.Granary  = friendly_men,
+				}
+				for source in Supply_Source {
+					fed[source] = points[source] * MEN_PER_SUPPLY / crowd[source]
+					efficiency[source] = men / crowd[source]
+				}
 			}
 
-			fed := network
-			army.supply_source = .Network
-			army.supply_efficiency = network_efficiency
-			if forage > network {
-				fed = forage
-				army.supply_source = .Foraging
-				army.supply_efficiency = forage_efficiency
-			}
-			if granary_fed[id.index] {
-				fed = 1
-				army.supply_source = .Granary
-				army.supply_efficiency = 1
-			}
-			army.supply = 100 * min(fed, 1)
+			best := Supply_Source.Network
+			for source in Supply_Source do if fed[source] > fed[best] do best = source
+			army.supply = 100 * min(fed[best], 1)
+			army.supply_source = best
+			army.supply_efficiency = efficiency[best]
 		}
 
 		for walk in walks {
