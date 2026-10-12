@@ -40,6 +40,8 @@ Faction_Record :: struct {
 	step:    int,
 	id:      int,
 	faction: Faction,
+	// Its culture's name
+	culture: Name,
 }
 
 @(private = "file")
@@ -55,6 +57,8 @@ Piece_Record :: struct {
 	id:      Piece_Id,
 	piece:   Piece_Data,
 	general: Character,
+	// Its culture's name
+	culture: Name,
 }
 
 @(private = "file")
@@ -88,7 +92,7 @@ rules_log_begin :: proc(game: ^Game) {
 
 	for faction, id in game.factions {
 		if id == 0 do continue
-		record := Faction_Record{game.step, id, faction}
+		record := Faction_Record{game.step, id, faction, game.cultures[faction.culture].name}
 		push(.Faction, &record)
 	}
 
@@ -101,9 +105,10 @@ rules_log_begin :: proc(game: ^Game) {
 	pieces := slot_map_iterator(&game.pieces)
 	for piece, id in slot_map_iterate(&pieces) {
 		record := Piece_Record {
-			step  = game.step,
-			id    = id,
-			piece = piece^,
+			step    = game.step,
+			id      = id,
+			piece   = piece^,
+			culture = game.cultures[piece.culture].name,
 		}
 		if piece.general != 0 do record.general = game.characters[piece.general]
 		push(.Piece, &record)
@@ -254,7 +259,7 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		write_header(w, record.step, "faction")
 		json_field_int(w, "id", i64(record.id))
 		json_field_string(w, "name", name_to_string(&record.faction.name))
-		field_enum(w, "culture", record.faction.culture)
+		json_field_string(w, "culture", name_to_string(&record.culture))
 		json_field_rgb(w, "color", record.faction.color)
 
 	case .Region:
@@ -273,7 +278,7 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		field_piece(w, "id", record.id)
 		json_field_string(w, "name", name_to_string(&piece.name))
 		field_enum(w, "icon", piece.icon)
-		field_enum(w, "culture", piece.culture)
+		json_field_string(w, "culture", name_to_string(&record.culture))
 		json_field_int(w, "owner", i64(piece.owner))
 		json_field_vec2(w, "pos", piece.pos)
 		json_key(w, "domain")

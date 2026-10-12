@@ -1,0 +1,22 @@
+# The cultures. Each has an id, a snake_case word the other files name it by, a name, and a look: the art its pawns
+# and medallions are drawn with, written as declared (Roman, Germanic). Then the buildings it can build, by id.
+
+culture = {
+	id = roman
+	name = "Roman"
+	look = Roman
+	buildings = [
+		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
+		sheep_farm, stables, barracks, palace, praetorium, curia,
+	]
+}
+
+culture = {
+	id = germanic
+	name = "Germanic"
+	look = Germanic
+	buildings = [
+		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
+		sheep_farm, stables, barracks,
+	]
+}

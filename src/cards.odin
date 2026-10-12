@@ -59,6 +59,11 @@ TILE_GAP :: 6
 TILES_PER_ROW :: 4
 @(private = "file")
 TAB_EM :: 6
+// A tile's menu: the width of its buttons, and the most rows it shows before scrolling
+@(private = "file")
+MENU_BUTTON_EM :: 13
+@(private = "file")
+MENU_ROWS_MAX :: 8
 
 @(private = "file")
 Card_Colors :: struct {
@@ -77,6 +82,7 @@ cards_ui :: proc(
 	ink: [3]f32,
 	map_mode: ^Map_Mode,
 	tab: ^Card_Tab,
+	menu: ^int,
 	input: ^Game_Input,
 ) {
 	opaque :: proc(rgb: [3]f32) -> [4]f32 {
@@ -95,24 +101,26 @@ cards_ui :: proc(
 	defer ui_style_pop()
 
 	asks: bit_set[Game_Ask]
+	town_order: Maybe(Town_Order)
 	if ui_column({width = ui_grow(), height = ui_grow(), padding = SCREEN_MARGIN}) {
 		if ui_row({width = ui_grow(), height = ui_fit()}) {
 			ui_spacer(ui_grow())
-			asks += card_ui("status card", &cards.status, text_font, title_font, colors, map_mode, nil)
+			asks += card_ui("status card", &cards.status, text_font, title_font, colors, map_mode, nil, nil, nil)
 		}
 		ui_spacer(ui_grow())
 		if ui_row({width = ui_grow(), height = ui_fit()}) {
 			if interaction, shown := &cards.interaction.?; shown {
-				asks += card_ui("interaction card", interaction, text_font, title_font, colors, nil, nil)
+				asks += card_ui("interaction card", interaction, text_font, title_font, colors, nil, nil, nil, nil)
 			}
 			ui_spacer(ui_grow())
 		}
 		ui_spacer(ui_grow())
 		if focus, shown := &cards.focus.?; shown {
-			asks += card_ui("focus card", focus, text_font, title_font, colors, nil, tab)
+			asks += card_ui("focus card", focus, text_font, title_font, colors, nil, tab, menu, &town_order)
 		}
 	}
 
+	if order, ordered := town_order.?; ordered do input.town_order = order
 	if .End_Turn in asks do input.end_turn = true
 	if .Next in asks do input.answer = .Next
 }
@@ -126,6 +134,10 @@ card_ui :: proc(
 	colors: Card_Colors,
 	map_mode: ^Map_Mode,
 	tab: ^Card_Tab,
+	// The slot whose menu is open, -1: none. Clicking a tile toggles its menu
+	menu: ^int,
+	// Set when one of its tiles' actions is clicked
+	town_order: ^Maybe(Town_Order),
 ) -> (
 	asks: bit_set[Game_Ask],
 ) {
@@ -215,6 +227,9 @@ card_ui :: proc(
 			ui_label_text(runs, {width = ui_em(LINES_EM)})
 		}
 
+		// Each tile's key: hovering it opens its breakdown, clicking it its menu
+		tile_keys: [CARD_TILES_MAX]string
+
 		// Fields, stats and tiles side by side. The focus card's body keeps one height, so switching pieces or
 		// tabs only changes its width
 		body := UI_Style {
@@ -224,7 +239,12 @@ card_ui :: proc(
 		}
 		metrics := text_font_metrics(text_font)
 		line_height := metrics.ascent - metrics.descent
-		if tab != nil do body.height = ui_px(FOCUS_ROWS * line_height + (FOCUS_ROWS - 1) * FIELD_GAP)
+		if tab != nil {
+			body_height := FOCUS_ROWS * line_height + (FOCUS_ROWS - 1) * FIELD_GAP
+			body.height = ui_px(body_height)
+			// Its tiles, two rows filling the body, keep their size whatever they hold
+			tile.height = ui_px((body_height - TILE_GAP) / 2)
+		}
 		if ui_row(body) {
 			columns := [2][]Card_Field{card.fields[:], card.stats[:]}
 			value_widths := [2]f32{FIELD_VALUE_EM, STAT_VALUE_EM}
@@ -268,23 +288,32 @@ card_ui :: proc(
 				}
 			}
 
-			// Tiles in rows sharing the body's height; one with a breakdown is keyed by it, so hovering it
-			// opens the breakdown's tooltip
+			// Tiles in rows of a fixed size; one with a breakdown is keyed by it, so hovering it opens the breakdown's
+			// tooltip
 			if len(card.tiles) > 0 {
-				if ui_column({width = ui_fit(), height = ui_grow(), gap = TILE_GAP}) {
+				if ui_column({width = ui_fit(), height = ui_fit(), gap = TILE_GAP}) {
 					for row_start := 0; row_start < len(card.tiles); row_start += TILES_PER_ROW {
-						if ui_row({width = ui_fit(), height = ui_grow(), gap = TILE_GAP}) {
+						if ui_row({width = ui_fit(), height = ui_fit(), gap = TILE_GAP}) {
 							for card_tile, offset in card.tiles[row_start:min(row_start + TILES_PER_ROW, len(card.tiles))] {
+								slot := row_start + offset
 								// Panels are clickable, so every tile needs a key
-								key := fmt.tprintf("%s tile %d", label, row_start + offset)
+								tile_keys[slot] = fmt.tprintf("%s tile %d", label, slot)
 								if index, has_breakdown := card_tile.breakdown.?; has_breakdown {
-									key = breakdown_key(index)
+									tile_keys[slot] = breakdown_key(index)
 								}
 								style := tile
 								if card_tile.name == "" do style.border = colors.faded_ink
-								if ui_panel(key, style) {
-									if card_tile.name != "" do ui_label(card_tile.name, {width = ui_grow(), text_align = .Center})
+								if card_tile.disabled {
+									style.disabled = true
+									style.background = colors.active_paper
 								}
+								if ui_panel(tile_keys[slot], style) {
+									if card_tile.name != "" do ui_label(card_tile.name, {width = ui_grow(), text_align = .Center})
+									if card_tile.project != "" {
+										ui_label(card_tile.project, {width = ui_grow(), text_align = .Center, text_color = colors.faded_ink})
+									}
+								}
+								if menu != nil && ui_signal(tile_keys[slot]).pressed do menu^ = menu^ == slot ? -1 : slot
 							}
 						}
 					}
@@ -292,29 +321,72 @@ card_ui :: proc(
 			}
 		}
 
+		// The open tile's menu, under the tile: what can be done with the slot, scrolling past MENU_ROWS_MAX
+		if menu != nil && menu^ >= 0 && menu^ < len(card.tiles) {
+			menu_tile := &card.tiles[menu^]
+			open := true
+			if ui_popup("tile menu", tile_keys[menu^], &open, tooltip) {
+				ui_label(menu_tile.name != "" ? menu_tile.name : "Empty slot", {text_color = colors.faded_ink})
+				// A plain column when every action fits, a scrolling one past MENU_ROWS_MAX
+				// Each a button with its detail; hovered, what its building does
+				menu_rows :: proc(
+					actions: []Card_Tile_Action,
+					breakdowns: []Card_Breakdown,
+					button: UI_Style,
+					tooltip: UI_Style,
+					colors: Card_Colors,
+					open: ^bool,
+					town_order: ^Maybe(Town_Order),
+				) {
+					for item, i in actions {
+						if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
+							style := button
+							style.width = ui_em(MENU_BUTTON_EM)
+							style.disabled = !item.enabled
+							signal := ui_button(fmt.tprintf("%s##tile action %d", item.label, i), style)
+							if signal.pressed {
+								open^ = false
+								town_order^ = item.order
+							}
+							ui_label(item.detail, {text_color = colors.faded_ink})
+							if index, has_breakdown := item.breakdown.?; has_breakdown {
+								if ui_tooltip(fmt.tprintf("tile action tip %d", i), signal.hovered, tooltip) {
+									breakdown_ui(&breakdowns[index], colors)
+								}
+							}
+						}
+					}
+				}
+				if len(menu_tile.actions) > MENU_ROWS_MAX {
+					button_height := line_height + 2 * action.padding.?.y
+					list := UI_Style {
+						width      = ui_fit(),
+						height     = ui_px(MENU_ROWS_MAX * button_height + (MENU_ROWS_MAX - 1) * FIELD_GAP),
+						gap        = FIELD_GAP,
+						background = colors.paper,
+						border     = colors.faded_ink,
+					}
+					// The bar's track and thumb
+					ui_style_push({background = colors.active_paper, border = colors.ink})
+					defer ui_style_pop()
+					if ui_scroll_panel("tile menu list", list) {
+						menu_rows(menu_tile.actions[:], card.breakdowns[:], action, tooltip, colors, &open, town_order)
+					}
+				} else {
+					if ui_column({width = ui_fit(), height = ui_fit(), gap = FIELD_GAP}) {
+						menu_rows(menu_tile.actions[:], card.breakdowns[:], action, tooltip, colors, &open, town_order)
+					}
+				}
+			}
+			if !open do menu^ = -1
+		}
+
+		// No hover tooltips while a tile's menu is open
+		menu_open := menu != nil && menu^ >= 0
 		for &breakdown, index in card.breakdowns {
 			key := breakdown_key(index)
-			if ui_tooltip(fmt.tprintf("breakdown tip %d", index), ui_signal(key).hovered, tooltip) {
-				if breakdown.note != "" do ui_label(breakdown.note)
-				for term in breakdown.terms {
-					if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
-						ui_label(term.label, {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
-						ui_label(term.value, {width = ui_em(STAT_VALUE_EM)})
-					}
-				}
-				if breakdown.total != "" {
-					rule := UI_Style {
-						width      = ui_grow(),
-						height     = ui_px(1),
-						background = colors.ink,
-						thickness  = 0,
-					}
-					if ui_panel("rule", rule) {}
-					if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
-						ui_label("Total", {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
-						ui_label(breakdown.total, {width = ui_em(STAT_VALUE_EM)})
-					}
-				}
+			if ui_tooltip(fmt.tprintf("breakdown tip %d", index), ui_signal(key).hovered && !menu_open, tooltip) {
+				breakdown_ui(&breakdown, colors)
 			}
 		}
 
@@ -339,4 +411,29 @@ card_ui :: proc(
 		}
 	}
 	return
+}
+
+// A breakdown's contents in its tooltip: its note, its terms, and its total under a rule
+@(private = "file")
+breakdown_ui :: proc(breakdown: ^Card_Breakdown, colors: Card_Colors) {
+	if breakdown.note != "" do ui_label(breakdown.note)
+	for term in breakdown.terms {
+		if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
+			ui_label(term.label, {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
+			ui_label(term.value, {width = ui_em(STAT_VALUE_EM)})
+		}
+	}
+	if breakdown.total != "" {
+		rule := UI_Style {
+			width      = ui_grow(),
+			height     = ui_px(1),
+			background = colors.ink,
+			thickness  = 0,
+		}
+		if ui_panel("rule", rule) {}
+		if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
+			ui_label("Total", {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
+			ui_label(breakdown.total, {width = ui_em(STAT_VALUE_EM)})
+		}
+	}
 }

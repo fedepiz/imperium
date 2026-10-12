@@ -226,6 +226,8 @@ run_windowed :: proc(options: Options) {
 	focus: Piece_Id
 	map_mode: Map_Mode
 	card_tab: Card_Tab
+	// The focus card's slot whose menu is open. -1: none
+	card_menu := -1
 	game_input: Game_Input
 	unstepped: f32
 	commands_active := options.commands != ""
@@ -369,6 +371,7 @@ run_windowed :: proc(options: Options) {
 		if select_click {
 			index, found := map_pawns_pick(&GLOBAL.pawns, view, window_size, input.cursor, -1)
 			focus = found ? GLOBAL.pawn_pieces[index] : {}
+			card_menu = -1
 		}
 		if order_click && focus != {} {
 			focus_index := -1
@@ -438,6 +441,7 @@ run_windowed :: proc(options: Options) {
 			map_style.ink,
 			&map_mode,
 			&card_tab,
+			&card_menu,
 			&game_input,
 		)
 		tweak_ui(tweaks_toggled, FONT_TWEAK)

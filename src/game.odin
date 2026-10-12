@@ -61,6 +61,7 @@ PIECE_MAX :: 1024
 FACTIONS_MAX :: 16
 CHARACTERS_MAX :: 1024
 BUILDING_KINDS_MAX :: 64
+CULTURES_MAX :: 16
 // The most building slots a settlement has
 TOWN_SLOTS_MAX :: 8
 
@@ -68,22 +69,25 @@ ARMY_FORAGING_DEFAULT :: 40
 ARMY_MOBILITY_DEFAULT :: 2
 
 Game :: struct {
-	terrain:         Terrain,
-	regions:         [REGIONS_MAX]Region,
-	pieces:          Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
-	step:            int,
-	factions:        [dynamic; FACTIONS_MAX]Faction,
-	characters:      [dynamic; CHARACTERS_MAX]Character,
-	building_kinds:  [dynamic; BUILDING_KINDS_MAX]Building_Kind,
-	turn:            int,
-	player:          Faction_Id,
-	ending:          bool,
-	contacts:        [dynamic; CONTACTS_MAX]Contact,
-	interaction:     Interaction,
-	movement:        Movement,
-	supply_network:  [MAP_CELLS]u8,
+	terrain:           Terrain,
+	regions:           [REGIONS_MAX]Region,
+	pieces:            Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
+	step:              int,
+	factions:          [dynamic; FACTIONS_MAX]Faction,
+	characters:        [dynamic; CHARACTERS_MAX]Character,
+	building_kinds:    [dynamic; BUILDING_KINDS_MAX]Building_Kind,
+	cultures:          [dynamic; CULTURES_MAX]Culture,
+	// Which building kinds each culture can build
+	culture_buildings: [CULTURES_MAX][BUILDING_KINDS_MAX]bool,
+	turn:              int,
+	player:            Faction_Id,
+	ending:            bool,
+	contacts:          [dynamic; CONTACTS_MAX]Contact,
+	interaction:       Interaction,
+	movement:          Movement,
+	supply_network:    [MAP_CELLS]u8,
 	// The playing faction's control over the land, 0..100
-	control_network: [MAP_CELLS]u8,
+	control_network:   [MAP_CELLS]u8,
 }
 
 Region_Id :: distinct u8
@@ -114,7 +118,7 @@ Piece_Data :: struct {
 	name:              Name,
 	pos:               [2]f32,
 	icon:              Map_Icon,
-	culture:           Map_Culture,
+	culture:           Culture_Id,
 	owner:             Faction_Id,
 	general:           Character_Id,
 	domain:            Maybe(Pathfind_Domain),
@@ -152,7 +156,9 @@ Town :: struct {
 	fertility:            f32,
 	// Its kind's: at most this many buildings
 	slots:                int,
-	buildings:            [dynamic; TOWN_SLOTS_MAX]Building_Kind_Id,
+	// The building in each slot, 0: empty. And what each slot is turning into
+	buildings:            [TOWN_SLOTS_MAX]Building_Kind_Id,
+	projects:             [TOWN_SLOTS_MAX]Project,
 	// Each step, from its buildings and population. Per turn
 	// The population its buildings need as staff, and the share of it they have, 0..1: every output is scaled by it
 	staff_needed:         f32,
@@ -175,6 +181,26 @@ Town :: struct {
 }
 
 Building_Kind_Id :: distinct u8
+
+// What a slot is turning into
+Project :: struct {
+	active:     bool,
+	// The building it becomes: new on an empty slot, or the next level of the one there, which keeps working until then.
+	// 0: the slot is cleared, demolished
+	kind:       Building_Kind_Id,
+	// Turns left
+	turns_left: f32,
+}
+
+Culture_Id :: distinct u8
+
+// A culture, from cultures.txt
+Culture :: struct {
+	id:   Name,
+	name: Name,
+	// The art its pawns and medallions are drawn with
+	look: Culture_Look,
+}
 
 // Local, on or off: what a town's buildings provide
 Feature :: enum u8 {
@@ -199,6 +225,14 @@ Building_Kind :: struct {
 	// 100
 	control:        f32,
 	features:       bit_set[Feature],
+	// Building it: coin paid at the start, labour used each turn, and turns
+	build_coin:     f32,
+	build_labour:   f32,
+	build_turns:    f32,
+	// The next level, which it can be upgraded into, and the level before, upgraded into it. 0: none, and 0 for the
+	// first level of a chain, the one built on an empty slot
+	upgrade:        Building_Kind_Id,
+	upgraded_from:  Building_Kind_Id,
 }
 
 Piece_Turn :: struct {
@@ -213,7 +247,7 @@ Supply_Source :: enum u8 {
 
 Faction :: struct {
 	name:     Name,
-	culture:  Map_Culture,
+	culture:  Culture_Id,
 	color:    [3]f32,
 	treasury: f32,
 	// Each step, from its towns. Per turn
@@ -519,6 +553,9 @@ game_load :: proc(
 		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
 
 		append(&game.building_kinds, Building_Kind{})
+		// Each kind's upgrade, by id: resolved once every kind is in, as it may come later in the file
+		upgrades := make([dynamic]string, 0, len(root.children) + 1, context.temp_allocator)
+		append(&upgrades, "")
 		for row in root.children {
 			assert(row.key == "building")
 			// A mistyped effect would read as 0: every key must be a field
@@ -536,12 +573,56 @@ game_load :: proc(
 				income         = tbl.get_num(row, "income"),
 				upkeep         = tbl.get_num(row, "upkeep"),
 				control        = tbl.get_num(row, "control"),
+				build_coin     = tbl.get_num(row, "build_coin"),
+				build_labour   = tbl.get_num(row, "build_labour"),
+				build_turns    = tbl.get_num(row, "build_turns"),
 			}
 			features := tbl.get_children(row, "features")
 			for feature in features {
 				kind.features += {enum_from_text(Feature, feature.text)}
 			}
 			fmt.assertf(append(&game.building_kinds, kind) == 1, "%s: more than %d building kinds", path, BUILDING_KINDS_MAX - 1)
+			append(&upgrades, tbl.get_text(row, "upgrade"))
+		}
+
+		for upgrade, k in upgrades {
+			if upgrade == "" do continue
+			for &other, o in game.building_kinds {
+				if o > 0 && name_to_string(&other.id) == upgrade do game.building_kinds[k].upgrade = Building_Kind_Id(o)
+			}
+			next := game.building_kinds[k].upgrade
+			fmt.assertf(next != 0, "%s: no building %q to upgrade into", path, upgrade)
+			game.building_kinds[next].upgraded_from = Building_Kind_Id(k)
+		}
+	}
+
+	// Load the cultures, and which buildings each can build; culture 0 is none
+	{
+		path := fmt.tprintf("assets/scenarios/%s/cultures.txt", scenario_name)
+		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
+		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+
+		append(&game.cultures, Culture{})
+		for row in root.children {
+			assert(row.key == "culture")
+			culture_id := Culture_Id(len(game.cultures))
+			culture := Culture {
+				id   = name_from_string(tbl.get_text(row, "id")),
+				name = name_from_string(tbl.get_text(row, "name")),
+				look = enum_from_text(Culture_Look, tbl.get_text(row, "look")),
+			}
+			fmt.assertf(append(&game.cultures, culture) == 1, "%s: more than %d cultures", path, CULTURES_MAX - 1)
+
+			buildings := tbl.get_children(row, "buildings")
+			for building in buildings {
+				found := false
+				for &kind, k in game.building_kinds {
+					if k == 0 || name_to_string(&kind.id) != building.text do continue
+					game.culture_buildings[culture_id][k] = true
+					found = true
+				}
+				fmt.assertf(found, "%s: no building %q", path, building.text)
+			}
 		}
 	}
 
@@ -589,7 +670,10 @@ game_load :: proc(
 
 			case "faction":
 				owner := Faction_Id(len(game.factions))
-				culture := enum_from_text(Map_Culture, tbl.get_text(row, "culture"))
+				culture: Culture_Id
+				culture_text := tbl.get_text(row, "culture")
+				for &known, c in game.cultures do if c > 0 && name_to_string(&known.id) == culture_text do culture = Culture_Id(c)
+				fmt.assertf(culture != 0, "%s: no culture %q", path, culture_text)
 				append(
 					&game.factions,
 					Faction {
@@ -617,7 +701,9 @@ game_load :: proc(
 					piece.owner = owner
 					piece.culture = culture
 					if own_culture, has_own := tbl.get_text(entry, "culture"); has_own {
-						piece.culture = enum_from_text(Map_Culture, own_culture)
+						piece.culture = 0
+						for &known, c in game.cultures do if c > 0 && name_to_string(&known.id) == own_culture do piece.culture = Culture_Id(c)
+						fmt.assertf(piece.culture != 0, "%s: no culture %q", path, own_culture)
 					}
 					piece.pos = tbl.get_num_array(entry, "at", 2)
 					if .Has_Town in piece.flags {
@@ -627,13 +713,13 @@ game_load :: proc(
 
 						buildings := tbl.get_children(entry, "buildings")
 						fmt.assertf(len(buildings) <= piece.town.slots, "%s: more buildings than slots in %s", path, name_to_string(&piece.name))
-						for building in buildings {
+						for building, slot in buildings {
 							kind_id: Building_Kind_Id
 							for &kind, k in game.building_kinds {
 								if k > 0 && name_to_string(&kind.id) == building.text do kind_id = Building_Kind_Id(k)
 							}
 							fmt.assertf(kind_id != 0, "%s: no building %q", path, building.text)
-							append(&piece.town.buildings, kind_id)
+							piece.town.buildings[slot] = kind_id
 						}
 					}
 

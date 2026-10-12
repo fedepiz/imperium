@@ -617,7 +617,8 @@ ui_end :: proc(input: UI_Input, dt: f32, quads: ^[dynamic; $N]Render_Quad) {
 	update_interaction(input)
 
 	// Tooltips: kept open while wanted open, or while the mouse is over them or one opened from them, and for
-	// TOOLTIP_GRACE after, to cross the gap. Closed when no longer built
+	// TOOLTIP_GRACE after, to cross the gap; those that do not linger only while wanted open. Closed when no longer
+	// built
 	{
 		// The hovered tooltip, and those it was opened from
 		chain: [TOOLTIPS_MAX]Key
@@ -631,7 +632,7 @@ ui_end :: proc(input: UI_Input, dt: f32, quads: ^[dynamic; $N]Render_Quad) {
 		}
 		for &tooltip in UI.tooltips {
 			if tooltip.key == KEY_NIL {continue}
-			if !tooltip.built {
+			if !tooltip.built || (!tooltip.lingers && !tooltip.wanted) {
 				tooltip = {}
 				continue
 			}
@@ -1584,14 +1585,19 @@ Tooltip :: struct {
 	// This frame: built, and wanted open
 	built:     bool,
 	wanted:    bool,
+	// Kept open past being wanted: while the mouse is over it, and for TOOLTIP_GRACE. Set from its contents as they are
+	// built: only one holding something to reach lingers, and one with nothing closes as soon as it is not wanted
+	lingers:   bool,
 	// Seconds since it was last wanted open, or the mouse was last over it or a tooltip opened from it
 	idle:      f32,
 }
 
 // A column floating over everything next to where the mouse was when it opened, kept inside the window.
-// Opens while want_open, and stays open while the mouse is over it, or over a tooltip opened from
-// it, and for a moment after. Returns true while open: build its contents then. Built inside another
-// tooltip, it is opened from that one. The label is only the key
+// Opens while want_open. If it holds something to reach (a button, an input, scrolling, or keyed text
+// opening a tooltip of its own), it stays open while the mouse is over it, or over a tooltip opened from
+// it, and for a moment after; otherwise it closes as soon as it is not wanted open. Returns true while
+// open: build its contents then. Built inside another tooltip, it is opened from that one. The label is
+// only the key
 @(deferred_out = tooltip_end)
 ui_tooltip :: proc(label: string, want_open: bool, style := UI_Style{}) -> bool {
 	key := key_from_string(label)
@@ -1641,6 +1647,18 @@ ui_tooltip :: proc(label: string, want_open: bool, style := UI_Style{}) -> bool 
 @(private = "file")
 tooltip_end :: proc(open: bool) {
 	if open {
+		// It lingers if anything built in it can be reached
+		reachable :: proc(id: Id) -> bool {
+			REACHED :: bit_set[UI_Box_Flag]{.Hot_Effects, .Focusable, .Hover_Text, .Scroll_X, .Scroll_Y}
+			if UI.boxes[id].flags & REACHED != {} {return true}
+			for child := UI.boxes[id].child_first; child != 0; child = UI.boxes[child].sibling_next {
+				if reachable(child) {return true}
+			}
+			return false
+		}
+		key := UI.tooltip_stack[UI.tooltip_depth - 1]
+		for &tooltip in UI.tooltips do if tooltip.key == key do tooltip.lingers = reachable(parent_top())
+
 		UI.tooltip_depth -= 1
 		// Ends the tooltip
 		parent_pop()
@@ -1752,6 +1770,57 @@ ui_combo :: proc(
 		}
 	}
 	return signal
+}
+
+// A column floating over everything under the box keyed anchor, as laid out last frame, kept inside the window: above
+// it when there is no room below. While open^, returns true: build its contents then. Any press outside it closes it,
+// setting open^ false; a press on the anchor is left to the caller, which opens it. The label is only the key
+@(deferred_in_out = popup_end)
+ui_popup :: proc(label: string, anchor: string, open: ^bool, style := UI_Style{}) -> bool {
+	if !open^ {return false}
+	key := key_from_string(label)
+	assert(key != KEY_NIL, "popups need a non-empty label")
+
+	// Last frame's layouts: the anchor's, and the popup's own size
+	under := &UI.boxes[hashtable_find(&UI.key_hash_table, key_from_string(anchor))]
+	size := UI.boxes[hashtable_find(&UI.key_hash_table, key)].size_computed
+	position := under.pos_computed + {0, under.size_computed.y}
+	if position.y + size.y > UI.viewport.y {
+		position.y = under.pos_computed.y - size.y
+	}
+	position.x = min(position.x, UI.viewport.x - size.x)
+	position = {max(0, position.x), max(0, position.y)}
+
+	parent_push(UI.overlay)
+	ui_style_next(style)
+	id, _ := box_make(key, {position = position})
+	box := &UI.boxes[id]
+	box.flags += {.Floating, .Background, .Border, .Clickable}
+	box.child_axis = .Y
+	parent_push(id)
+	return true
+}
+
+@(private = "file")
+popup_end :: proc(label: string, anchor: string, open: ^bool, style: UI_Style, shown: bool) {
+	if !shown {return}
+	parent_pop()
+	parent_pop()
+
+	// After its contents, so a press on one of them was read before it closes
+	if UI.pressed_any {
+		key := key_from_string(label)
+		inside := false
+		for at := hashtable_find(&UI.key_hash_table, UI.pressed); at != 0; at = UI.boxes[at].parent {
+			if UI.boxes[at].key == key {
+				inside = true
+				break
+			}
+		}
+		if !inside && UI.pressed != key_from_string(anchor) {
+			open^ = false
+		}
+	}
 }
 
 // A track that fills from the left up to value, between lo and hi. Pressing or dragging on it sets the value from where

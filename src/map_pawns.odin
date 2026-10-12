@@ -14,7 +14,7 @@ Map_Pawn :: struct {
 	// Centre, in cells
 	pos:         [2]f32,
 	icon:        Map_Icon,
-	culture:     Map_Culture,
+	look:        Culture_Look,
 	// Tinted in Map_Pawn_Style.highlight
 	highlighted: bool,
 	// Tint swings to Map_Pawn_Style.pulse and back
@@ -45,7 +45,7 @@ Map_Icon :: enum {
 	Fleet,
 }
 
-Map_Culture :: enum {
+Culture_Look :: enum {
 	Roman,
 	Germanic,
 }
@@ -54,7 +54,7 @@ Map_Culture :: enum {
 Map_Pawns :: struct {
 	// This frame's pawns. Past the capacity, pawns are dropped
 	scene:       [dynamic; MAP_PAWNS_MAX]Map_Pawn,
-	images:      [Pawn_Set][Map_Culture][Map_Icon]Pawn_Image,
+	images:      [Pawn_Set][Culture_Look][Map_Icon]Pawn_Image,
 	label_font:  Text_Font_Id,
 	// 0: pictures. 1: medallions
 	medallion_t: f32,
@@ -76,14 +76,14 @@ Pawn_Set :: enum {
 	Medallion,
 }
 
-// Images: <set>/<culture>_<icon>, and <set>/<culture>_<icon>_fill
+// Images: <set>/<look>_<icon>, and <set>/<look>_<icon>_fill
 @(private = "file", rodata)
 SET_NAMES := [Pawn_Set]string {
 	.Picture   = "pawns",
 	.Medallion = "medallions",
 }
 @(private = "file", rodata)
-CULTURE_NAMES := [Map_Culture]string {
+LOOK_NAMES := [Culture_Look]string {
 	.Roman    = "roman",
 	.Germanic = "germanic",
 }
@@ -132,8 +132,8 @@ LABEL_HALO :: 1.5
 LABEL_HALO_SHIFTS := [8][2]f32{{-1, -1}, {0, -1}, {1, -1}, {-1, 0}, {1, 0}, {-1, 1}, {0, 1}, {1, 1}}
 
 map_pawns_image_paths :: proc(paths: ^[dynamic; ASSETS_IMAGES_MAX]string) {
-	for set in Pawn_Set do for culture in Map_Culture do for icon in Map_Icon {
-		drawing := fmt.tprintf("%s/%s_%s", SET_NAMES[set], CULTURE_NAMES[culture], ICON_NAMES[icon])
+	for set in Pawn_Set do for look in Culture_Look do for icon in Map_Icon {
+		drawing := fmt.tprintf("%s/%s_%s", SET_NAMES[set], LOOK_NAMES[look], ICON_NAMES[icon])
 		append(paths, drawing, fmt.tprintf("%s_fill", drawing))
 	}
 }
@@ -141,7 +141,7 @@ map_pawns_image_paths :: proc(paths: ^[dynamic; ASSETS_IMAGES_MAX]string) {
 map_pawns_build :: proc(pawns: ^Map_Pawns, image_rects: []Extents, label_font: Text_Font_Id) {
 	pawns.label_font = label_font
 	next := 0
-	for &cultures in pawns.images do for &icons in cultures do for &image in icons {
+	for &looks in pawns.images do for &icons in looks do for &image in icons {
 		drawing := image_rects[next]
 		fill := image_rects[next + 1]
 		next += 2
@@ -178,7 +178,7 @@ map_pawns_pick :: proc(
 	world := view.center + (point - window / 2) / view.zoom
 	for pawn, i in pawns.scene {
 		if i == skipped do continue
-		half := sprite_half_size(pawns.images[set][pawn.culture][pawn.icon], set, pawn.icon)
+		half := sprite_half_size(pawns.images[set][pawn.look][pawn.icon], set, pawn.icon)
 		if abs(world.x - pawn.pos.x) > half.x || abs(world.y - pawn.pos.y) > half.y do continue
 		index = i
 		found = true
@@ -254,7 +254,7 @@ map_pawns_quads :: proc(
 			[2]f32{visible.x_max - visible.x_min, visible.y_max - visible.y_min} * VIEW_TOLERANCE
 		for pawn, index in pawns.scene {
 			for weight, set in weights {
-				image := pawns.images[set][pawn.culture][pawn.icon]
+				image := pawns.images[set][pawn.look][pawn.icon]
 				if weight <= 0 || image.drawing.x_max <= image.drawing.x_min do continue
 				half := sprite_half_size(image, set, pawn.icon)
 				lo := pawn.pos - half

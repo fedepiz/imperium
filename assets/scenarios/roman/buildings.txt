@@ -6,11 +6,24 @@
 #   income, upkeep: coin per turn into its owner's treasury, and out of it
 #   control: radiated to its owner's towns, less their distance. A town sums what reaches it, up to 100
 #   features: the local features it provides, written as declared (Horses, Drill)
-# A negative food or labour is consumed.
+#   upgrade: the building it can be upgraded into, by id: its next level
+#   build_labour, build_turns, build_coin: building it uses labour each turn for build_turns turns, and coin at the
+#   start
+# A negative food or labour is consumed; a town using more labour than it makes runs a deficit. Income is scaled by its
+# town's control.
 
-building = { id = farm        name = "Farm"        population = 2  food_fertility = 2  labour = 1 }
-building = { id = herds       name = "Herds"       population = 1  food = 2            labour = 1 }
-building = { id = stables     name = "Stables"     population = 1  upkeep = 1  features = [Horses] }
-building = { id = barracks    name = "Barracks"    population = 2  upkeep = 1  features = [Drill] }
-building = { id = palace      name = "Palace"      population = 3  upkeep = 4  control = 100 }
-building = { id = praetorium  name = "Praetorium"  population = 2  upkeep = 2  control = 60 }
+
+building = { id = wheat_fields     name = "Wheat Fields"     population = 2  food_fertility = 2    labour = 1  upgrade = wheat_farm  build_labour = 2  build_turns = 2 }
+building = { id = wheat_farm       name = "Wheat Farm"       population = 3  food_fertility = 2.5  labour = 1  upgrade = wheat_mill  build_labour = 3  build_turns = 3 }
+building = { id = wheat_mill       name = "Wheat Mill"       population = 4  food_fertility = 3    labour = 1  income = 1  build_labour = 4  build_turns = 4 }
+building = { id = cattle_herds     name = "Cattle Herds"     population = 1  food = 1  food_fertility = 0.5  labour = 1  income = 0.5  upgrade = cattle_pastures  build_labour = 1  build_turns = 2 }
+building = { id = cattle_pastures  name = "Cattle Pastures"  population = 2  food = 2  food_fertility = 1    labour = 1  income = 1    upgrade = cattle_ranch  build_labour = 2  build_turns = 3 }
+building = { id = cattle_ranch     name = "Cattle Ranch"     population = 3  food = 3  food_fertility = 1.5  labour = 1  income = 1.5  build_labour = 3  build_turns = 4 }
+building = { id = sheep_flocks     name = "Sheep Flocks"     population = 1  food = 1  labour = 1  income = 1  upgrade = sheep_pens  build_labour = 1  build_turns = 1 }
+building = { id = sheep_pens       name = "Sheep Pens"       population = 2  food = 2  labour = 1  income = 2  upgrade = sheep_farm  build_labour = 2  build_turns = 2 }
+building = { id = sheep_farm       name = "Sheep Farm"       population = 3  food = 3  labour = 1  income = 3  build_labour = 3  build_turns = 3 }
+building = { id = stables          name = "Stables"          population = 1  upkeep = 1  features = [Horses]  build_labour = 2  build_turns = 2 }
+building = { id = barracks         name = "Barracks"         population = 2  upkeep = 1  features = [Drill]  build_labour = 3  build_turns = 3 }
+building = { id = palace           name = "Palace"           population = 3  upkeep = 4  control = 100  build_labour = 4  build_turns = 5  build_coin = 20 }
+building = { id = praetorium       name = "Praetorium"       population = 2  upkeep = 2  control = 60  build_labour = 3  build_turns = 4  build_coin = 10 }
+building = { id = curia            name = "Curia"            population = 2  labour = -3  income = 3  build_labour = 2  build_turns = 3 }

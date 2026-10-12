@@ -6,10 +6,11 @@ import "core:strings"
 
 CARD_LINES_MAX :: REPORT_LINES_MAX
 CARD_PARTS_MAX :: REPORT_PARTS_MAX
-CARD_BREAKDOWNS_MAX :: 48
+CARD_BREAKDOWNS_MAX :: 128
 CARD_FIELDS_MAX :: 16
 CARD_ACTIONS_MAX :: 4
 CARD_TILES_MAX :: 16
+CARD_TILE_ACTIONS_MAX :: BUILDING_KINDS_MAX
 
 Map_Mode :: enum u8 {
 	Political,
@@ -113,6 +114,24 @@ Card_Action :: struct {
 Card_Tile :: struct {
 	name:      string,
 	breakdown: Maybe(int),
+	// Not a slot this settlement has
+	disabled:  bool,
+	// Its project under way, if any
+	project:   string,
+	// Offered when it is clicked
+	actions:   [dynamic; CARD_TILE_ACTIONS_MAX]Card_Tile_Action,
+}
+
+// Something to do with a slot: build, upgrade, demolish
+Card_Tile_Action :: struct {
+	label:     string,
+	// Its cost, or what it does
+	detail:    string,
+	enabled:   bool,
+	// What the building it makes does, on hover
+	breakdown: Maybe(int),
+	// Sent when it is clicked
+	order:     Town_Order,
 }
 
 Card :: struct {
@@ -250,7 +269,7 @@ game_present_pawns :: proc(
 		pawn := Map_Pawn {
 			pos         = piece.pos,
 			icon        = piece.icon,
-			culture     = piece.culture,
+			look        = game.cultures[piece.culture].look,
 			highlighted = engaged,
 			pulsing     = id == focus,
 			label       = name_to_string(&piece.name),
@@ -287,6 +306,26 @@ card_breakdown :: proc(card: ^Card, tally: ^Report_Tally, total: string) -> Mayb
 		}
 		if factor.op == .Scale do value = fmt.tprintf("x %s", value)
 		append(&breakdown.terms, Card_Term{string(factor.label[:]), value})
+	}
+	if append(&card.breakdowns, breakdown) == 0 do return nil
+	return len(card.breakdowns) - 1
+}
+
+// What a building does, as a breakdown on the card: for a slot's building, and for one that could be built. Food is
+// given, as it depends on the town
+@(private = "file")
+card_building_breakdown :: proc(card: ^Card, kind: ^Building_Kind, food: f32) -> Maybe(int) {
+	breakdown: Card_Breakdown
+	append(&breakdown.terms, Card_Term{"Population", fmt.tprintf("%.0f", kind.population)})
+	if food != 0 do append(&breakdown.terms, Card_Term{"Food", fmt.tprintf("%+.0f", food)})
+	if kind.labour != 0 do append(&breakdown.terms, Card_Term{"Labour", fmt.tprintf("%+.0f", kind.labour)})
+	if kind.income != 0 do append(&breakdown.terms, Card_Term{"Income", fmt.tprintf("%+.1f", kind.income)})
+	if kind.upkeep != 0 do append(&breakdown.terms, Card_Term{"Upkeep", fmt.tprintf("%.0f", kind.upkeep)})
+	if kind.control != 0 do append(&breakdown.terms, Card_Term{"Control", fmt.tprintf("%.0f", kind.control)})
+	if kind.features != {} {
+		names := make([dynamic]string, context.temp_allocator)
+		for feature in kind.features do append(&names, fmt.tprint(feature))
+		append(&breakdown.terms, Card_Term{"Features", strings.join(names[:], ", ", context.temp_allocator)})
 	}
 	if append(&card.breakdowns, breakdown) == 0 do return nil
 	return len(card.breakdowns) - 1
@@ -367,7 +406,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 		is_army := .Has_Army in piece.flags
 		append(&card.fields, Card_Field{label = "Type", value = ICON_TITLES[piece.icon]})
 		append(&card.fields, Card_Field{label = "Faction", value = faction_title(game, piece.owner)})
-		append(&card.fields, Card_Field{label = "Culture", value = fmt.tprint(piece.culture)})
+		append(&card.fields, Card_Field{label = "Culture", value = name_to_string(&game.cultures[piece.culture].name)})
 		statuses := make([dynamic]string, context.temp_allocator)
 		if is_army && army.spent do append(&statuses, "Spent")
 		if piece.inside != {} do append(&statuses, "Garrisoning")
@@ -463,30 +502,100 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			features := len(feature_names) > 0 ? strings.join(feature_names[:], ", ", context.temp_allocator) : "None"
 			append(&card.stats, Card_Field{label = "Features", value = features})
 
-			// A tile per slot: its building, with what it does here on hover, or empty
-			for kind_id, slot in town.buildings {
-				kind := &game.building_kinds[kind_id]
-				breakdown: Card_Breakdown
-				append(&breakdown.terms, Card_Term{"Population", fmt.tprintf("%.0f", kind.population)})
-				if town.slot_food[slot] != 0 {
-					append(&breakdown.terms, Card_Term{"Food", fmt.tprintf("%+.0f", town.slot_food[slot])})
+			// The tiles: two rows, a town's slots filling the first columns of both, the rest disabled. A slot shows its
+			// building, with what it does here on hover, or is empty. Clicked, it offers what can be built there
+			columns := town.slots / 2
+			// Only the playing faction acts on its towns
+			acting := piece.owner == game.player
+			treasury := game.factions[piece.owner].treasury
+			// What building a kind costs, and whether the treasury can pay its coin
+			Cost :: struct {
+				detail:  string,
+				payable: bool,
+			}
+			cost_of :: proc(kind: ^Building_Kind, treasury: f32) -> Cost {
+				detail := fmt.tprintf("%.0f labour a turn, %.0f turns", kind.build_labour, kind.build_turns)
+				if kind.build_coin > 0 do detail = fmt.tprintf("%s, %.0f coin", detail, kind.build_coin)
+				return {detail, treasury >= kind.build_coin}
+			}
+			for position in 0 ..< TOWN_SLOTS_MAX {
+				row := position / (TOWN_SLOTS_MAX / 2)
+				column := position % (TOWN_SLOTS_MAX / 2)
+				tile: Card_Tile
+				if column >= columns {
+					tile.disabled = true
+					append(&card.tiles, tile)
+					continue
 				}
-				if kind.labour != 0 do append(&breakdown.terms, Card_Term{"Labour", fmt.tprintf("%+.0f", kind.labour)})
-				if kind.income != 0 do append(&breakdown.terms, Card_Term{"Income", fmt.tprintf("%+.0f", kind.income)})
-				if kind.upkeep != 0 do append(&breakdown.terms, Card_Term{"Upkeep", fmt.tprintf("%.0f", kind.upkeep)})
-				if kind.control != 0 do append(&breakdown.terms, Card_Term{"Control", fmt.tprintf("%.0f", kind.control)})
-				if kind.features != {} {
-					names := make([dynamic]string, context.temp_allocator)
-					for feature in kind.features do append(&names, fmt.tprint(feature))
-					append(&breakdown.terms, Card_Term{"Features", strings.join(names[:], ", ", context.temp_allocator)})
+				slot := row * columns + column
+				here := town.buildings[slot]
+				project := town.projects[slot]
+				if here != 0 {
+					kind := &game.building_kinds[here]
+					tile.name = name_to_string(&kind.name)
+					tile.breakdown = card_building_breakdown(&card, kind, town.slot_food[slot])
 				}
-				tile := Card_Tile {
-					name = name_to_string(&kind.name),
+				if project.active {
+					// Under way: its progress, and cancelling
+					if project.kind == 0 {
+						tile.project = "Demolishing"
+					} else {
+						target := &game.building_kinds[project.kind]
+						tile.project = fmt.tprintf("%s (%.0f)", name_to_string(&target.name), math.ceil(project.turns_left))
+					}
+					append(
+						&tile.actions,
+						Card_Tile_Action {
+							label = "Cancel",
+							detail = "No refund",
+							enabled = acting,
+							order = {town = focus, slot = slot, action = .Cancel},
+						},
+					)
+				} else if here != 0 {
+					kind := &game.building_kinds[here]
+					if kind.upgrade != 0 {
+						next := &game.building_kinds[kind.upgrade]
+						cost := cost_of(next, treasury)
+						append(
+							&tile.actions,
+							Card_Tile_Action {
+								label = fmt.tprintf("Upgrade to %s", name_to_string(&next.name)),
+								detail = cost.detail,
+								enabled = acting && cost.payable && game.culture_buildings[piece.culture][kind.upgrade],
+								breakdown = card_building_breakdown(&card, next, next.food + next.food_fertility * town.fertility),
+								order = {town = focus, slot = slot, action = .Build, kind = kind.upgrade},
+							},
+						)
+					}
+					append(
+						&tile.actions,
+						Card_Tile_Action {
+							label = "Demolish",
+							detail = "Next turn",
+							enabled = acting,
+							order = {town = focus, slot = slot, action = .Demolish},
+						},
+					)
+				} else {
+					// The first level of every chain the town's culture can build
+					for &kind, k in game.building_kinds {
+						if k == 0 || kind.upgraded_from != 0 || !game.culture_buildings[piece.culture][k] do continue
+						cost := cost_of(&kind, treasury)
+						append(
+							&tile.actions,
+							Card_Tile_Action {
+								label = name_to_string(&kind.name),
+								detail = cost.detail,
+								enabled = acting && cost.payable,
+								breakdown = card_building_breakdown(&card, &kind, kind.food + kind.food_fertility * town.fertility),
+								order = {town = focus, slot = slot, action = .Build, kind = Building_Kind_Id(k)},
+							},
+						)
+					}
 				}
-				if append(&card.breakdowns, breakdown) > 0 do tile.breakdown = len(card.breakdowns) - 1
 				append(&card.tiles, tile)
 			}
-			for len(card.tiles) < town.slots do append(&card.tiles, Card_Tile{})
 		} else {
 			if piece.general != 0 {
 				general := name_to_string(&game.characters[piece.general].name)

@@ -92,9 +92,26 @@ Game_Order :: struct {
 }
 
 Game_Input :: struct {
-	end_turn: bool,
-	answer:   Game_Answer,
-	order:    Maybe(Game_Order),
+	end_turn:   bool,
+	answer:     Game_Answer,
+	order:      Maybe(Game_Order),
+	town_order: Maybe(Town_Order),
+}
+
+Town_Action :: enum u8 {
+	Build,
+	Demolish,
+	Cancel,
+}
+
+// For a town's slot: build in it, on an empty slot or the next level of its building; demolish it; or cancel its
+// project
+Town_Order :: struct {
+	town:   Piece_Id,
+	slot:   int,
+	action: Town_Action,
+	// Build: the building
+	kind:   Building_Kind_Id,
 }
 
 Contact :: struct {
@@ -909,6 +926,36 @@ game_step :: proc(
 		game.interaction.actor == {} &&
 		movement.marches[.Leader].piece == {}
 
+	// A town order starts a slot's project, or cancels it: in the playing faction's towns, one project a slot
+	if order, ordered := input.town_order.?; ordered {
+		piece := slot_map_get(&game.pieces, order.town)
+		if piece != nil && .Has_Town in piece.flags && piece.owner == game.player && order.slot >= 0 && order.slot < piece.town.slots {
+			town := &piece.town
+			project := &town.projects[order.slot]
+			here := town.buildings[order.slot]
+			treasury := &game.factions[piece.owner].treasury
+			switch order.action {
+			case .Build:
+				kind := &game.building_kinds[order.kind]
+				// A chain's first level on an empty slot, or the next level of the building there
+				fits := here == 0 ? kind.upgraded_from == 0 : game.building_kinds[here].upgrade == order.kind
+				allowed := order.kind != 0 && game.culture_buildings[piece.culture][order.kind]
+				if !project.active && fits && allowed && treasury^ >= kind.build_coin {
+					treasury^ -= kind.build_coin
+					project^ = {
+						active     = true,
+						kind       = order.kind,
+						turns_left = kind.build_turns,
+					}
+				}
+			case .Demolish:
+				if !project.active && here != 0 do project^ = {active = true, turns_left = 1}
+			case .Cancel:
+				project^ = {}
+			}
+		}
+	}
+
 	// Towns: what their buildings make and their people eat. Income, scaled by control, and upkeep add up to their owners'
 	for &faction in game.factions {
 		faction.income = 0
@@ -923,8 +970,11 @@ game_step :: proc(
 		for kind_id in town.buildings do town.staff_needed += game.building_kinds[kind_id].population
 		town.staffing = town.staff_needed > 0 ? min(1, town.population / town.staff_needed) : 1
 
+		// Each building runs at its staffing. Labour made and labour used, by buildings and projects, are kept apart: using
+		// more than is made is a deficit, and holds nothing back
 		town.food = 0
 		town.labour = 0
+		town.labour_used = 0
 		town.income = 0
 		town.upkeep = 0
 		town.features = {}
@@ -932,23 +982,34 @@ game_step :: proc(
 			kind := &game.building_kinds[kind_id]
 			town.slot_food[slot] = (kind.food + kind.food_fertility * town.fertility) * town.staffing
 			town.food += town.slot_food[slot]
-			town.labour += kind.labour * town.staffing
+			if kind.labour > 0 do town.labour += kind.labour * town.staffing
+			else do town.labour_used -= kind.labour * town.staffing
 			town.income += kind.income * town.staffing * town.control / 100
 			// Paid however staffed
 			town.upkeep += kind.upkeep
 			town.features += kind.features
 		}
+		for project in town.projects {
+			if project.active do town.labour_used += game.building_kinds[project.kind].build_labour
+		}
 		game.factions[piece.owner].income += town.income
 		game.factions[piece.owner].upkeep += town.upkeep
 		town.population_supported = town.food / FOOD_PER_POPULATION
-		// At its owner's turn end, its population moves toward what its food supports
+		// At its owner's turn end, its population moves toward what its food supports, and its projects advance a turn. A
+		// finished one replaces the slot's building
 		if turn_ending && piece.owner == game.player {
 			change := (town.population_supported - town.population) * POPULATION_RATE
 			town.population += min(change, town.population * POPULATION_GROWTH_MAX)
+
+			for &project, slot in town.projects {
+				if !project.active do continue
+				project.turns_left -= 1
+				if project.turns_left > 0 do continue
+				town.buildings[slot] = project.kind
+				project = {}
+			}
 		}
 		town.food_eaten = town.population * FOOD_PER_POPULATION
-		// Nothing uses labour yet
-		town.labour_used = 0
 	}
 
 	// At its turn end, the faction's net income goes into its treasury
