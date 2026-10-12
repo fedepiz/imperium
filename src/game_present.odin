@@ -153,9 +153,11 @@ Card :: struct {
 }
 
 Cards :: struct {
-	status:      Card,
-	focus:       Maybe(Card),
-	interaction: Maybe(Card),
+	status:            Card,
+	focus:             Card,
+	interaction:       Card,
+	focus_shown:       bool,
+	interaction_shown: bool,
 }
 
 game_present_map :: proc(
@@ -393,10 +395,10 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 	append(&status.actions, Card_Action{"End turn", .End_Turn, game_turn_endable(game)})
 
 	if piece := slot_map_get(&game.pieces, focus); piece != nil {
-		card := Card {
-			title = game_piece_title(piece),
-			tab   = tab,
-		}
+		cards.focus_shown = true
+		card := &cards.focus
+		card.title = game_piece_title(piece)
+		card.tab = tab
 		if .Has_Army in piece.flags do card.tabs += {.Army}
 		if .Has_Town in piece.flags do card.tabs += {.Town}
 		// The chosen tab, or else one the piece has
@@ -444,7 +446,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					value = compact_number(f64(left)),
 					fill = per_turn > 0 ? left / per_turn : 0,
 					graded = true,
-					breakdown = card_note(&card, fmt.tprintf("%s of %s", compact_number(f64(left)), compact_number(f64(per_turn)))),
+					breakdown = card_note(card, fmt.tprintf("%s of %s", compact_number(f64(left)), compact_number(f64(per_turn)))),
 				},
 			)
 		}
@@ -513,7 +515,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					fill = 0.5 + 0.5 * staff_net / max(town.population, town.staff_needed, 1e-6),
 					fill_origin = 0.5,
 					breakdown = card_note(
-						&card,
+						card,
 						fmt.tprintf("%.1f people, %.0f needed by buildings", town.population, town.staff_needed),
 					),
 				},
@@ -545,7 +547,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 						value = fmt.tprintf("%+.1f", net),
 						fill = 0.5 + 0.5 * net / max(balance.supply, balance.demand, 1e-6),
 						fill_origin = 0.5,
-						breakdown = card_note(&card, balance.note),
+						breakdown = card_note(card, balance.note),
 					},
 				)
 			}
@@ -596,7 +598,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				if here != 0 {
 					kind := &game.building_kinds[here]
 					tile.name = name_to_string(&kind.name)
-					tile.breakdown = card_building_breakdown(&card, kind, town.slot_food[slot])
+					tile.breakdown = card_building_breakdown(card, kind, town.slot_food[slot])
 				}
 				if project.active {
 					// Under way: its progress, and cancelling
@@ -626,7 +628,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 								label = fmt.tprintf("Upgrade to %s", name_to_string(&next.name)),
 								detail = cost.detail,
 								enabled = acting && cost.payable && game.culture_buildings[piece.culture][kind.upgrade],
-								breakdown = card_building_breakdown(&card, next, next.food + next.food_fertility * town.fertility),
+								breakdown = card_building_breakdown(card, next, next.food + next.food_fertility * town.fertility),
 								order = Town_Order{town = focus, slot = slot, action = .Build, kind = kind.upgrade},
 							},
 						)
@@ -651,7 +653,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 								label = name_to_string(&kind.name),
 								detail = cost.detail,
 								enabled = acting && cost.payable,
-								breakdown = card_building_breakdown(&card, &kind, kind.food + kind.food_fertility * town.fertility),
+								breakdown = card_building_breakdown(card, &kind, kind.food + kind.food_fertility * town.fertility),
 								order = Town_Order{town = focus, slot = slot, action = .Build, kind = Building_Kind_Id(k)},
 							},
 						)
@@ -673,7 +675,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 						fill = army.men_max > 0 ? f32(army.men) / f32(army.men_max) : 0,
 						graded = true,
 						breakdown = card_note(
-							&card,
+							card,
 							fmt.tprintf("%s of %s", compact_number(f64(army.men)), compact_number(f64(army.men_max))),
 						),
 					},
@@ -711,7 +713,6 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.supply_source)})
 			}
 		}
-		cards.focus = card
 	}
 
 	open := &game.interaction
@@ -724,16 +725,17 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 	attacker := result.attacker
 	defender := 1 - attacker
 	kind := report_string(report, result.kind_title)
-	card: Card
+	cards.interaction_shown = true
+	card := &cards.interaction
 	#partial switch open.stage {
 	case .Announce:
 		card.title = fmt.tprintf("%s: %s", kind, report_string(report, result.attack_title))
 	case .Refused:
 		card.title = fmt.tprintf("%s: %s", kind, report_string(report, result.attack_title))
-		card_report(&card, report)
+		card_report(card, report)
 	case .Report:
 		card.title = fmt.tprintf("%s report", kind)
-		card_report(&card, report)
+		card_report(card, report)
 	case .Outcome:
 		card.title = fmt.tprintf("%s: %s", kind, report_string(report, result.outcome_title))
 	case .Fall_Back:
@@ -760,22 +762,22 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				if side.men_engaged.total < f32(army.men) {
 					engaged := compact_number(f64(side.men_engaged.total))
 					men.value = fmt.tprintf("%s of %s", engaged, men.value)
-					men.breakdown = card_breakdown(&card, &side.men_engaged, engaged)
+					men.breakdown = card_breakdown(card, &side.men_engaged, engaged)
 				}
 				append(fields, Card_Field{label = "Commander", value = fmt.tprint(temperament)})
 				append(fields, men)
 				append(fields, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
 				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
-				append(fields, card_tally_field(&card, "Power", &side.power, power))
+				append(fields, card_tally_field(card, "Power", &side.power, power))
 			case .Fall_Back:
 				if !result.caught || side_index == result.winner do continue
 				men := compact_number(f64(side.pursuit_men.total))
-				append(fields, card_tally_field(&card, "Men", &side.pursuit_men, men))
+				append(fields, card_tally_field(card, "Men", &side.pursuit_men, men))
 				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f%%", side.pursuit_readiness)})
 			case:
 				men := compact_number(f64(side.men.total))
 				append(fields, Card_Field{label = "Posture", value = report_string(report, side.posture)})
-				append(fields, card_tally_field(&card, "Men", &side.men, men))
+				append(fields, card_tally_field(card, "Men", &side.men, men))
 				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f%%", side.readiness)})
 				if side.dissolved do append(fields, Card_Field{label = "Fate", value = "Dissolved"})
 			}
@@ -783,5 +785,4 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 	}
 
 	append(&card.actions, Card_Action{"Next", .Next, game.movement.marches[.Leader].piece == {}})
-	cards.interaction = card
 }

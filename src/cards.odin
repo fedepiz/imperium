@@ -117,14 +117,14 @@ cards_ui :: proc(
 		}
 		ui_spacer(ui_grow())
 		if ui_row({width = ui_grow(), height = ui_fit()}) {
-			if interaction, shown := &cards.interaction.?; shown {
-				asks += card_ui("interaction card", interaction, text_font, title_font, colors, nil, nil, nil, nil)
+			if cards.interaction_shown {
+				asks += card_ui("interaction card", &cards.interaction, text_font, title_font, colors, nil, nil, nil, nil)
 			}
 			ui_spacer(ui_grow())
 		}
 		ui_spacer(ui_grow())
-		if focus, shown := &cards.focus.?; shown {
-			asks += card_ui("focus card", focus, text_font, title_font, colors, nil, tab, menu, &town_order)
+		if cards.focus_shown {
+			asks += card_ui("focus card", &cards.focus, text_font, title_font, colors, nil, tab, menu, &town_order)
 		}
 	}
 
