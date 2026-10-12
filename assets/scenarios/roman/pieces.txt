@@ -12,7 +12,6 @@
 #   full strength and 100% readiness), foraging 0..100 (army skill at living off the land, default 40), mobility
 #   (1..4, default 2), temperament (the general's: Bold, Steady, Cautious or Cunning; default Steady)
 
-kind = { name = village     icon = Village                               contact = 7   contact_on = [Land]  body = 2    hindrance = 2    supply = 50  traits = [Capturable, Can_Contain, Fortified] }
 kind = { name = town        icon = Town                                  contact = 8   contact_on = [Land]  body = 2.5  hindrance = 2.5  supply = 65  traits = [Capturable, Can_Contain, Fortified] }
 kind = { name = city        icon = City                                  contact = 9   contact_on = [Land]  body = 3    hindrance = 3    supply = 80  traits = [Capturable, Can_Contain, Fortified] }
 kind = { name = large_city  icon = Large_City                            contact = 10  contact_on = [Land]  body = 3.5  hindrance = 3.5  supply = 90  traits = [Capturable, Can_Contain, Fortified] }
