@@ -100,6 +100,7 @@ Piece_Flag :: enum {
 	Has_Army,
 	Fortified,
 	Shares_Supply,
+	Has_Town,
 }
 
 Piece_Data :: struct {

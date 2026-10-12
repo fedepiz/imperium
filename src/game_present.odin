@@ -9,6 +9,7 @@ CARD_PARTS_MAX :: REPORT_PARTS_MAX
 CARD_BREAKDOWNS_MAX :: 48
 CARD_FIELDS_MAX :: 16
 CARD_ACTIONS_MAX :: 4
+CARD_TILES_MAX :: 16
 
 Map_Mode :: enum u8 {
 	Control,
@@ -21,6 +22,18 @@ MAP_MODE_NAMES := [Map_Mode]string {
 	.Control = "Control",
 	.Supply  = "Supply",
 	.Plain   = "Plain",
+}
+
+// What the focus card shows of a piece
+Card_Tab :: enum u8 {
+	Army,
+	Buildings,
+}
+
+@(rodata)
+CARD_TAB_NAMES := [Card_Tab]string {
+	.Army      = "Army",
+	.Buildings = "Buildings",
 }
 
 @(private = "file")
@@ -63,6 +76,12 @@ Card_Field :: struct {
 	label:     string,
 	value:     string,
 	breakdown: Maybe(int),
+	// Share of the whole, 0..1: shown as a bar after the value, filled from fill_origin. An origin above 0 is a balance:
+	// below it a shortfall, above it a surplus
+	fill:        Maybe(f32),
+	fill_origin: f32,
+	// The fill colored from bad to good by how full it is
+	graded:      bool,
 }
 
 Card_Term :: struct {
@@ -82,6 +101,12 @@ Card_Action :: struct {
 	enabled: bool,
 }
 
+// A building slot; no name: empty
+Card_Tile :: struct {
+	name:      string,
+	breakdown: Maybe(int),
+}
+
 Card :: struct {
 	title:      string,
 	lines:      [dynamic; CARD_LINES_MAX]Span,
@@ -89,7 +114,11 @@ Card :: struct {
 	breakdowns: [dynamic; CARD_BREAKDOWNS_MAX]Card_Breakdown,
 	fields:     [dynamic; CARD_FIELDS_MAX]Card_Field,
 	stats:      [dynamic; CARD_FIELDS_MAX]Card_Field,
+	tiles:      [dynamic; CARD_TILES_MAX]Card_Tile,
 	actions:    [dynamic; CARD_ACTIONS_MAX]Card_Action,
+	// Tabs the piece has, and the one shown
+	tabs:       bit_set[Card_Tab],
+	tab:        Card_Tab,
 }
 
 Cards :: struct {
@@ -268,7 +297,7 @@ card_report :: proc(card: ^Card, report: ^Report) {
 	}
 }
 
-game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
+game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 	cards^ = {}
 
 	status := &cards.status
@@ -279,16 +308,25 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 	if piece := slot_map_get(&game.pieces, focus); piece != nil {
 		card := Card {
 			title = game_piece_title(piece),
+			tab   = tab,
 		}
+		if .Has_Army in piece.flags do card.tabs += {.Army}
+		if .Has_Town in piece.flags do card.tabs += {.Buildings}
+		// The chosen tab, or else one the piece has
+		if card.tab not_in card.tabs {
+			for each in Card_Tab {
+				if each in card.tabs {
+					card.tab = each
+					break
+				}
+			}
+		}
+		// The piece, the same on every tab
+		army := piece.army
+		is_army := .Has_Army in piece.flags
 		append(&card.fields, Card_Field{label = "Type", value = ICON_TITLES[piece.icon]})
 		append(&card.fields, Card_Field{label = "Faction", value = faction_title(game, piece.owner)})
 		append(&card.fields, Card_Field{label = "Culture", value = fmt.tprint(piece.culture)})
-		if piece.general != 0 {
-			general := name_to_string(&game.characters[piece.general].name)
-			append(&card.fields, Card_Field{label = "General", value = general})
-		}
-		army := piece.army
-		is_army := .Has_Army in piece.flags
 		statuses := make([dynamic]string, context.temp_allocator)
 		if is_army && army.spent do append(&statuses, "Spent")
 		if piece.inside != {} do append(&statuses, "Garrisoning")
@@ -297,19 +335,126 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 		if len(statuses) > 0 do status = strings.join(statuses[:], ", ", context.temp_allocator)
 		append(&card.fields, Card_Field{label = "Status", value = status})
 		if piece.domain != nil {
-			left := compact_number(f64(game_movement_left(piece^)))
-			per_turn := compact_number(f64(piece.movement_per_turn))
-			append(&card.stats, Card_Field{label = "Movement", value = fmt.tprintf("%s of %s", left, per_turn)})
+			left := game_movement_left(piece^)
+			per_turn := piece.movement_per_turn
+			append(
+				&card.fields,
+				Card_Field {
+					label = "Movement",
+					value = compact_number(f64(left)),
+					fill = per_turn > 0 ? left / per_turn : 0,
+					graded = true,
+					breakdown = card_note(&card, fmt.tprintf("%s of %s", compact_number(f64(left)), compact_number(f64(per_turn)))),
+				},
+			)
 		}
-		if is_army {
-			men := fmt.tprintf("%s of %s", compact_number(f64(army.men)), compact_number(f64(army.men_max)))
-			efficiency := fmt.tprintf("%.0f%%", 100 * army.supply_efficiency)
-			append(&card.stats, Card_Field{label = "Men", value = men})
-			append(&card.stats, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
-			append(&card.stats, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
-			append(&card.stats, Card_Field{label = "Supply", value = fmt.tprintf("%.0f%%", army.supply)})
-			append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.supply_source)})
-			append(&card.stats, Card_Field{label = "Efficiency", value = efficiency})
+
+		// The tab's own section
+		if card.tab == .Buildings {
+			// Town economy: made-up data until towns have records
+			append(
+				&card.stats,
+				Card_Field{label = "Population", value = "10", fill = 10 / 11.6, breakdown = card_note(&card, "10.0 of 11.6")},
+			)
+			// Balances, from the middle: supply less demand, over the larger of the two. All of it spare fills the right
+			// half; none of the demand met, the left
+			Made_Up_Balance :: struct {
+				label, note:    string,
+				supply, demand: f32,
+			}
+			balances := []Made_Up_Balance {
+				{"Food", "11.6 produced, 10.0 eaten", 11.6, 10},
+				{"Labour", "4 produced, 1 used", 4, 1},
+				{"Public order", "2.0 order, 3.5 unrest", 2, 3.5},
+			}
+			for balance in balances {
+				net := balance.supply - balance.demand
+				append(
+					&card.stats,
+					Card_Field {
+						label = balance.label,
+						value = fmt.tprintf("%+.1f", net),
+						fill = 0.5 + 0.5 * net / max(balance.supply, balance.demand, 1e-6),
+						fill_origin = 0.5,
+						breakdown = card_note(&card, balance.note),
+					},
+				)
+			}
+			append(&card.stats, Card_Field{label = "Features", value = "Horses"})
+
+			Made_Up_Building :: struct {
+				name, population, food, features: string,
+			}
+			buildings := []Made_Up_Building {
+				{"Farm", "2", "+4.8", ""},
+				{"Farm", "2", "+4.8", ""},
+				{"Herds", "1", "+2.0", ""},
+				{"Stables", "1", "", "Horses"},
+			}
+			for building in buildings {
+				breakdown: Card_Breakdown
+				append(&breakdown.terms, Card_Term{"Population", building.population})
+				if building.food != "" do append(&breakdown.terms, Card_Term{"Food", building.food})
+				if building.features != "" do append(&breakdown.terms, Card_Term{"Features", building.features})
+				tile := Card_Tile {
+					name = building.name,
+				}
+				if append(&card.breakdowns, breakdown) > 0 do tile.breakdown = len(card.breakdowns) - 1
+				append(&card.tiles, tile)
+			}
+			// Empty slots, up to a made-up 8
+			for len(card.tiles) < 8 do append(&card.tiles, Card_Tile{})
+		} else {
+			if piece.general != 0 {
+				general := name_to_string(&game.characters[piece.general].name)
+				append(&card.stats, Card_Field{label = "General", value = general})
+			}
+			if is_army {
+				append(
+					&card.stats,
+					Card_Field {
+						label = "Men",
+						value = compact_number(f64(army.men)),
+						fill = army.men_max > 0 ? f32(army.men) / f32(army.men_max) : 0,
+						graded = true,
+						breakdown = card_note(
+							&card,
+							fmt.tprintf("%s of %s", compact_number(f64(army.men)), compact_number(f64(army.men_max))),
+						),
+					},
+				)
+				// Percentages: the bar is out of 100
+				percents := [?]struct {
+					label: string,
+					value: f32,
+				} {
+					{"Proficiency", army.proficiency},
+					{"Readiness", army.readiness},
+					{"Supply", army.supply},
+				}
+				for percent in percents {
+					append(
+						&card.stats,
+						Card_Field {
+							label = percent.label,
+							value = fmt.tprintf("%.0f%%", percent.value),
+							fill = percent.value / 100,
+							graded = true,
+						},
+					)
+				}
+				efficiency := 100 * army.supply_efficiency
+				append(
+					&card.stats,
+					Card_Field {
+						label = "Efficiency",
+						value = fmt.tprintf("%.0f%%", efficiency),
+						fill = efficiency / 100,
+						graded = true,
+					},
+				)
+				append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.supply_source)})
+			}
 		}
 		cards.focus = card
 	}

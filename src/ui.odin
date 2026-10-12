@@ -183,6 +183,12 @@ UI_Box_Flag :: enum {
 @(private = "file")
 SCROLL_STEP :: 3
 
+UI_Text_Align :: enum u8 {
+	Left,
+	Center,
+	Right,
+}
+
 // A partial set of box fields. Nil fields leave whatever was set before them alone.
 UI_Style :: struct {
 	width:             Maybe(UI_Size),
@@ -202,6 +208,8 @@ UI_Style :: struct {
 	text_color:        Maybe([4]f32),
 	// Text faded toward while hovered: a Hot_Effects box's own, and keyed runs of text
 	hot_text_color:    Maybe([4]f32),
+	// Where one line of text sits across the room inside the padding
+	text_align:        Maybe(UI_Text_Align),
 	// Sets or clears UI_Box_Flag.Disabled; a disabled parent still disables its children
 	disabled:          Maybe(bool),
 	// Where a floating box's top-left corner sits, from its parent's
@@ -243,6 +251,7 @@ Box :: struct {
 	font:              Text_Font_Id,
 	text_color:        [4]f32,
 	hot_text_color:    [4]f32,
+	text_align:        UI_Text_Align,
 	// Layout results: until this frame's layout runs, they are last frame's
 	pos_computed:      [2]f32,
 	size_computed:     [2]f32,
@@ -943,6 +952,7 @@ style_merge :: proc(dst: ^UI_Style, src: UI_Style) {
 	if src.font != nil {dst.font = src.font}
 	if src.text_color != nil {dst.text_color = src.text_color}
 	if src.hot_text_color != nil {dst.hot_text_color = src.hot_text_color}
+	if src.text_align != nil {dst.text_align = src.text_align}
 	if src.disabled != nil {dst.disabled = src.disabled}
 	if src.position != nil {dst.position = src.position}
 }
@@ -963,6 +973,7 @@ style_apply :: proc(dst: ^Box, src: UI_Style) {
 	if v, ok := src.font.?; ok {dst.font = v}
 	if v, ok := src.text_color.?; ok {dst.text_color = v}
 	if v, ok := src.hot_text_color.?; ok {dst.hot_text_color = v}
+	if v, ok := src.text_align.?; ok {dst.text_align = v}
 	if v, ok := src.disabled.?; ok {
 		if v {dst.flags += {.Disabled}} else {dst.flags -= {.Disabled}}
 	}
@@ -1070,11 +1081,16 @@ scroll_flag :: proc(axis: Axis) -> UI_Box_Flag {
 	return out
 }
 
-// Where a box's text starts: left-aligned after the padding, centered vertically, never above the box.
+// Where a box's text starts: after the padding, moved across by its alignment, centered vertically, never above the box.
+// Text as wide as its room or wider, as wrapped text is, starts at the padding.
 @(private = "file")
 text_origin :: proc(box: ^Box) -> [2]f32 {
 	pos := box.pos_computed
 	pos.x += box.padding.x
+	if box.text_align != .Left {
+		spare := max(0, text_room(box).x - text_size(box.text).x)
+		pos.x += math.floor(box.text_align == .Center ? spare / 2 : spare)
+	}
 	pos.y += max(0, box.size_computed.y - text_height(box)) / 2
 	return pos
 }
@@ -1764,6 +1780,86 @@ ui_slider :: proc(label: string, value: ^f32, lo, hi: f32, style := UI_Style{}) 
 	)
 	UI.boxes[fill].flags += {.Background}
 	ui_spacer(ui_grow(1 - t))
+	return signal
+}
+
+// A track filled between shares origin and t, 0..1, in focus_border like a slider's fill, inside its frame by the
+// horizontal padding. With origin 0 the track is one framed bar, filled from the left. With origin above 0 it is cut in
+// two framed halves, either side of a notch of the track's full height in the border color: the halves stand in from the
+// track's top and bottom by its vertical padding and from the notch by its gap, and t falls in one half or the other. The
+// label is only the key: keyed, the meter takes the mouse, so hovering it can open a tooltip.
+ui_meter :: proc(label: string, t: f32, origin: f32 = 0, style := UI_Style{}) -> UI_Signal {
+	ui_style_next(style)
+	id, signal := box_make(key_from_string(label), {})
+	track := &UI.boxes[id]
+	if track.key != KEY_NIL do track.flags += {.Clickable}
+	track.child_axis = .X
+	start := clamp(origin, 0, 1)
+	end := clamp(t, 0, 1)
+	inset := track.padding.x
+	fill_style := UI_Style {
+		height     = ui_grow(),
+		background = track.focus_border,
+		radius     = track.radius,
+	}
+	parent_push(id)
+	defer parent_pop()
+
+	// Grow weights split a frame: empty, filled, empty
+	fill_between :: proc(from, to: f32, fill_style: UI_Style) {
+		style := fill_style
+		style.width = ui_grow(to - from)
+		ui_spacer(ui_grow(from))
+		fill, _ := box_make({}, style)
+		UI.boxes[fill].flags += {.Background}
+		ui_spacer(ui_grow(1 - to))
+	}
+
+	if start <= 0 {
+		track.flags += {.Background, .Border}
+		track.gap = 0
+		fill_between(0, end, fill_style)
+		return signal
+	}
+
+	// The halves: each a frame inside a holder that stands it in from the track's top and bottom
+	stand_in := track.padding.y
+	track.padding = {}
+	half := UI_Style {
+		width      = ui_grow(),
+		height     = ui_grow(),
+		padding    = [2]f32{inset, inset},
+		background = track.background,
+		border     = track.border,
+		thickness  = track.thickness,
+		radius     = track.radius,
+	}
+	Half :: struct {
+		share, from, to: f32,
+	}
+	halves := [2]Half {
+		// Below the origin: filled leftward from the notch
+		{start, end < start ? end / start : 1, 1},
+		// Above it: filled rightward from the notch
+		{1 - start, 0, end > start ? (end - start) / (1 - start) : 0},
+	}
+	for part, i in halves {
+		if i == 1 {
+			notch, _ := box_make({}, {width = ui_px(max(2, 2 * track.thickness)), height = ui_grow(), background = track.border})
+			UI.boxes[notch].flags += {.Background}
+		}
+		if part.share <= 0 do continue
+		holder, _ := box_make({}, {width = ui_grow(part.share), height = ui_grow(), padding = [2]f32{0, stand_in}})
+		UI.boxes[holder].child_axis = .Y
+		parent_push(holder)
+		frame, _ := box_make({}, half)
+		UI.boxes[frame].flags += {.Background, .Border}
+		UI.boxes[frame].child_axis = .X
+		parent_push(frame)
+		fill_between(part.from, part.to, fill_style)
+		parent_pop()
+		parent_pop()
+	}
 	return signal
 }
 

@@ -225,6 +225,7 @@ run_windowed :: proc(options: Options) {
 
 	focus: Piece_Id
 	map_mode: Map_Mode
+	card_tab: Card_Tab
 	game_input: Game_Input
 	unstepped: f32
 	commands_active := options.commands != ""
@@ -425,7 +426,7 @@ run_windowed :: proc(options: Options) {
 		)
 
 		cards := new(Cards, context.temp_allocator)
-		game_cards(&GLOBAL.game, focus, cards)
+		game_cards(&GLOBAL.game, focus, card_tab, cards)
 
 		// UI, over everything
 		ui_begin(window_size)
@@ -436,6 +437,7 @@ run_windowed :: proc(options: Options) {
 			map_style.paper,
 			map_style.ink,
 			&map_mode,
+			&card_tab,
 			&game_input,
 		)
 		tweak_ui(tweaks_toggled, FONT_TWEAK)
