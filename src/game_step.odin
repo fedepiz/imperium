@@ -36,6 +36,9 @@ MEN_PER_SUPPLY :: 250
 // Share of full strength regained per turn on home land, at 100% supply
 @(private = "file")
 REINFORCEMENT_SHARE :: 0.05
+// Share of full strength a recruited army starts with: it reinforces to the rest
+@(private = "file")
+RECRUIT_STRENGTH :: 0.2
 // Control lost per unit of travel cost from its source
 @(private = "file")
 CONTROL_DECAY :: 1
@@ -102,16 +105,19 @@ Town_Action :: enum u8 {
 	Build,
 	Demolish,
 	Cancel,
+	Recruit,
 }
 
 // For a town's slot: build in it, on an empty slot or the next level of its building; demolish it; or cancel its
-// project
+// project. Or for the town: recruit an army
 Town_Order :: struct {
-	town:   Piece_Id,
-	slot:   int,
-	action: Town_Action,
+	town:      Piece_Id,
+	slot:      int,
+	action:    Town_Action,
 	// Build: the building
-	kind:   Building_Kind_Id,
+	kind:      Building_Kind_Id,
+	// Recruit: the army's type
+	army_type: Army_Type_Id,
 }
 
 Contact :: struct {
@@ -289,6 +295,31 @@ Event_Turn :: struct {
 	player: Faction_Id,
 }
 
+// A slot's project began: a building, or 0 for a demolition
+Event_Project_Started :: struct {
+	town: Piece_Id,
+	slot: int,
+	kind: Building_Kind_Id,
+}
+
+Event_Project_Cancelled :: struct {
+	town: Piece_Id,
+	slot: int,
+}
+
+// A slot's project finished: the slot now holds kind, 0 when demolished
+Event_Project_Finished :: struct {
+	town: Piece_Id,
+	slot: int,
+	kind: Building_Kind_Id,
+}
+
+Event_Recruited :: struct {
+	army:      Piece_Id,
+	town:      Piece_Id,
+	army_type: Army_Type_Id,
+}
+
 Game_Event :: union {
 	Event_End_Turn,
 	Event_Order_Refused,
@@ -306,6 +337,10 @@ Game_Event :: union {
 	Event_Spent_Roll,
 	Event_Unspent,
 	Event_Turn,
+	Event_Project_Started,
+	Event_Project_Cancelled,
+	Event_Project_Finished,
+	Event_Recruited,
 }
 
 @(private = "file")
@@ -926,32 +961,83 @@ game_step :: proc(
 		game.interaction.actor == {} &&
 		movement.marches[.Leader].piece == {}
 
-	// A town order starts a slot's project, or cancels it: in the playing faction's towns, one project a slot
+	// A town order: in the playing faction's towns, starts a slot's project or cancels it, one project a slot; or
+	// recruits an army
 	if order, ordered := input.town_order.?; ordered {
 		piece := slot_map_get(&game.pieces, order.town)
-		if piece != nil && .Has_Town in piece.flags && piece.owner == game.player && order.slot >= 0 && order.slot < piece.town.slots {
+		if piece != nil && .Has_Town in piece.flags && piece.owner == game.player {
 			town := &piece.town
-			project := &town.projects[order.slot]
-			here := town.buildings[order.slot]
 			treasury := &game.factions[piece.owner].treasury
+			slot := clamp(order.slot, 0, TOWN_SLOTS_MAX - 1)
+			on_slot := order.slot >= 0 && order.slot < town.slots
+			project := &town.projects[slot]
+			here := town.buildings[slot]
 			switch order.action {
 			case .Build:
 				kind := &game.building_kinds[order.kind]
 				// A chain's first level on an empty slot, or the next level of the building there
 				fits := here == 0 ? kind.upgraded_from == 0 : game.building_kinds[here].upgrade == order.kind
 				allowed := order.kind != 0 && game.culture_buildings[piece.culture][order.kind]
-				if !project.active && fits && allowed && treasury^ >= kind.build_coin {
+				if on_slot && !project.active && fits && allowed && treasury^ >= kind.build_coin {
 					treasury^ -= kind.build_coin
 					project^ = {
 						active     = true,
 						kind       = order.kind,
 						turns_left = kind.build_turns,
 					}
+					append(events, Event_Project_Started{order.town, slot, order.kind})
 				}
 			case .Demolish:
-				if !project.active && here != 0 do project^ = {active = true, turns_left = 1}
+				if on_slot && !project.active && here != 0 {
+					project^ = {
+						active     = true,
+						turns_left = 1,
+					}
+					append(events, Event_Project_Started{order.town, slot, 0})
+				}
 			case .Cancel:
-				project^ = {}
+				if on_slot && project.active {
+					project^ = {}
+					append(events, Event_Project_Cancelled{order.town, slot})
+				}
+			case .Recruit:
+				army_type := &game.army_types[order.army_type]
+				allowed := order.army_type != 0 && game.culture_army_types[piece.culture][order.army_type]
+				if allowed && army_type.recruit_requires <= town.features && treasury^ >= army_type.recruit_coin {
+					treasury^ -= army_type.recruit_coin
+					recruit := game.army_template
+					recruit.name = army_type.name
+					recruit.owner = piece.owner
+					recruit.culture = piece.culture
+					recruit.flags += {.Has_Army}
+					// Next to the town: the first land cell around it
+					recruit.pos = piece.pos
+					land := pathfind_grid(.Land)
+					reach := piece.body_radius + recruit.body_radius + 1
+					for i in 0 ..< 8 {
+						angle := f32(i) * math.TAU / 8
+						at := piece.pos + reach * [2]f32{math.cos(angle), math.sin(angle)}
+						if grid_contains(cell_of(at), MAP_SIZE) && land[grid_index(cell_of(at), MAP_SIZE)] > 0 {
+							recruit.pos = at
+							break
+						}
+					}
+					recruit.army = {
+						men         = int(f32(army_type.men) * RECRUIT_STRENGTH),
+						men_max     = army_type.men,
+						proficiency = army_type.proficiency,
+						readiness   = 100,
+						foraging    = army_type.foraging,
+						mobility    = army_type.mobility,
+						supply      = 100,
+						type        = order.army_type,
+					}
+					if army_type.scope == .Local {
+						recruit.army.home = Region_Id(game.terrain.regions[grid_index(cell_of(piece.pos), MAP_SIZE)])
+					}
+					id := slot_map_insert(&game.pieces, recruit)
+					append(events, Event_Recruited{id, order.town, order.army_type})
+				}
 			}
 		}
 	}
@@ -962,7 +1048,7 @@ game_step :: proc(
 		faction.upkeep = 0
 	}
 	towns := slot_map_iterator(&game.pieces)
-	for piece in slot_map_iterate(&towns) {
+	for piece, piece_id in slot_map_iterate(&towns) {
 		if .Has_Town not_in piece.flags do continue
 		town := &piece.town
 		// Staff: short of people, every building runs at the share it has
@@ -1006,10 +1092,25 @@ game_step :: proc(
 				project.turns_left -= 1
 				if project.turns_left > 0 do continue
 				town.buildings[slot] = project.kind
+				append(events, Event_Project_Finished{piece_id, slot, project.kind})
 				project = {}
 			}
 		}
 		town.food_eaten = town.population * FOOD_PER_POPULATION
+	}
+
+	// Recruited armies' upkeep: coin from their owner, and a local army's labour from its home region's town, while its
+	// owner holds it
+	upkept := slot_map_iterator(&game.pieces)
+	for piece in slot_map_iterate(&upkept) {
+		if .Has_Army not_in piece.flags || piece.army.type == 0 do continue
+		army_type := &game.army_types[piece.army.type]
+		game.factions[piece.owner].upkeep += army_type.upkeep_coin
+		if piece.army.home == 0 do continue
+		home := slot_map_get(&game.pieces, game.regions[piece.army.home].capital)
+		if home != nil && .Has_Town in home.flags && home.owner == piece.owner {
+			home.town.labour_used += army_type.upkeep_labour
+		}
 	}
 
 	// At its turn end, the faction's net income goes into its treasury
@@ -1113,12 +1214,13 @@ game_step :: proc(
 				}
 			}
 
-			// Reinforcement on home land
+			// Reinforcement on home land: any region its faction holds, or a local army's own home region only
 			cell := cell_of(piece.pos)
 			if grid_contains(cell, MAP_SIZE) {
 				region := game.terrain.regions[grid_index(cell, MAP_SIZE)]
 				capital := slot_map_get(&game.pieces, game.regions[region].capital)
-				if capital != nil && capital.owner == piece.owner {
+				at_home := army.home == 0 || Region_Id(region) == army.home
+				if capital != nil && capital.owner == piece.owner && at_home {
 					men := math.round(REINFORCEMENT_SHARE * f32(army.men_max) * army.supply / 100)
 					army.men = min(army.men_max, army.men + int(men))
 				}

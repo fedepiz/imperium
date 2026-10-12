@@ -8,9 +8,10 @@
 #       shares; Has_Town has a town economy: population and buildings), slots (building slots of a Has_Town)
 # faction: name, culture (by id, from cultures.txt), color [r, g, b] 0..255, treasury (starting coin). Factions play in file order. Then one piece row per piece:
 #   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
-#   region), general (creates a character), men + proficiency 0..100 (optional; makes it an army, starting at
-#   full strength and 100% readiness), foraging 0..100 (army skill at living off the land, default 40), mobility
-#   (1..4, default 2), temperament (the general's: Bold, Steady, Cautious or Cunning; default Steady)
+#   region), general (creates a character), army_type (by id, from army_types.txt; makes it an army of that type at
+#   full strength and 100% readiness, a local one at home where it starts), temperament (the general's: Bold, Steady,
+#   Cautious or Cunning; default Steady). A settlement's garrison is given instead as men + proficiency 0..100,
+#   foraging 0..100 (army skill at living off the land, default 40) and mobility (1..4, default 2)
 #   population and buildings (a Has_Town's starting population, and its buildings by id, at most its slots)
 
 kind = { name = town        icon = Town                                  contact = 8   contact_on = [Land]  body = 2.5  hindrance = 2.5  supply = 65  slots = 4  traits = [Capturable, Can_Contain, Fortified, Has_Town] }
@@ -39,8 +40,8 @@ faction = {
 	piece = { kind = town        name = "Siscia"      at = [419, 374]  capital_of = siscia      men = 3000   proficiency = 30  population = 8  buildings = [wheat_fields, wheat_fields, cattle_herds] }
 	piece = { kind = town        name = "Domavia"     at = [470, 396]  capital_of = domavia     men = 3000   proficiency = 30  population = 7  buildings = [wheat_fields, wheat_fields, cattle_herds] }
 	piece = { kind = city        name = "Salona"      at = [421, 405]  capital_of = salona      men = 6000   proficiency = 30  population = 15  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, barracks, praetorium, curia] }
-	piece = { kind = army        name = "Legio I"     at = [334, 419]  general = "Flavius Aetius"  men = 20000  proficiency = 70  temperament = Cunning }
-	piece = { kind = army        name = "Legio II"    at = [338, 410]  general = "Bonifacius"      men = 15000  proficiency = 50 }
+	piece = { kind = army        name = "Legio I"     at = [334, 419]  general = "Flavius Aetius"  army_type = palatini  temperament = Cunning }
+	piece = { kind = army        name = "Legio II"    at = [338, 410]  general = "Bonifacius"      army_type = comitatenses }
 	piece = { kind = fleet   at = [353, 455] }
 	piece = { kind = fleet   at = [355, 393] }
 }
@@ -55,5 +56,5 @@ faction = {
 	piece = { kind = city        name = "Virunum"               at = [385, 354]  capital_of = virunum               men = 6000   proficiency = 30  population = 7  buildings = [wheat_fields, wheat_fields, sheep_flocks, sheep_flocks, stables] }
 	piece = { kind = town        name = "Octodurum"             at = [253, 367]  capital_of = octodurum             men = 3000   proficiency = 30  population = 5  buildings = [wheat_fields, sheep_flocks, sheep_flocks] }
 	piece = { kind = town        name = "Iuvavum"               at = [362, 336]  capital_of = iuvavum               men = 3000   proficiency = 30  population = 5  buildings = [wheat_fields, sheep_flocks, sheep_flocks] }
-	piece = { kind = army        name = "Cuneus Gibuldi"        at = [316, 342]  general = "Gibuld"  men = 12000  proficiency = 55  foraging = 60  temperament = Bold  mobility = 3 }
+	piece = { kind = army        name = "Cuneus Gibuldi"        at = [316, 342]  general = "Gibuld"  army_type = warband  temperament = Bold }
 }

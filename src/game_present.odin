@@ -99,9 +99,11 @@ Card_Term :: struct {
 }
 
 Card_Breakdown :: struct {
-	note:  string,
-	terms: [dynamic; REPORT_TALLY_FACTORS_MAX]Card_Term,
-	total: string,
+	note:        string,
+	terms:       [dynamic; REPORT_TALLY_FACTORS_MAX]Card_Term,
+	total:       string,
+	// What it is about, after the rest
+	description: string,
 }
 
 Card_Action :: struct {
@@ -131,7 +133,7 @@ Card_Tile_Action :: struct {
 	// What the building it makes does, on hover
 	breakdown: Maybe(int),
 	// Sent when it is clicked
-	order:     Town_Order,
+	order:     Maybe(Town_Order),
 }
 
 Card :: struct {
@@ -143,6 +145,8 @@ Card :: struct {
 	stats:      [dynamic; CARD_FIELDS_MAX]Card_Field,
 	tiles:      [dynamic; CARD_TILES_MAX]Card_Tile,
 	actions:    [dynamic; CARD_ACTIONS_MAX]Card_Action,
+	// A settlement's recruiting: a button opening its menu
+	recruit:    Maybe(Card_Tile),
 	// Tabs the piece has, and the one shown
 	tabs:       bit_set[Card_Tab],
 	tab:        Card_Tab,
@@ -315,7 +319,9 @@ card_breakdown :: proc(card: ^Card, tally: ^Report_Tally, total: string) -> Mayb
 // given, as it depends on the town
 @(private = "file")
 card_building_breakdown :: proc(card: ^Card, kind: ^Building_Kind, food: f32) -> Maybe(int) {
-	breakdown: Card_Breakdown
+	breakdown := Card_Breakdown {
+		description = description_to_string(&kind.description),
+	}
 	append(&breakdown.terms, Card_Term{"Population", fmt.tprintf("%.0f", kind.population)})
 	if food != 0 do append(&breakdown.terms, Card_Term{"Food", fmt.tprintf("%+.0f", food)})
 	if kind.labour != 0 do append(&breakdown.terms, Card_Term{"Labour", fmt.tprintf("%+.0f", kind.labour)})
@@ -404,7 +410,20 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 		// The piece, the same on every tab
 		army := piece.army
 		is_army := .Has_Army in piece.flags
-		append(&card.fields, Card_Field{label = "Type", value = ICON_TITLES[piece.icon]})
+		// An army's type, described on hover; or else what the piece is
+		type_field := Card_Field {
+			label = "Type",
+			value = ICON_TITLES[piece.icon],
+		}
+		if is_army && army.type != 0 {
+			army_type := &game.army_types[army.type]
+			type_field.value = name_to_string(&army_type.name)
+			described := Card_Breakdown {
+				description = description_to_string(&army_type.description),
+			}
+			if append(&card.breakdowns, described) > 0 do type_field.breakdown = len(card.breakdowns) - 1
+		}
+		append(&card.fields, type_field)
 		append(&card.fields, Card_Field{label = "Faction", value = faction_title(game, piece.owner)})
 		append(&card.fields, Card_Field{label = "Culture", value = name_to_string(&game.cultures[piece.culture].name)})
 		statuses := make([dynamic]string, context.temp_allocator)
@@ -439,6 +458,45 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					graded = true,
 				},
 			)
+
+			// Recruiting: every army type the culture recruits, with its cost and what the town lacks for it. Hovered,
+			// the army it makes
+			recruit := Card_Tile {
+				name = "Recruit",
+			}
+			acting := piece.owner == game.player
+			treasury := game.factions[piece.owner].treasury
+			for &army_type, a in game.army_types {
+				if a == 0 || !game.culture_army_types[piece.culture][a] do continue
+				detail := fmt.tprintf("%.0f labour a turn", army_type.upkeep_labour)
+				if army_type.upkeep_coin > 0 {
+					detail = fmt.tprintf("%.0f coin, %.0f coin a turn", army_type.recruit_coin, army_type.upkeep_coin)
+				}
+				missing := army_type.recruit_requires - piece.town.features
+				if missing != {} {
+					names := make([dynamic]string, context.temp_allocator)
+					for feature in missing do append(&names, fmt.tprint(feature))
+					detail = fmt.tprintf("Needs %s", strings.join(names[:], ", ", context.temp_allocator))
+				}
+
+				breakdown := Card_Breakdown {
+					description = description_to_string(&army_type.description),
+				}
+				append(&breakdown.terms, Card_Term{"Scope", fmt.tprint(army_type.scope)})
+				append(&breakdown.terms, Card_Term{"Men", compact_number(f64(army_type.men))})
+				append(&breakdown.terms, Card_Term{"Proficiency", fmt.tprintf("%.0f%%", army_type.proficiency)})
+				append(&breakdown.terms, Card_Term{"Foraging", fmt.tprintf("%.0f%%", army_type.foraging)})
+				append(&breakdown.terms, Card_Term{"Mobility", fmt.tprintf("%.0f", army_type.mobility)})
+				action := Card_Tile_Action {
+					label   = name_to_string(&army_type.name),
+					detail  = detail,
+					enabled = acting && missing == {} && treasury >= army_type.recruit_coin,
+					order   = Town_Order{town = focus, action = .Recruit, army_type = Army_Type_Id(a)},
+				}
+				if append(&card.breakdowns, breakdown) > 0 do action.breakdown = len(card.breakdowns) - 1
+				append(&recruit.actions, action)
+			}
+			card.recruit = recruit
 		}
 
 		// The tab's own section
@@ -549,7 +607,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 							label = "Cancel",
 							detail = "No refund",
 							enabled = acting,
-							order = {town = focus, slot = slot, action = .Cancel},
+							order = Town_Order{town = focus, slot = slot, action = .Cancel},
 						},
 					)
 				} else if here != 0 {
@@ -564,7 +622,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 								detail = cost.detail,
 								enabled = acting && cost.payable && game.culture_buildings[piece.culture][kind.upgrade],
 								breakdown = card_building_breakdown(&card, next, next.food + next.food_fertility * town.fertility),
-								order = {town = focus, slot = slot, action = .Build, kind = kind.upgrade},
+								order = Town_Order{town = focus, slot = slot, action = .Build, kind = kind.upgrade},
 							},
 						)
 					}
@@ -574,7 +632,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 							label = "Demolish",
 							detail = "Next turn",
 							enabled = acting,
-							order = {town = focus, slot = slot, action = .Demolish},
+							order = Town_Order{town = focus, slot = slot, action = .Demolish},
 						},
 					)
 				} else {
@@ -589,7 +647,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 								detail = cost.detail,
 								enabled = acting && cost.payable,
 								breakdown = card_building_breakdown(&card, &kind, kind.food + kind.food_fertility * town.fertility),
-								order = {town = focus, slot = slot, action = .Build, kind = Building_Kind_Id(k)},
+								order = Town_Order{town = focus, slot = slot, action = .Build, kind = Building_Kind_Id(k)},
 							},
 						)
 					}

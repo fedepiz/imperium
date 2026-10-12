@@ -1,5 +1,6 @@
 # The cultures. Each has an id, a snake_case word the other files name it by, a name, and a look: the art its pawns
-# and medallions are drawn with, written as declared (Roman, Germanic). Then the buildings it can build, by id.
+# and medallions are drawn with, written as declared (Roman, Germanic). Then the buildings it can build and the army
+# types it can recruit, by id.
 
 culture = {
 	id = roman
@@ -9,6 +10,7 @@ culture = {
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
 		sheep_farm, stables, barracks, palace, praetorium, curia,
 	]
+	army_types = [comitatenses, palatini, limitanei, vexillationes]
 }
 
 culture = {
@@ -19,4 +21,5 @@ culture = {
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
 		sheep_farm, stables, barracks,
 	]
+	army_types = [warband, retinue]
 }

@@ -26,6 +26,10 @@ Rules_Tag :: enum u32 {
 	Spent_Roll,
 	Unspent,
 	Turn,
+	Project_Started,
+	Project_Cancelled,
+	Project_Finished,
+	Recruited,
 }
 
 @(private = "file")
@@ -160,6 +164,14 @@ rules_log_events :: proc(game: ^Game, events: []Game_Event) {
 			push_event(.Unspent, game.step, e)
 		case Event_Turn:
 			push_event(.Turn, game.step, e)
+		case Event_Project_Started:
+			push_event(.Project_Started, game.step, e)
+		case Event_Project_Cancelled:
+			push_event(.Project_Cancelled, game.step, e)
+		case Event_Project_Finished:
+			push_event(.Project_Finished, game.step, e)
+		case Event_Recruited:
+			push_event(.Recruited, game.step, e)
 		}
 	}
 }
@@ -241,6 +253,8 @@ write_army :: proc(w: ^Json_Writer, army: ^Army) {
 	json_field_float(w, "supply", army.supply)
 	field_enum(w, "supply_source", army.supply_source)
 	json_field_float(w, "supply_efficiency", army.supply_efficiency)
+	json_field_int(w, "type", i64(army.type))
+	json_field_int(w, "home", i64(army.home))
 	json_object_end(w)
 }
 
@@ -471,6 +485,33 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		write_header(w, record.step, "turn")
 		json_field_int(w, "turn", i64(record.event.turn))
 		json_field_int(w, "player", i64(record.event.player))
+
+	case .Project_Started:
+		record := (^Event_Record(Event_Project_Started))(raw_data(payload))
+		write_header(w, record.step, "project_started")
+		field_piece(w, "town", record.event.town)
+		json_field_int(w, "slot", i64(record.event.slot))
+		json_field_int(w, "kind", i64(record.event.kind))
+
+	case .Project_Cancelled:
+		record := (^Event_Record(Event_Project_Cancelled))(raw_data(payload))
+		write_header(w, record.step, "project_cancelled")
+		field_piece(w, "town", record.event.town)
+		json_field_int(w, "slot", i64(record.event.slot))
+
+	case .Project_Finished:
+		record := (^Event_Record(Event_Project_Finished))(raw_data(payload))
+		write_header(w, record.step, "project_finished")
+		field_piece(w, "town", record.event.town)
+		json_field_int(w, "slot", i64(record.event.slot))
+		json_field_int(w, "kind", i64(record.event.kind))
+
+	case .Recruited:
+		record := (^Event_Record(Event_Recruited))(raw_data(payload))
+		write_header(w, record.step, "recruited")
+		field_piece(w, "army", record.event.army)
+		field_piece(w, "town", record.event.town)
+		json_field_int(w, "army_type", i64(record.event.army_type))
 	}
 	json_object_end(w)
 	json_line_end(w)

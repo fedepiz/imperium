@@ -5,25 +5,183 @@
 #   labour: labour per turn
 #   income, upkeep: coin per turn into its owner's treasury, and out of it
 #   control: radiated to its owner's towns, less their distance. A town sums what reaches it, up to 100
-#   features: the local features it provides, written as declared (Horses, Drill)
+#   features: the local features it provides, written as declared (Horses, Drill, Court)
 #   upgrade: the building it can be upgraded into, by id: its next level
 #   build_labour, build_turns, build_coin: building it uses labour each turn for build_turns turns, and coin at the
 #   start
+#   description: what it is, shown when it is hovered
 # A negative food or labour is consumed; a town using more labour than it makes runs a deficit. Income is scaled by its
 # town's control.
 
+building = {
+	id = wheat_fields
+	name = "Wheat Fields"
+	population = 2
+	food_fertility = 2
+	labour = 1
+	upgrade = wheat_farm
+	build_labour = 2
+	build_turns = 2
+	description = "Wheat Fields: arable land sown with wheat and barley, the staple of the Mediterranean diet. Most fields were worked by smallholders and their families with an ox-drawn plough, and a field was usually left fallow every other year."
+}
 
-building = { id = wheat_fields     name = "Wheat Fields"     population = 2  food_fertility = 2    labour = 1  upgrade = wheat_farm  build_labour = 2  build_turns = 2 }
-building = { id = wheat_farm       name = "Wheat Farm"       population = 3  food_fertility = 2.5  labour = 1  upgrade = wheat_mill  build_labour = 3  build_turns = 3 }
-building = { id = wheat_mill       name = "Wheat Mill"       population = 4  food_fertility = 3    labour = 1  income = 1  build_labour = 4  build_turns = 4 }
-building = { id = cattle_herds     name = "Cattle Herds"     population = 1  food = 1  food_fertility = 0.5  labour = 1  income = 0.5  upgrade = cattle_pastures  build_labour = 1  build_turns = 2 }
-building = { id = cattle_pastures  name = "Cattle Pastures"  population = 2  food = 2  food_fertility = 1    labour = 1  income = 1    upgrade = cattle_ranch  build_labour = 2  build_turns = 3 }
-building = { id = cattle_ranch     name = "Cattle Ranch"     population = 3  food = 3  food_fertility = 1.5  labour = 1  income = 1.5  build_labour = 3  build_turns = 4 }
-building = { id = sheep_flocks     name = "Sheep Flocks"     population = 1  food = 1  labour = 1  income = 1  upgrade = sheep_pens  build_labour = 1  build_turns = 1 }
-building = { id = sheep_pens       name = "Sheep Pens"       population = 2  food = 2  labour = 1  income = 2  upgrade = sheep_farm  build_labour = 2  build_turns = 2 }
-building = { id = sheep_farm       name = "Sheep Farm"       population = 3  food = 3  labour = 1  income = 3  build_labour = 3  build_turns = 3 }
-building = { id = stables          name = "Stables"          population = 1  upkeep = 1  features = [Horses]  build_labour = 2  build_turns = 2 }
-building = { id = barracks         name = "Barracks"         population = 2  upkeep = 1  features = [Drill]  build_labour = 3  build_turns = 3 }
-building = { id = palace           name = "Palace"           population = 3  upkeep = 4  control = 100  build_labour = 4  build_turns = 5  build_coin = 20 }
-building = { id = praetorium       name = "Praetorium"       population = 2  upkeep = 2  control = 60  build_labour = 3  build_turns = 4  build_coin = 10 }
-building = { id = curia            name = "Curia"            population = 2  labour = -3  income = 3  build_labour = 2  build_turns = 3 }
+building = {
+	id = wheat_farm
+	name = "Wheat Farm"
+	population = 3
+	food_fertility = 2.5
+	labour = 1
+	upgrade = wheat_mill
+	build_labour = 3
+	build_turns = 3
+	description = "Wheat Farm: an agricultural estate centred on a villa rustica, a working farmhouse with barns, granaries and threshing floors. By the late empire much of the work was done by coloni, tenant farmers legally bound to the land they worked."
+}
+
+building = {
+	id = wheat_mill
+	name = "Wheat Mill"
+	population = 4
+	food_fertility = 3
+	labour = 1
+	income = 1
+	build_labour = 4
+	build_turns = 4
+	description = "Wheat Mill: a watermill for grinding grain into flour. Water power was known from the first century BC, and large milling complexes, such as the one at Barbegal in Gaul, could supply whole cities."
+}
+
+building = {
+	id = cattle_herds
+	name = "Cattle Herds"
+	population = 1
+	food = 1
+	food_fertility = 0.5
+	labour = 1
+	income = 0.5
+	upgrade = cattle_pastures
+	build_labour = 1
+	build_turns = 2
+	description = "Cattle Herds: oxen and cows kept on common grazing land. Oxen were the main draught animals of ancient farming, pulling ploughs and carts; cows gave milk, and beef was eaten less often than pork."
+}
+
+building = {
+	id = cattle_pastures
+	name = "Cattle Pastures"
+	population = 2
+	food = 2
+	food_fertility = 1
+	labour = 1
+	income = 1
+	upgrade = cattle_ranch
+	build_labour = 2
+	build_turns = 3
+	description = "Cattle Pastures: enclosed meadows and hay fields set aside for cattle. Raising cattle for sale at market, beyond a farm's own needs, was common in the wetter northern provinces and in the Po valley."
+}
+
+building = {
+	id = cattle_ranch
+	name = "Cattle Ranch"
+	population = 3
+	food = 3
+	food_fertility = 1.5
+	labour = 1
+	income = 1.5
+	build_labour = 3
+	build_turns = 4
+	description = "Cattle Ranch: large-scale cattle raising on the latifundia, the great estates of the senatorial aristocracy. Herds were moved between summer pastures in the hills and winter pastures in the lowlands, a practice called transhumance."
+}
+
+building = {
+	id = sheep_flocks
+	name = "Sheep Flocks"
+	population = 1
+	food = 1
+	labour = 1
+	income = 1
+	upgrade = sheep_pens
+	build_labour = 1
+	build_turns = 1
+	description = "Sheep Flocks: sheep kept on hillsides and poor ground unsuited to the plough. They provided wool, milk for cheese and some meat, and were the main livestock of the mountain regions."
+}
+
+building = {
+	id = sheep_pens
+	name = "Sheep Pens"
+	population = 2
+	food = 2
+	labour = 1
+	income = 2
+	upgrade = sheep_farm
+	build_labour = 2
+	build_turns = 2
+	description = "Sheep Pens: folds and shearing sheds for larger flocks. Wool was spun and woven at home across the empire, and the surplus was sold at local markets."
+}
+
+building = {
+	id = sheep_farm
+	name = "Sheep Farm"
+	population = 3
+	food = 3
+	labour = 1
+	income = 3
+	build_labour = 3
+	build_turns = 3
+	description = "Sheep Farm: wool production on a commercial scale. Some regions were known for the quality of their cloth, and the state ran its own weaving workshops, the gynaecea, to clothe the army and the court."
+}
+
+building = {
+	id = stables
+	name = "Stables"
+	population = 1
+	upkeep = 1
+	features = [Horses]
+	build_labour = 2
+	build_turns = 2
+	description = "Stables: horses bred and kept for riding, transport and war. Horses were costly to keep, and the state bought many for the army and for the cursus publicus, the imperial post and transport service."
+}
+
+building = {
+	id = barracks
+	name = "Barracks"
+	population = 2
+	upkeep = 1
+	features = [Drill]
+	build_labour = 3
+	build_turns = 3
+	description = "Barracks: living quarters, armouries and exercise grounds for soldiers. Late Roman recruits trained in marching, weapon drill and fighting in formation, as described by the military writer Vegetius."
+}
+
+building = {
+	id = palace
+	name = "Palace"
+	population = 3
+	upkeep = 4
+	control = 100
+	features = [Court]
+	build_labour = 4
+	build_turns = 5
+	build_coin = 20
+	description = "Palace: an imperial residence, or palatium, named after the Palatine hill in Rome where Augustus and his successors lived. In late antiquity emperors resided in cities such as Milan, Ravenna and Constantinople, and the palace housed the court and the central ministries."
+}
+
+building = {
+	id = praetorium
+	name = "Praetorium"
+	population = 2
+	upkeep = 2
+	control = 60
+	build_labour = 3
+	build_turns = 4
+	build_coin = 10
+	description = "Praetorium: the official residence and headquarters of a provincial governor, named after the praetor, a senior Roman magistrate. The governor heard lawsuits, oversaw the collection of taxes and kept order with a staff of clerks and soldiers."
+}
+
+building = {
+	id = curia
+	name = "Curia"
+	population = 2
+	labour = -3
+	income = 3
+	build_labour = 2
+	build_turns = 3
+	description = "Curia: the council of a Roman town, made up of the decurions, its wealthiest landowners. In the late empire the decurions were held personally responsible for collecting the town's taxes, and many tried to escape the duty."
+}
