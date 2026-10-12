@@ -497,6 +497,19 @@ ROLE_LABELS := [Role]string {
 	.Defender = "Defender",
 }
 
+Battle_Side_Flag :: enum u8 {
+	Spent,
+	Garrisoning,
+	// Fights from a fortified piece; names the battle
+	Behind_Walls,
+	// The fortified piece's own army; named "<name>'s garrison"
+	Inherent_Garrison,
+	Can_Attack,
+	Can_Avoid,
+	Can_Fall_Back,
+	Can_Pursue,
+}
+
 Battle_Side :: struct {
 	men:           f32,
 	men_max:       f32,
@@ -506,16 +519,10 @@ Battle_Side :: struct {
 	engaged_max:   f32,
 	proficiency:   f32,
 	readiness:     f32,
-	spent:         bool,
-	garrisoning:   bool,
-	// Fights from a fortified piece; names the battle
-	behind_walls:  bool,
+	flags:         bit_set[Battle_Side_Flag],
 	mobility:      f32,
 	temperament:   Temperament,
-	can_attack:    bool,
-	can_avoid:     bool,
-	can_fall_back: bool,
-	can_pursue:    bool,
+	// The piece's title
 	name:          string,
 }
 
@@ -558,7 +565,10 @@ Battle_Result :: struct {
 battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	rng := battle.seed
 	report := &result.report
-	for side, i in battle.sides do result.names[i] = report_text(report, side.name)
+	for side, i in battle.sides {
+		form := .Inherent_Garrison in side.flags ? "%'s garrison" : "%"
+		result.names[i] = report_text(report, form, side.name)
+	}
 
 	// Men taking part
 	men_engaged: [2]f32
@@ -588,8 +598,8 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	for side, i in battle.sides {
 		gap := result.sides[i].power.total - result.sides[1 - i].power.total
 		facts[i] = {TEMPERAMENT_FACTS[side.temperament], ladder(gap, STRENGTH_LADDER[:])}
-		if side.spent do facts[i] += {.Spent}
-		if side.garrisoning do facts[i] += {.Garrisoning}
+		if .Spent in side.flags do facts[i] += {.Spent}
+		if .Garrisoning in side.flags do facts[i] += {.Garrisoning}
 	}
 
 	if battle.ordered do facts[0] += {.Contact_Ordered}
@@ -602,15 +612,15 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		reasons[i] = report_because(report, held, absent, FACT_TITLES)
 	}
 	switch {
-	case battle.sides[0].can_attack && attacking[0]:
+	case .Can_Attack in battle.sides[0].flags && attacking[0]:
 		result.fought = true
-	case battle.sides[1].can_attack && attacking[1]:
+	case .Can_Attack in battle.sides[1].flags && attacking[1]:
 		result.fought = true
 		result.attacker = 1
 	case:
 		result.refused = battle.ordered
 		refusal: Report_Arg = Report_Note{"Its commander declines.", reasons[0]}
-		if !battle.sides[0].can_attack do refusal = "It has already attacked this turn."
+		if .Can_Attack not_in battle.sides[0].flags do refusal = "It has already attacked this turn."
 		report_say(report, "%", refusal)
 	}
 
@@ -623,15 +633,17 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		.Defender = battle.sides[at[.Defender]],
 	}
 	names := [Role]string {
-		.Attacker = sides[.Attacker].name,
-		.Defender = sides[.Defender].name,
+		.Attacker = report_string(report, result.names[at[.Attacker]]),
+		.Defender = report_string(report, result.names[at[.Defender]]),
 	}
+	// Attacked: the piece, not its garrison
+	attacked := sides[.Defender].name
 	kind := Battle_Kind.Field
-	if sides[.Defender].behind_walls do kind = .Assault
-	if sides[.Attacker].behind_walls do kind = .Sortie
+	if .Behind_Walls in sides[.Defender].flags do kind = .Assault
+	if .Behind_Walls in sides[.Attacker].flags do kind = .Sortie
 	result.kind_title = report_text(report, KIND_TITLES[kind])
 	verb := result.fought ? KIND_VERBS[kind] : KIND_REFUSALS[kind]
-	result.attack_title = report_text(report, "% % %", names[.Attacker], verb, names[.Defender])
+	result.attack_title = report_text(report, "% % %", names[.Attacker], verb, attacked)
 	if !result.fought do return
 
 	powers := [Role]Report_Tally {
@@ -647,7 +659,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		"% % %.",
 		names[.Attacker],
 		Report_Note{KIND_VERBS[kind], reasons[result.attacker]},
-		names[.Defender],
+		attacked,
 	)
 
 	// Engaged share of each side's men, scaling its readiness effects
@@ -666,7 +678,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		defender := sides[.Defender]
 		attacker := sides[.Attacker]
 		avoid, held, absent := decide(.Avoid, situation[.Defender])
-		if defender.can_avoid && avoid == .Avoid_Try {
+		if .Can_Avoid in defender.flags && avoid == .Avoid_Try {
 			roll: Report_Tally
 			report_tally_add(&roll, "Roll", roll_2d6(&rng))
 			report_tally_add(&roll, "Mobility", MOBILITY_BONUS * (defender.mobility - attacker.mobility))
@@ -807,7 +819,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			out.falls_back =
 				takes_losers_losses[role] &&
 				outcome in OUTCOMES_RETREATING &&
-				sides[role].can_fall_back
+				.Can_Fall_Back in sides[role].flags
 		}
 	}
 
@@ -839,7 +851,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		outcome := result.outcome
 		standing := !result.sides[at[loser]].dissolved && !result.sides[at[winner]].dissolved
 		can_advance := standing && result.sides[at[loser]].falls_back
-		can_pursue := standing && outcome in OUTCOMES_PURSUABLE && sides[winner].can_pursue
+		can_pursue := standing && outcome in OUTCOMES_PURSUABLE && .Can_Pursue in sides[winner].flags
 		victor := sides[winner]
 		beaten := sides[loser]
 		follow := Choice.Follow_Stay
@@ -868,13 +880,13 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		}
 		switch {
 		case !result.follows:
-			result.follow_title = report_text(report, "% falls back", beaten.name)
+			result.follow_title = report_text(report, "% falls back", names[loser])
 		case !pursued:
-			result.follow_title = report_text(report, "% falls back; % advances", beaten.name, victor.name)
+			result.follow_title = report_text(report, "% falls back; % advances", names[loser], names[winner])
 		case result.caught:
-			result.follow_title = report_text(report, "% pursues and catches %", victor.name, beaten.name)
+			result.follow_title = report_text(report, "% pursues and catches %", names[winner], names[loser])
 		case:
-			result.follow_title = report_text(report, "% pursues; % gets away", victor.name, beaten.name)
+			result.follow_title = report_text(report, "% pursues; % gets away", names[winner], names[loser])
 		}
 	}
 	return

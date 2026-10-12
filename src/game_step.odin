@@ -693,6 +693,13 @@ game_step :: proc(
 		for piece, i in pieces {
 			army := piece.army
 			limited := behind_walls[1 - i]
+			flags: bit_set[Battle_Side_Flag]
+			if army.spent do flags += {.Spent}
+			if piece.inside != {} do flags += {.Garrisoning}
+			if behind_walls[i] do flags += {.Behind_Walls}
+			if .Fortified in piece.flags do flags += {.Inherent_Garrison}
+			if behind_walls[i] || !piece.this_turn.attacked do flags += {.Can_Attack}
+			if !sortie do flags += {.Can_Avoid, .Can_Fall_Back, .Can_Pursue}
 			battle.sides[i] = {
 				men           = f32(army.men),
 				men_max       = f32(army.men_max),
@@ -700,15 +707,9 @@ game_step :: proc(
 				engaged_max   = limited ? f32(pieces[1 - i].army.men) : math.INF_F32,
 				proficiency   = army.proficiency,
 				readiness     = army.readiness,
-				spent         = army.spent,
-				garrisoning   = piece.inside != {},
-				behind_walls  = behind_walls[i],
+				flags         = flags,
 				mobility      = army.mobility,
 				temperament   = game_commander_temperament(game, piece),
-				can_attack    = behind_walls[i] || !piece.this_turn.attacked,
-				can_avoid     = !sortie,
-				can_fall_back = !sortie,
-				can_pursue    = !sortie,
 				name          = game_piece_title(piece),
 			}
 		}
