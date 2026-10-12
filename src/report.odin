@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:math"
 import "core:strings"
 
 REPORT_TALLY_FACTORS_MAX :: 20
@@ -31,6 +32,8 @@ Report_Factor :: struct {
 Report_Tally :: struct {
 	factors: [dynamic; REPORT_TALLY_FACTORS_MAX]Report_Factor,
 	total:   f32,
+	// Of the total
+	unit:    Report_Unit,
 }
 
 Report_Part :: struct {
@@ -142,7 +145,16 @@ report_write :: proc(report: ^Report, text: string, args: []Report_Arg, as_parts
 			if as_parts && len(value.factors) > 0 && append(&report.tallies, value) == 1 {
 				tally = len(report.tallies) - 1
 			}
-			report_put(report, fmt.bprintf(digits[:], "%.1f", value.total), tally, {}, as_parts)
+			total: string
+			switch value.unit {
+			case .Points:
+				total = fmt.bprintf(digits[:], "%.1f", value.total)
+			case .Men:
+				total = compact_number(f64(value.total))
+			case .Percent:
+				total = fmt.bprintf(digits[:], "%.0f%%", 100 * value.total)
+			}
+			report_put(report, total, tally, {}, as_parts)
 		case Report_Note:
 			report_put(report, value.text, nil, value.note, as_parts)
 		}
@@ -158,4 +170,25 @@ report_put :: proc(report: ^Report, text: string, tally: Maybe(int), note: Span,
 	if as_part {
 		append(&report.parts, Report_Part{Span{begin, len(report.text) - begin}, tally, note})
 	}
+}
+
+compact_number :: proc(value: f64) -> string {
+	SUFFIXES :: [?]string{"", "K", "M", "B"}
+	sign := value < 0 ? "-" : ""
+	magnitude := abs(value)
+	tier := 0
+	for math.round(magnitude) >= 1000 && tier < len(SUFFIXES) - 1 {
+		magnitude /= 1000
+		tier += 1
+	}
+	suffixes := SUFFIXES
+	switch {
+	case tier == 0:
+		return fmt.tprintf("%s%.0f", sign, magnitude)
+	case math.round(magnitude * 100) < 1000:
+		return fmt.tprintf("%s%.2f%s", sign, magnitude, suffixes[tier])
+	case math.round(magnitude * 10) < 1000:
+		return fmt.tprintf("%s%.1f%s", sign, magnitude, suffixes[tier])
+	}
+	return fmt.tprintf("%s%.0f%s", sign, magnitude, suffixes[tier])
 }

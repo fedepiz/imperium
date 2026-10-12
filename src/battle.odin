@@ -575,6 +575,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	for side, i in battle.sides {
 		assert(side.engaged_share > 0)
 		engaged := &result.sides[i].men_engaged
+		engaged.unit = .Men
 		report_tally_add(engaged, "Men", side.men, .Men)
 		if side.engaged_share < 1 do report_tally_scale(engaged, "Share", side.engaged_share, .Percent)
 		if engaged.total > side.engaged_max {
@@ -667,7 +668,8 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 	for side, role in sides {
 		scale[role] = side.men > 0 ? men_engaged[at[role]] / side.men : 1
 		if scale[role] >= 1 do continue
-		report_say(report, "% engages % of % men.", names[role], men_engaged[at[role]], side.men)
+		engaged := result.sides[at[role]].men_engaged
+		report_say(report, "% engages % of % men.", names[role], engaged, compact_number(f64(side.men)))
 	}
 	report_say(report, "Power % against %.", powers[.Attacker], powers[.Defender])
 
@@ -812,6 +814,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			fate: Fate = takes_losers_losses[role] ? .Loser : .Winner
 			out := &result.sides[at[role]]
 			if share := MEN_LOST_SHARE[fate][outcome]; share > 0 {
+				out.men.unit = .Men
 				report_tally_add(&out.men, "Engaged", -min(men_engaged[0], men_engaged[1]), .Men)
 				report_tally_scale(&out.men, "Share", share, .Percent)
 			}
@@ -873,6 +876,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 			result.caught = check(report, names[winner], roll, MOBILITY_TARGET, pursues)
 			if result.caught {
 				out := &result.sides[at[loser]]
+				out.pursuit_men.unit = .Men
 				report_tally_add(&out.pursuit_men, "Men left", -(beaten.men + out.men.total), .Men)
 				report_tally_scale(&out.pursuit_men, "Share", PURSUIT_MEN_LOST_SHARE[outcome], .Percent)
 				out.pursuit_readiness = PURSUIT_READINESS

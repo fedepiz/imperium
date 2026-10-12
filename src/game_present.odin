@@ -217,28 +217,6 @@ faction_title :: proc(game: ^Game, faction: Faction_Id) -> string {
 }
 
 @(private = "file")
-compact_number :: proc(value: f64) -> string {
-	SUFFIXES :: [?]string{"", "K", "M", "B"}
-	sign := value < 0 ? "-" : ""
-	magnitude := abs(value)
-	tier := 0
-	for math.round(magnitude) >= 1000 && tier < len(SUFFIXES) - 1 {
-		magnitude /= 1000
-		tier += 1
-	}
-	suffixes := SUFFIXES
-	switch {
-	case tier == 0:
-		return fmt.tprintf("%s%.0f", sign, magnitude)
-	case math.round(magnitude * 100) < 1000:
-		return fmt.tprintf("%s%.2f%s", sign, magnitude, suffixes[tier])
-	case math.round(magnitude * 10) < 1000:
-		return fmt.tprintf("%s%.1f%s", sign, magnitude, suffixes[tier])
-	}
-	return fmt.tprintf("%s%.0f%s", sign, magnitude, suffixes[tier])
-}
-
-@(private = "file")
 card_breakdown :: proc(card: ^Card, tally: ^Report_Tally, total: string) -> Maybe(int) {
 	breakdown := Card_Breakdown {
 		total = total,
@@ -394,12 +372,12 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, cards: ^Cards) {
 				if !result.caught || side_index == result.winner do continue
 				men := compact_number(f64(side.pursuit_men.total))
 				append(fields, card_tally_field(&card, "Men", &side.pursuit_men, men))
-				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.pursuit_readiness)})
+				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f%%", side.pursuit_readiness)})
 			case:
 				men := compact_number(f64(side.men.total))
 				append(fields, Card_Field{label = "Posture", value = report_string(report, side.posture)})
 				append(fields, card_tally_field(&card, "Men", &side.men, men))
-				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f", side.readiness)})
+				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f%%", side.readiness)})
 				if side.dissolved do append(fields, Card_Field{label = "Fate", value = "Dissolved"})
 			}
 		}
