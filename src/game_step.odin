@@ -34,6 +34,9 @@ SUPPLY_DRAG :: 5
 SUPPLY_DECAY :: 2
 @(private = "file")
 MEN_PER_SUPPLY :: 250
+// Share of full strength regained per turn on home land, at 100% supply
+@(private = "file")
+REINFORCEMENT_SHARE :: 0.05
 @(private = "file")
 FALL_BACK_BUDGET :: 10
 @(private = "file")
@@ -947,6 +950,17 @@ game_step :: proc(
 				if total > SPENT_ROLL_TARGET {
 					army.spent = false
 					append(events, Event_Unspent{id})
+				}
+			}
+
+			// Reinforcement on home land
+			cell := cell_of(piece.pos)
+			if grid_contains(cell, MAP_SIZE) {
+				region := game.terrain.regions[grid_index(cell, MAP_SIZE)]
+				capital := slot_map_get(&game.pieces, game.regions[region].capital)
+				if capital != nil && capital.owner == piece.owner {
+					men := math.round(REINFORCEMENT_SHARE * f32(army.men_max) * army.supply / 100)
+					army.men = min(army.men_max, army.men + int(men))
 				}
 			}
 		}
