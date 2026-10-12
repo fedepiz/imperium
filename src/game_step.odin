@@ -1063,6 +1063,8 @@ game_step :: proc(
 		town.labour_used = 0
 		town.income = 0
 		town.upkeep = 0
+		town.public_order = 0
+		town.unrest = 0
 		town.features = {}
 		for kind_id, slot in town.buildings {
 			kind := &game.building_kinds[kind_id]
@@ -1073,6 +1075,8 @@ game_step :: proc(
 			town.income += kind.income * town.staffing * town.control / 100
 			// Paid however staffed
 			town.upkeep += kind.upkeep
+			if kind.public_order > 0 do town.public_order += kind.public_order
+			else do town.unrest -= kind.public_order
 			town.features += kind.features
 		}
 		for project in town.projects {

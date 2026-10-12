@@ -328,6 +328,7 @@ card_building_breakdown :: proc(card: ^Card, kind: ^Building_Kind, food: f32) ->
 	if kind.income != 0 do append(&breakdown.terms, Card_Term{"Income", fmt.tprintf("%+.1f", kind.income)})
 	if kind.upkeep != 0 do append(&breakdown.terms, Card_Term{"Upkeep", fmt.tprintf("%.0f", kind.upkeep)})
 	if kind.control != 0 do append(&breakdown.terms, Card_Term{"Control", fmt.tprintf("%.0f", kind.control)})
+	if kind.public_order != 0 do append(&breakdown.terms, Card_Term{"Public order", fmt.tprintf("%+.1f", kind.public_order)})
 	if kind.features != {} {
 		names := make([dynamic]string, context.temp_allocator)
 		for feature in kind.features do append(&names, fmt.tprint(feature))
@@ -528,8 +529,12 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				{"Food", fmt.tprintf("%.1f produced, %.1f eaten", town.food, town.food_eaten), town.food, town.food_eaten},
 				{"Labour", fmt.tprintf("%.0f produced, %.0f used", town.labour, town.labour_used), town.labour, town.labour_used},
 				{"Income", fmt.tprintf("%.1f income, %.1f upkeep", town.income, town.upkeep), town.income, town.upkeep},
-				// Made up until public order exists
-				{"Public order", "2.0 order, 3.5 unrest", 2, 3.5},
+				{
+					"Public order",
+					fmt.tprintf("%.1f order, %.1f unrest", town.public_order, town.unrest),
+					town.public_order,
+					town.unrest,
+				},
 			}
 			for balance in balances {
 				net := balance.supply - balance.demand

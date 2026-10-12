@@ -5,6 +5,7 @@
 #   labour: labour per turn
 #   income, upkeep: coin per turn into its owner's treasury, and out of it
 #   control: radiated to its owner's towns, less their distance. A town sums what reaches it, up to 100
+#   public_order: its town's public order, as given: positive keeps order, negative stirs unrest
 #   features: the local features it provides, written as declared (Horses, Drill, Court)
 #   upgrade: the building it can be upgraded into, by id: its next level
 #   build_labour, build_turns, build_coin: building it uses labour each turn for build_turns turns, and coin at the
@@ -172,6 +173,7 @@ building = {
 	build_labour = 3
 	build_turns = 4
 	build_coin = 10
+	public_order = 1.0
 	description = "Praetorium: the official residence and headquarters of a provincial governor, named after the praetor, a senior Roman magistrate. The governor heard lawsuits, oversaw the collection of taxes and kept order with a staff of clerks and soldiers."
 }
 
@@ -181,6 +183,7 @@ building = {
 	population = 2
 	labour = -3
 	income = 3
+	public_order = -1
 	build_labour = 2
 	build_turns = 3
 	description = "Curia: the council of a Roman town, made up of the decurions, its wealthiest landowners. In the late empire the decurions were held personally responsible for collecting the town's taxes, and many tried to escape the duty."

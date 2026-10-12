@@ -186,6 +186,9 @@ Town :: struct {
 	// 0..100: the share of what it sends to the global pool that reaches it. Set with the networks, at load and each
 	// turn change
 	control:              f32,
+	// Its buildings' public order, as given: what keeps order, and what stirs unrest
+	public_order:         f32,
+	unrest:               f32,
 	// The population its food feeds
 	population_supported: f32,
 	features:             bit_set[Feature],
@@ -265,6 +268,8 @@ Building_Kind :: struct {
 	// Spread over the land to its owner's towns, less the travel cost. A town's control sums every source's, capped at
 	// 100
 	control:        f32,
+	// Its town's public order: positive keeps order, negative stirs unrest
+	public_order:   f32,
 	features:       bit_set[Feature],
 	// Building it: coin paid at the start, labour used each turn, and turns
 	build_coin:     f32,
@@ -640,6 +645,7 @@ game_load :: proc(
 				income         = tbl.get_num(row, "income"),
 				upkeep         = tbl.get_num(row, "upkeep"),
 				control        = tbl.get_num(row, "control"),
+				public_order   = tbl.get_num(row, "public_order"),
 				build_coin     = tbl.get_num(row, "build_coin"),
 				build_labour   = tbl.get_num(row, "build_labour"),
 				build_turns    = tbl.get_num(row, "build_turns"),
