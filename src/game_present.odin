@@ -39,7 +39,6 @@ MARCH_ARROWS :: bit_set[Mover]{.Leader, .Chaser}
 
 @(private = "file", rodata)
 ICON_TITLES := [Map_Icon]string {
-	.Village    = "Village",
 	.Town       = "Town",
 	.City       = "City",
 	.Large_City = "Large City",

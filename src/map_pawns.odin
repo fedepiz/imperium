@@ -38,7 +38,6 @@ MAP_PAWN_STYLE_DEFAULT :: Map_Pawn_Style {
 }
 
 Map_Icon :: enum {
-	Village,
 	Town,
 	City,
 	Large_City,
@@ -90,7 +89,6 @@ CULTURE_NAMES := [Map_Culture]string {
 }
 @(private = "file", rodata)
 ICON_NAMES := [Map_Icon]string {
-	.Village    = "town_0",
 	.Town       = "town_1",
 	.City       = "town_2",
 	.Large_City = "town_3",
@@ -107,7 +105,6 @@ CELLS_PER_PIXEL := [Pawn_Set]f32 {
 }
 @(private = "file", rodata)
 ICON_SIZES := [Map_Icon]f32 {
-	.Village    = 1.65,
 	.Town       = 1.95,
 	.City       = 2.1,
 	.Large_City = 2.55,
