@@ -222,7 +222,7 @@ RULES := [Decision][]Rule {
 		},
 		{
 			all = {.Temperament_Cautious, .Contact_Ordered},
-			any = {.Strength_Superior, .Strength_Ahead},
+			any = {.Strength_Superior, .Strength_Ahead, .Strength_Even},
 			choice = .Contact_Attack,
 		},
 		{all = {.Temperament_Cautious, .Strength_Superior}, choice = .Contact_Attack},
@@ -321,6 +321,8 @@ CHOICE_VERBS := #partial [Choice]string {
 }
 
 Battle_Outcome :: enum u8 {
+	// No battle fought
+	None,
 	Avoided,
 	Stalemate,
 	Probed,
@@ -359,6 +361,7 @@ KIND_REFUSALS := [Battle_Kind]string {
 
 @(private = "file", rodata)
 OUTCOME_TITLES := [Battle_Outcome]string {
+	.None         = "No battle",
 	.Avoided      = "Avoided",
 	.Stalemate    = "Stalemate",
 	.Probed       = "Probed",
@@ -370,6 +373,7 @@ OUTCOME_TITLES := [Battle_Outcome]string {
 }
 @(private = "file", rodata)
 LOSER_FATES := [Battle_Outcome]string {
+	.None         = "",
 	.Avoided      = "gets away",
 	.Stalemate    = "",
 	.Probed       = "pulls out",
@@ -380,7 +384,7 @@ LOSER_FATES := [Battle_Outcome]string {
 	.Rout         = "is routed",
 }
 @(private = "file", rodata)
-OUTCOME_VICTORY := [Battle_Outcome]Fact {
+OUTCOME_VICTORY := #partial [Battle_Outcome]Fact {
 	.Avoided      = .Victory_Slight,
 	.Stalemate    = .Victory_Slight,
 	.Probed       = .Victory_Slight,
@@ -392,6 +396,7 @@ OUTCOME_VICTORY := [Battle_Outcome]Fact {
 }
 @(private = "file", rodata)
 OUTCOME_WORSE := [Battle_Outcome]Battle_Outcome {
+	.None         = .None,
 	.Avoided      = .Avoided,
 	.Stalemate    = .Stalemate,
 	.Probed       = .Probed,
@@ -424,6 +429,7 @@ Fate :: enum u8 {
 @(private = "file", rodata)
 MEN_LOST_SHARE := [Fate][Battle_Outcome]f32 {
 	.Loser = {
+		.None = 0,
 		.Avoided = 0,
 		.Stalemate = 0.05,
 		.Probed = 0.04,
@@ -434,6 +440,7 @@ MEN_LOST_SHARE := [Fate][Battle_Outcome]f32 {
 		.Rout = 0.40,
 	},
 	.Winner = {
+		.None = 0,
 		.Avoided = 0,
 		.Stalemate = 0.05,
 		.Probed = 0.02,
@@ -447,6 +454,7 @@ MEN_LOST_SHARE := [Fate][Battle_Outcome]f32 {
 @(private = "file", rodata)
 READINESS_CHANGE := [Fate][Battle_Outcome]f32 {
 	.Loser = {
+		.None = 0,
 		.Avoided = -AVOID_READINESS,
 		.Stalemate = -10,
 		.Probed = -10,
@@ -457,6 +465,7 @@ READINESS_CHANGE := [Fate][Battle_Outcome]f32 {
 		.Rout = -50,
 	},
 	.Winner = {
+		.None = 0,
 		.Avoided = 0,
 		.Stalemate = -10,
 		.Probed = -5,
@@ -469,6 +478,7 @@ READINESS_CHANGE := [Fate][Battle_Outcome]f32 {
 }
 @(private = "file", rodata)
 PURSUIT_MEN_LOST_SHARE := [Battle_Outcome]f32 {
+	.None         = 0,
 	.Avoided      = 0,
 	.Stalemate    = 0,
 	.Probed       = 0,

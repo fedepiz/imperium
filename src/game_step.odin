@@ -26,10 +26,9 @@ ROAD_READINESS_PER_MOVEMENT :: 0.2
 READINESS_PER_MOVEMENT :: 1
 @(private = "file")
 OVERDRAW_READINESS :: 2
+// Most readiness gained or lost per turn moving toward the supply level
 @(private = "file")
-READINESS_RECOVERY :: 20
-@(private = "file")
-SUPPLY_DRAG :: 5
+READINESS_SPEED :: 10
 @(private = "file")
 SUPPLY_DECAY :: 2
 @(private = "file")
@@ -701,7 +700,8 @@ game_step :: proc(
 			if piece.inside != {} do flags += {.Garrisoning}
 			if behind_walls[i] do flags += {.Behind_Walls}
 			if .Fortified in piece.flags do flags += {.Inherent_Garrison}
-			if behind_walls[i] || !piece.this_turn.attacked do flags += {.Can_Attack}
+			// Only the initiator attacks
+			if i == 0 && (behind_walls[i] || !piece.this_turn.attacked) do flags += {.Can_Attack}
 			if !sortie do flags += {.Can_Avoid, .Can_Fall_Back, .Can_Pursue}
 			battle.sides[i] = {
 				men           = f32(army.men),
@@ -935,12 +935,10 @@ game_step :: proc(
 			changes += {.Turn_End}
 			exertion: f32 =
 				piece.movement_per_turn > 0 ? 1 - game_movement_left(piece^) / piece.movement_per_turn : 0
-			rest := (1 - exertion) * (1 - exertion)
-			if readiness < army.supply {
-				readiness = min(army.supply, readiness + READINESS_RECOVERY * rest)
-			} else {
-				readiness = max(army.supply, readiness - SUPPLY_DRAG)
-			}
+			// Recovery: toward the supply level; gains scaled by rest
+			delta := clamp(army.supply - readiness, -READINESS_SPEED, READINESS_SPEED)
+			if delta > 0 do delta *= 1 - exertion
+			readiness += delta
 			if army.spent && readiness >= SPENT_READINESS {
 				seed_source := [3]u64{u64(game.turn), u64(game.player), transmute(u64)id}
 				rng := hash.fnv64a(mem.slice_to_bytes(seed_source[:]))
