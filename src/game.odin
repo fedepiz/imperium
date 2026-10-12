@@ -60,24 +60,30 @@ REGIONS_MAX :: 256
 PIECE_MAX :: 1024
 FACTIONS_MAX :: 16
 CHARACTERS_MAX :: 1024
+BUILDING_KINDS_MAX :: 64
+// The most building slots a settlement has
+TOWN_SLOTS_MAX :: 8
 
 ARMY_FORAGING_DEFAULT :: 40
 ARMY_MOBILITY_DEFAULT :: 2
 
 Game :: struct {
-	terrain:        Terrain,
-	regions:        [REGIONS_MAX]Region,
-	pieces:         Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
-	step:           int,
-	factions:       [dynamic; FACTIONS_MAX]Faction,
-	characters:     [dynamic; CHARACTERS_MAX]Character,
-	turn:           int,
-	player:         Faction_Id,
-	ending:         bool,
-	contacts:       [dynamic; CONTACTS_MAX]Contact,
-	interaction:    Interaction,
-	movement:       Movement,
-	supply_network: [MAP_CELLS]u8,
+	terrain:         Terrain,
+	regions:         [REGIONS_MAX]Region,
+	pieces:          Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
+	step:            int,
+	factions:        [dynamic; FACTIONS_MAX]Faction,
+	characters:      [dynamic; CHARACTERS_MAX]Character,
+	building_kinds:  [dynamic; BUILDING_KINDS_MAX]Building_Kind,
+	turn:            int,
+	player:          Faction_Id,
+	ending:          bool,
+	contacts:        [dynamic; CONTACTS_MAX]Contact,
+	interaction:     Interaction,
+	movement:        Movement,
+	supply_network:  [MAP_CELLS]u8,
+	// The playing faction's control over the land, 0..100
+	control_network: [MAP_CELLS]u8,
 }
 
 Region_Id :: distinct u8
@@ -122,6 +128,7 @@ Piece_Data :: struct {
 	inside:            Piece_Id,
 	contains:          Piece_Id,
 	army:              Army,
+	town:              Town,
 }
 
 Army :: struct {
@@ -138,6 +145,62 @@ Army :: struct {
 	supply_efficiency: f32,
 }
 
+// A settlement's economy
+Town :: struct {
+	population:           f32,
+	// Its region's, copied at load
+	fertility:            f32,
+	// Its kind's: at most this many buildings
+	slots:                int,
+	buildings:            [dynamic; TOWN_SLOTS_MAX]Building_Kind_Id,
+	// Each step, from its buildings and population. Per turn
+	// The population its buildings need as staff, and the share of it they have, 0..1: every output is scaled by it
+	staff_needed:         f32,
+	staffing:             f32,
+	// The food of the building in each slot, here
+	slot_food:            [TOWN_SLOTS_MAX]f32,
+	food:                 f32,
+	food_eaten:           f32,
+	labour:               f32,
+	labour_used:          f32,
+	// Into its owner's treasury: scaled by its control
+	income:               f32,
+	upkeep:               f32,
+	// 0..100: the share of what it sends to the global pool that reaches it. Set with the networks, at load and each
+	// turn change
+	control:              f32,
+	// The population its food feeds
+	population_supported: f32,
+	features:             bit_set[Feature],
+}
+
+Building_Kind_Id :: distinct u8
+
+// Local, on or off: what a town's buildings provide
+Feature :: enum u8 {
+	Horses,
+	Drill,
+}
+
+// A kind of building and its effects, per turn, from buildings.txt. A negative flow is consumed
+Building_Kind :: struct {
+	id:             Name,
+	name:           Name,
+	// The population it occupies
+	population:     f32,
+	food:           f32,
+	// Food times its town's fertility
+	food_fertility: f32,
+	labour:         f32,
+	// Into its owner's treasury, and out of it
+	income:         f32,
+	upkeep:         f32,
+	// Spread over the land to its owner's towns, less the travel cost. A town's control sums every source's, capped at
+	// 100
+	control:        f32,
+	features:       bit_set[Feature],
+}
+
 Piece_Turn :: struct {
 	attacked:       bool,
 	movement_spent: f32,
@@ -149,9 +212,13 @@ Supply_Source :: enum u8 {
 }
 
 Faction :: struct {
-	name:    Name,
-	culture: Map_Culture,
-	color:   [3]f32,
+	name:     Name,
+	culture:  Map_Culture,
+	color:    [3]f32,
+	treasury: f32,
+	// Each step, from its towns. Per turn
+	income:   f32,
+	upkeep:   f32,
 }
 
 Character :: struct {
@@ -175,10 +242,12 @@ name_to_string :: proc(name: ^Name) -> string {
 }
 
 Region :: struct {
-	id:      Name,
-	name:    Name,
-	color:   [3]u8,
-	capital: Piece_Id,
+	id:        Name,
+	name:      Name,
+	color:     [3]u8,
+	capital:   Piece_Id,
+	// Scales the food of its farms: 1 poor, 2 ordinary, 3 good, 4 rich
+	fertility: f32,
 }
 
 // Out: game, geography
@@ -210,6 +279,7 @@ game_load :: proc(
 			region.id = name_from_string(id)
 			region.name = name_from_string(name)
 			region.color = linalg.array_cast(colors, u8)
+			region.fertility = tbl.get_num(entry, "fertility")
 		}
 	}
 
@@ -442,6 +512,39 @@ game_load :: proc(
 		for water, i in geo_out.water do sea[i] = water ? 1 : 0
 	}
 
+	// Load the building kinds; kind 0 is none
+	{
+		path := fmt.tprintf("assets/scenarios/%s/buildings.txt", scenario_name)
+		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
+		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+
+		append(&game.building_kinds, Building_Kind{})
+		for row in root.children {
+			assert(row.key == "building")
+			// A mistyped effect would read as 0: every key must be a field
+			for key in row.children {
+				fmt.assertf(reflect.struct_field_by_name(Building_Kind, key.key).type != nil, "%s: no building key %q", path, key.key)
+			}
+
+			kind := Building_Kind {
+				id             = name_from_string(tbl.get_text(row, "id")),
+				name           = name_from_string(tbl.get_text(row, "name")),
+				population     = tbl.get_num(row, "population"),
+				food           = tbl.get_num(row, "food"),
+				food_fertility = tbl.get_num(row, "food_fertility"),
+				labour         = tbl.get_num(row, "labour"),
+				income         = tbl.get_num(row, "income"),
+				upkeep         = tbl.get_num(row, "upkeep"),
+				control        = tbl.get_num(row, "control"),
+			}
+			features := tbl.get_children(row, "features")
+			for feature in features {
+				kind.features += {enum_from_text(Feature, feature.text)}
+			}
+			fmt.assertf(append(&game.building_kinds, kind) == 1, "%s: more than %d building kinds", path, BUILDING_KINDS_MAX - 1)
+		}
+	}
+
 	{
 		path := fmt.tprintf("assets/scenarios/%s/pieces.txt", scenario_name)
 		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
@@ -476,6 +579,8 @@ game_load :: proc(
 				piece.body_radius = tbl.get_num(row, "body")
 				piece.hindrance = tbl.get_num(row, "hindrance", 1)
 				piece.supply_production = tbl.get_num(row, "supply")
+				piece.town.slots = int(tbl.get_num(row, "slots"))
+				assert(piece.town.slots <= TOWN_SLOTS_MAX)
 				traits := tbl.get_children(row, "traits")
 				for flag in traits {
 					piece.flags += {enum_from_text(Piece_Flag, flag.text)}
@@ -491,6 +596,7 @@ game_load :: proc(
 						name = name_from_string(tbl.get_text(row, "name")),
 						culture = culture,
 						color = tbl.get_num_array(row, "color", 3) / 255,
+						treasury = tbl.get_num(row, "treasury"),
 					},
 				)
 
@@ -514,6 +620,22 @@ game_load :: proc(
 						piece.culture = enum_from_text(Map_Culture, own_culture)
 					}
 					piece.pos = tbl.get_num_array(entry, "at", 2)
+					if .Has_Town in piece.flags {
+						region := game.terrain.regions[grid_index(cell_of(piece.pos), MAP_SIZE)]
+						piece.town.fertility = game.regions[region].fertility
+						piece.town.population = tbl.get_num(entry, "population")
+
+						buildings := tbl.get_children(entry, "buildings")
+						fmt.assertf(len(buildings) <= piece.town.slots, "%s: more buildings than slots in %s", path, name_to_string(&piece.name))
+						for building in buildings {
+							kind_id: Building_Kind_Id
+							for &kind, k in game.building_kinds {
+								if k > 0 && name_to_string(&kind.id) == building.text do kind_id = Building_Kind_Id(k)
+							}
+							fmt.assertf(kind_id != 0, "%s: no building %q", path, building.text)
+							append(&piece.town.buildings, kind_id)
+						}
+					}
 
 					if general, has_general := tbl.get_text(entry, "general"); has_general {
 						character := Character {
@@ -557,7 +679,7 @@ game_load :: proc(
 	success &= len(game.factions) > 1
 	game.turn = 1
 	game.player = 1
-	game_supply_build(game)
+	game_networks_build(game)
 	return
 }
 

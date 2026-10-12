@@ -12,32 +12,40 @@ CARD_ACTIONS_MAX :: 4
 CARD_TILES_MAX :: 16
 
 Map_Mode :: enum u8 {
+	Political,
 	Control,
 	Supply,
+	Fertility,
 	Plain,
 }
 
 @(rodata)
 MAP_MODE_NAMES := [Map_Mode]string {
-	.Control = "Control",
-	.Supply  = "Supply",
-	.Plain   = "Plain",
+	.Political = "Political",
+	.Control   = "Control",
+	.Supply    = "Supply",
+	.Fertility = "Fertility",
+	.Plain     = "Plain",
 }
 
 // What the focus card shows of a piece
 Card_Tab :: enum u8 {
 	Army,
-	Buildings,
+	Town,
 }
 
 @(rodata)
 CARD_TAB_NAMES := [Card_Tab]string {
-	.Army      = "Army",
-	.Buildings = "Buildings",
+	.Army = "Army",
+	.Town = "Town",
 }
 
 @(private = "file")
 REGION_UNHELD_COLOR :: [3]f32{0.6, 0.6, 0.6}
+
+// The top of the fertility scale: it fills the bar, and washes the map at its greenest
+@(private = "file")
+FERTILITY_MAX :: 5
 
 @(private = "file")
 REACH_SLOT :: 0
@@ -146,16 +154,24 @@ game_present_map :: proc(
 		movement.flooded == focus &&
 		movement.flooded != leader_march.piece
 
-	frame.region_display = mode == .Control ? .Filled_When_Far : .Hidden
+	// Political fills the regions in their owners' colours; Control and Fertility outline them, over their washes
+	#partial switch mode {
+	case .Political:
+		frame.region_display = .Filled_When_Far
+	case .Control, .Fertility:
+		frame.region_display = .Outlined
+	case:
+		frame.region_display = .Hidden
+	}
 	for &region, id in game.regions {
 		color := REGION_UNHELD_COLOR
 		capital := slot_map_get(&game.pieces, region.capital)
-		if mode == .Control && capital != nil && capital.owner != 0 {
+		if mode == .Political && capital != nil && capital.owner != 0 {
 			color = game.factions[capital.owner].color
 		}
 		frame.regions[id] = {
 			color       = color,
-			highlighted = mode == .Control && !reach_shown && Region_Id(id) == pointed,
+			highlighted = frame.region_display != .Hidden && !reach_shown && Region_Id(id) == pointed,
 		}
 	}
 
@@ -209,6 +225,16 @@ game_present_map :: proc(
 	if mode == .Supply {
 		resize(&frame.wash, RENDER_TERRAIN_CELLS)
 		for supply, i in game.supply_network do frame.wash[i] = u8(u32(supply) * 255 / 100)
+	}
+	if mode == .Fertility {
+		resize(&frame.wash, RENDER_TERRAIN_CELLS)
+		for region, i in game.terrain.regions {
+			frame.wash[i] = u8(clamp(game.regions[region].fertility / FERTILITY_MAX, 0, 1) * 255 + 0.5)
+		}
+	}
+	if mode == .Control {
+		resize(&frame.wash, RENDER_TERRAIN_CELLS)
+		for control, i in game.control_network do frame.wash[i] = u8(u32(control) * 255 / 100)
 	}
 }
 
@@ -303,6 +329,21 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 	status := &cards.status
 	status.title = fmt.tprintf("Turn %d", game.turn)
 	append(&status.fields, Card_Field{label = "Playing", value = faction_title(game, game.player)})
+	{
+		faction := &game.factions[game.player]
+		append(&status.fields, Card_Field{label = "Treasury", value = compact_number(f64(faction.treasury))})
+		net := faction.income - faction.upkeep
+		append(
+			&status.fields,
+			Card_Field {
+				label = "Income",
+				value = fmt.tprintf("%+.1f", net),
+				fill = 0.5 + 0.5 * net / max(faction.income, faction.upkeep, 1e-6),
+				fill_origin = 0.5,
+				breakdown = card_note(status, fmt.tprintf("%.1f income, %.1f upkeep", faction.income, faction.upkeep)),
+			},
+		)
+	}
 	append(&status.actions, Card_Action{"End turn", .End_Turn, game_turn_endable(game)})
 
 	if piece := slot_map_get(&game.pieces, focus); piece != nil {
@@ -311,7 +352,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			tab   = tab,
 		}
 		if .Has_Army in piece.flags do card.tabs += {.Army}
-		if .Has_Town in piece.flags do card.tabs += {.Buildings}
+		if .Has_Town in piece.flags do card.tabs += {.Town}
 		// The chosen tab, or else one the piece has
 		if card.tab not_in card.tabs {
 			for each in Card_Tab {
@@ -348,23 +389,49 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				},
 			)
 		}
+		if .Has_Town in piece.flags {
+			fertility := piece.town.fertility
+			append(
+				&card.fields,
+				Card_Field {
+					label = "Fertility",
+					value = fmt.tprintf("%.0f", fertility),
+					fill = fertility / FERTILITY_MAX,
+					graded = true,
+				},
+			)
+		}
 
 		// The tab's own section
-		if card.tab == .Buildings {
-			// Town economy: made-up data until towns have records
+		if card.tab == .Town {
+			town := &piece.town
+			// Population: its people, and a balance of them against the staff its buildings need
+			staff_net := town.population - town.staff_needed
 			append(
 				&card.stats,
-				Card_Field{label = "Population", value = "10", fill = 10 / 11.6, breakdown = card_note(&card, "10.0 of 11.6")},
+				Card_Field {
+					label = "Population",
+					value = fmt.tprintf("%.0f", town.population),
+					fill = 0.5 + 0.5 * staff_net / max(town.population, town.staff_needed, 1e-6),
+					fill_origin = 0.5,
+					breakdown = card_note(
+						&card,
+						fmt.tprintf("%.1f people, %.0f needed by buildings", town.population, town.staff_needed),
+					),
+				},
 			)
+
 			// Balances, from the middle: supply less demand, over the larger of the two. All of it spare fills the right
 			// half; none of the demand met, the left
-			Made_Up_Balance :: struct {
+			Balance :: struct {
 				label, note:    string,
 				supply, demand: f32,
 			}
-			balances := []Made_Up_Balance {
-				{"Food", "11.6 produced, 10.0 eaten", 11.6, 10},
-				{"Labour", "4 produced, 1 used", 4, 1},
+			balances := [?]Balance {
+				{"Food", fmt.tprintf("%.1f produced, %.1f eaten", town.food, town.food_eaten), town.food, town.food_eaten},
+				{"Labour", fmt.tprintf("%.0f produced, %.0f used", town.labour, town.labour_used), town.labour, town.labour_used},
+				{"Income", fmt.tprintf("%.1f income, %.1f upkeep", town.income, town.upkeep), town.income, town.upkeep},
+				// Made up until public order exists
 				{"Public order", "2.0 order, 3.5 unrest", 2, 3.5},
 			}
 			for balance in balances {
@@ -380,30 +447,46 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					},
 				)
 			}
-			append(&card.stats, Card_Field{label = "Features", value = "Horses"})
 
-			Made_Up_Building :: struct {
-				name, population, food, features: string,
-			}
-			buildings := []Made_Up_Building {
-				{"Farm", "2", "+4.8", ""},
-				{"Farm", "2", "+4.8", ""},
-				{"Herds", "1", "+2.0", ""},
-				{"Stables", "1", "", "Horses"},
-			}
-			for building in buildings {
+			append(
+				&card.stats,
+				Card_Field {
+					label = "Control",
+					value = fmt.tprintf("%.0f%%", town.control),
+					fill = town.control / 100,
+					graded = true,
+				},
+			)
+
+			feature_names := make([dynamic]string, context.temp_allocator)
+			for feature in town.features do append(&feature_names, fmt.tprint(feature))
+			features := len(feature_names) > 0 ? strings.join(feature_names[:], ", ", context.temp_allocator) : "None"
+			append(&card.stats, Card_Field{label = "Features", value = features})
+
+			// A tile per slot: its building, with what it does here on hover, or empty
+			for kind_id, slot in town.buildings {
+				kind := &game.building_kinds[kind_id]
 				breakdown: Card_Breakdown
-				append(&breakdown.terms, Card_Term{"Population", building.population})
-				if building.food != "" do append(&breakdown.terms, Card_Term{"Food", building.food})
-				if building.features != "" do append(&breakdown.terms, Card_Term{"Features", building.features})
+				append(&breakdown.terms, Card_Term{"Population", fmt.tprintf("%.0f", kind.population)})
+				if town.slot_food[slot] != 0 {
+					append(&breakdown.terms, Card_Term{"Food", fmt.tprintf("%+.0f", town.slot_food[slot])})
+				}
+				if kind.labour != 0 do append(&breakdown.terms, Card_Term{"Labour", fmt.tprintf("%+.0f", kind.labour)})
+				if kind.income != 0 do append(&breakdown.terms, Card_Term{"Income", fmt.tprintf("%+.0f", kind.income)})
+				if kind.upkeep != 0 do append(&breakdown.terms, Card_Term{"Upkeep", fmt.tprintf("%.0f", kind.upkeep)})
+				if kind.control != 0 do append(&breakdown.terms, Card_Term{"Control", fmt.tprintf("%.0f", kind.control)})
+				if kind.features != {} {
+					names := make([dynamic]string, context.temp_allocator)
+					for feature in kind.features do append(&names, fmt.tprint(feature))
+					append(&breakdown.terms, Card_Term{"Features", strings.join(names[:], ", ", context.temp_allocator)})
+				}
 				tile := Card_Tile {
-					name = building.name,
+					name = name_to_string(&kind.name),
 				}
 				if append(&card.breakdowns, breakdown) > 0 do tile.breakdown = len(card.breakdowns) - 1
 				append(&card.tiles, tile)
 			}
-			// Empty slots, up to a made-up 8
-			for len(card.tiles) < 8 do append(&card.tiles, Card_Tile{})
+			for len(card.tiles) < town.slots do append(&card.tiles, Card_Tile{})
 		} else {
 			if piece.general != 0 {
 				general := name_to_string(&game.characters[piece.general].name)

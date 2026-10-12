@@ -291,58 +291,69 @@ Pathfind_Source :: struct {
 	value: f32,
 }
 
-// Multi-source decaying spread over a domain: out[cell] = max over sources of value − decay × path cost, 0 where
-// nothing reaches. Cells inside blockers are never reached; a source inside one still holds its own cell. out is
-// MAP_CELLS long.
+// How the sources' values meet in a cell
+Pathfind_Combine :: enum u8 {
+	// The strongest
+	Max,
+	// Added up
+	Sum,
+}
+
+// Multi-source decaying spread over a domain: out[cell] = the max, or the sum, over sources of value − decay × path
+// cost, each source counting 0 where it does not reach. Blocked cells, if given, are never reached; a source in one
+// still holds its own cell. blocked and out are MAP_CELLS long.
 pathfind_spread :: proc(
 	domain: Pathfind_Domain,
 	sources: []Pathfind_Source,
-	blockers: []Disc,
+	blocked: []bool,
 	decay: f32,
+	combine: Pathfind_Combine,
 	out: []f32,
 ) {
 	assert(len(out) == MAP_CELLS && decay > 0)
+	assert(blocked == nil || len(blocked) == MAP_CELLS)
 	grid := GRIDS[domain][:]
 	slice.fill(out, 0)
 
-	// Cells inside any blocker
-	blocked := make([]bool, MAP_CELLS, context.temp_allocator)
-	for disc in blockers {
-		covered := cell_rect_clip(cell_rect_covering(disc.center - disc.radius, disc.center + disc.radius), MAP_SIZE)
-		for y in covered.min.y ..< covered.max.y do for x in covered.min.x ..< covered.max.x {
-			if disc_contains(disc, cell_center({x, y})) do blocked[grid_index({x, y}, MAP_SIZE)] = true
-		}
-	}
-
-	// Dijkstra, highest value first (priority = −value)
+	// Max: one Dijkstra from every source at once, into out. Sum: one per source, each into a scratch spread added to out
+	passes := combine == .Max ? 1 : len(sources)
+	spread := combine == .Max ? out : make([]f32, MAP_CELLS, context.temp_allocator)
 	queue := make([dynamic]Heap_Entry, context.temp_allocator)
-	for source in sources {
-		cell := cell_of(source.pos)
-		if !grid_contains(cell, MAP_SIZE) do continue
-		index := grid_index(cell, MAP_SIZE)
-		if grid[index] == 0 || source.value <= out[index] do continue
-		out[index] = source.value
-		append(&queue, Heap_Entry{-source.value, u32(index)})
-		heap.push(queue[:], heap_entry_less)
-	}
-	for len(queue) > 0 {
-		heap.pop(queue[:], heap_entry_less)
-		entry := pop(&queue)
-		value := -entry.priority
-		// Skip stale heap entries
-		if value < out[entry.index] do continue
-		at := grid_pos(int(entry.index), MAP_SIZE)
-		for dir in Dir {
-			move := step_cost(grid, at, dir)
-			if move == 0 do continue
-			next := grid_index(at + DIR_OFFSET[dir], MAP_SIZE)
-			if blocked[next] do continue
-			reached := value - decay * move
-			if reached <= out[next] do continue
-			out[next] = reached
-			append(&queue, Heap_Entry{-reached, u32(next)})
+	for pass in 0 ..< passes {
+		from := combine == .Max ? sources : sources[pass:][:1]
+		if combine == .Sum do slice.fill(spread, 0)
+
+		// Dijkstra, highest value first (priority = −value)
+		for source in from {
+			cell := cell_of(source.pos)
+			if !grid_contains(cell, MAP_SIZE) do continue
+			index := grid_index(cell, MAP_SIZE)
+			if grid[index] == 0 || source.value <= spread[index] do continue
+			spread[index] = source.value
+			append(&queue, Heap_Entry{-source.value, u32(index)})
 			heap.push(queue[:], heap_entry_less)
 		}
+		for len(queue) > 0 {
+			heap.pop(queue[:], heap_entry_less)
+			entry := pop(&queue)
+			value := -entry.priority
+			// Skip stale heap entries
+			if value < spread[entry.index] do continue
+			at := grid_pos(int(entry.index), MAP_SIZE)
+			for dir in Dir {
+				move := step_cost(grid, at, dir)
+				if move == 0 do continue
+				next := grid_index(at + DIR_OFFSET[dir], MAP_SIZE)
+				if blocked != nil && blocked[next] do continue
+				reached := value - decay * move
+				if reached <= spread[next] do continue
+				spread[next] = reached
+				append(&queue, Heap_Entry{-reached, u32(next)})
+				heap.push(queue[:], heap_entry_less)
+			}
+		}
+
+		if combine == .Sum do for value, i in spread do out[i] += value
 	}
 }
 

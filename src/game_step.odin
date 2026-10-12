@@ -36,6 +36,18 @@ MEN_PER_SUPPLY :: 250
 // Share of full strength regained per turn on home land, at 100% supply
 @(private = "file")
 REINFORCEMENT_SHARE :: 0.05
+// Control lost per unit of travel cost from its source
+@(private = "file")
+CONTROL_DECAY :: 1
+// Food a unit of population eats per turn
+@(private = "file")
+FOOD_PER_POPULATION :: 1
+// Share of the gap to the population its food supports closed per turn, and the most it grows per turn, as a share of
+// itself: slow, and never explosive. Decline is not capped
+@(private = "file")
+POPULATION_RATE :: 0.05
+@(private = "file")
+POPULATION_GROWTH_MAX :: 0.02
 @(private = "file")
 FALL_BACK_BUDGET :: 10
 @(private = "file")
@@ -317,23 +329,64 @@ game_movement_left :: proc(piece: Piece_Data) -> f32 {
 	return max(0, piece.movement_per_turn - piece.this_turn.movement_spent)
 }
 
-game_supply_build :: proc(game: ^Game) {
-	sources: [dynamic; PIECE_MAX]Pathfind_Source
-	// Enemy zones block the spread
-	zones: [dynamic; PIECE_MAX]Disc
-	it := slot_map_iterator(&game.pieces)
-	for piece in slot_map_iterate(&it) {
-		if piece.owner == game.player {
-			if piece.supply_production > 0 {
-				append(&sources, Pathfind_Source{piece.pos, piece.supply_production})
+// Built at load and each turn change. The playing faction's supply network: the strongest of its sources reaching each
+// cell, kept out of enemy zones. Its control network, and every town's control: the sum of what its owner's sources
+// reach with over its own regions only, capped at 100
+game_networks_build :: proc(game: ^Game) {
+	spread := make([]f32, MAP_CELLS, context.temp_allocator)
+	blocked := make([]bool, MAP_CELLS, context.temp_allocator)
+
+	// Supply
+	{
+		sources: [dynamic; PIECE_MAX]Pathfind_Source
+		it := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&it) {
+			if piece.owner == game.player {
+				if piece.supply_production > 0 {
+					append(&sources, Pathfind_Source{piece.pos, piece.supply_production})
+				}
+			} else if piece.contact_radius > 0 && .Land in piece.contact_domains {
+				// Enemy zones block the spread
+				zone := Disc{piece.pos, piece.contact_radius}
+				covered := cell_rect_clip(cell_rect_covering(zone.center - zone.radius, zone.center + zone.radius), MAP_SIZE)
+				for y in covered.min.y ..< covered.max.y do for x in covered.min.x ..< covered.max.x {
+					if disc_contains(zone, cell_center({x, y})) do blocked[grid_index({x, y}, MAP_SIZE)] = true
+				}
 			}
-		} else if piece.contact_radius > 0 && .Land in piece.contact_domains {
-			append(&zones, Disc{piece.pos, piece.contact_radius})
+		}
+		pathfind_spread(.Land, sources[:], blocked, SUPPLY_DECAY, .Max, spread)
+		for value, i in spread do game.supply_network[i] = u8(clamp(value, 0, 100) + 0.5)
+	}
+
+	// Control, per faction: its towns' control buildings together are a source each. It never leaves the faction's
+	// regions, those whose capital it holds
+	for faction in 1 ..< len(game.factions) {
+		owner := Faction_Id(faction)
+		held: [REGIONS_MAX]bool
+		for &region, id in game.regions {
+			capital := slot_map_get(&game.pieces, region.capital)
+			held[id] = id > 0 && capital != nil && capital.owner == owner
+		}
+		for region, i in game.terrain.regions do blocked[i] = !held[region]
+
+		sources: [dynamic; PIECE_MAX]Pathfind_Source
+		towns := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&towns) {
+			if .Has_Town not_in piece.flags || piece.owner != owner do continue
+			strength: f32
+			for kind_id in piece.town.buildings do strength += game.building_kinds[kind_id].control
+			if strength > 0 do append(&sources, Pathfind_Source{piece.pos, strength})
+		}
+		pathfind_spread(.Land, sources[:], blocked, CONTROL_DECAY, .Sum, spread)
+		if owner == game.player {
+			for value, i in spread do game.control_network[i] = u8(clamp(value, 0, 100) + 0.5)
+		}
+		read := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&read) {
+			if .Has_Town not_in piece.flags || piece.owner != owner do continue
+			piece.town.control = min(spread[grid_index(cell_of(piece.pos), MAP_SIZE)], 100)
 		}
 	}
-	spread := make([]f32, MAP_CELLS, context.temp_allocator)
-	pathfind_spread(.Land, sources[:], zones[:], SUPPLY_DECAY, spread)
-	for value, i in spread do game.supply_network[i] = u8(clamp(value, 0, 100) + 0.5)
 }
 
 @(private = "file")
@@ -856,6 +909,54 @@ game_step :: proc(
 		game.interaction.actor == {} &&
 		movement.marches[.Leader].piece == {}
 
+	// Towns: what their buildings make and their people eat. Income, scaled by control, and upkeep add up to their owners'
+	for &faction in game.factions {
+		faction.income = 0
+		faction.upkeep = 0
+	}
+	towns := slot_map_iterator(&game.pieces)
+	for piece in slot_map_iterate(&towns) {
+		if .Has_Town not_in piece.flags do continue
+		town := &piece.town
+		// Staff: short of people, every building runs at the share it has
+		town.staff_needed = 0
+		for kind_id in town.buildings do town.staff_needed += game.building_kinds[kind_id].population
+		town.staffing = town.staff_needed > 0 ? min(1, town.population / town.staff_needed) : 1
+
+		town.food = 0
+		town.labour = 0
+		town.income = 0
+		town.upkeep = 0
+		town.features = {}
+		for kind_id, slot in town.buildings {
+			kind := &game.building_kinds[kind_id]
+			town.slot_food[slot] = (kind.food + kind.food_fertility * town.fertility) * town.staffing
+			town.food += town.slot_food[slot]
+			town.labour += kind.labour * town.staffing
+			town.income += kind.income * town.staffing * town.control / 100
+			// Paid however staffed
+			town.upkeep += kind.upkeep
+			town.features += kind.features
+		}
+		game.factions[piece.owner].income += town.income
+		game.factions[piece.owner].upkeep += town.upkeep
+		town.population_supported = town.food / FOOD_PER_POPULATION
+		// At its owner's turn end, its population moves toward what its food supports
+		if turn_ending && piece.owner == game.player {
+			change := (town.population_supported - town.population) * POPULATION_RATE
+			town.population += min(change, town.population * POPULATION_GROWTH_MAX)
+		}
+		town.food_eaten = town.population * FOOD_PER_POPULATION
+		// Nothing uses labour yet
+		town.labour_used = 0
+	}
+
+	// At its turn end, the faction's net income goes into its treasury
+	if turn_ending {
+		player := &game.factions[game.player]
+		player.treasury += player.income - player.upkeep
+	}
+
 	pieces := slot_map_iterator(&game.pieces)
 	for piece, id in slot_map_iterate(&pieces) {
 		if .Has_Army not_in piece.flags do continue
@@ -983,7 +1084,7 @@ game_step :: proc(
 
 		all := slot_map_iterator(&game.pieces)
 		for piece in slot_map_iterate(&all) do piece.this_turn = {}
-		game_supply_build(game)
+		game_networks_build(game)
 	}
 }
 

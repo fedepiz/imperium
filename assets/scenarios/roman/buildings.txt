@@ -1,0 +1,16 @@
+# The kinds of building. Each has an id, a snake_case word the other files name it by, and a name. Then its effects,
+# each 0 or none when left out:
+#   population: the population it occupies
+#   food: food per turn; food_fertility: food per turn, times its region's fertility
+#   labour: labour per turn
+#   income, upkeep: coin per turn into its owner's treasury, and out of it
+#   control: radiated to its owner's towns, less their distance. A town sums what reaches it, up to 100
+#   features: the local features it provides, written as declared (Horses, Drill)
+# A negative food or labour is consumed.
+
+building = { id = farm        name = "Farm"        population = 2  food_fertility = 2  labour = 1 }
+building = { id = herds       name = "Herds"       population = 1  food = 2            labour = 1 }
+building = { id = stables     name = "Stables"     population = 1  upkeep = 1  features = [Horses] }
+building = { id = barracks    name = "Barracks"    population = 2  upkeep = 1  features = [Drill] }
+building = { id = palace      name = "Palace"      population = 3  upkeep = 4  control = 100 }
+building = { id = praetorium  name = "Praetorium"  population = 2  upkeep = 2  control = 60 }
