@@ -1042,10 +1042,13 @@ game_step :: proc(
 		}
 	}
 
-	// Towns: what their buildings make and their people eat. Income, scaled by control, and upkeep add up to their owners'
+	// Towns: what their buildings make and their people eat. Income, scaled by control, upkeep, and food sent to and
+	// taken from the central store add up to their owners'
 	for &faction in game.factions {
 		faction.income = 0
 		faction.upkeep = 0
+		faction.food_sent = 0
+		faction.food_taken = 0
 	}
 	towns := slot_map_iterator(&game.pieces)
 	for piece, piece_id in slot_map_iterate(&towns) {
@@ -1065,6 +1068,8 @@ game_step :: proc(
 		town.upkeep = 0
 		town.public_order = 0
 		town.unrest = 0
+		town.food_sent = 0
+		town.food_taken = 0
 		town.features = {}
 		for kind_id, slot in town.buildings {
 			kind := &game.building_kinds[kind_id]
@@ -1077,6 +1082,8 @@ game_step :: proc(
 			town.upkeep += kind.upkeep
 			if kind.public_order > 0 do town.public_order += kind.public_order
 			else do town.unrest -= kind.public_order
+			if kind.food_store > 0 do town.food_sent += kind.food_store * town.staffing
+			else do town.food_taken -= kind.food_store * town.staffing
 			town.features += kind.features
 		}
 		for project in town.projects {
@@ -1101,6 +1108,11 @@ game_step :: proc(
 			}
 		}
 		town.food_eaten = town.population * FOOD_PER_POPULATION
+
+		// To the central store: the surplus and what the buildings send, as far as control reaches
+		town.food_sent = (town.food_sent + max(0, town.food - town.food_eaten)) * town.control / 100
+		game.factions[piece.owner].food_sent += town.food_sent
+		game.factions[piece.owner].food_taken += town.food_taken
 	}
 
 	// Recruited armies' upkeep: coin from their owner, and a local army's labour from its home region's town, while its
@@ -1117,10 +1129,12 @@ game_step :: proc(
 		}
 	}
 
-	// At its turn end, the faction's net income goes into its treasury
+	// At its turn end, the faction's net income goes into its treasury, and its net food into its store. Either can go
+	// below zero for now
 	if turn_ending {
 		player := &game.factions[game.player]
 		player.treasury += player.income - player.upkeep
+		player.food_store += player.food_sent - player.food_taken
 	}
 
 	pieces := slot_map_iterator(&game.pieces)

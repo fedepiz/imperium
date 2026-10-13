@@ -6,7 +6,8 @@
 #       piece, and the army inside surrenders; Can_Enter can enter an empty Can_Contain of its faction; Fortified
 #       fights sorties from its walls, as does an army inside it; Shares_Supply counts in nearby armies' supply
 #       shares; Has_Town has a town economy: population and buildings), slots (building slots of a Has_Town)
-# faction: name, culture (by id, from cultures.txt), color [r, g, b] 0..255, treasury (starting coin). Factions play in file order. Then one piece row per piece:
+# faction: name, culture (by id, from cultures.txt), color [r, g, b] 0..255, treasury (starting coin), food_store
+# (starting food in its central store, default 0). Factions play in file order. Then one piece row per piece:
 #   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
 #   region), general (creates a character), army_type (by id, from army_types.txt; makes it an army of that type at
 #   full strength and 100% readiness, a local one at home where it starts), temperament (the general's: Bold, Steady,

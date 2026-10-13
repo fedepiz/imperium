@@ -331,6 +331,7 @@ card_building_breakdown :: proc(card: ^Card, kind: ^Building_Kind, food: f32) ->
 	if kind.upkeep != 0 do append(&breakdown.terms, Card_Term{"Upkeep", fmt.tprintf("%.0f", kind.upkeep)})
 	if kind.control != 0 do append(&breakdown.terms, Card_Term{"Control", fmt.tprintf("%.0f", kind.control)})
 	if kind.public_order != 0 do append(&breakdown.terms, Card_Term{"Public order", fmt.tprintf("%+.1f", kind.public_order)})
+	if kind.food_store != 0 do append(&breakdown.terms, Card_Term{"Food store", fmt.tprintf("%+.0f", kind.food_store)})
 	if kind.features != {} {
 		names := make([dynamic]string, context.temp_allocator)
 		for feature in kind.features do append(&names, fmt.tprint(feature))
@@ -389,6 +390,18 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				fill = 0.5 + 0.5 * net / max(faction.income, faction.upkeep, 1e-6),
 				fill_origin = 0.5,
 				breakdown = card_note(status, fmt.tprintf("%.1f income, %.1f upkeep", faction.income, faction.upkeep)),
+			},
+		)
+		append(&status.fields, Card_Field{label = "Food store", value = compact_number(f64(faction.food_store))})
+		food_net := faction.food_sent - faction.food_taken
+		append(
+			&status.fields,
+			Card_Field {
+				label = "Food",
+				value = fmt.tprintf("%+.1f", food_net),
+				fill = 0.5 + 0.5 * food_net / max(faction.food_sent, faction.food_taken, 1e-6),
+				fill_origin = 0.5,
+				breakdown = card_note(status, fmt.tprintf("%.1f sent, %.1f taken", faction.food_sent, faction.food_taken)),
 			},
 		)
 	}
@@ -528,7 +541,18 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				supply, demand: f32,
 			}
 			balances := [?]Balance {
-				{"Food", fmt.tprintf("%.1f produced, %.1f eaten", town.food, town.food_eaten), town.food, town.food_eaten},
+				{
+					"Food",
+					fmt.tprintf(
+						"%.1f produced, %.1f eaten; %.1f to the store, %.1f from it",
+						town.food,
+						town.food_eaten,
+						town.food_sent,
+						town.food_taken,
+					),
+					town.food,
+					town.food_eaten,
+				},
 				{"Labour", fmt.tprintf("%.0f produced, %.0f used", town.labour, town.labour_used), town.labour, town.labour_used},
 				{"Income", fmt.tprintf("%.1f income, %.1f upkeep", town.income, town.upkeep), town.income, town.upkeep},
 				{

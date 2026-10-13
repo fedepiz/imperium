@@ -189,6 +189,10 @@ Town :: struct {
 	// Its buildings' public order, as given: what keeps order, and what stirs unrest
 	public_order:         f32,
 	unrest:               f32,
+	// Food into its owner's central store: its surplus and its buildings' sending, scaled by its control. And food its
+	// buildings take out of the store
+	food_sent:            f32,
+	food_taken:           f32,
 	// The population its food feeds
 	population_supported: f32,
 	features:             bit_set[Feature],
@@ -270,6 +274,8 @@ Building_Kind :: struct {
 	control:        f32,
 	// Its town's public order: positive keeps order, negative stirs unrest
 	public_order:   f32,
+	// Food into its owner's central store, scaled by its town's control; or, negative, food taken out of it
+	food_store:     f32,
 	features:       bit_set[Feature],
 	// Building it: coin paid at the start, labour used each turn, and turns
 	build_coin:     f32,
@@ -294,13 +300,17 @@ Supply_Source :: enum u8 {
 }
 
 Faction :: struct {
-	name:     Name,
-	culture:  Culture_Id,
-	color:    [3]f32,
-	treasury: f32,
+	name:       Name,
+	culture:    Culture_Id,
+	color:      [3]f32,
+	treasury:   f32,
+	// The central store of food its towns send to, and its buildings draw on
+	food_store: f32,
 	// Each step, from its towns. Per turn
-	income:   f32,
-	upkeep:   f32,
+	income:     f32,
+	upkeep:     f32,
+	food_sent:  f32,
+	food_taken: f32,
 }
 
 Character :: struct {
@@ -646,6 +656,7 @@ game_load :: proc(
 				upkeep         = tbl.get_num(row, "upkeep"),
 				control        = tbl.get_num(row, "control"),
 				public_order   = tbl.get_num(row, "public_order"),
+				food_store     = tbl.get_num(row, "food_store"),
 				build_coin     = tbl.get_num(row, "build_coin"),
 				build_labour   = tbl.get_num(row, "build_labour"),
 				build_turns    = tbl.get_num(row, "build_turns"),
@@ -830,6 +841,7 @@ game_load :: proc(
 						culture = culture,
 						color = tbl.get_num_array(row, "color", 3) / 255,
 						treasury = tbl.get_num(row, "treasury"),
+						food_store = tbl.get_num(row, "food_store"),
 					},
 				)
 

@@ -6,6 +6,8 @@
 #   income, upkeep: coin per turn into its owner's treasury, and out of it
 #   control: radiated to its owner's towns, less their distance. A town sums what reaches it, up to 100
 #   public_order: its town's public order, as given: positive keeps order, negative stirs unrest
+#   food_store: food into its owner's central store, scaled by its town's control; negative, food taken out of it,
+#   which adds no food to the town by itself
 #   features: the local features it provides, written as declared (Horses, Drill, Court)
 #   upgrade: the building it can be upgraded into, by id: its next level
 #   build_labour, build_turns, build_coin: building it uses labour each turn for build_turns turns, and coin at the
@@ -32,6 +34,7 @@ building = {
 	population = 3
 	food_fertility = 2.5
 	labour = 1
+	food_store = 1
 	upgrade = wheat_mill
 	build_labour = 3
 	build_turns = 3
@@ -45,6 +48,7 @@ building = {
 	food_fertility = 3
 	labour = 1
 	income = 1
+	food_store = 3
 	build_labour = 4
 	build_turns = 4
 	description = "Wheat Mill: a watermill for grinding grain into flour. Water power was known from the first century BC, and large milling complexes, such as the one at Barbegal in Gaul, could supply whole cities."
@@ -187,4 +191,39 @@ building = {
 	build_labour = 2
 	build_turns = 3
 	description = "Curia: the council of a Roman town, made up of the decurions, its wealthiest landowners. In the late empire the decurions were held personally responsible for collecting the town's taxes, and many tried to escape the duty."
+}
+
+building = {
+	id = granary
+	name = "Granary"
+	population = 1
+	food = 3
+	food_store = -3
+	upgrade = horrea
+	build_labour = 2
+	build_turns = 2
+	description = "Granary: a storehouse for grain, raised on pillars or built with ventilated floors to keep the harvest dry and away from vermin. Towns kept reserves against bad years and to feed troops passing through."
+}
+
+building = {
+	id = horrea
+	name = "Horrea"
+	population = 2
+	food = 6
+	food_store = -6
+	upgrade = annona_office
+	build_labour = 3
+	build_turns = 3
+	description = "Horrea: the great public warehouses of Roman cities, named after horreum, the Latin for granary. The largest, at Rome and its port of Ostia, held the grain shipped from Africa and Egypt to feed the capital."
+}
+
+building = {
+	id = annona_office
+	name = "Annona Office"
+	population = 3
+	food = 10
+	food_store = -10
+	build_labour = 4
+	build_turns = 4
+	description = "Annona Office: the administration of the annona, the public food supply, named after Annona, the personification of the yearly harvest. It collected grain as a tax in kind, and handed out bread to the people of Rome and Constantinople and rations to the army."
 }

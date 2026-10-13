@@ -8,7 +8,7 @@ culture = {
 	look = Roman
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, stables, barracks, palace, praetorium, curia,
+		sheep_farm, stables, barracks, palace, praetorium, curia, granary, horrea, annona_office,
 	]
 	army_types = [comitatenses, palatini, limitanei, vexillationes]
 }
