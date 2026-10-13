@@ -86,7 +86,7 @@ character = {
 	background = Soldier
 	disposition = Devout
 	office = roman_governor
-	of = "Mediolanum"
+	of = "Narbo"
 }
 
 character = {
@@ -100,7 +100,7 @@ character = {
 	background = Aristocrat
 	disposition = Proud
 	office = roman_governor
-	of = "Ravenna"
+	of = "Lugdunum"
 }
 
 character = {
@@ -127,8 +127,9 @@ character = {
 	temperament = Cautious
 	background = Soldier
 	disposition = Loyal
-	office = roman_curator
-	of = "Aquileia"
+	office = tribune
+	of = "Mediolanum"
+	men = 4000
 }
 
 character = {
@@ -211,6 +212,8 @@ character = {
 	temperament = Steady
 	background = Courtier
 	disposition = Loyal
+	office = roman_governor
+	of = "Tarentum"
 }
 
 character = {
@@ -326,6 +329,231 @@ character = {
 }
 
 character = {
+	name = "Auxiliaris"
+	faction = "Rome"
+	age = 40
+	rank = 3
+	influence = 25
+	loyalty = 70
+	temperament = Steady
+	background = Official
+	disposition = Loyal
+	office = roman_governor
+	of = "Augusta Treverorum"
+}
+
+character = {
+	name = "Tonantius Ferreolus"
+	faction = "Rome"
+	age = 25
+	rank = 2
+	influence = 15
+	loyalty = 70
+	temperament = Cautious
+	background = Aristocrat
+	disposition = Devout
+	office = roman_curator
+	of = "Durocortorum"
+}
+
+character = {
+	name = "Salvianus"
+	faction = "Rome"
+	age = 30
+	rank = 2
+	influence = 15
+	loyalty = 65
+	temperament = Steady
+	background = Churchman
+	disposition = Devout
+	office = roman_curator
+	of = "Colonia Agrippina"
+}
+
+character = {
+	name = "Nicomachus Flavianus"
+	faction = "Rome"
+	age = 55
+	rank = 3
+	influence = 30
+	loyalty = 60
+	temperament = Steady
+	background = Aristocrat
+	disposition = Proud
+	office = roman_governor
+	of = "Mediolanum"
+}
+
+character = {
+	name = "Volusianus"
+	faction = "Rome"
+	age = 50
+	rank = 3
+	influence = 30
+	loyalty = 65
+	temperament = Cautious
+	background = Official
+	disposition = Proud
+	office = roman_governor
+	of = "Ravenna"
+}
+
+character = {
+	name = "Cassiodorus"
+	faction = "Rome"
+	age = 40
+	rank = 2
+	influence = 15
+	loyalty = 70
+	temperament = Steady
+	background = Official
+	disposition = Loyal
+	office = roman_curator
+	of = "Aquileia"
+}
+
+character = {
+	name = "Remistus"
+	faction = "Rome"
+	age = 26
+	rank = 1
+	influence = 8
+	loyalty = 55
+	temperament = Bold
+	background = Federate
+	disposition = Ambitious
+	office = praepositus
+	of = "Tarentum"
+	men = 1000
+}
+
+character = {
+	name = "Agrippinus"
+	faction = "Rome"
+	age = 30
+	rank = 3
+	influence = 25
+	loyalty = 60
+	temperament = Cunning
+	background = Soldier
+	disposition = Ambitious
+	office = roman_governor
+	of = "Vesontio"
+}
+
+character = {
+	name = "Eucherius"
+	faction = "Rome"
+	age = 50
+	rank = 2
+	influence = 15
+	loyalty = 70
+	temperament = Steady
+	background = Churchman
+	disposition = Devout
+	office = roman_curator
+	of = "Octodurum"
+}
+
+character = {
+	name = "Dardanus"
+	faction = "Rome"
+	age = 65
+	rank = 3
+	influence = 30
+	loyalty = 70
+	temperament = Cautious
+	background = Aristocrat
+	disposition = Devout
+	office = roman_curator
+	of = "Vienna"
+}
+
+character = {
+	name = "Hilarius"
+	faction = "Rome"
+	age = 27
+	rank = 2
+	influence = 15
+	loyalty = 60
+	temperament = Bold
+	background = Churchman
+	disposition = Ambitious
+	office = roman_curator
+	of = "Aquae Sextiae"
+}
+
+character = {
+	name = "Paulinus Pellaeus"
+	faction = "Rome"
+	age = 54
+	rank = 3
+	influence = 25
+	loyalty = 65
+	temperament = Cautious
+	background = Aristocrat
+	disposition = Devout
+	office = roman_governor
+	of = "Burdigala"
+}
+
+character = {
+	name = "Orientius"
+	faction = "Rome"
+	age = 50
+	rank = 2
+	influence = 12
+	loyalty = 70
+	temperament = Cautious
+	background = Churchman
+	disposition = Devout
+	office = roman_curator
+	of = "Elusa"
+}
+
+character = {
+	name = "Germanus"
+	faction = "Rome"
+	age = 52
+	rank = 2
+	influence = 20
+	loyalty = 65
+	temperament = Bold
+	background = Churchman
+	disposition = Devout
+	office = roman_curator
+	of = "Avaricum"
+}
+
+character = {
+	name = "Brictius"
+	faction = "Rome"
+	age = 60
+	rank = 2
+	influence = 15
+	loyalty = 55
+	temperament = Steady
+	background = Churchman
+	disposition = Proud
+	office = roman_curator
+	of = "Turonum"
+}
+
+character = {
+	name = "Rutilius Namatianus"
+	faction = "Rome"
+	age = 55
+	rank = 2
+	influence = 15
+	loyalty = 60
+	temperament = Steady
+	background = Aristocrat
+	disposition = Proud
+	office = roman_curator
+	of = "Rotomagus"
+}
+
+character = {
 	name = "Gibuld"
 	faction = "Alamanni"
 	age = 40
@@ -388,7 +616,7 @@ character = {
 	background = Federate
 	disposition = Devout
 	office = germanic_count
-	of = "Vesontio"
+	of = "Uburzis"
 	men = 2000
 }
 
@@ -445,7 +673,7 @@ character = {
 	background = Soldier
 	disposition = Proud
 	office = hunno
-	of = "Vesontio"
+	of = "Augusta Vindelicorum"
 	men = 10000
 }
 
@@ -462,4 +690,316 @@ character = {
 	office = hunno
 	of = "Virunum"
 	men = 10000
+}
+
+character = {
+	name = "Gundahar"
+	faction = "Burgundians"
+	age = 45
+	rank = 5
+	influence = 60
+	loyalty = 100
+	temperament = Bold
+	background = Aristocrat
+	disposition = Proud
+	office = king
+	of = "Argentoratum"
+}
+
+character = {
+	name = "Gundomar"
+	faction = "Burgundians"
+	age = 42
+	rank = 4
+	influence = 40
+	loyalty = 70
+	temperament = Steady
+	background = Aristocrat
+	disposition = Loyal
+	office = maior_domus
+}
+
+character = {
+	name = "Gislahar"
+	faction = "Burgundians"
+	age = 35
+	rank = 4
+	influence = 35
+	loyalty = 55
+	temperament = Bold
+	background = Soldier
+	disposition = Ambitious
+	office = dux
+}
+
+character = {
+	name = "Gundioc"
+	faction = "Burgundians"
+	age = 24
+	rank = 1
+	influence = 10
+	loyalty = 65
+	temperament = Cunning
+	background = Aristocrat
+	disposition = Ambitious
+}
+
+character = {
+	name = "Clodio"
+	faction = "Franks"
+	age = 35
+	rank = 5
+	influence = 60
+	loyalty = 100
+	temperament = Bold
+	background = Aristocrat
+	disposition = Ambitious
+	office = king
+	of = "Flevum"
+}
+
+character = {
+	name = "Ragnomar"
+	faction = "Franks"
+	age = 48
+	rank = 4
+	influence = 40
+	loyalty = 65
+	temperament = Cautious
+	background = Aristocrat
+	disposition = Greedy
+	office = maior_domus
+}
+
+character = {
+	name = "Merovech"
+	faction = "Franks"
+	age = 25
+	rank = 4
+	influence = 35
+	loyalty = 60
+	temperament = Bold
+	background = Soldier
+	disposition = Ambitious
+	office = dux
+}
+
+character = {
+	name = "Chlodomar"
+	faction = "Franks"
+	age = 30
+	rank = 2
+	influence = 15
+	loyalty = 70
+	temperament = Steady
+	background = Soldier
+	disposition = Loyal
+}
+
+character = {
+	name = "Hengist"
+	faction = "Saxons"
+	age = 35
+	rank = 5
+	influence = 55
+	loyalty = 100
+	temperament = Cunning
+	background = Federate
+	disposition = Ambitious
+	office = king
+	of = "Tulifurdum"
+}
+
+character = {
+	name = "Wihtgils"
+	faction = "Saxons"
+	age = 58
+	rank = 4
+	influence = 40
+	loyalty = 75
+	temperament = Cautious
+	background = Aristocrat
+	disposition = Devout
+	office = maior_domus
+}
+
+character = {
+	name = "Horsa"
+	faction = "Saxons"
+	age = 32
+	rank = 4
+	influence = 40
+	loyalty = 70
+	temperament = Bold
+	background = Soldier
+	disposition = Proud
+	office = dux
+}
+
+character = {
+	name = "Oisc"
+	faction = "Saxons"
+	age = 18
+	rank = 0
+	influence = 5
+	loyalty = 80
+	temperament = Bold
+	background = Soldier
+	disposition = Loyal
+}
+
+character = {
+	name = "Eomer"
+	faction = "Angles"
+	age = 45
+	rank = 5
+	influence = 55
+	loyalty = 100
+	temperament = Steady
+	background = Aristocrat
+	disposition = Proud
+	office = king
+	of = "Angulus"
+}
+
+character = {
+	name = "Wiliarit"
+	faction = "Angles"
+	age = 50
+	rank = 4
+	influence = 40
+	loyalty = 70
+	temperament = Cautious
+	background = Aristocrat
+	disposition = Loyal
+	office = maior_domus
+}
+
+character = {
+	name = "Icel"
+	faction = "Angles"
+	age = 25
+	rank = 4
+	influence = 35
+	loyalty = 60
+	temperament = Bold
+	background = Soldier
+	disposition = Ambitious
+	office = dux
+}
+
+character = {
+	name = "Cnebba"
+	faction = "Angles"
+	age = 18
+	rank = 0
+	influence = 5
+	loyalty = 80
+	temperament = Bold
+	background = Soldier
+	disposition = Loyal
+}
+
+character = {
+	name = "Bisin"
+	faction = "Thuringians"
+	age = 30
+	rank = 5
+	influence = 60
+	loyalty = 100
+	temperament = Steady
+	background = Aristocrat
+	disposition = Proud
+	office = king
+	of = "Lupfurdum"
+}
+
+character = {
+	name = "Hildemar"
+	faction = "Thuringians"
+	age = 50
+	rank = 4
+	influence = 40
+	loyalty = 60
+	temperament = Cautious
+	background = Aristocrat
+	disposition = Greedy
+	office = maior_domus
+}
+
+character = {
+	name = "Wolfhari"
+	faction = "Thuringians"
+	age = 38
+	rank = 4
+	influence = 35
+	loyalty = 55
+	temperament = Bold
+	background = Soldier
+	disposition = Ambitious
+	office = dux
+}
+
+character = {
+	name = "Sigiwald"
+	faction = "Thuringians"
+	age = 27
+	rank = 2
+	influence = 15
+	loyalty = 65
+	temperament = Cunning
+	background = Soldier
+	disposition = Proud
+}
+
+character = {
+	name = "Agilmund"
+	faction = "Langobards"
+	age = 60
+	rank = 5
+	influence = 60
+	loyalty = 100
+	temperament = Bold
+	background = Aristocrat
+	disposition = Proud
+	office = king
+	of = "Aregelia"
+}
+
+character = {
+	name = "Audovald"
+	faction = "Langobards"
+	age = 45
+	rank = 4
+	influence = 40
+	loyalty = 65
+	temperament = Steady
+	background = Aristocrat
+	disposition = Loyal
+	office = maior_domus
+}
+
+character = {
+	name = "Lamissio"
+	faction = "Langobards"
+	age = 30
+	rank = 4
+	influence = 40
+	loyalty = 50
+	temperament = Bold
+	background = Soldier
+	disposition = Ambitious
+	office = dux
+}
+
+character = {
+	name = "Gisulf"
+	faction = "Langobards"
+	age = 22
+	rank = 1
+	influence = 10
+	loyalty = 70
+	temperament = Bold
+	background = Soldier
+	disposition = Loyal
 }

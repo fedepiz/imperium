@@ -105,7 +105,7 @@ CELLS_PER_PIXEL := [Pawn_Set]f32 {
 }
 @(private = "file", rodata)
 ICON_SIZES := [Map_Icon]f32 {
-	.Town       = 1.95,
+	.Town       = 1.5,
 	.City       = 2.1,
 	.Large_City = 2.55,
 	.Army       = 1.1,
@@ -125,6 +125,18 @@ PULSE_PERIOD :: 1.2
 // Pawns outside the view by up to this fraction of its size are still drawn
 @(private = "file")
 VIEW_TOLERANCE :: 0.1
+
+// Zoom, in logical pixels per cell: labels that fade go from shown, down to gone. The rest always show
+@(private = "file")
+LABEL_ZOOM_SHOWN :: 6
+@(private = "file")
+LABEL_ZOOM_GONE :: 4
+@(private = "file", rodata)
+LABEL_FADES := #partial [Map_Icon]bool {
+	.Town  = true,
+	.Army  = true,
+	.Fleet = true,
+}
 
 @(private = "file")
 LABEL_HALO :: 1.5
@@ -301,10 +313,12 @@ map_pawns_quads :: proc(
 		top_left: [2]f32,
 	}
 	labels := make([dynamic]Label, 0, len(pawns.scene), context.temp_allocator)
+	zoom_fade := clamp((view.zoom - LABEL_ZOOM_GONE) / (LABEL_ZOOM_SHOWN - LABEL_ZOOM_GONE), 0, 1)
 	for pawn, index in pawns.scene {
-		if pawn.label == "" || label_weights[index] <= 0 do continue
-		ink_color := [4]f32{style.ink.r, style.ink.g, style.ink.b, 1}
-		halo_color := [4]f32{style.paper.r, style.paper.g, style.paper.b, 1}
+		label_alpha: f32 = LABEL_FADES[pawn.icon] ? zoom_fade : 1
+		if pawn.label == "" || label_weights[index] <= 0 || label_alpha <= 0 do continue
+		ink_color := [4]f32{style.ink.r, style.ink.g, style.ink.b, label_alpha}
+		halo_color := [4]f32{style.paper.r, style.paper.g, style.paper.b, label_alpha}
 		ink := text_make({{text = pawn.label, font = pawns.label_font, color = ink_color}})
 		halo := text_make({{text = pawn.label, font = pawns.label_font, color = halo_color}})
 		anchor := label_anchors[index] / label_weights[index]

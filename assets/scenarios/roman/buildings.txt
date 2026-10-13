@@ -313,6 +313,26 @@ building = {
 }
 
 building = {
+	id = konigsburg
+	name = "Konigsburg"
+	population = 2
+	income = 2
+	public_order = 1
+	flags = [Main]
+	title = king
+	title_salary_local_share = 1
+	icon = City
+	slots = 6
+	supply = 80
+	hindrance = 3
+	contact = 9
+	body = 3
+	build_turns = 4
+	build_coin = 10
+	description = "Konigsburg: German for king's stronghold. A fortified royal seat where a king kept his household, his treasure and his followers: the seat of a kingdom, but no great city."
+}
+
+building = {
 	id = konigshof
 	name = "Konigshof"
 	population = 3

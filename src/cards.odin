@@ -33,8 +33,6 @@ Court_View :: struct {
 	// Clicked or opened on, with his office, highlighted until closed. Reveal: scrolled to once
 	selected: Character_Id,
 	reveal:   bool,
-	// Last frame's: a new one opens the court
-	vacancy:  Office_Id,
 	office:   Office_Id,
 }
 
@@ -225,10 +223,7 @@ cards_ui :: proc(
 		}
 	}
 
-	// A new vacancy opens the court on it
 	court := &view.court
-	if cards.court.vacancy.office != {} && cards.court.vacancy.office != court.vacancy do court.open = true
-	court.vacancy = cards.court.vacancy.office
 	if court.open do court_ui(&cards.court, theme, court, &order)
 	if order != nil do input^ = order
 	if .Court in asks {

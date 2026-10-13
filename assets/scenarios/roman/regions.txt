@@ -52,3 +52,34 @@ region = { id = salona                name = "Salona"                color = [17
 
 # Maxima Sequanorum
 region = { id = vesontio              name = "Vesontio"              color = [ 30,  50, 130]  fertility = 2 }
+region = { id = argentoratum          name = "Argentoratum"          color = [ 95,  60, 140]  fertility = 3 }
+
+# Narbonensis
+region = { id = aquae_sextiae         name = "Aquae Sextiae"         color = [240, 120,  90]  fertility = 2 }
+region = { id = vienna                name = "Vienna"                color = [ 60, 180, 140]  fertility = 3 }
+region = { id = narbo                 name = "Narbo"                 color = [180, 140, 220]  fertility = 2 }
+
+# Aquitania
+region = { id = burdigala             name = "Burdigala"             color = [150,  40, 120]  fertility = 3 }
+region = { id = elusa                 name = "Elusa"                 color = [220, 220, 100]  fertility = 2 }
+region = { id = avaricum              name = "Avaricum"              color = [ 90, 120,  60]  fertility = 2 }
+
+# Lugdunensis
+region = { id = lugdunum              name = "Lugdunum"              color = [190,  60,  90]  fertility = 3 }
+region = { id = turonum               name = "Turonum"               color = [100, 140, 200]  fertility = 3 }
+region = { id = rotomagus             name = "Rotomagus"             color = [230, 190, 140]  fertility = 3 }
+
+# Belgica
+region = { id = augusta_treverorum    name = "Augusta Treverorum"    color = [160, 200,  80]  fertility = 2 }
+region = { id = durocortorum          name = "Durocortorum"          color = [ 70,  90, 160]  fertility = 3 }
+region = { id = colonia_agrippina     name = "Colonia Agrippina"     color = [210, 140, 150]  fertility = 3 }
+
+# Germania
+region = { id = uburzis               name = "Uburzis"               color = [140, 150,  60]  fertility = 3 }
+region = { id = aregelia              name = "Aregelia"              color = [175,  95,  60]  fertility = 3 }
+region = { id = lupfurdum             name = "Lupfurdum"             color = [ 90, 160, 200]  fertility = 2 }
+
+# Frisia
+region = { id = tulifurdum            name = "Tulifurdum"            color = [200, 180,  90]  fertility = 2 }
+region = { id = flevum                name = "Flevum"                color = [ 70, 150, 100]  fertility = 2 }
+region = { id = angulus               name = "Angulus"               color = [120,  70,  40]  fertility = 2 }

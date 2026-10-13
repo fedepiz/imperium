@@ -46,6 +46,20 @@ faction = {
 	piece = { kind = settlement  name = "Siscia"      at = [419, 374]  capital_of = siscia      men = 3000   proficiency = 30  population = 8  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
 	piece = { kind = settlement  name = "Domavia"     at = [470, 396]  capital_of = domavia     men = 3000   proficiency = 30  population = 7  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
 	piece = { kind = settlement  name = "Salona"      at = [421, 405]  capital_of = salona      men = 6000   proficiency = 30  population = 15  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, praetorium, curia]  main = civitas }
+	piece = { kind = settlement  name = "Augusta Treverorum"  at = [265, 295]  capital_of = augusta_treverorum  men = 6000  proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds, curia]  main = civitas }
+	piece = { kind = settlement  name = "Durocortorum"        at = [228, 304]  capital_of = durocortorum        men = 3000  proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Colonia Agrippina"   at = [269, 273]  capital_of = colonia_agrippina   men = 3000  proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Vesontio"           at = [242, 345]  capital_of = vesontio            men = 6000  proficiency = 30  population = 13  buildings = [wheat_fields, wheat_fields, cattle_herds, cattle_herds, curia]  main = civitas }
+	piece = { kind = settlement  name = "Octodurum"          at = [253, 367]  capital_of = octodurum           men = 3000  proficiency = 30  population = 5  buildings = [wheat_fields, sheep_flocks, sheep_flocks]  main = municipium }
+	piece = { kind = settlement  name = "Lugdunum"           at = [238, 365]  capital_of = lugdunum            men = 6000  proficiency = 30  population = 16  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, curia]  main = civitas }
+	piece = { kind = settlement  name = "Vienna"             at = [238, 389]  capital_of = vienna              men = 3000  proficiency = 30  population = 13  buildings = [wheat_fields, wheat_fields, cattle_herds, curia]  main = municipium }
+	piece = { kind = settlement  name = "Aquae Sextiae"      at = [248, 408]  capital_of = aquae_sextiae       men = 3000  proficiency = 30  population = 8  buildings = [wheat_fields, wheat_fields, sheep_flocks, curia]  main = municipium }
+	piece = { kind = settlement  name = "Narbo"              at = [213, 415]  capital_of = narbo               men = 6000  proficiency = 30  population = 12  buildings = [wheat_fields, wheat_fields, wheat_fields, sheep_flocks, curia]  main = civitas }
+	piece = { kind = settlement  name = "Burdigala"          at = [162, 384]  capital_of = burdigala           men = 6000  proficiency = 30  population = 14  buildings = [wheat_fields, wheat_fields, cattle_herds, curia]  main = civitas }
+	piece = { kind = settlement  name = "Elusa"              at = [172, 402]  capital_of = elusa               men = 3000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = municipium }
+	piece = { kind = settlement  name = "Avaricum"           at = [205, 344]  capital_of = avaricum            men = 3000  proficiency = 30  population = 9  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Turonum"            at = [180, 338]  capital_of = turonum             men = 3000  proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Rotomagus"          at = [186, 300]  capital_of = rotomagus           men = 3000  proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
 	piece = { kind = army        name = "Legio I"     at = [334, 419]  title = magister_militum  men = 5000 }
 	piece = { kind = army        name = "Legio II"    at = [338, 410]  title = tribune  of = "Roma"  men = 10000 }
 	piece = { kind = fleet   at = [353, 455] }
@@ -60,9 +74,74 @@ faction = {
 	color = [80, 120, 170]
 	treasury = 50
 	piece = { kind = settlement  name = "Augusta Vindelicorum"  at = [325, 327]  capital_of = augusta_vindelicorum  men = 10000  proficiency = 30  population = 14  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, muster_hall]  main = konigshof }
-	piece = { kind = settlement  name = "Vesontio"              at = [242, 345]  capital_of = vesontio              men = 6000   proficiency = 30  population = 13  buildings = [wheat_fields, wheat_fields, cattle_herds, cattle_herds, muster_hall]  main = burg }
 	piece = { kind = settlement  name = "Virunum"               at = [385, 354]  capital_of = virunum               men = 6000   proficiency = 30  population = 7  buildings = [wheat_fields, wheat_fields, sheep_flocks, muster_hall]  main = heim }
-	piece = { kind = settlement  name = "Octodurum"             at = [253, 367]  capital_of = octodurum             men = 3000   proficiency = 30  population = 5  buildings = [wheat_fields, sheep_flocks, sheep_flocks]  main = heim }
 	piece = { kind = settlement  name = "Iuvavum"               at = [362, 336]  capital_of = iuvavum               men = 3000   proficiency = 30  population = 5  buildings = [wheat_fields, sheep_flocks, sheep_flocks]  main = heim }
+	piece = { kind = settlement  name = "Uburzis"               at = [312, 294]  capital_of = uburzis               men = 6000   proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = burg }
 	piece = { kind = army        name = "Comitatus Gibuldi"     at = [316, 342]  title = king  of = "Augusta Vindelicorum"  men = 4000 }
+}
+
+faction = {
+	name = "Burgundians"
+	culture = germanic
+	offices = [maior_domus, dux]
+	capital = "Argentoratum"
+	color = [150, 85, 160]
+	treasury = 40
+	piece = { kind = settlement  name = "Argentoratum"          at = [281, 316]  capital_of = argentoratum  men = 6000  proficiency = 30  population = 12  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds]  main = konigsburg }
+	piece = { kind = army        name = "Comitatus Gundaharii"  at = [288, 329]  title = king  of = "Argentoratum"  men = 3000 }
+}
+
+faction = {
+	name = "Franks"
+	culture = germanic
+	offices = [maior_domus, dux]
+	capital = "Flevum"
+	color = [70, 150, 90]
+	treasury = 30
+	piece = { kind = settlement  name = "Flevum"                at = [237, 246]  capital_of = flevum  men = 6000  proficiency = 30  population = 8  buildings = [wheat_fields, cattle_herds, cattle_herds]  main = konigsburg }
+	piece = { kind = army        name = "Comitatus Chlodionis"  at = [230, 257]  title = king  of = "Flevum"  men = 3000 }
+}
+
+faction = {
+	name = "Saxons"
+	culture = germanic
+	offices = [maior_domus, dux]
+	capital = "Tulifurdum"
+	color = [200, 170, 70]
+	treasury = 30
+	piece = { kind = settlement  name = "Tulifurdum"            at = [309, 247]  capital_of = tulifurdum  men = 6000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = konigsburg }
+	piece = { kind = army        name = "Comitatus Hengisti"    at = [309, 261]  title = king  of = "Tulifurdum"  men = 2500 }
+}
+
+faction = {
+	name = "Angles"
+	culture = germanic
+	offices = [maior_domus, dux]
+	capital = "Angulus"
+	color = [150, 110, 70]
+	treasury = 30
+	piece = { kind = settlement  name = "Angulus"               at = [306, 208]  capital_of = angulus  men = 6000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = konigsburg }
+	piece = { kind = army        name = "Comitatus Eomeri"      at = [306, 222]  title = king  of = "Angulus"  men = 2000 }
+}
+
+faction = {
+	name = "Thuringians"
+	culture = germanic
+	offices = [maior_domus, dux]
+	capital = "Lupfurdum"
+	color = [215, 120, 50]
+	treasury = 30
+	piece = { kind = settlement  name = "Lupfurdum"             at = [366, 271]  capital_of = lupfurdum  men = 6000  proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = konigsburg }
+	piece = { kind = army        name = "Comitatus Bisini"      at = [378, 275]  title = king  of = "Lupfurdum"  men = 2500 }
+}
+
+faction = {
+	name = "Langobards"
+	culture = germanic
+	offices = [maior_domus, dux]
+	capital = "Aregelia"
+	color = [90, 170, 180]
+	treasury = 30
+	piece = { kind = settlement  name = "Aregelia"              at = [346, 266]  capital_of = aregelia  men = 6000  proficiency = 30  population = 9  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = konigsburg }
+	piece = { kind = army        name = "Comitatus Agilmundi"   at = [334, 262]  title = king  of = "Aregelia"  men = 2500 }
 }

@@ -40,7 +40,7 @@ culture = {
 	look = Germanic
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, muster_hall, heim, burg, konigshof,
+		sheep_farm, muster_hall, heim, burg, konigsburg, konigshof,
 	]
 	names = [
 		"Chnodomar", "Serapio", "Mederich", "Agenarich", "Rando", "Vithicab", "Priarius", "Butilin", "Leuthari", "Urius",

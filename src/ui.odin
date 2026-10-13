@@ -10,7 +10,7 @@ import sdl "vendor:sdl3"
 
 // Maximum number of ui boxes supported by the system
 @(private = "file")
-BOX_MAX :: 2048
+BOX_MAX :: 8192
 @(private = "file")
 DEPTH_MAX :: 32
 // Maximum number of animated values alive at once
