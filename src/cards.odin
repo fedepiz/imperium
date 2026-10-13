@@ -1,7 +1,6 @@
 package main
 
 import "core:fmt"
-import "core:math"
 
 @(private = "file")
 HOT_PAPER_SHADE :: 0.9
@@ -29,8 +28,8 @@ NOTCH_GAP :: 2
 SCREEN_MARGIN :: [2]f32{20, 20}
 Court_View :: struct {
 	open:     bool,
-	// Last frame's, drawn highlighted. -1: none
-	hovered:  int,
+	// Last frame's, drawn highlighted. 0: none
+	hovered:  Character_Id,
 	// Clicked or opened on, with his office, highlighted until closed. Reveal: scrolled to once
 	selected: Character_Id,
 	reveal:   bool,
@@ -127,9 +126,14 @@ Cards_View :: struct {
 
 @(private = "file")
 Card_Theme :: struct {
-	text_font:  Text_Font_Id,
-	title_font: Text_Font_Id,
-	colors:     Card_Colors,
+	text_font:   Text_Font_Id,
+	title_font:  Text_Font_Id,
+	colors:      Card_Colors,
+	line_height: f32,
+	button:      UI_Style,
+	tooltip:     UI_Style,
+	// The padding keeps the fill inside the border; its focus border is the fill
+	meter:       UI_Style,
 }
 
 @(private = "file")
@@ -148,7 +152,7 @@ cards_ui :: proc(
 	paper: [3]f32,
 	ink: [3]f32,
 	view: ^Cards_View,
-	input: ^Game_Input,
+	input: ^Game_Order,
 ) {
 	opaque :: proc(rgb: [3]f32) -> [4]f32 {
 		return {rgb.r, rgb.g, rgb.b, 1}
@@ -160,11 +164,46 @@ cards_ui :: proc(
 		ink          = opaque(ink),
 		faded_ink    = {ink.r, ink.g, ink.b, FADED_INK_ALPHA},
 	}
-	theme := Card_Theme{text_font, title_font, colors}
 	ui_style_push(
 		{font = text_font, text_color = colors.ink, width = ui_text_dim(), height = ui_text_dim()},
 	)
 	defer ui_style_pop()
+	metrics := text_font_metrics(text_font)
+	theme := Card_Theme {
+		text_font = text_font,
+		title_font = title_font,
+		colors = colors,
+		line_height = metrics.ascent - metrics.descent,
+		button = {
+			padding = [2]f32{12, 4},
+			background = colors.paper,
+			hot_background = colors.hot_paper,
+			active_background = colors.active_paper,
+			border = colors.ink,
+			focus_border = colors.ink,
+			hot_text_color = colors.ink,
+		},
+		tooltip = {
+			width = ui_fit(),
+			height = ui_fit(),
+			padding = [2]f32{12, 8},
+			gap = 4,
+			background = colors.paper,
+			border = colors.ink,
+			thickness = 1.5,
+			radius = 3,
+		},
+		meter = {
+			width = ui_em(BAR_EM),
+			height = ui_px(BAR_HEIGHT),
+			padding = [2]f32{2, 2},
+			background = colors.paper,
+			border = colors.ink,
+			thickness = 1,
+			radius = 1,
+			focus_border = colors.faded_ink,
+		},
+	}
 
 	asks: bit_set[Game_Ask]
 	order: Game_Order
@@ -191,14 +230,12 @@ cards_ui :: proc(
 	if cards.court.vacancy.office != {} && cards.court.vacancy.office != court.vacancy do court.open = true
 	court.vacancy = cards.court.vacancy.office
 	if court.open do court_ui(&cards.court, theme, court, &order)
-	if order != nil do input.order = order
+	if order != nil do input^ = order
 	if .Court in asks {
 		court.open = !court.open
 		court.selected = 0
 		court.office = {}
 	}
-	if .End_Turn in asks do input.end_turn = true
-	if .Next in asks do input.answer = .Next
 }
 
 @(private = "file")
@@ -213,7 +250,6 @@ card_ui :: proc(
 	asks: bit_set[Game_Ask],
 ) {
 	colors := theme.colors
-	text_font := theme.text_font
 	menu := &view.menu
 	court_view := &view.court
 	panel := UI_Style {
@@ -226,37 +262,8 @@ card_ui :: proc(
 		thickness  = 1.5,
 		radius     = 3,
 	}
-	action := UI_Style {
-		padding           = [2]f32{12, 4},
-		background        = colors.paper,
-		hot_background    = colors.hot_paper,
-		active_background = colors.active_paper,
-		border            = colors.ink,
-		focus_border      = colors.ink,
-		hot_text_color    = colors.ink,
-	}
-	tooltip := UI_Style {
-		width      = ui_fit(),
-		height     = ui_fit(),
-		padding    = [2]f32{12, 8},
-		gap        = 4,
-		background = colors.paper,
-		border     = colors.ink,
-		thickness  = 1.5,
-		radius     = 3,
-	}
-	// The padding keeps the fill inside the border
-	meter := UI_Style {
-		width        = ui_em(BAR_EM),
-		height       = ui_px(BAR_HEIGHT),
-		padding      = [2]f32{2, 2},
-		background   = colors.paper,
-		border       = colors.ink,
-		thickness    = 1,
-		radius       = 1,
-		// The fill
-		focus_border = colors.faded_ink,
-	}
+	action := theme.button
+	tooltip := theme.tooltip
 	tile := UI_Style {
 		width      = ui_em(TILE_WIDTH_EM),
 		height     = ui_grow(),
@@ -337,8 +344,7 @@ card_ui :: proc(
 			height = ui_fit(),
 			gap    = COLUMN_GAP,
 		}
-		metrics := text_font_metrics(text_font)
-		line_height := metrics.ascent - metrics.descent
+		line_height := theme.line_height
 		if card.tabs != {} {
 			// Room for a button row
 			body_height := FOCUS_ROWS * line_height + (FOCUS_ROWS - 1) * FIELD_GAP + 2 * action.padding.?.y
@@ -351,47 +357,13 @@ card_ui :: proc(
 			for fields, column in columns {
 				if len(fields) == 0 do continue
 				if ui_column({width = ui_fit(), height = ui_fit(), gap = FIELD_GAP}) {
-					for field in fields {
-						if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
-							ui_label(field.label, {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
-							if fill, has_fill := field.fill.?; has_fill {
-								// The bar opens the breakdown's tooltip
-								ui_label(field.value, {width = ui_em(NUMBER_EM)})
-								key: string
-								if index, has_breakdown := field.breakdown.?; has_breakdown do key = breakdown_key(index)
-								style := meter
-								height: f32 = BAR_HEIGHT
-								if field.fill_origin > 0 {
-									// A balance: the notch stands out, the fill coloured by its side
-									height += 2 * NOTCH_STAND_OUT
-									style.height = ui_px(height)
-									style.padding = [2]f32{2, NOTCH_STAND_OUT}
-									style.gap = NOTCH_GAP
-									style.focus_border = fill < field.fill_origin ? BAD_INK : GOOD_INK
-								}
-								if field.graded do style.focus_border = graded_ink(fill)
-								centre := [2]f32{0, (line_height - height) / 2}
-								if ui_column({width = ui_fit(), height = ui_fit(), padding = centre}) {
-									ui_meter(key, fill, field.fill_origin, style)
-								}
-							} else if field.click != nil {
-								// One line, keyed by its breakdown for hovering. A character's name gets more room
-								key := fmt.tprintf("%s###%s %s", field.value, label, field.label)
-								if index, has_breakdown := field.breakdown.?; has_breakdown {
-									key = fmt.tprintf("%s###%s", field.value, breakdown_key(index))
-								}
-								style := action
-								style.width = ui_em(value_ems[column])
-								if _, is_character := field.click.(Character_Id); is_character do style.width = ui_em(CHARACTER_VALUE_EM)
-								style.height = ui_px(line_height + 2 * action.padding.?.y)
-								if ui_button(key, style).pressed do take(field.click, &asks, order, menu, court_view)
-								if id, opens := field.click.(Card_Menu_Id); opens do anchors[id] = key
-							} else {
-								value := breakdown_run(field.value, field.breakdown)
-								// One line, cut short rather than wrapped
-								ui_label_text({value}, {width = ui_em(value_ems[column]), height = ui_px(line_height)})
-							}
-						}
+					for &field, f in fields {
+						// Keyed by its breakdown for hovering; a button needs a key either way
+						key: string
+						if index, has_breakdown := field.breakdown.?; has_breakdown do key = breakdown_key(index)
+						else if field.click != nil do key = fmt.tprintf("%s field %d %d", label, column, f)
+						if field_ui(&field, theme, value_ems[column], key).pressed do take(field.click, &asks, order, menu, court_view)
+						if id, opens := field.click.(Card_Menu_Id); opens do anchors[id] = fmt.tprintf("%s###%s", field.value, key)
 					}
 					if column == 0 {
 						for button, b in card.buttons {
@@ -568,6 +540,48 @@ breakdown_ui :: proc(breakdown: ^Card_Breakdown, colors: Card_Colors) {
 	}
 }
 
+// A field's row: its label, if any, then its value as a bar after its number, a button, or one line of text. Keyed:
+// the bar or the text hovers, and a button needs it
+@(private = "file")
+field_ui :: proc(field: ^Card_Field, theme: Card_Theme, value_em: f32, key: string) -> (signal: UI_Signal) {
+	if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
+		if field.label != "" do ui_label(field.label, {width = ui_em(LABEL_EM), text_color = theme.colors.faded_ink})
+		if fill, has_fill := field.fill.?; has_fill {
+			ui_label(field.value, {width = ui_em(NUMBER_EM)})
+			style := theme.meter
+			height: f32 = BAR_HEIGHT
+			if field.fill_origin > 0 {
+				// A balance: the notch stands out, the fill coloured by its side
+				height += 2 * NOTCH_STAND_OUT
+				style.height = ui_px(height)
+				style.padding = [2]f32{2, NOTCH_STAND_OUT}
+				style.gap = NOTCH_GAP
+				style.focus_border = fill < field.fill_origin ? BAD_INK : GOOD_INK
+			}
+			if field.graded do style.focus_border = graded_ink(fill)
+			centre := [2]f32{0, (theme.line_height - height) / 2}
+			if ui_column({width = ui_fit(), height = ui_fit(), padding = centre}) {
+				signal = ui_meter(key, fill, field.fill_origin, style)
+			}
+		} else if field.click != nil {
+			// A character's name gets more room
+			style := theme.button
+			style.width = ui_em(value_em)
+			if _, is_character := field.click.(Character_Id); is_character do style.width = ui_em(CHARACTER_VALUE_EM)
+			style.height = ui_px(theme.line_height + 2 * theme.button.padding.?.y)
+			signal = ui_button(fmt.tprintf("%s###%s", field.value, key), style)
+		} else {
+			run := UI_Text {
+				text = field.value,
+			}
+			if key != "" do run = {text = field.value, key = key, hot_color = HOVER_INK, underline = true}
+			// One line, cut short rather than wrapped
+			signal = ui_label_text({run}, {width = ui_em(value_em), height = ui_px(theme.line_height)})
+		}
+	}
+	return
+}
+
 // Bad to ochre below half, ochre to good above
 @(private = "file")
 graded_ink :: proc(t: f32) -> [4]f32 {
@@ -578,10 +592,9 @@ graded_ink :: proc(t: f32) -> [4]f32 {
 @(private = "file")
 court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Game_Order) {
 	colors := theme.colors
-	text_font := theme.text_font
 	title_font := theme.title_font
 	// Hovered this frame, highlighted next
-	hovered := -1
+	hovered: Character_Id
 	defer view.hovered = hovered
 	panel := UI_Style {
 		width      = ui_grow(),
@@ -593,28 +606,10 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 		thickness  = 1.5,
 		radius     = 3,
 	}
-	button := UI_Style {
-		padding           = [2]f32{12, 4},
-		background        = colors.paper,
-		hot_background    = colors.hot_paper,
-		active_background = colors.active_paper,
-		border            = colors.ink,
-		focus_border      = colors.ink,
-		hot_text_color    = colors.ink,
-	}
-	meter := UI_Style {
-		width        = ui_em(BAR_EM),
-		height       = ui_px(BAR_HEIGHT),
-		padding      = [2]f32{2, 2},
-		background   = colors.paper,
-		border       = colors.ink,
-		thickness    = 1,
-		radius       = 1,
-		focus_border = colors.faded_ink,
-	}
+	button := theme.button
+	tooltip := theme.tooltip
 	// The portrait as tall as the entry's lines
-	metrics := text_font_metrics(text_font)
-	line_height := metrics.ascent - metrics.descent
+	line_height := theme.line_height
 	inner_height := COURT_ENTRY_LINES * line_height + (COURT_ENTRY_LINES - 1) * FIELD_GAP
 	entry := UI_Style {
 		width      = ui_grow(),
@@ -647,16 +642,6 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 		thickness  = 1,
 		radius     = 2,
 	}
-	tooltip := UI_Style {
-		width      = ui_fit(),
-		height     = ui_fit(),
-		padding    = [2]f32{12, 8},
-		gap        = 4,
-		background = colors.paper,
-		border     = colors.ink,
-		thickness  = 1.5,
-		radius     = 3,
-	}
 	rank_square := UI_Style {
 		width        = ui_px(COURT_RANK_SQUARE),
 		height       = ui_px(COURT_RANK_SQUARE),
@@ -665,28 +650,6 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 		thickness    = 1,
 		radius       = 1,
 		focus_border = MIDDLE_INK,
-	}
-	// Keyed: its number underlined, and hovering
-	stat_bar :: proc(
-		label: string,
-		number: string,
-		fill: f32,
-		meter: UI_Style,
-		line_height: f32,
-		colors: Card_Colors,
-		key := "",
-	) {
-		if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
-			ui_label(label, {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
-			run := UI_Text {
-				text = number,
-			}
-			if key != "" do run = {text = number, key = key, hot_color = HOVER_INK, underline = true}
-			ui_label_text({run}, {width = ui_em(NUMBER_EM)})
-			if ui_column({width = ui_fit(), height = ui_fit(), padding = [2]f32{0, (line_height - BAR_HEIGHT) / 2}}) {
-				ui_meter("", fill, 0, meter)
-			}
-		}
 	}
 
 	if ui_overlay() {
@@ -721,7 +684,7 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 							if selected && view.reveal do ui_scroll_to(entry_key)
 							// Its portrait and rank strip included
 							clicked := false
-							lit := ui_anim(fmt.tprintf("court entry lit %d", i), i == view.hovered || selected ? 1 : 0)
+							lit := ui_anim(fmt.tprintf("court entry lit %d", i), row.character == view.hovered || selected ? 1 : 0)
 							entry_style := entry
 							entry_style.border = colors.faded_ink + (colors.ink - colors.faded_ink) * lit
 							entry_style.thickness = 1 + lit
@@ -729,7 +692,7 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 								if ui_row({width = ui_fit(), height = ui_fit(), gap = COURT_RANK_STRIP_GAP}) {
 									portrait_key := fmt.tprintf("court portrait %d", i)
 									if ui_panel(portrait_key, portrait) {}
-									if ui_signal(portrait_key).hovered do hovered = i
+									if ui_signal(portrait_key).hovered do hovered = row.character
 									clicked |= ui_signal(portrait_key).pressed
 									// Rank: squares up to the court's highest, filled from the bottom; hovered, the number
 									rank_key := fmt.tprintf("court rank %d", i)
@@ -747,10 +710,12 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 											ui_meter("", court.rank_max - square <= row.rank ? 1 : 0, 0, rank_square)
 										}
 									}
-									if ui_signal(rank_key).hovered do hovered = i
+									if ui_signal(rank_key).hovered do hovered = row.character
 									clicked |= ui_signal(rank_key).pressed
-									if ui_tooltip(fmt.tprintf("court rank tip %d", i), ui_signal(rank_key).hovered, tooltip) {
-										ui_label(fmt.tprintf("Rank %d", row.rank))
+									if index, tipped := row.rank_breakdown.?; tipped {
+										if ui_tooltip(fmt.tprintf("court rank tip %d", i), ui_signal(rank_key).hovered, tooltip) {
+											breakdown_ui(&court.breakdowns[index], colors)
+										}
 									}
 								}
 								if ui_column(lines) {
@@ -763,55 +728,22 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 									ui_label(fmt.tprintf("Age %d", row.age), {width = ui_em(COURT_NAME_EM), text_color = colors.faded_ink})
 								}
 								if ui_column(lines) {
-									// Against the richest at court
-									stat_bar(
-										"Wealth",
-										fmt.tprintf("%.1f", row.wealth),
-										row.wealth / max(court.wealth_max, 1),
-										meter,
-										line_height,
-										colors,
-									)
-									stat_bar(
-										"Influence",
-										fmt.tprintf("%.0f", row.influence),
-										row.influence / max(court.influence_max, 1),
-										meter,
-										line_height,
-										colors,
-										fmt.tprintf("court influence %d", i),
-									)
-									// Hovered: its target
-									if ui_tooltip(fmt.tprintf("court influence tip %d", i), ui_signal(fmt.tprintf("court influence %d", i)).hovered, tooltip) {
-										// Wealth only when it adds
-										terms := make([dynamic][2]string, context.temp_allocator)
-										append(&terms, [2]string{"Office", fmt.tprintf("%.0f", row.office_influence)})
-										if math.round(row.wealth_bonus) > 0 do append(&terms, [2]string{"Wealth", fmt.tprintf("+%.0f", row.wealth_bonus)})
-										append(&terms, [2]string{"Target", fmt.tprintf("%.0f", row.office_influence + row.wealth_bonus)})
-										for term in terms {
-											if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
-												ui_label(term[0], {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
-												ui_label(term[1])
-											}
+									// Only those with a breakdown keyed: a keyed bar takes clicks, counted as the entry's
+									for &stat, s in row.stats {
+										index, tipped := stat.breakdown.?
+										key := tipped ? fmt.tprintf("court stat %d %d", i, s) : ""
+										field_ui(&stat, theme, STAT_VALUE_EM, key)
+										if !tipped do continue
+										clicked |= ui_signal(key).pressed
+										if ui_tooltip(fmt.tprintf("court stat tip %d %d", i, s), ui_signal(key).hovered, tooltip) {
+											breakdown_ui(&court.breakdowns[index], colors)
 										}
 									}
-									loyalty_meter := meter
-									loyalty_meter.focus_border = graded_ink(row.loyalty / 100)
-									stat_bar("Loyalty", fmt.tprintf("%.0f%%", row.loyalty), row.loyalty / 100, loyalty_meter, line_height, colors)
 								}
 								if ui_column({width = ui_em(COURT_ARMY_EM), height = ui_fit(), gap = FIELD_GAP}) {
 									if row.army != "" {
 										ui_label(row.army, {width = ui_em(COURT_ARMY_EM)})
-										if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
-											ui_label(compact_number(f64(row.men)), {width = ui_em(NUMBER_EM)})
-											strength := row.men / max(row.men_max, 1)
-											men_meter := meter
-											men_meter.focus_border = graded_ink(strength)
-											centre := [2]f32{0, (line_height - BAR_HEIGHT) / 2}
-											if ui_column({width = ui_fit(), height = ui_fit(), padding = centre}) {
-												ui_meter("", strength, 0, men_meter)
-											}
-										}
+										field_ui(&row.men, theme, STAT_VALUE_EM, "")
 										ui_label(fmt.tprintf("at %s", row.base), {width = ui_em(COURT_ARMY_EM), text_color = colors.faded_ink})
 									} else {
 										ui_label("No army", {width = ui_em(COURT_ARMY_EM), text_color = colors.faded_ink})
@@ -823,7 +755,7 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 									ui_label(row.disposition, {width = ui_em(COURT_TRAIT_EM)})
 								}
 							}
-							if ui_signal(entry_key).hovered do hovered = i
+							if ui_signal(entry_key).hovered do hovered = row.character
 							// Clicked: him and his office selected; again, neither
 							if clicked || ui_signal(entry_key).pressed {
 								view.selected = selected ? 0 : row.character
@@ -855,41 +787,28 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 												key := fmt.tprintf("court office %d", o)
 												holder := office.holder
 												// Lit: lighter, its border thicker
-												highlighted := holder >= 0 && (holder == view.hovered || court.rows[holder].character == view.selected)
-											highlighted ||= office.id == view.office
+												highlighted := holder != 0 && (holder == view.hovered || holder == view.selected)
+												highlighted ||= office.id == view.office
 												lit := ui_anim(fmt.tprintf("court office lit %d", o), highlighted ? 1 : 0)
 												style := office_tile
 												style.background = colors.active_paper + (colors.hot_paper - colors.active_paper) * lit
-												if holder < 0 do style.background = colors.ink
+												if holder == 0 do style.background = colors.ink
 												// The vacancy being filled, in ochre
 												if office.filling do style.background = MIDDLE_INK
 												style.thickness = 1 + lit
 												if ui_panel(key, style) {
-													if holder >= 0 {
-														ui_label(court.rows[holder].name[:1], {width = ui_grow(), text_align = .Center})
-													}
+													if holder != 0 do ui_label(office.holder_name[:1], {width = ui_grow(), text_align = .Center})
 												}
 												if ui_signal(key).hovered do hovered = holder
-											// Clicked: it and its holder selected; again, neither
-											if ui_signal(key).pressed {
-												chosen := view.office != office.id
-												view.office = chosen ? office.id : {}
-												view.selected = chosen && holder >= 0 ? court.rows[holder].character : 0
-											}
-												if ui_tooltip(fmt.tprintf("court office tip %d", o), ui_signal(key).hovered, tooltip) {
-													ui_label(office.title)
-													if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
-														ui_label("Rank", {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
-														ui_label(fmt.tprint(office.rank))
-													}
-													if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
-														ui_label("Influence", {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
-														ui_label(fmt.tprintf("%.0f", office.influence))
-													}
-													if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
-														ui_label("Holder", {width = ui_em(LABEL_EM), text_color = colors.faded_ink})
-														if holder >= 0 do ui_label(court.rows[holder].name)
-														else do ui_label("Vacant", {text_color = colors.faded_ink})
+												// Clicked: it and its holder selected; again, neither
+												if ui_signal(key).pressed {
+													chosen := view.office != office.id
+													view.office = chosen ? office.id : {}
+													view.selected = chosen ? holder : 0
+												}
+												if index, tipped := office.breakdown.?; tipped {
+													if ui_tooltip(fmt.tprintf("court office tip %d", o), ui_signal(key).hovered, tooltip) {
+														breakdown_ui(&court.breakdowns[index], colors)
 													}
 												}
 											}
@@ -940,8 +859,8 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 									style.disabled = !can_dismiss
 									signal := ui_button("Dismiss###court dismiss", style)
 									if signal.pressed && can_dismiss do order^ = dismiss
-									if ui_tooltip("court dismiss tip", signal.hovered && chosen.dismiss_note != "", tooltip) {
-										ui_label(chosen.dismiss_note)
+									if index, tipped := chosen.dismiss_breakdown.?; tipped {
+										if ui_tooltip("court dismiss tip", signal.hovered, tooltip) do breakdown_ui(&court.breakdowns[index], colors)
 									}
 									if !can_dismiss {
 										ui_label(chosen.undismissable, {width = ui_grow(), text_color = colors.faded_ink})
@@ -953,17 +872,16 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 								if vacancy.army != "" do about = fmt.tprintf("Rank %d, commands %s", vacancy.rank, vacancy.army)
 								ui_label(about, {width = ui_grow(), text_color = colors.faded_ink})
 								for candidate, c in vacancy.candidates {
-									if candidate.row < 0 do continue
-									row := &court.rows[candidate.row]
 									style := button
 									style.width = ui_grow()
-									signal := ui_button(fmt.tprintf("%s###court candidate %d", row.name, c), style)
-									if signal.hovered do hovered = candidate.row
+									style.disabled = !vacancy.can_appoint
+									signal := ui_button(fmt.tprintf("%s###court candidate %d", candidate.name, c), style)
+									if signal.hovered do hovered = candidate.character
 									if signal.pressed do order^ = candidate.order
-									if ui_tooltip(fmt.tprintf("court candidate tip %d", c), signal.hovered, tooltip) {
-										ui_label(row.office != "" ? row.office : "No office")
-										ui_label(fmt.tprintf("Rank %d", row.rank), {text_color = colors.faded_ink})
-										if candidate.passes != "" do ui_label(candidate.passes, {text_color = colors.faded_ink})
+									if index, tipped := candidate.breakdown.?; tipped {
+										if ui_tooltip(fmt.tprintf("court candidate tip %d", c), signal.hovered, tooltip) {
+											breakdown_ui(&court.breakdowns[index], colors)
+										}
 									}
 								}
 							}

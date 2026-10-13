@@ -74,20 +74,17 @@ ICON_TITLES := [Map_Icon]string {
 COLUMN_TITLES := [2]string{"Attacker", "Defender"}
 
 Game_Ask :: enum u8 {
-	End_Turn,
-	Next,
 	Court,
 }
 
 COURT_ROWS_MAX :: FACTION_CHARACTERS_MAX
 COURT_OFFICES_MAX :: FACTION_OFFICES_MAX
+COURT_BREAKDOWNS_MAX :: 512
 
 Court_Row :: struct {
 	name:        string,
 	rank:        int,
 	influence:   f32,
-	// 0..100
-	loyalty:     f32,
 	age:         int,
 	temperament: string,
 	background:  string,
@@ -95,37 +92,38 @@ Court_Row :: struct {
 	// Empty: none
 	office:      string,
 	office_id:   Office_Id,
-	office_influence: f32,
-	wealth_bonus: f32,
-	wealth:      f32,
+	// Wealth, Influence and Loyalty
+	stats:       [3]Card_Field,
 	// Empty army: none
 	army:        string,
-	men:         f32,
-	men_max:     f32,
+	men:         Card_Field,
 	base:        string,
 	dismiss:     Maybe(Dismiss_Order),
-	dismiss_note: string,
 	undismissable: string,
 	character:   Character_Id,
+	rank_breakdown:      Maybe(int),
+	dismiss_breakdown:   Maybe(int),
 }
 
 Court_Office :: struct {
 	title:     string,
 	rank:      int,
-	influence: f32,
-	// Its holder's row. -1: vacant
-	holder:    int,
+	// 0: vacant
+	holder:      Character_Id,
+	holder_name: string,
 	// The vacancy being filled
 	filling:   bool,
 	// Its flags beyond the usual. Empty: none
 	traits:    string,
 	id:        Office_Id,
+	breakdown: Maybe(int),
 }
 
 Court_Candidate :: struct {
-	row:    int,
-	passes: string,
-	order:  Appoint_Order,
+	character: Character_Id,
+	name:      string,
+	order:     Appoint_Order,
+	breakdown: Maybe(int),
 }
 
 // No office: none
@@ -135,15 +133,15 @@ Court_Vacancy :: struct {
 	rank:       int,
 	army:       string,
 	candidates: [dynamic; CANDIDATES_MAX]Court_Candidate,
+	can_appoint: bool,
 }
 
 Court :: struct {
 	title:         string,
 	rows:          [dynamic; COURT_ROWS_MAX]Court_Row,
 	offices:       [dynamic; COURT_OFFICES_MAX]Court_Office,
-	// Filling the bars; the rank shown in full
-	influence_max: f32,
-	wealth_max:    f32,
+	breakdowns:    [dynamic; COURT_BREAKDOWNS_MAX]Card_Breakdown,
+	// The rank shown in full
 	rank_max:      int,
 	vacancy:       Court_Vacancy,
 }
@@ -274,10 +272,7 @@ game_present_map :: proc(
 	}
 	for &region, id in game.regions {
 		color := REGION_UNHELD_COLOR
-		capital := slot_map_get(&game.pieces, region.capital)
-		if mode == .Political && capital != nil && capital.owner != 0 {
-			color = game.factions[capital.owner].color
-		}
+		if mode == .Political && region.owner != 0 do color = game.factions[region.owner].color
 		frame.regions[id] = {
 			color       = color,
 			highlighted = frame.region_display != .Hidden && !reach_shown && Region_Id(id) == pointed,
@@ -288,7 +283,7 @@ game_present_map :: proc(
 		flood := &movement.flood
 		on_water := flood.domain != .Land
 		piece := slot_map_get(&game.pieces, focus)
-		controlled := piece != nil && game.under_way & {.Battle, .Ending} == {} && piece.owner == game.player
+		controlled := piece != nil && game.can_move && piece.owner == game.player
 
 		frame.highlights[REACH_SLOT] = {
 			kind        = controlled ? .Reach : .Foreign_Reach,
@@ -499,6 +494,17 @@ card_building_breakdown :: proc(game: ^Game, card: ^Card, kind: ^Building_Kind, 
 }
 
 @(private = "file")
+tally_add :: proc(breakdowns: ^[dynamic; $N]Card_Breakdown, terms: []Card_Term, total := "", note := "") -> Maybe(int) {
+	breakdown := Card_Breakdown {
+		note  = note,
+		total = total,
+	}
+	for term in terms do append(&breakdown.terms, term)
+	if append(breakdowns, breakdown) == 0 do return nil
+	return len(breakdowns) - 1
+}
+
+@(private = "file")
 card_note :: proc(card: ^Card, note: string) -> Maybe(int) {
 	if append(&card.breakdowns, Card_Breakdown{note = note}) == 0 do return nil
 	return len(card.breakdowns) - 1
@@ -547,7 +553,11 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				value = fmt.tprintf("%+.1f", net),
 				fill = 0.5 + 0.5 * net / max(faction.income, faction.upkeep, 1e-6),
 				fill_origin = 0.5,
-				breakdown = card_note(status, fmt.tprintf("%.1f income, %.1f upkeep", faction.income, faction.upkeep)),
+				breakdown = tally_add(
+					&status.breakdowns,
+					{{"Income", fmt.tprintf("%.1f", faction.income)}, {"Upkeep", fmt.tprintf("%+.1f", -faction.upkeep)}},
+					fmt.tprintf("%+.1f", net),
+				),
 			},
 		)
 		append(&status.fields, Card_Field{label = "Food store", value = compact_number(f64(faction.food_store))})
@@ -559,7 +569,11 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				value = fmt.tprintf("%+.1f", food_net),
 				fill = 0.5 + 0.5 * food_net / max(faction.food_sent, faction.food_taken, 1e-6),
 				fill_origin = 0.5,
-				breakdown = card_note(status, fmt.tprintf("%.1f sent, %.1f taken", faction.food_sent, faction.food_taken)),
+				breakdown = tally_add(
+					&status.breakdowns,
+					{{"Sent", fmt.tprintf("%.1f", faction.food_sent)}, {"Taken", fmt.tprintf("%+.1f", -faction.food_taken)}},
+					fmt.tprintf("%+.1f", food_net),
+				),
 			},
 		)
 	}
@@ -576,7 +590,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			},
 		)
 	}
-	append(&status.actions, Card_Action{"End turn", Game_Ask.End_Turn, game.endable})
+	append(&status.actions, Card_Action{"End turn", Game_Order(End_Turn_Order{}), game.endable})
 	append(&status.actions, Card_Action{"Court", Game_Ask.Court, true})
 
 	// The court
@@ -584,26 +598,48 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 		court := &cards.court
 		court.title = fmt.tprintf("Court of %s", faction_title(game, game.player))
 
+		// The greatest influence and wealth, filling the bars
+		influence_max, wealth_max: f32 = 1, 1
+		for &character, c in game.characters {
+			if c == 0 || character.faction != game.player do continue
+			influence_max = max(influence_max, character.influence)
+			if office := slot_map_get(&game.offices, character.office); office != nil do wealth_max = max(wealth_max, office.wealth)
+		}
+
 		for &character, c in game.characters {
 			if c == 0 || character.faction != game.player do continue
 			row := Court_Row {
 				name        = name_to_string(&character.name),
 				rank        = character.rank,
 				influence   = character.influence,
-				loyalty     = character.loyalty,
 				age         = character.age,
 				temperament = fmt.tprint(character.temperament),
 				background  = fmt.tprint(character.background),
 				disposition = fmt.tprint(character.disposition),
 				character   = Character_Id(c),
 			}
+			row.rank_breakdown = tally_add(&court.breakdowns, {{"Rank", fmt.tprint(character.rank)}})
+			wealth: f32
+			row.stats[1] = {
+				label  = "Influence",
+				value  = fmt.tprintf("%.0f", character.influence),
+				fill   = character.influence / influence_max,
+			}
+			row.stats[2] = {
+				label  = "Loyalty",
+				value  = fmt.tprintf("%.0f%%", character.loyalty),
+				fill   = character.loyalty / 100,
+				graded = true,
+			}
 			if office := slot_map_get(&game.offices, character.office); office != nil {
 				kind := &game.office_kinds[office.kind]
 				row.office = name_to_string(&office.title)
 				row.office_id = character.office
-				row.office_influence = kind.influence
-				row.wealth_bonus = character.influence_target - kind.influence
-				row.wealth = office.wealth
+				wealth = office.wealth
+				// Wealth only when it adds
+				target := [2]Card_Term{{"Office", fmt.tprintf("%.0f", kind.influence)}, {"Wealth", fmt.tprintf("%+.0f", character.influence_target - kind.influence)}}
+				terms := target[:math.round(character.influence_target - kind.influence) > 0 ? 2 : 1]
+				row.stats[1].breakdown = tally_add(&court.breakdowns, terms, fmt.tprintf("%.0f", character.influence_target))
 				switch office.dismissal {
 				case .For_Life:
 					row.undismissable = "Held for life"
@@ -611,24 +647,36 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					row.undismissable = "Not dismissable"
 				case .In_Term:
 					row.undismissable = fmt.tprintf("Term: %d %s left", office.term_left, office.term_left == 1 ? "turn" : "turns")
+				case .Not_Now:
+					row.undismissable = "Not now"
 				case .Allowed:
 					row.dismiss = Dismiss_Order{character.office}
 					if .Feudal in kind.flags {
-						row.dismiss_note = fmt.tprintf("A fief: every feudal holder loses %d loyalty", FEUDAL_DISMISSAL_LOYALTY)
+						row.dismiss_breakdown = tally_add(
+							&court.breakdowns,
+							{{"Each feudal holder", fmt.tprintf("-%d loyalty", FEUDAL_DISMISSAL_LOYALTY)}},
+						)
 					}
 				}
 				base := slot_map_get(&game.pieces, office.muster_at)
 				if kind.army_type != 0 && base != nil {
 					row.army = name_to_string(&game.army_types[kind.army_type].name)
 					row.base = name_to_string(&base.name)
-					row.men_max = f32(office.men_max)
-					row.men = f32(office.men)
-					if army := slot_map_get(&game.pieces, office.army); army != nil do row.men = f32(army.army.men)
+					men := office.men
+					if army := slot_map_get(&game.pieces, office.army); army != nil do men = army.army.men
+					row.men = {
+						value  = compact_number(f64(men)),
+						fill   = f32(men) / f32(max(office.men_max, 1)),
+						graded = true,
+					}
 				}
 			}
+			row.stats[0] = {
+				label = "Wealth",
+				value = fmt.tprintf("%.1f", wealth),
+				fill  = wealth / wealth_max,
+			}
 			append(&court.rows, row)
-			court.influence_max = max(court.influence_max, row.influence)
-			court.wealth_max = max(court.wealth_max, row.wealth)
 			court.rank_max = max(court.rank_max, row.rank)
 		}
 		slice.sort_by(court.rows[:], proc(a, b: Court_Row) -> bool {
@@ -640,20 +688,25 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			if office.faction != game.player do continue
 			kind := &game.office_kinds[office.kind]
 			court.rank_max = max(court.rank_max, kind.rank)
-			holder := -1
-			for &row, r in court.rows do if office.holder != 0 && row.character == office.holder do holder = r
 			traits := make([dynamic]string, context.temp_allocator)
 			for flag in kind.flags do if flag != .Dismissable do append(&traits, fmt.tprint(flag))
+			holder_name := office.holder != 0 ? name_to_string(&game.characters[office.holder].name) : ""
+			terms := [3]Card_Term {
+				{"Rank", fmt.tprint(kind.rank)},
+				{"Influence", fmt.tprintf("%.0f", kind.influence)},
+				{"Holder", office.holder != 0 ? holder_name : "Vacant"},
+			}
 			append(
 				&court.offices,
 				Court_Office {
 					title = name_to_string(&office.title),
 					rank = kind.rank,
-					influence = kind.influence,
-					holder = holder,
+					holder = office.holder,
+					holder_name = holder_name,
 					filling = office_id == game.appointment.office,
 					traits = strings.join(traits[:], ", ", context.temp_allocator),
 					id = office_id,
+					breakdown = tally_add(&court.breakdowns, terms[:], note = name_to_string(&office.title)),
 				},
 			)
 		}
@@ -663,17 +716,22 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			court.vacancy.office = game.appointment.office
 			court.vacancy.title = name_to_string(&vacancy.title)
 			court.vacancy.rank = kind.rank
+			court.vacancy.can_appoint = game.appointment.can_appoint
 			if kind.army_type != 0 do court.vacancy.army = name_to_string(&game.army_types[kind.army_type].name)
 			for candidate in game.appointment.candidates {
-				row := -1
-				for &each, r in court.rows do if each.character == candidate.character do row = r
-				passes := ""
-				if candidate.passed_over > 0 {
-					passes = fmt.tprintf("Passes over %d, -%d loyalty each", candidate.passed_over, PASSED_OVER_LOYALTY)
-				}
+				character := &game.characters[candidate.character]
+				office_title := "None"
+				if office := slot_map_get(&game.offices, character.office); office != nil do office_title = name_to_string(&office.title)
+				passes := fmt.tprintf("%d, -%d loyalty each", candidate.passed_over, PASSED_OVER_LOYALTY)
+				terms := [3]Card_Term{{"Office", office_title}, {"Rank", fmt.tprint(character.rank)}, {"Passes over", passes}}
 				append(
 					&court.vacancy.candidates,
-					Court_Candidate{row = row, passes = passes, order = {game.appointment.office, candidate.character}},
+					Court_Candidate {
+						character = candidate.character,
+						name = name_to_string(&character.name),
+						order = {game.appointment.office, candidate.character},
+						breakdown = tally_add(&court.breakdowns, terms[:candidate.passed_over > 0 ? 3 : 2]),
+					},
 				)
 			}
 		}
@@ -731,7 +789,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 		if len(statuses) > 0 do status = strings.join(statuses[:], ", ", context.temp_allocator)
 		append(&card.fields, Card_Field{label = "Status", value = status})
 		if piece.domain != nil {
-			left := game_movement_left(piece^)
+			left := piece.this_turn.movement_left
 			per_turn := piece.movement_per_turn
 			append(
 				&card.fields,
@@ -740,7 +798,14 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					value = compact_number(f64(left)),
 					fill = per_turn > 0 ? left / per_turn : 0,
 					graded = true,
-					breakdown = card_note(card, fmt.tprintf("%s of %s", compact_number(f64(left)), compact_number(f64(per_turn)))),
+					breakdown = tally_add(
+						&card.breakdowns,
+						{
+							{"Per turn", compact_number(f64(per_turn))},
+							{"Spent", fmt.tprintf("-%s", compact_number(f64(per_turn - left)))},
+						},
+						compact_number(f64(left)),
+					),
 				},
 			)
 		}
@@ -760,7 +825,6 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			mobilise := Card_Menu {
 				title = "Mobilise",
 			}
-			acting := piece.owner == game.player
 			titles := slot_map_iterator(&game.offices)
 			for office, office_id in slot_map_iterate(&titles) {
 				kind := &game.office_kinds[office.kind]
@@ -788,7 +852,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				action := Card_Menu_Action {
 					label   = name_to_string(&kind.name),
 					detail  = detail,
-					enabled = acting && office.can_mobilise,
+					enabled = office.can_mobilise,
 					order   = Title_Order{office = office_id, action = .Mobilise},
 				}
 				if append(&card.breakdowns, breakdown) > 0 do action.breakdown = len(card.breakdowns) - 1
@@ -810,47 +874,45 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					value = fmt.tprintf("%.0f", town.population),
 					fill = 0.5 + 0.5 * staff_net / max(town.population, town.staff_needed, 1e-6),
 					fill_origin = 0.5,
-					breakdown = card_note(
-						card,
-						fmt.tprintf("%.1f people, %.0f needed by buildings", town.population, town.staff_needed),
+					breakdown = tally_add(
+						&card.breakdowns,
+						{
+							{"People", fmt.tprintf("%.1f", town.population)},
+							{"Staff needed", fmt.tprintf("%+.1f", -town.staff_needed)},
+						},
+						fmt.tprintf("%+.1f", staff_net),
 					),
 				},
 			)
 
 			// Balances, from the middle: supply less demand, over the larger of the two
 			Balance :: struct {
-				label, note:    string,
+				label:          string,
 				supply, demand: f32,
+				terms:          []Card_Term,
 			}
 			balances := [?]Balance {
 				{
 					"Food",
-					fmt.tprintf(
-						"%.1f produced, %.1f eaten; %.1f to the store, %.1f from it",
-						town.food,
-						town.food_eaten,
-						town.food_sent,
-						town.food_taken,
-					),
 					town.food,
 					town.food_eaten,
+					{{"Produced", fmt.tprintf("%.1f", town.food)}, {"Eaten", fmt.tprintf("%+.1f", -town.food_eaten)}},
 				},
 				{
 					"Income",
-					fmt.tprintf(
-						"%.1f to the treasury, %.1f upkeep, of which %.1f salaries",
-						town.income,
-						town.upkeep,
-						town.salaries_global,
-					),
 					town.income,
 					town.upkeep,
+					{
+						{"To the treasury", fmt.tprintf("%.1f", town.income)},
+						{"Upkeep", fmt.tprintf("%+.1f", town.salaries_global - town.upkeep)},
+						{"Salaries", fmt.tprintf("%+.1f", -town.salaries_global)},
+					},
 				},
 				{
 					"Public order",
-					fmt.tprintf("%.1f order, %.1f unrest", town.public_order, town.unrest),
 					town.public_order,
 					town.unrest,
+					{{"Order", fmt.tprintf("%.1f", town.public_order)}, {"Unrest", fmt.tprintf("%+.1f", -town.unrest)}},
 				},
 			}
 			for balance in balances {
@@ -862,7 +924,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 						value = fmt.tprintf("%+.1f", net),
 						fill = 0.5 + 0.5 * net / max(balance.supply, balance.demand, 1e-6),
 						fill_origin = 0.5,
-						breakdown = card_note(card, balance.note),
+						breakdown = tally_add(&card.breakdowns, balance.terms, fmt.tprintf("%+.1f", net)),
 					},
 				)
 			}
@@ -872,13 +934,13 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				Card_Field {
 					label = "Wealth",
 					value = fmt.tprintf("%.1f", town.wealth),
-					breakdown = card_note(
-						card,
-						fmt.tprintf(
-							"%.1f a turn kept locally: %.1f in salaries, the rest shared by its titles",
-							town.wealth,
-							town.salaries_local,
-						),
+					breakdown = tally_add(
+						&card.breakdowns,
+						{
+							{"Kept locally", fmt.tprintf("%.1f", town.wealth)},
+							{"Salaries", fmt.tprintf("%+.1f", -town.salaries_local)},
+						},
+						fmt.tprintf("%.1f", town.wealth_shared),
 					),
 				},
 			)
@@ -921,9 +983,9 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 						value = compact_number(f64(army.men)),
 						fill = army.men_max > 0 ? f32(army.men) / f32(army.men_max) : 0,
 						graded = true,
-						breakdown = card_note(
-							card,
-							fmt.tprintf("%s of %s", compact_number(f64(army.men)), compact_number(f64(army.men_max))),
+						breakdown = tally_add(
+							&card.breakdowns,
+							{{"Men", compact_number(f64(army.men))}, {"Full strength", compact_number(f64(army.men_max))}},
 						),
 					},
 				)
@@ -1000,7 +1062,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				if piece == nil do continue
 				if .Has_Army not_in piece.flags do continue
 				army := piece.army
-				temperament := game_commander_temperament(game, piece)
+				temperament := army.temperament
 				power := fmt.tprintf("%.1f", side.power.total)
 				men := Card_Field {
 					label = "Men",
@@ -1031,5 +1093,5 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 		}
 	}
 
-	append(&card.actions, Card_Action{"Next", Game_Ask.Next, game.movement.marches[.Leader].piece == {}})
+	append(&card.actions, Card_Action{"Next", Game_Order(Next_Order{}), game.movement.marches[.Leader].piece == {}})
 }

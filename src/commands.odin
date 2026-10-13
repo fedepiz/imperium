@@ -143,7 +143,7 @@ commands_next :: proc(command: ^Command) -> bool {
 command_apply :: proc(
 	game: ^Game,
 	command: Command,
-	input: ^Game_Input,
+	input: ^Game_Order,
 	camera: ^Camera,
 ) -> (
 	steps: int,
@@ -156,24 +156,24 @@ command_apply :: proc(
 	case .Step:
 		steps = command.count
 	case .Order_Target:
-		input.order = Move_Order {
+		input^ = Move_Order {
 			piece  = command.piece,
 			target = command.target,
 		}
 	case .Order_Move:
-		input.order = Move_Order {
+		input^ = Move_Order {
 			piece       = command.piece,
 			destination = command.to,
 			snap        = CLICK_MOVE_SNAP,
 		}
 	case .Next:
-		input.answer = .Next
+		input^ = Next_Order{}
 	case .End_Turn:
-		input.end_turn = true
+		input^ = End_Turn_Order{}
 	case .Appoint:
 		// The vacancy being filled, to its top candidate. One a step: the next is ready after it
 		if len(game.appointment.candidates) > 0 {
-			input.order = Appoint_Order{game.appointment.office, game.appointment.candidates[0].character}
+			input^ = Appoint_Order{game.appointment.office, game.appointment.candidates[0].character}
 		}
 	case .Camera_Focus_On_Piece:
 		if piece := slot_map_get(&game.pieces, command.piece); piece != nil {

@@ -6,6 +6,7 @@ import _ "core:image/png"
 import "core:math/linalg"
 import "core:os"
 import "core:reflect"
+import "core:slice"
 import "core:strings"
 
 import tbl "tabula"
@@ -99,8 +100,10 @@ Game :: struct {
 	turn:               int,
 	player:             Faction_Id,
 	ending:             bool,
-	// Each step, once battle and movement are done. Endable: nothing under way, and no vacancy
+	// Each step, once battle and movement are done. Can_move: no battle, not ending. Endable: nothing under way, and no
+	// vacancy
 	under_way:          bit_set[Under_Way],
+	can_move:           bool,
 	endable:            bool,
 	contacts:           [dynamic; CONTACTS_MAX]Contact,
 	interaction:        Interaction,
@@ -184,6 +187,8 @@ Army :: struct {
 	title:             Office_Id,
 	// A local army reinforces only there. 0: global
 	home:              Region_Id,
+	// Each step: its general's
+	temperament:       Temperament,
 }
 
 Town :: struct {
@@ -195,9 +200,8 @@ Town :: struct {
 	// The main building last. 0: empty
 	buildings:            [TOWN_SLOT_COUNT]Building_Kind_Id,
 	projects:             [TOWN_SLOT_COUNT]Project,
-	// Each step. Locked: its title's army is in the field, so no demolishing or upgrading
+	// Each step
 	titles:               [TOWN_SLOT_COUNT]Office_Id,
-	locked:               [TOWN_SLOT_COUNT]bool,
 	building_orders:      [TOWN_SLOT_COUNT]Building_Orders,
 	// Each step, per turn. Staffing: 0..1, scaling every output
 	staff_needed:         f32,
@@ -298,6 +302,8 @@ Office_Dismissal :: enum u8 {
 	For_Life,
 	Not_Dismissable,
 	In_Term,
+	// Not its faction's turn, or something under way
+	Not_Now,
 }
 
 Project :: struct {
@@ -338,8 +344,9 @@ Culture :: struct {
 
 // Each step. None: every office is held
 Appointment :: struct {
-	office:     Office_Id,
-	candidates: [dynamic; CANDIDATES_MAX]Candidate,
+	office:      Office_Id,
+	candidates:  [dynamic; CANDIDATES_MAX]Candidate,
+	can_appoint: bool,
 }
 
 // Passed over: the candidates above him, ranked higher
@@ -388,8 +395,9 @@ Building_Kind :: struct {
 }
 
 Piece_Turn :: struct {
-	attacked:       bool,
-	movement_spent: f32,
+	attacked:      bool,
+	// From its movement per turn at each turn change
+	movement_left: f32,
 }
 
 Supply_Source :: enum u8 {
@@ -486,6 +494,8 @@ Region :: struct {
 	capital:   Piece_Id,
 	// 1 poor .. 4 rich
 	fertility: f32,
+	// Each step: its capital's owner. 0: none
+	owner:     Faction_Id,
 }
 
 // Out: game, geography
@@ -500,9 +510,7 @@ game_load :: proc(
 
 	// Load regions from tabula file
 	{
-		path := fmt.tprintf("assets/scenarios/%s/regions.txt", scenario_name)
-		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
-		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+		root, _ := scenario_file(scenario_name, "regions.txt")
 
 		assert(len(root.children) < REGIONS_MAX - 1)
 		for idx in 0 ..< len(root.children) {
@@ -577,9 +585,7 @@ game_load :: proc(
 
 		for desc in descs {
 			// Load in the data from the way description file
-			path := fmt.tprintf("assets/scenarios/%s/%s.txt", scenario_name, desc.kind_name)
-			source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
-			root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+			root, _ := scenario_file(scenario_name, fmt.tprintf("%s.txt", desc.kind_name))
 
 			polylines_clear(lines_in)
 
@@ -756,26 +762,12 @@ game_load :: proc(
 
 	// Army types; 0 is none
 	{
-		path := fmt.tprintf("assets/scenarios/%s/army_types.txt", scenario_name)
-		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
-		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+		root, path := scenario_file(scenario_name, "army_types.txt")
 
 		append(&game.army_types, Army_Type{})
 		for row in root.children {
 			assert(row.key == "army_type")
-			// Every key a field, every field given
-			for key in row.children {
-				fmt.assertf(
-					reflect.struct_field_by_name(Army_Type, key.key).type != nil,
-					"%s: no army type key %q",
-					path,
-					key.key,
-				)
-			}
-			for field in reflect.struct_field_names(Army_Type) {
-				_, given := tbl.find(row, field)
-				fmt.assertf(given, "%s: army type %q lacks %q", path, tbl.get_text(row, "id"), field)
-			}
+			row_check(row, Army_Type, path, required = true)
 
 			army_type := Army_Type {
 				id          = name_from_string(tbl.get_text(row, "id")),
@@ -800,22 +792,12 @@ game_load :: proc(
 
 	// Office kinds; 0 is none
 	{
-		path := fmt.tprintf("assets/scenarios/%s/offices.txt", scenario_name)
-		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
-		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+		root, path := scenario_file(scenario_name, "offices.txt")
 
 		append(&game.office_kinds, Office_Kind{})
 		for row in root.children {
 			assert(row.key == "office")
-			// Every key a field
-			for key in row.children {
-				fmt.assertf(
-					reflect.struct_field_by_name(Office_Kind, key.key).type != nil,
-					"%s: no office key %q",
-					path,
-					key.key,
-				)
-			}
+			row_check(row, Office_Kind, path)
 			office := Office_Kind {
 				id        = name_from_string(tbl.get_text(row, "id")),
 				name      = name_from_string(tbl.get_text(row, "name")),
@@ -840,9 +822,7 @@ game_load :: proc(
 
 	// Building kinds; 0 is none
 	{
-		path := fmt.tprintf("assets/scenarios/%s/buildings.txt", scenario_name)
-		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
-		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+		root, path := scenario_file(scenario_name, "buildings.txt")
 
 		append(&game.building_kinds, Building_Kind{})
 		// Upgrades by id, resolved once every kind is in
@@ -850,15 +830,7 @@ game_load :: proc(
 		append(&upgrades, "")
 		for row in root.children {
 			assert(row.key == "building")
-			// Every key a field
-			for key in row.children {
-				fmt.assertf(
-					reflect.struct_field_by_name(Building_Kind, key.key).type != nil,
-					"%s: no building key %q",
-					path,
-					key.key,
-				)
-			}
+			row_check(row, Building_Kind, path)
 
 			kind := Building_Kind {
 				id             = name_from_string(tbl.get_text(row, "id")),
@@ -919,9 +891,7 @@ game_load :: proc(
 
 	// Cultures; 0 is none
 	{
-		path := fmt.tprintf("assets/scenarios/%s/cultures.txt", scenario_name)
-		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
-		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+		root, path := scenario_file(scenario_name, "cultures.txt")
 
 		append(&game.cultures, Culture{})
 		for row in root.children {
@@ -972,9 +942,7 @@ game_load :: proc(
 	army_titles := make([dynamic]Army_Title, context.temp_allocator)
 
 	{
-		path := fmt.tprintf("assets/scenarios/%s/pieces.txt", scenario_name)
-		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
-		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+		root, path := scenario_file(scenario_name, "pieces.txt")
 
 		Kind :: struct {
 			name:  string,
@@ -998,6 +966,7 @@ game_load :: proc(
 					piece.domain = enum_from_text(Pathfind_Domain, moves)
 				}
 				piece.movement_per_turn = tbl.get_num(row, "per_turn")
+				piece.this_turn.movement_left = piece.movement_per_turn
 				piece.contact_radius = tbl.get_num(row, "contact")
 				contact_on := tbl.get_children(row, "contact_on")
 				for domain in contact_on {
@@ -1156,23 +1125,12 @@ game_load :: proc(
 
 	// Characters
 	{
-		path := fmt.tprintf("assets/scenarios/%s/characters.txt", scenario_name)
-		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
-		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+		root, path := scenario_file(scenario_name, "characters.txt")
 
 		counts: [FACTIONS_MAX]int
 		for row in root.children {
 			assert(row.key == "character")
-			// Every key a field, every field given but the derived ones
-			for key in row.children {
-				known := reflect.struct_field_by_name(Character, key.key).type != nil || key.key == "of" || key.key == "men"
-				fmt.assertf(known, "%s: no character key %q", path, key.key)
-			}
-			for field in reflect.struct_field_names(Character) {
-				if field == "office" || field == "influence_target" do continue
-				_, given := tbl.find(row, field)
-				fmt.assertf(given, "%s: character %q lacks %q", path, tbl.get_text(row, "name"), field)
-			}
+			row_check(row, Character, path, {"of", "men"}, true, {"office", "influence_target"})
 
 			faction_name := tbl.get_text(row, "faction")
 			faction: Faction_Id
@@ -1259,6 +1217,33 @@ game_load :: proc(
 	// Settle the derived records
 	game_step(game, {}, {}, start_events)
 	return
+}
+
+// Parsed, with its path for errors
+@(private = "file")
+scenario_file :: proc(scenario_name, file: string) -> (root: tbl.Row, path: string) {
+	path = fmt.tprintf("assets/scenarios/%s/%s", scenario_name, file)
+	source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
+	root, _, _ = tbl.parse(transmute(string)source, context.temp_allocator)
+	return
+}
+
+// Every key one of T's fields or an extra, as a mistyped key would read as 0. Required: every field given but the
+// skipped
+@(private = "file")
+row_check :: proc(row: tbl.Row, $T: typeid, path: string, extra: []string = {}, required := false, skipped: []string = {}) {
+	for key in row.children {
+		known := reflect.struct_field_by_name(T, key.key).type != nil || slice.contains(extra, key.key)
+		fmt.assertf(known, "%s: no %v key %q", path, typeid_of(T), key.key)
+	}
+	if !required do return
+	row_name := tbl.get_text(row, "id")
+	if row_name == "" do row_name = tbl.get_text(row, "name")
+	for field in reflect.struct_field_names(T) {
+		if slice.contains(skipped, field) do continue
+		_, given := tbl.find(row, field)
+		fmt.assertf(given, "%s: %q lacks %q", path, row_name, field)
+	}
 }
 
 @(private = "file")

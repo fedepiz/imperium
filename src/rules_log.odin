@@ -322,7 +322,7 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 			json_null(w)
 		}
 		json_field_float(w, "movement_per_turn", piece.movement_per_turn)
-		json_field_float(w, "movement_left", game_movement_left(piece^))
+		json_field_float(w, "movement_left", piece.this_turn.movement_left)
 		json_field_bool(w, "attacked", piece.this_turn.attacked)
 		json_field_float(w, "contact_radius", piece.contact_radius)
 		field_set(w, "contact_domains", piece.contact_domains)

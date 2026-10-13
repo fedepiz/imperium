@@ -118,7 +118,7 @@ run_headless :: proc(options: Options) {
 	free_all(context.temp_allocator)
 	if options.rules_log != "" do rules_log_begin(&GLOBAL.game)
 
-	input: Game_Input
+	input: Game_Order
 	command: Command
 	for commands_next(&command) {
 		steps := command_apply(&GLOBAL.game, command, &input, &GLOBAL.camera)
@@ -224,10 +224,8 @@ run_windowed :: proc(options: Options) {
 	map_drag := false
 
 	focus: Piece_Id
-	cards_view := Cards_View {
-		court = {hovered = -1},
-	}
-	game_input: Game_Input
+	cards_view: Cards_View
+	game_input: Game_Order
 	unstepped: f32
 	commands_active := options.commands != ""
 	commands_waiting := 0
@@ -388,7 +386,7 @@ run_windowed :: proc(options: Options) {
 				focus_index,
 			)
 			if found do order.target = GLOBAL.pawn_pieces[index]
-			game_input.order = order
+			game_input = order
 		}
 
 		unstepped = min(unstepped + dt, STEPS_PER_FRAME_MAX * STEP_SECONDS)
