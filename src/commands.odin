@@ -13,6 +13,7 @@ Command_Type :: enum {
 	Order_Move,
 	Next,
 	End_Turn,
+	Appoint,
 	Camera_Focus_On_Piece,
 	Camera_Focus_On_Location,
 }
@@ -33,6 +34,7 @@ TYPE_NAMES := [Command_Type]string {
 	.Order_Move   = "order_move",
 	.Next         = "next",
 	.End_Turn                 = "end_turn",
+	.Appoint                  = "appoint",
 	.Camera_Focus_On_Piece    = "camera_focus_on_piece",
 	.Camera_Focus_On_Location = "camera_focus_on_location",
 }
@@ -64,6 +66,7 @@ REQUIRED := [Command_Type]bit_set[Argument] {
 	.Order_Move   = {.Piece, .X, .Y},
 	.Next         = {},
 	.End_Turn                 = {},
+	.Appoint                  = {},
 	.Camera_Focus_On_Piece    = {.Piece},
 	.Camera_Focus_On_Location = {.X, .Y},
 }
@@ -153,12 +156,12 @@ command_apply :: proc(
 	case .Step:
 		steps = command.count
 	case .Order_Target:
-		input.order = Game_Order {
+		input.order = Move_Order {
 			piece  = command.piece,
 			target = command.target,
 		}
 	case .Order_Move:
-		input.order = Game_Order {
+		input.order = Move_Order {
 			piece       = command.piece,
 			destination = command.to,
 			snap        = CLICK_MOVE_SNAP,
@@ -167,6 +170,11 @@ command_apply :: proc(
 		input.answer = .Next
 	case .End_Turn:
 		input.end_turn = true
+	case .Appoint:
+		// The vacancy being filled, to its top candidate. One a step: the next is ready after it
+		if len(game.appointment.candidates) > 0 {
+			input.order = Appoint_Order{game.appointment.office, game.appointment.candidates[0].character}
+		}
 	case .Camera_Focus_On_Piece:
 		if piece := slot_map_get(&game.pieces, command.piece); piece != nil {
 			camera.target.center = piece.pos

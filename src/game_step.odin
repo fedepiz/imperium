@@ -1,9 +1,11 @@
 package main
 
+import "core:fmt"
 import "core:hash"
 import "core:math"
 import "core:math/linalg"
 import "core:mem"
+import "core:slice"
 
 STEPS_PER_SECOND :: 60
 STEP_SECONDS :: 1.0 / f32(STEPS_PER_SECOND)
@@ -36,17 +38,38 @@ MEN_PER_SUPPLY :: 250
 // Share of full strength regained per turn on home land, at 100% supply
 @(private = "file")
 REINFORCEMENT_SHARE :: 0.05
-// Share of full strength a recruited army starts with: it reinforces to the rest
+// Share of its men an army above its full strength loses per turn
 @(private = "file")
-RECRUIT_STRENGTH :: 0.2
+DESERTION_SHARE :: 0.05
+// Share of its full strength a demobilised title gathers per turn
+@(private = "file")
+TITLE_GATHER_SHARE :: 0.05
+@(private = "file")
+MOBILISE_READINESS :: 20
+// Share of the gap to its target closed per turn, never less than INFLUENCE_STEP_MIN
+@(private = "file")
+INFLUENCE_RATE :: 0.1
+@(private = "file")
+INFLUENCE_STEP_MIN :: 1
+// Per coin of wealth
+@(private = "file")
+INFLUENCE_PER_WEALTH :: 2
+// Gained when an appointment raises his rank
+@(private = "file")
+PROMOTED_LOYALTY :: 10
+// In turns: at least, and below
+@(private = "file")
+NEW_CHARACTER_AGE :: [2]int{20, 40}
+@(private = "file")
+NEW_CHARACTER_INFLUENCE :: 5
+@(private = "file")
+NEW_CHARACTER_LOYALTY :: 50
 // Control lost per unit of travel cost from its source
 @(private = "file")
 CONTROL_DECAY :: 1
-// Food a unit of population eats per turn
 @(private = "file")
 FOOD_PER_POPULATION :: 1
-// Share of the gap to the population its food supports closed per turn, and the most it grows per turn, as a share of
-// itself: slow, and never explosive. Decline is not capped
+// Share of the gap to what food supports closed per turn, and the most it grows per turn, as a share of itself
 @(private = "file")
 POPULATION_RATE :: 0.05
 @(private = "file")
@@ -87,37 +110,59 @@ Game_Answer :: enum u8 {
 	Next,
 }
 
-Game_Order :: struct {
+Move_Order :: struct {
 	piece:       Piece_Id,
 	target:      Piece_Id,
 	destination: [2]f32,
 	snap:        int,
 }
 
+// At most one a step
+Game_Order :: union {
+	Move_Order,
+	Town_Order,
+	Title_Order,
+	Appoint_Order,
+	Dismiss_Order,
+}
+
 Game_Input :: struct {
-	end_turn:   bool,
-	answer:     Game_Answer,
-	order:      Maybe(Game_Order),
-	town_order: Maybe(Town_Order),
+	end_turn: bool,
+	answer:   Game_Answer,
+	order:    Game_Order,
 }
 
 Town_Action :: enum u8 {
 	Build,
 	Demolish,
 	Cancel,
-	Recruit,
 }
 
-// For a town's slot: build in it, on an empty slot or the next level of its building; demolish it; or cancel its
-// project. Or for the town: recruit an army
 Town_Order :: struct {
-	town:      Piece_Id,
-	slot:      int,
-	action:    Town_Action,
+	town:   Piece_Id,
+	slot:   int,
+	action: Town_Action,
 	// Build: the building
-	kind:      Building_Kind_Id,
-	// Recruit: the army's type
-	army_type: Army_Type_Id,
+	kind:   Building_Kind_Id,
+}
+
+Title_Action :: enum u8 {
+	Mobilise,
+	Demobilise,
+}
+
+Appoint_Order :: struct {
+	office:    Office_Id,
+	character: Character_Id,
+}
+
+Dismiss_Order :: struct {
+	office: Office_Id,
+}
+
+Title_Order :: struct {
+	office: Office_Id,
+	action: Title_Action,
 }
 
 Contact :: struct {
@@ -295,7 +340,7 @@ Event_Turn :: struct {
 	player: Faction_Id,
 }
 
-// A slot's project began: a building, or 0 for a demolition
+// Kind 0: a demolition
 Event_Project_Started :: struct {
 	town: Piece_Id,
 	slot: int,
@@ -307,17 +352,33 @@ Event_Project_Cancelled :: struct {
 	slot: int,
 }
 
-// A slot's project finished: the slot now holds kind, 0 when demolished
+// Kind 0: demolished
 Event_Project_Finished :: struct {
 	town: Piece_Id,
 	slot: int,
 	kind: Building_Kind_Id,
 }
 
-Event_Recruited :: struct {
-	army:      Piece_Id,
-	town:      Piece_Id,
-	army_type: Army_Type_Id,
+Event_Mobilised :: struct {
+	army:   Piece_Id,
+	office: Office_Id,
+}
+
+Event_Demobilised :: struct {
+	army:   Piece_Id,
+	office: Office_Id,
+}
+
+Event_Dismissed :: struct {
+	office:    Office_Id,
+	character: Character_Id,
+}
+
+// Vacated: the office he left, if any
+Event_Appointed :: struct {
+	office:    Office_Id,
+	character: Character_Id,
+	vacated:   Office_Id,
 }
 
 Game_Event :: union {
@@ -340,7 +401,10 @@ Game_Event :: union {
 	Event_Project_Started,
 	Event_Project_Cancelled,
 	Event_Project_Finished,
-	Event_Recruited,
+	Event_Mobilised,
+	Event_Demobilised,
+	Event_Appointed,
+	Event_Dismissed,
 }
 
 @(private = "file")
@@ -359,20 +423,6 @@ Walk_Order :: struct {
 	follows:     bool,
 }
 
-game_ordering :: proc(game: ^Game) -> Faction_Id {
-	settled := game.interaction.actor == {} && !game.ending
-	return settled ? game.player : 0
-}
-
-game_turn_endable :: proc(game: ^Game) -> bool {
-	return(
-		!game.ending &&
-		game.movement.marches[.Leader].piece == {} &&
-		len(game.contacts) == 0 &&
-		game.interaction.actor == {} \
-	)
-}
-
 game_commander_temperament :: proc(game: ^Game, piece: ^Piece_Data) -> Temperament {
 	return piece.general != 0 ? game.characters[piece.general].temperament : NO_GENERAL_TEMPERAMENT
 }
@@ -381,9 +431,8 @@ game_movement_left :: proc(piece: Piece_Data) -> f32 {
 	return max(0, piece.movement_per_turn - piece.this_turn.movement_spent)
 }
 
-// Built at load and each turn change. The playing faction's supply network: the strongest of its sources reaching each
-// cell, kept out of enemy zones. Its control network, and every town's control: the sum of what its owner's sources
-// reach with over its own regions only, capped at 100
+// Built at load and each turn change. Supply: the strongest source, kept out of enemy zones. Control: summed, within
+// the owner's regions, up to 100
 game_networks_build :: proc(game: ^Game) {
 	spread := make([]f32, MAP_CELLS, context.temp_allocator)
 	blocked := make([]bool, MAP_CELLS, context.temp_allocator)
@@ -410,8 +459,7 @@ game_networks_build :: proc(game: ^Game) {
 		for value, i in spread do game.supply_network[i] = u8(clamp(value, 0, 100) + 0.5)
 	}
 
-	// Control, per faction: its towns' control buildings together are a source each. It never leaves the faction's
-	// regions, those whose capital it holds
+	// Control, per faction: never outside its regions
 	for faction in 1 ..< len(game.factions) {
 		owner := Faction_Id(faction)
 		held: [REGIONS_MAX]bool
@@ -627,10 +675,12 @@ game_step :: proc(
 	input: Game_Input,
 	events: ^[dynamic; GAME_EVENTS_MAX]Game_Event,
 ) {
+	// The start step: taken by loading
+	starting := game.step == 0
 	game.step += 1
 	movement := &game.movement
 
-	end_turn_accepted := input.end_turn && game_turn_endable(game)
+	end_turn_accepted := input.end_turn && game.endable
 	if input.end_turn do append(events, Event_End_Turn{end_turn_accepted})
 	if end_turn_accepted {
 		game.ending = true
@@ -837,18 +887,17 @@ game_step :: proc(
 		game.interaction.result = result
 	}
 
-	if player_order, ordered := input.order.?; ordered {
+	if player_order, ordered := input.order.(Move_Order); ordered {
 		piece := slot_map_get(&game.pieces, player_order.piece)
-		ordering := game_ordering(game)
 		refusal: Maybe(Order_Refusal)
 		switch {
 		case orders[.Leader].piece != {}:
 			refusal = .Superseded
 		case piece == nil:
 			refusal = .No_Such_Piece
-		case ordering == 0:
+		case game.under_way & {.Battle, .Ending} != {}:
 			refusal = .Not_Now
-		case piece.owner != ordering:
+		case piece.owner != game.player:
 			refusal = .Not_Yours
 		}
 		if reason, refused := refusal.?; refused {
@@ -955,31 +1004,27 @@ game_step :: proc(
 	}
 	if walk_done do movement.marches = {}
 
-	turn_ending :=
-		game.ending &&
-		len(game.contacts) == 0 &&
-		game.interaction.actor == {} &&
-		movement.marches[.Leader].piece == {}
+	// Step: Under way
+	game.under_way = {}
+	if movement.marches[.Leader].piece != {} do game.under_way += {.March}
+	if len(game.contacts) > 0 do game.under_way += {.Contact}
+	if game.interaction.actor != {} do game.under_way += {.Battle}
+	if game.ending do game.under_way += {.Ending}
+	turn_ending := game.under_way == {.Ending}
 
-	// A town order: in the playing faction's towns, starts a slot's project or cancels it, one project a slot; or
-	// recruits an army
-	if order, ordered := input.town_order.?; ordered {
+	// Step: Town order
+	if order, ordered := input.order.(Town_Order); ordered && order.slot >= 0 && order.slot < TOWN_SLOT_COUNT {
 		piece := slot_map_get(&game.pieces, order.town)
-		if piece != nil && .Has_Town in piece.flags && piece.owner == game.player {
+		if piece != nil && .Has_Town in piece.flags {
 			town := &piece.town
-			treasury := &game.factions[piece.owner].treasury
-			slot := clamp(order.slot, 0, TOWN_SLOTS_MAX - 1)
-			on_slot := order.slot >= 0 && order.slot < town.slots
+			slot := order.slot
+			allows := town.building_orders[slot]
 			project := &town.projects[slot]
-			here := town.buildings[slot]
 			switch order.action {
 			case .Build:
-				kind := &game.building_kinds[order.kind]
-				// A chain's first level on an empty slot, or the next level of the building there
-				fits := here == 0 ? kind.upgraded_from == 0 : game.building_kinds[here].upgrade == order.kind
-				allowed := order.kind != 0 && game.culture_buildings[piece.culture][order.kind]
-				if on_slot && !project.active && fits && allowed && treasury^ >= kind.build_coin {
-					treasury^ -= kind.build_coin
+				if int(order.kind) in allows.buildable {
+					kind := &game.building_kinds[order.kind]
+					game.factions[piece.owner].treasury -= kind.build_coin
 					project^ = {
 						active     = true,
 						kind       = order.kind,
@@ -988,7 +1033,7 @@ game_step :: proc(
 					append(events, Event_Project_Started{order.town, slot, order.kind})
 				}
 			case .Demolish:
-				if on_slot && !project.active && here != 0 {
+				if allows.demolish {
 					project^ = {
 						active     = true,
 						turns_left = 1,
@@ -996,147 +1041,483 @@ game_step :: proc(
 					append(events, Event_Project_Started{order.town, slot, 0})
 				}
 			case .Cancel:
-				if on_slot && project.active {
+				if allows.cancel {
 					project^ = {}
 					append(events, Event_Project_Cancelled{order.town, slot})
-				}
-			case .Recruit:
-				army_type := &game.army_types[order.army_type]
-				allowed := order.army_type != 0 && game.culture_army_types[piece.culture][order.army_type]
-				if allowed && army_type.recruit_requires <= town.features && treasury^ >= army_type.recruit_coin {
-					treasury^ -= army_type.recruit_coin
-					recruit := game.army_template
-					recruit.name = army_type.name
-					recruit.owner = piece.owner
-					recruit.culture = piece.culture
-					recruit.flags += {.Has_Army}
-					// Next to the town: the first land cell around it
-					recruit.pos = piece.pos
-					land := pathfind_grid(.Land)
-					reach := piece.body_radius + recruit.body_radius + 1
-					for i in 0 ..< 8 {
-						angle := f32(i) * math.TAU / 8
-						at := piece.pos + reach * [2]f32{math.cos(angle), math.sin(angle)}
-						if grid_contains(cell_of(at), MAP_SIZE) && land[grid_index(cell_of(at), MAP_SIZE)] > 0 {
-							recruit.pos = at
-							break
-						}
-					}
-					recruit.army = {
-						men         = int(f32(army_type.men) * RECRUIT_STRENGTH),
-						men_max     = army_type.men,
-						proficiency = army_type.proficiency,
-						readiness   = 100,
-						foraging    = army_type.foraging,
-						mobility    = army_type.mobility,
-						supply      = 100,
-						type        = order.army_type,
-					}
-					if army_type.scope == .Local {
-						recruit.army.home = Region_Id(game.terrain.regions[grid_index(cell_of(piece.pos), MAP_SIZE)])
-					}
-					id := slot_map_insert(&game.pieces, recruit)
-					append(events, Event_Recruited{id, order.town, order.army_type})
 				}
 			}
 		}
 	}
 
-	// Towns: what their buildings make and their people eat. Income, scaled by control, upkeep, and food sent to and
-	// taken from the central store add up to their owners'
-	for &faction in game.factions {
-		faction.income = 0
-		faction.upkeep = 0
-		faction.food_sent = 0
-		faction.food_taken = 0
+	// Step: Title order
+	if order, ordered := input.order.(Title_Order); ordered && game.under_way == {} {
+		office := slot_map_get(&game.offices, order.office)
+		if office != nil && office.faction == game.player && game.office_kinds[office.kind].army_type != 0 {
+			army_type_id := game.office_kinds[office.kind].army_type
+			army_type := &game.army_types[army_type_id]
+			switch order.action {
+			case .Mobilise:
+				at := slot_map_get(&game.pieces, office.muster_at)
+				if office.can_mobilise && at != nil {
+					mobilised := game.army_template
+					mobilised.name = name_from_string(fmt.tprintf("%s of %s", name_to_string(&army_type.name), name_to_string(&at.name)))
+					mobilised.owner = office.faction
+					mobilised.culture = at.culture
+					mobilised.flags += {.Has_Army}
+					// Next to the town: the first land cell around it
+					mobilised.pos = at.pos
+					land := pathfind_grid(.Land)
+					reach := at.body_radius + mobilised.body_radius + 1
+					for i in 0 ..< 8 {
+						angle := f32(i) * math.TAU / 8
+						cell := at.pos + reach * [2]f32{math.cos(angle), math.sin(angle)}
+						if grid_contains(cell_of(cell), MAP_SIZE) && land[grid_index(cell_of(cell), MAP_SIZE)] > 0 {
+							mobilised.pos = cell
+							break
+						}
+					}
+					mobilised.army = {
+						men         = office.men,
+						men_max     = office.men_max,
+						proficiency = army_type.proficiency,
+						readiness   = MOBILISE_READINESS,
+						foraging    = army_type.foraging,
+						mobility    = army_type.mobility,
+						supply      = 100,
+						type        = army_type_id,
+						title       = order.office,
+					}
+					if army_type.scope == .Local {
+						mobilised.army.home = Region_Id(game.terrain.regions[grid_index(cell_of(at.pos), MAP_SIZE)])
+					}
+					army := slot_map_insert(&game.pieces, mobilised)
+					office.men = 0
+					append(events, Event_Mobilised{army, order.office})
+				}
+			case .Demobilise:
+				army := slot_map_get(&game.pieces, office.army)
+				if army != nil {
+					office.men = army.army.men
+					if settlement := slot_map_get(&game.pieces, army.inside); settlement != nil {
+						settlement.contains = {}
+						append(events, Event_Exit{office.army, army.inside})
+					}
+					append(events, Event_Demobilised{office.army, order.office})
+					slot_map_remove(&game.pieces, office.army)
+					append(events, Event_Removed{office.army})
+				}
+			}
+		}
 	}
-	towns := slot_map_iterator(&game.pieces)
-	for piece, piece_id in slot_map_iterate(&towns) {
-		if .Has_Town not_in piece.flags do continue
-		town := &piece.town
-		// Staff: short of people, every building runs at the share it has
-		town.staff_needed = 0
-		for kind_id in town.buildings do town.staff_needed += game.building_kinds[kind_id].population
-		town.staffing = town.staff_needed > 0 ? min(1, town.population / town.staff_needed) : 1
 
-		// Each building runs at its staffing. Labour made and labour used, by buildings and projects, are kept apart: using
-		// more than is made is a deficit, and holds nothing back
-		town.food = 0
-		town.labour = 0
-		town.labour_used = 0
-		town.income = 0
-		town.upkeep = 0
-		town.public_order = 0
-		town.unrest = 0
-		town.food_sent = 0
-		town.food_taken = 0
-		town.features = {}
-		for kind_id, slot in town.buildings {
-			kind := &game.building_kinds[kind_id]
-			town.slot_food[slot] = (kind.food + kind.food_fertility * town.fertility) * town.staffing
-			town.food += town.slot_food[slot]
-			if kind.labour > 0 do town.labour += kind.labour * town.staffing
-			else do town.labour_used -= kind.labour * town.staffing
-			town.income += kind.income * town.staffing * town.control / 100
-			// Paid however staffed
-			town.upkeep += kind.upkeep
-			if kind.public_order > 0 do town.public_order += kind.public_order
-			else do town.unrest -= kind.public_order
-			if kind.food_store > 0 do town.food_sent += kind.food_store * town.staffing
-			else do town.food_taken -= kind.food_store * town.staffing
-			town.features += kind.features
+	// Step: Appointment order
+	if order, ordered := input.order.(Appoint_Order); ordered && game.under_way == {} && order.office == game.appointment.office {
+		chosen := -1
+		for candidate, c in game.appointment.candidates do if candidate.character == order.character do chosen = c
+		office := slot_map_get(&game.offices, order.office)
+		if chosen >= 0 && office != nil && office.holder == 0 {
+			character := &game.characters[order.character]
+			kind := &game.office_kinds[office.kind]
+			for candidate in game.appointment.candidates[:chosen] {
+				passed := &game.characters[candidate.character]
+				if passed.rank > character.rank do passed.loyalty = max(0, passed.loyalty - PASSED_OVER_LOYALTY)
+			}
+			vacated := character.office
+			if old := slot_map_get(&game.offices, vacated); old != nil do old.holder = 0
+			office.holder = order.character
+			office.term_left = kind.term
+			if character.rank < kind.rank {
+				character.rank = kind.rank
+				character.loyalty = min(100, character.loyalty + PROMOTED_LOYALTY)
+			}
+			append(events, Event_Appointed{order.office, order.character, vacated})
 		}
-		for project in town.projects {
-			if project.active do town.labour_used += game.building_kinds[project.kind].build_labour
-		}
-		game.factions[piece.owner].income += town.income
-		game.factions[piece.owner].upkeep += town.upkeep
-		town.population_supported = town.food / FOOD_PER_POPULATION
-		// At its owner's turn end, its population moves toward what its food supports, and its projects advance a turn. A
-		// finished one replaces the slot's building
-		if turn_ending && piece.owner == game.player {
-			change := (town.population_supported - town.population) * POPULATION_RATE
-			town.population += min(change, town.population * POPULATION_GROWTH_MAX)
+	}
 
-			for &project, slot in town.projects {
+	// Step: Dismissal order
+	if order, ordered := input.order.(Dismiss_Order); ordered && game.under_way == {} {
+		office := slot_map_get(&game.offices, order.office)
+		if office != nil && office.faction == game.player && office.holder != 0 && office.dismissal == .Allowed {
+			if .Feudal in game.office_kinds[office.kind].flags {
+				fiefs := slot_map_iterator(&game.offices)
+				for fief in slot_map_iterate(&fiefs) {
+					if fief.faction != office.faction || fief.holder == 0 || .Feudal not_in game.office_kinds[fief.kind].flags do continue
+					holder := &game.characters[fief.holder]
+					holder.loyalty = max(0, holder.loyalty - FEUDAL_DISMISSAL_LOYALTY)
+				}
+			}
+			append(events, Event_Dismissed{order.office, office.holder})
+			office.holder = 0
+		}
+	}
+
+	// Step: Projects (turn end)
+	if turn_ending {
+		building := slot_map_iterator(&game.pieces)
+		for piece, piece_id in slot_map_iterate(&building) {
+			if .Has_Town not_in piece.flags || piece.owner != game.player do continue
+			for &project, slot in piece.town.projects {
 				if !project.active do continue
 				project.turns_left -= 1
 				if project.turns_left > 0 do continue
-				town.buildings[slot] = project.kind
+				piece.town.buildings[slot] = project.kind
 				append(events, Event_Project_Finished{piece_id, slot, project.kind})
 				project = {}
 			}
 		}
-		town.food_eaten = town.population * FOOD_PER_POPULATION
-
-		// To the central store: the surplus and what the buildings send, as far as control reaches
-		town.food_sent = (town.food_sent + max(0, town.food - town.food_eaten)) * town.control / 100
-		game.factions[piece.owner].food_sent += town.food_sent
-		game.factions[piece.owner].food_taken += town.food_taken
 	}
 
-	// Recruited armies' upkeep: coin from their owner, and a local army's labour from its home region's town, while its
-	// owner holds it
-	upkept := slot_map_iterator(&game.pieces)
-	for piece in slot_map_iterate(&upkept) {
-		if .Has_Army not_in piece.flags || piece.army.type == 0 do continue
-		army_type := &game.army_types[piece.army.type]
-		game.factions[piece.owner].upkeep += army_type.upkeep_coin
-		if piece.army.home == 0 do continue
-		home := slot_map_get(&game.pieces, game.regions[piece.army.home].capital)
-		if home != nil && .Has_Town in home.flags && home.owner == piece.owner {
-			home.town.labour_used += army_type.upkeep_labour
+	// Step: Settlements
+	{
+		settlements := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&settlements) {
+			if .Has_Town not_in piece.flags do continue
+			main := &game.building_kinds[piece.town.buildings[MAIN_SLOT]]
+			piece.icon = main.icon
+			piece.town.slots = main.slots
+			piece.supply_production = main.supply
+			piece.hindrance = main.hindrance
+			piece.contact_radius = main.contact
+			piece.body_radius = main.body
 		}
 	}
 
-	// At its turn end, the faction's net income goes into its treasury, and its net food into its store. Either can go
-	// below zero for now
+	// Step: Networks (start)
+	if starting do game_networks_build(game)
+
+	// Step: Titles
+	// Destroyed when its building is gone or replaced, or its town lost with its army out of the field
+	{
+		cleared := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&cleared) do piece.town.titles = {}
+		offices := slot_map_iterator(&game.offices)
+		for office, office_id in slot_map_iterate(&offices) {
+			town := slot_map_get(&game.pieces, office.town)
+			if town == nil do continue
+			office.elapsed = town.owner != office.faction
+			built := town.town.buildings[office.slot] == office.building
+			in_field := slot_map_get(&game.pieces, office.army) != nil
+			if !built || (office.elapsed && !in_field) {
+				slot_map_remove(&game.offices, office_id)
+				continue
+			}
+			if !office.elapsed do town.town.titles[office.slot] = office_id
+		}
+		missing := slot_map_iterator(&game.pieces)
+		for piece, piece_id in slot_map_iterate(&missing) {
+			if .Has_Town not_in piece.flags do continue
+			for kind_id, slot in piece.town.buildings {
+				kind := game.building_kinds[kind_id].title
+				if kind == 0 || piece.town.titles[slot] != {} do continue
+				title := fmt.tprintf("%s of %s", name_to_string(&game.office_kinds[kind].name), name_to_string(&piece.name))
+				piece.town.titles[slot] = slot_map_insert(
+					&game.offices,
+					Office {
+						kind = kind,
+						faction = piece.owner,
+						title = name_from_string(title),
+						town = piece_id,
+						slot = slot,
+						building = kind_id,
+					},
+				)
+			}
+		}
+	}
+
+	// Step: Holders
+	{
+		for &faction in game.factions do faction.characters = 0
+		for &character, c in game.characters {
+			character.office = {}
+			if c > 0 do game.factions[character.faction].characters += 1
+		}
+		held := slot_map_iterator(&game.offices)
+		for office, office_id in slot_map_iterate(&held) {
+			office.army = {}
+			if office.holder != 0 do game.characters[office.holder].office = office_id
+		}
+		armies := slot_map_iterator(&game.pieces)
+		for piece, piece_id in slot_map_iterate(&armies) {
+			if .Has_Army not_in piece.flags || piece.army.title == {} do continue
+			title := slot_map_get(&game.offices, piece.army.title)
+			piece.general = 0
+			if title == nil do continue
+			title.army = piece_id
+			piece.general = title.holder
+		}
+		allowing := slot_map_iterator(&game.offices)
+		for office in slot_map_iterate(&allowing) {
+			kind := &game.office_kinds[office.kind]
+			switch {
+			case .Eternal in kind.flags:
+				office.dismissal = .For_Life
+			case .Dismissable not_in kind.flags:
+				office.dismissal = .Not_Dismissable
+			case office.term_left > 0:
+				office.dismissal = .In_Term
+			case:
+				office.dismissal = .Allowed
+			}
+			office.muster_at = office.town != {} ? office.town : game.factions[office.faction].capital
+			// Not while its building is being demolished or replaced
+			town := slot_map_get(&game.pieces, office.town)
+			kept := town == nil || !town.town.projects[office.slot].active
+			at := slot_map_get(&game.pieces, office.muster_at)
+			held := at != nil && at.owner == office.faction && !office.elapsed
+			office.can_mobilise = kind.army_type != 0 && office.holder != 0 && office.army == {} && office.men > 0 && held && kept
+		}
+		locking := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&locking) {
+			if .Has_Town not_in piece.flags do continue
+			for title_id, slot in piece.town.titles {
+				title := slot_map_get(&game.offices, title_id)
+				piece.town.locked[slot] = title != nil && title.army != {}
+			}
+		}
+	}
+
+	// Step: Building orders
+	{
+		ordering := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&ordering) {
+			if .Has_Town not_in piece.flags do continue
+			town := &piece.town
+			treasury := game.factions[piece.owner].treasury
+			acting := piece.owner == game.player && game.under_way == {}
+			for &allows, slot in town.building_orders {
+				allows = {}
+				if slot >= town.slots && slot != MAIN_SLOT do continue
+				here := town.buildings[slot]
+				if here == 0 {
+					for &kind, k in game.building_kinds {
+						if k == 0 || kind.upgraded_from != 0 || !game.culture_buildings[piece.culture][k] do continue
+						if (.Main in kind.flags) == (slot == MAIN_SLOT) do allows.offered += {k}
+					}
+				} else if next := game.building_kinds[here].upgrade; next != 0 && game.culture_buildings[piece.culture][next] {
+					allows.offered += {int(next)}
+				}
+				project := town.projects[slot].active
+				if !acting do continue
+				allows.cancel = project
+				if project || town.locked[slot] do continue
+				for k in allows.offered do if treasury >= game.building_kinds[k].build_coin do allows.buildable += {k}
+				allows.demolish = here != 0 && slot != MAIN_SLOT
+			}
+		}
+	}
+
+	// Step: Towns
+	{
+		for &faction in game.factions {
+			faction.income = 0
+			faction.upkeep = 0
+			faction.food_sent = 0
+			faction.food_taken = 0
+		}
+		towns := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&towns) {
+			if .Has_Town not_in piece.flags do continue
+			town := &piece.town
+			// Short of people, every building runs at the share it has
+			town.staff_needed = 0
+			for kind_id in town.buildings do town.staff_needed += game.building_kinds[kind_id].population
+			town.staffing = town.staff_needed > 0 ? min(1, town.population / town.staff_needed) : 1
+
+			town.food = 0
+			town.income = 0
+			town.wealth = 0
+			town.upkeep = 0
+			town.public_order = 0
+			town.unrest = 0
+			town.food_sent = 0
+			town.food_taken = 0
+			town.salaries_global = 0
+			town.salaries_local = 0
+			town.shares = 0
+			for kind_id, slot in town.buildings {
+				kind := &game.building_kinds[kind_id]
+				town.slot_food[slot] = (kind.food + kind.food_fertility * town.fertility) * town.staffing
+				town.food += town.slot_food[slot]
+				town.income += kind.income * town.staffing * town.control / 100
+				town.wealth += kind.income * town.staffing * (1 - town.control / 100)
+				// Paid however staffed
+				town.upkeep += kind.upkeep
+				if kind.public_order > 0 do town.public_order += kind.public_order
+				else do town.unrest -= kind.public_order
+				if kind.food_store > 0 do town.food_sent += kind.food_store * town.staffing
+				else do town.food_taken -= kind.food_store * town.staffing
+				// Weights count whether held or not
+				title := slot_map_get(&game.offices, town.titles[slot])
+				if title == nil do continue
+				if title.holder != 0 {
+					town.salaries_global += kind.title_salary_global
+					town.salaries_local += kind.title_salary_local
+				}
+				town.shares += kind.title_salary_local_share
+			}
+			town.upkeep += town.salaries_global
+			town.wealth_shared = max(0, town.wealth - town.salaries_local)
+			game.factions[piece.owner].income += town.income
+			game.factions[piece.owner].upkeep += town.upkeep
+			town.population_supported = town.food / FOOD_PER_POPULATION
+			town.food_eaten = town.population * FOOD_PER_POPULATION
+
+			// The surplus and what buildings send, as far as control reaches
+			town.food_sent = (town.food_sent + max(0, town.food - town.food_eaten)) * town.control / 100
+			game.factions[piece.owner].food_sent += town.food_sent
+			game.factions[piece.owner].food_taken += town.food_taken
+		}
+	}
+
+	// Step: Pay
+	{
+		paying := slot_map_iterator(&game.offices)
+		for office, office_id in slot_map_iterate(&paying) {
+			kind := &game.office_kinds[office.kind]
+			office.wealth = 0
+			town := slot_map_get(&game.pieces, office.town)
+			if office.holder != 0 && town == nil {
+				office.wealth = kind.salary
+				game.factions[office.faction].upkeep += kind.salary
+			}
+			if office.holder != 0 && town != nil && town.town.titles[office.slot] == office_id {
+				building := &game.building_kinds[office.building]
+				office.wealth = building.title_salary_global + building.title_salary_local
+				if town.town.shares > 0 {
+					office.wealth += town.town.wealth_shared * building.title_salary_local_share / town.town.shares
+				}
+			}
+			if kind.army_type == 0 do continue
+			office.men_max = int(office.wealth * game.army_types[kind.army_type].men_per_wealth)
+			if army := slot_map_get(&game.pieces, office.army); army != nil do army.army.men_max = office.men_max
+		}
+		for &character in game.characters {
+			character.influence_target = 0
+			if office := slot_map_get(&game.offices, character.office); office != nil {
+				character.influence_target = game.office_kinds[office.kind].influence + office.wealth * INFLUENCE_PER_WEALTH
+			}
+		}
+	}
+
+	// Step: Stability
+	{
+		weighted, total: [FACTIONS_MAX]f32
+		for &character, c in game.characters {
+			if c == 0 do continue
+			weighted[character.faction] += character.influence * character.loyalty
+			total[character.faction] += character.influence
+		}
+		for &faction, f in game.factions do faction.stability = total[f] > 0 ? weighted[f] / total[f] : 0
+	}
+
+	// Step: Ranks
+	{
+		Ranked :: struct {
+			office: Office_Id,
+			rank:   int,
+			own:    bool,
+		}
+		ranked := make([dynamic]Ranked, 0, OFFICES_MAX, context.temp_allocator)
+		ranking := slot_map_iterator(&game.offices)
+		for office, office_id in slot_map_iterate(&ranking) {
+			append(&ranked, Ranked{office_id, game.office_kinds[office.kind].rank, office.town == {}})
+		}
+		slice.sort_by(ranked[:], proc(a, b: Ranked) -> bool {
+			if a.rank != b.rank do return a.rank > b.rank
+			if a.own != b.own do return a.own
+			return a.office.index < b.office.index
+		})
+		clear(&game.offices_ranked)
+		for each in ranked do append(&game.offices_ranked, each.office)
+	}
+
+	// Step: Appointment
+	{
+		game.appointment = {}
+		for office_id in game.offices_ranked {
+			office := slot_map_get(&game.offices, office_id)
+			if office.faction != game.player || office.holder != 0 || office.elapsed do continue
+			game.appointment.office = office_id
+			break
+		}
+		if vacancy := slot_map_get(&game.offices, game.appointment.office); vacancy != nil {
+			rank := game.office_kinds[vacancy.kind].rank
+			Applicant :: struct {
+				character: Character_Id,
+				rank:      int,
+				influence: f32,
+			}
+			applicants := make([dynamic]Applicant, 0, FACTION_CHARACTERS_MAX, context.temp_allocator)
+			for &character, c in game.characters {
+				if c == 0 || character.faction != game.player do continue
+				if office := slot_map_get(&game.offices, character.office); office != nil {
+					kind := &game.office_kinds[office.kind]
+					if kind.rank >= rank || office.term_left > 0 || .Eternal in kind.flags do continue
+				}
+				append(&applicants, Applicant{Character_Id(c), character.rank, character.influence})
+			}
+			slice.sort_by(applicants[:], proc(a, b: Applicant) -> bool {
+				return a.rank != b.rank ? a.rank > b.rank : a.influence > b.influence
+			})
+			for applicant in applicants {
+				passed_over := 0
+				for above in game.appointment.candidates do if game.characters[above.character].rank > applicant.rank do passed_over += 1
+				if append(&game.appointment.candidates, Candidate{applicant.character, passed_over}) == 0 do break
+			}
+		}
+	}
+
+	game.endable = game.under_way == {} && game.appointment.office == {}
+
+	// Step: Population (turn end)
+	if turn_ending {
+		growing := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&growing) {
+			if .Has_Town not_in piece.flags || piece.owner != game.player do continue
+			town := &piece.town
+			change := (town.population_supported - town.population) * POPULATION_RATE
+			town.population += min(change, town.population * POPULATION_GROWTH_MAX)
+		}
+	}
+
+	// Step: Treasury (turn end)
+	// Either can go below zero for now
 	if turn_ending {
 		player := &game.factions[game.player]
 		player.treasury += player.income - player.upkeep
 		player.food_store += player.food_sent - player.food_taken
 	}
 
+	// Step: Title men (turn end)
+	if turn_ending {
+		gathering := slot_map_iterator(&game.offices)
+		for office in slot_map_iterate(&gathering) {
+			if office.faction != game.player || game.office_kinds[office.kind].army_type == 0 || office.army != {} do continue
+			gain := int(math.round(TITLE_GATHER_SHARE * f32(office.men_max)))
+			office.men = men_toward_full(office.men, office.men_max, gain)
+		}
+	}
+
+	// Step: Terms (turn end)
+	if turn_ending {
+		serving := slot_map_iterator(&game.offices)
+		for office in slot_map_iterate(&serving) {
+			if office.faction == game.player && office.holder != 0 do office.term_left = max(0, office.term_left - 1)
+		}
+	}
+
+	// Step: Influence (turn end)
+	if turn_ending {
+		for &character, c in game.characters {
+			if c == 0 || character.faction != game.player do continue
+			gap := character.influence_target - character.influence
+			step := max(abs(gap) * INFLUENCE_RATE, INFLUENCE_STEP_MIN)
+			character.influence += clamp(gap, -step, step)
+		}
+	}
+
+	// Step: Armies
 	pieces := slot_map_iterator(&game.pieces)
 	for piece, id in slot_map_iterate(&pieces) {
 		if .Has_Army not_in piece.flags do continue
@@ -1232,17 +1613,18 @@ game_step :: proc(
 				}
 			}
 
-			// Reinforcement on home land: any region its faction holds, or a local army's own home region only
+			// Reinforcement on home land: any held region, or a local army's own only
+			gain := 0
 			cell := cell_of(piece.pos)
 			if grid_contains(cell, MAP_SIZE) {
 				region := game.terrain.regions[grid_index(cell, MAP_SIZE)]
 				capital := slot_map_get(&game.pieces, game.regions[region].capital)
 				at_home := army.home == 0 || Region_Id(region) == army.home
 				if capital != nil && capital.owner == piece.owner && at_home {
-					men := math.round(REINFORCEMENT_SHARE * f32(army.men_max) * army.supply / 100)
-					army.men = min(army.men_max, army.men + int(men))
+					gain = int(math.round(REINFORCEMENT_SHARE * f32(army.men_max) * army.supply / 100))
 				}
 			}
+			army.men = men_toward_full(army.men, army.men_max, gain)
 		}
 
 		army.readiness = clamp(readiness, 0, 100)
@@ -1253,6 +1635,45 @@ game_step :: proc(
 		if changes != {} do append(events, Event_Army{id, changes, army^})
 	}
 
+	// Step: New characters
+	if !starting && !game.ending && game.appointment.office != {} && len(game.appointment.candidates) < CANDIDATES_MIN {
+		faction := &game.factions[game.player]
+		culture := &game.cultures[faction.culture]
+		for _ in len(game.appointment.candidates) ..< CANDIDATES_MIN {
+			id := Character_Id(len(game.characters))
+			if faction.characters >= FACTION_CHARACTERS_MAX || int(id) >= CHARACTERS_MAX || len(culture.names) == 0 do break
+			seed_source := [3]u64{u64(game.turn), u64(game.player), u64(id)}
+			rng := hash.fnv64a(mem.slice_to_bytes(seed_source[:]))
+			// Name: the first unused from a rolled place; all used, the rolled one numbered
+			first := int(random_unit(&rng) * f32(len(culture.names)))
+			name := name_from_string(fmt.tprintf("%s %d", name_to_string(&culture.names[first]), id))
+			for k in 0 ..< len(culture.names) {
+				candidate := culture.names[(first + k) % len(culture.names)]
+				used := false
+				for other in game.characters do if other.name == candidate do used = true
+				if !used {
+					name = candidate
+					break
+				}
+			}
+			append(
+				&game.characters,
+				Character {
+					name = name,
+					faction = game.player,
+					age = NEW_CHARACTER_AGE[0] + int(random_unit(&rng) * f32(NEW_CHARACTER_AGE[1] - NEW_CHARACTER_AGE[0])),
+					influence = NEW_CHARACTER_INFLUENCE,
+					loyalty = NEW_CHARACTER_LOYALTY,
+					temperament = Temperament(int(random_unit(&rng) * f32(len(Temperament)))),
+					background = Background(int(random_unit(&rng) * f32(len(Background)))),
+					disposition = Disposition(int(random_unit(&rng) * f32(len(Disposition)))),
+				},
+			)
+			faction.characters += 1
+		}
+	}
+
+	// Step: Turn change
 	if turn_ending {
 		game.ending = false
 		next_player := int(game.player) + 1
@@ -1269,3 +1690,9 @@ game_step :: proc(
 	}
 }
 
+// Above full strength, DESERTION_SHARE of the men leave, at least one
+@(private = "file")
+men_toward_full :: proc(men, men_max, gain: int) -> int {
+	if men > men_max do return max(men_max, men - max(1, int(math.round(DESERTION_SHARE * f32(men)))))
+	return min(men_max, men + gain)
+}

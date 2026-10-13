@@ -94,6 +94,8 @@ UI: struct {
 	focus:             Key,
 	// Given focus by focus, from the next end
 	focus_next:        Key,
+	// Scrolled to by ui_scroll_to, at the next end
+	scroll_next:       Key,
 	// The focus as of the last end takes the keyboard, so the game gets no keys
 	keyboard_captured: bool,
 	// The keys and characters the last end gave to the box of events_key, the focused box then
@@ -300,6 +302,12 @@ ui_keyboard_captured :: proc() -> bool {
 // Gives focus to whatever carries the label's key in the current scope, from the next end.
 ui_focus :: proc(label: string) {
 	UI.focus_next = key_from_string(label)
+}
+
+// Brings whatever carries the label's key in the current scope to the start of the nearest box scrolling around it,
+// easing there from the next end. Nothing scrolls if no such box is built this frame.
+ui_scroll_to :: proc(label: string) {
+	UI.scroll_next = key_from_string(label)
 }
 
 // The key went down, or repeated, among the keys the last end gave to the focused box.
@@ -613,6 +621,24 @@ ui_end :: proc(input: UI_Input, dt: f32, quads: ^[dynamic; $N]Render_Quad) {
 	compute_box_order()
 
 	layout()
+
+	// Scrolled to: the nearest scrolling box around it aims its scroll at the box's place in its content
+	if UI.scroll_next != KEY_NIL {
+		target := &UI.boxes[hashtable_find(&UI.key_hash_table, UI.scroll_next)]
+		if target.key == UI.scroll_next {
+			for id := target.parent; id != 0; id = UI.boxes[id].parent {
+				pane := &UI.boxes[id]
+				if pane.flags & {.Scroll_X, .Scroll_Y} == {} {continue}
+				for axis in Axis {
+					if scroll_flag(axis) not_in pane.flags {continue}
+					offset := target.pos_computed[axis] - pane.pos_computed[axis] - pane.padding[axis]
+					pane.scroll_target[axis] = offset + math.floor(pane.scroll[axis])
+				}
+				break
+			}
+		}
+		UI.scroll_next = {}
+	}
 
 	update_interaction(input)
 

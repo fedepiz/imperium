@@ -2,14 +2,78 @@
 {"type": "step", "count": 300}
 {"type": "order_move", "piece": 4294967312, "x": 300, "y": 385}
 {"type": "step", "count": 480}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
 {"type": "end_turn"}
 {"type": "step", "count": 90}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
 {"type": "end_turn"}
 {"type": "step", "count": 90}
 {"type": "order_move", "piece": 4294967312, "x": 262, "y": 380}
 {"type": "step", "count": 480}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
 {"type": "end_turn"}
 {"type": "step", "count": 90}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
+{"type": "appoint"}
+{"type": "step", "count": 1}
 {"type": "end_turn"}
 {"type": "step", "count": 90}
 {"type": "camera_focus_on_piece", "piece": 4294967312, "zoom": 16}

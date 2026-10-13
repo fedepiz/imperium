@@ -29,7 +29,10 @@ Rules_Tag :: enum u32 {
 	Project_Started,
 	Project_Cancelled,
 	Project_Finished,
-	Recruited,
+	Mobilised,
+	Demobilised,
+	Appointed,
+	Dismissed,
 }
 
 @(private = "file")
@@ -170,8 +173,14 @@ rules_log_events :: proc(game: ^Game, events: []Game_Event) {
 			push_event(.Project_Cancelled, game.step, e)
 		case Event_Project_Finished:
 			push_event(.Project_Finished, game.step, e)
-		case Event_Recruited:
-			push_event(.Recruited, game.step, e)
+		case Event_Mobilised:
+			push_event(.Mobilised, game.step, e)
+		case Event_Demobilised:
+			push_event(.Demobilised, game.step, e)
+		case Event_Appointed:
+			push_event(.Appointed, game.step, e)
+		case Event_Dismissed:
+			push_event(.Dismissed, game.step, e)
 		}
 	}
 }
@@ -199,6 +208,16 @@ field_piece :: proc(w: ^Json_Writer, key: string, id: Piece_Id) {
 		json_null(w)
 	} else {
 		json_int(w, piece_id_value(id))
+	}
+}
+
+@(private = "file")
+field_office :: proc(w: ^Json_Writer, key: string, id: Office_Id) {
+	json_key(w, key)
+	if id == {} {
+		json_null(w)
+	} else {
+		json_int(w, i64(id.generation) << 32 | i64(id.index))
 	}
 }
 
@@ -254,6 +273,7 @@ write_army :: proc(w: ^Json_Writer, army: ^Army) {
 	field_enum(w, "supply_source", army.supply_source)
 	json_field_float(w, "supply_efficiency", army.supply_efficiency)
 	json_field_int(w, "type", i64(army.type))
+	field_office(w, "title", army.title)
 	json_field_int(w, "home", i64(army.home))
 	json_object_end(w)
 }
@@ -506,12 +526,30 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		json_field_int(w, "slot", i64(record.event.slot))
 		json_field_int(w, "kind", i64(record.event.kind))
 
-	case .Recruited:
-		record := (^Event_Record(Event_Recruited))(raw_data(payload))
-		write_header(w, record.step, "recruited")
+	case .Mobilised:
+		record := (^Event_Record(Event_Mobilised))(raw_data(payload))
+		write_header(w, record.step, "mobilised")
 		field_piece(w, "army", record.event.army)
-		field_piece(w, "town", record.event.town)
-		json_field_int(w, "army_type", i64(record.event.army_type))
+		field_office(w, "office", record.event.office)
+
+	case .Demobilised:
+		record := (^Event_Record(Event_Demobilised))(raw_data(payload))
+		write_header(w, record.step, "demobilised")
+		field_piece(w, "army", record.event.army)
+		field_office(w, "office", record.event.office)
+
+	case .Appointed:
+		record := (^Event_Record(Event_Appointed))(raw_data(payload))
+		write_header(w, record.step, "appointed")
+		field_office(w, "office", record.event.office)
+		json_field_int(w, "character", i64(record.event.character))
+		field_office(w, "vacated", record.event.vacated)
+
+	case .Dismissed:
+		record := (^Event_Record(Event_Dismissed))(raw_data(payload))
+		write_header(w, record.step, "dismissed")
+		field_office(w, "office", record.event.office)
+		json_field_int(w, "character", i64(record.event.character))
 	}
 	json_object_end(w)
 	json_line_end(w)

@@ -1,6 +1,6 @@
 # The cultures. Each has an id, a snake_case word the other files name it by, a name, and a look: the art its pawns
-# and medallions are drawn with, written as declared (Roman, Germanic). Then the buildings it can build and the army
-# types it can recruit, by id.
+# and medallions are drawn with, written as declared (Roman, Germanic). Then the buildings it can build, by id, and the
+# names its new characters are given: an unused one at random, or once all are used, one with a number.
 
 culture = {
 	id = roman
@@ -8,9 +8,30 @@ culture = {
 	look = Roman
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, stables, barracks, palace, praetorium, curia, granary, horrea, annona_office,
+		sheep_farm, stables, barracks, palace, praetorium, curia, granary, horrea, annona_office, municipium, civitas, metropolis,
 	]
-	army_types = [comitatenses, palatini, limitanei, vexillationes]
+	names = [
+		"Symmachus", "Albinus", "Avienus", "Volusianus", "Anthemius", "Olybrius", "Glycerius", "Orestes", "Placidus",
+		"Basilius", "Faustinus", "Gennadius", "Aurelianus", "Ausonius", "Boethius", "Cassiodorus", "Ennodius", "Sidonius",
+		"Ecdicius", "Agricola", "Magnus", "Felicianus", "Probinus", "Hilarius", "Ambrosius", "Asterius", "Anatolius",
+		"Aemilianus", "Aetherius", "Africanus", "Agapitus", "Alypius", "Amantius", "Ammonius", "Anastasius", "Andronicus",
+		"Apollinaris", "Arator", "Ardabur", "Arvandus", "Asclepiodotus", "Asturius", "Attalus", "Audax", "Aurelius",
+		"Auxentius", "Avitianus", "Bassus", "Benignus", "Caelestinus", "Calepius", "Candidianus", "Castinus", "Celer",
+		"Celsus", "Cethegus", "Claudianus", "Constantius", "Consentius", "Crispinus", "Cyprianus", "Dardanus", "Datianus",
+		"Decentius", "Dexter", "Dioscorus", "Domninus", "Donatus", "Dulcitius", "Dynamius", "Elpidius", "Eucherius",
+		"Eudoxius", "Eugenius", "Eulalius", "Eusebius", "Eutropius", "Evodius", "Exsuperius", "Fabius", "Festus",
+		"Firminus", "Florentius", "Fortunatus", "Fronto", "Fulgentius", "Gaudentius", "Gerontius", "Gratianus",
+		"Helladius", "Heraclianus", "Hermogenes", "Hesychius", "Honoratus", "Hypatius", "Ingenuus", "Innocentius",
+		"Iohannes", "Iordanes", "Iulianus", "Iustus", "Lampadius", "Laurentius", "Leontius", "Liberius", "Licinius",
+		"Longinus", "Lucillus", "Lupicinus", "Macedonius", "Mamertinus", "Marcianus", "Marinus", "Maximianus", "Maximinus",
+		"Messala", "Messianus", "Nectarius", "Nicomachus", "Nonius", "Numerius", "Olympius", "Optatus", "Palladius",
+		"Pancratius", "Pelagius", "Peregrinus", "Philagrius", "Pinianus", "Pompeius", "Pontius", "Possessor",
+		"Praetextatus", "Priscus", "Proculus", "Profuturus", "Prosper", "Protadius", "Quintianus", "Remistus", "Rufinus",
+		"Rusticus", "Sabinianus", "Sallustius", "Salvianus", "Sapaudus", "Saturninus", "Sebastianus", "Secundinus",
+		"Senator", "Sergius", "Silvanus", "Simplicius", "Sporacius", "Syagrius", "Tatianus", "Taurus", "Tertullus",
+		"Thalassius", "Theodorus", "Ursus", "Valerianus", "Valerius", "Venustus", "Vettius", "Victor", "Victorinus",
+		"Vigilius", "Vincentius", "Vitalianus", "Viventius", "Zosimus",
+	]
 }
 
 culture = {
@@ -19,7 +40,25 @@ culture = {
 	look = Germanic
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, stables, barracks,
+		sheep_farm, muster_hall, heim, burg, konigshof,
 	]
-	army_types = [warband, retinue]
+	names = [
+		"Chnodomar", "Serapio", "Mederich", "Agenarich", "Rando", "Vithicab", "Priarius", "Butilin", "Leuthari", "Urius",
+		"Ursicin", "Gamo", "Crocus", "Agilo", "Scudilo", "Bitherid", "Hortari", "Mallobaud", "Richomer", "Teutomer",
+		"Charietto", "Nevitta", "Dagalaif", "Bauto", "Arbogast", "Marcomer", "Sunno", "Genobaud", "Ascaric", "Merogais",
+		"Alaric", "Ataulf", "Sigeric", "Wallia", "Theoderic", "Thorismund", "Euric", "Gundobad", "Gundioc", "Godegisel",
+		"Godomar", "Chilperic", "Clodio", "Childeric", "Sigibert", "Ragnachar", "Chararic", "Fridigern", "Gundahar",
+		"Winithar", "Marobod", "Adalric", "Ansgisel", "Berthari", "Chlodomar", "Eburwin", "Hariwulf", "Hildebald",
+		"Hrodgar", "Leudomar", "Raginfrid", "Ricwin", "Sigiwald", "Theudebert", "Theudomar", "Wolfhari", "Agilmund",
+		"Ansbald", "Chariobaud", "Eburhard", "Fridomar", "Gundomar", "Hildemar", "Hrodomar", "Leudegisel", "Ragnomar",
+		"Sigismar", "Theudegisel", "Wiliarit", "Adalgis", "Amalric", "Ansovald", "Audomar", "Authari", "Baudegisel",
+		"Berowulf", "Bertefrid", "Chlodobert", "Chramnus", "Dagobert", "Ebroin", "Ermanaric", "Frotmund", "Gairovald",
+		"Gislahar", "Godila", "Grimoald", "Gundovald", "Gunthar", "Hariulf", "Heribald", "Hildegar", "Hrodulf", "Hunald",
+		"Ingomar", "Leudast", "Liutfrid", "Magnachar", "Marcovech", "Nantwin", "Odomar", "Ostrogotha", "Radagais",
+		"Ragnovald", "Ricbert", "Rothari", "Sigimund", "Sigivuld", "Sunnegisel", "Theudowin", "Thrasaric", "Ulfila",
+		"Uraias", "Waldo", "Walaric", "Wandil", "Widigis", "Wilimer", "Winigis", "Witigis", "Wulfila", "Adalhard",
+		"Agiulf", "Alboin", "Ansegisel", "Arnulf", "Audovald", "Bertoald", "Chlothar", "Cunimund", "Eberwin",
+		"Faroald", "Fredegar", "Gisulf", "Haimo", "Hildeprand", "Hrodbert", "Ibba", "Liutprand", "Malaric",
+		"Mummolin", "Odo", "Ratchis", "Rodwald", "Sisebut", "Thrasamund", "Wacho",
+	]
 }

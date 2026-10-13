@@ -224,10 +224,9 @@ run_windowed :: proc(options: Options) {
 	map_drag := false
 
 	focus: Piece_Id
-	map_mode: Map_Mode
-	card_tab: Card_Tab
-	// The focus card's slot whose menu is open. -1: none
-	card_menu := -1
+	cards_view := Cards_View {
+		court = {hovered = -1},
+	}
 	game_input: Game_Input
 	unstepped: f32
 	commands_active := options.commands != ""
@@ -371,12 +370,12 @@ run_windowed :: proc(options: Options) {
 		if select_click {
 			index, found := map_pawns_pick(&GLOBAL.pawns, view, window_size, input.cursor, -1)
 			focus = found ? GLOBAL.pawn_pieces[index] : {}
-			card_menu = -1
+			cards_view.menu = nil
 		}
 		if order_click && focus != {} {
 			focus_index := -1
 			for piece, index in GLOBAL.pawn_pieces do if piece == focus do focus_index = index
-			order := Game_Order {
+			order := Move_Order {
 				piece       = focus,
 				destination = cursor_cell,
 				snap        = CLICK_MOVE_SNAP,
@@ -413,7 +412,7 @@ run_windowed :: proc(options: Options) {
 		{
 			pointer: Maybe([2]f32)
 			if !ui_hovered_any() do pointer = cursor_cell
-			game_present_map(&GLOBAL.game, focus, pointer, map_mode, &GLOBAL.render_data.terrain)
+			game_present_map(&GLOBAL.game, focus, pointer, cards_view.map_mode, &GLOBAL.render_data.terrain)
 			GLOBAL.render_data.terrain.dt = dt
 		}
 
@@ -429,7 +428,7 @@ run_windowed :: proc(options: Options) {
 		)
 
 		cards := new(Cards, context.temp_allocator)
-		game_cards(&GLOBAL.game, focus, card_tab, cards)
+		game_cards(&GLOBAL.game, focus, cards_view.tab, cards)
 
 		// UI, over everything
 		ui_begin(window_size)
@@ -439,9 +438,7 @@ run_windowed :: proc(options: Options) {
 			FONT_CARD_TITLE,
 			map_style.paper,
 			map_style.ink,
-			&map_mode,
-			&card_tab,
-			&card_menu,
+			&cards_view,
 			&game_input,
 		)
 		tweak_ui(tweaks_toggled, FONT_TWEAK)

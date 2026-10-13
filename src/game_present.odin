@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import "core:slice"
 import "core:strings"
 
 CARD_LINES_MAX :: REPORT_LINES_MAX
@@ -10,7 +11,9 @@ CARD_BREAKDOWNS_MAX :: 128
 CARD_FIELDS_MAX :: 16
 CARD_ACTIONS_MAX :: 4
 CARD_TILES_MAX :: 16
-CARD_TILE_ACTIONS_MAX :: BUILDING_KINDS_MAX
+// Its slots', the main one included, and mobilising
+CARD_MENUS_MAX :: TOWN_SLOT_COUNT + 1
+CARD_MENU_ACTIONS_MAX :: BUILDING_KINDS_MAX
 
 Map_Mode :: enum u8 {
 	Political,
@@ -29,7 +32,6 @@ MAP_MODE_NAMES := [Map_Mode]string {
 	.Plain     = "Plain",
 }
 
-// What the focus card shows of a piece
 Card_Tab :: enum u8 {
 	Army,
 	Town,
@@ -44,7 +46,7 @@ CARD_TAB_NAMES := [Card_Tab]string {
 @(private = "file")
 REGION_UNHELD_COLOR :: [3]f32{0.6, 0.6, 0.6}
 
-// The top of the fertility scale: it fills the bar, and washes the map at its greenest
+// Fills the bar, and washes the map greenest
 @(private = "file")
 FERTILITY_MAX :: 5
 
@@ -63,7 +65,7 @@ MARCH_ARROWS :: bit_set[Mover]{.Leader, .Chaser}
 ICON_TITLES := [Map_Icon]string {
 	.Town       = "Town",
 	.City       = "City",
-	.Large_City = "Large City",
+	.Large_City = "Great City",
 	.Army       = "Army",
 	.Fleet      = "Fleet",
 }
@@ -74,6 +76,76 @@ COLUMN_TITLES := [2]string{"Attacker", "Defender"}
 Game_Ask :: enum u8 {
 	End_Turn,
 	Next,
+	Court,
+}
+
+COURT_ROWS_MAX :: FACTION_CHARACTERS_MAX
+COURT_OFFICES_MAX :: FACTION_OFFICES_MAX
+
+Court_Row :: struct {
+	name:        string,
+	rank:        int,
+	influence:   f32,
+	// 0..100
+	loyalty:     f32,
+	age:         int,
+	temperament: string,
+	background:  string,
+	disposition: string,
+	// Empty: none
+	office:      string,
+	office_id:   Office_Id,
+	office_influence: f32,
+	wealth_bonus: f32,
+	wealth:      f32,
+	// Empty army: none
+	army:        string,
+	men:         f32,
+	men_max:     f32,
+	base:        string,
+	dismiss:     Maybe(Dismiss_Order),
+	dismiss_note: string,
+	undismissable: string,
+	character:   Character_Id,
+}
+
+Court_Office :: struct {
+	title:     string,
+	rank:      int,
+	influence: f32,
+	// Its holder's row. -1: vacant
+	holder:    int,
+	// The vacancy being filled
+	filling:   bool,
+	// Its flags beyond the usual. Empty: none
+	traits:    string,
+	id:        Office_Id,
+}
+
+Court_Candidate :: struct {
+	row:    int,
+	passes: string,
+	order:  Appoint_Order,
+}
+
+// No office: none
+Court_Vacancy :: struct {
+	office:     Office_Id,
+	title:      string,
+	rank:       int,
+	army:       string,
+	candidates: [dynamic; CANDIDATES_MAX]Court_Candidate,
+}
+
+Court :: struct {
+	title:         string,
+	rows:          [dynamic; COURT_ROWS_MAX]Court_Row,
+	offices:       [dynamic; COURT_OFFICES_MAX]Court_Office,
+	// Filling the bars; the rank shown in full
+	influence_max: f32,
+	wealth_max:    f32,
+	rank_max:      int,
+	vacancy:       Court_Vacancy,
 }
 
 Card_Part :: struct {
@@ -85,12 +157,13 @@ Card_Field :: struct {
 	label:     string,
 	value:     string,
 	breakdown: Maybe(int),
-	// Share of the whole, 0..1: shown as a bar after the value, filled from fill_origin. An origin above 0 is a balance:
-	// below it a shortfall, above it a surplus
+	// 0..1: a bar after the value, filled from fill_origin. An origin above 0: a balance
 	fill:        Maybe(f32),
 	fill_origin: f32,
-	// The fill colored from bad to good by how full it is
+	// Coloured bad to good by its fill
 	graded:      bool,
+	// Nil: a plain value
+	click:       Card_Click,
 }
 
 Card_Term :: struct {
@@ -102,38 +175,47 @@ Card_Breakdown :: struct {
 	note:        string,
 	terms:       [dynamic; REPORT_TALLY_FACTORS_MAX]Card_Term,
 	total:       string,
-	// What it is about, after the rest
 	description: string,
 }
 
+Card_Click :: union {
+	Game_Ask,
+	Game_Order,
+	Card_Menu_Id,
+	Character_Id,
+}
+
+Card_Menu_Id :: distinct int
+
 Card_Action :: struct {
 	label:   string,
-	ask:     Game_Ask,
+	click:   Card_Click,
 	enabled: bool,
 }
 
-// A building slot; no name: empty
+// No name: empty
 Card_Tile :: struct {
 	name:      string,
 	breakdown: Maybe(int),
 	// Not a slot this settlement has
 	disabled:  bool,
-	// Its project under way, if any
 	project:   string,
-	// Offered when it is clicked
-	actions:   [dynamic; CARD_TILE_ACTIONS_MAX]Card_Tile_Action,
+	click:     Card_Click,
 }
 
-// Something to do with a slot: build, upgrade, demolish
-Card_Tile_Action :: struct {
+Card_Menu :: struct {
+	title:   string,
+	actions: [dynamic; CARD_MENU_ACTIONS_MAX]Card_Menu_Action,
+}
+
+Card_Menu_Action :: struct {
 	label:     string,
 	// Its cost, or what it does
 	detail:    string,
 	enabled:   bool,
-	// What the building it makes does, on hover
+	// Hovered, what the building it makes does
 	breakdown: Maybe(int),
-	// Sent when it is clicked
-	order:     Maybe(Town_Order),
+	order:     Game_Order,
 }
 
 Card :: struct {
@@ -144,12 +226,13 @@ Card :: struct {
 	fields:     [dynamic; CARD_FIELDS_MAX]Card_Field,
 	stats:      [dynamic; CARD_FIELDS_MAX]Card_Field,
 	tiles:      [dynamic; CARD_TILES_MAX]Card_Tile,
+	menus:      [dynamic; CARD_MENUS_MAX]Card_Menu,
+	// Under its fields, and at its bottom
+	buttons:    [dynamic; CARD_ACTIONS_MAX]Card_Action,
 	actions:    [dynamic; CARD_ACTIONS_MAX]Card_Action,
-	// A settlement's recruiting: a button opening its menu
-	recruit:    Maybe(Card_Tile),
-	// Tabs the piece has, and the one shown
 	tabs:       bit_set[Card_Tab],
 	tab:        Card_Tab,
+	map_modes:  bool,
 }
 
 Cards :: struct {
@@ -158,6 +241,7 @@ Cards :: struct {
 	interaction:       Card,
 	focus_shown:       bool,
 	interaction_shown: bool,
+	court:             Court,
 }
 
 game_present_map :: proc(
@@ -179,7 +263,7 @@ game_present_map :: proc(
 		movement.flooded == focus &&
 		movement.flooded != leader_march.piece
 
-	// Political fills the regions in their owners' colours; Control and Fertility outline them, over their washes
+	// Political fills the regions in their owners' colours; Control and Fertility outline them
 	#partial switch mode {
 	case .Political:
 		frame.region_display = .Filled_When_Far
@@ -204,7 +288,7 @@ game_present_map :: proc(
 		flood := &movement.flood
 		on_water := flood.domain != .Land
 		piece := slot_map_get(&game.pieces, focus)
-		controlled := piece != nil && game_ordering(game) != 0 && piece.owner == game_ordering(game)
+		controlled := piece != nil && game.under_way & {.Battle, .Ending} == {} && piece.owner == game.player
 
 		frame.highlights[REACH_SLOT] = {
 			kind        = controlled ? .Reach : .Foreign_Reach,
@@ -317,25 +401,98 @@ card_breakdown :: proc(card: ^Card, tally: ^Report_Tally, total: string) -> Mayb
 	return len(card.breakdowns) - 1
 }
 
-// What a building does, as a breakdown on the card: for a slot's building, and for one that could be built. Food is
-// given, as it depends on the town
+// A slot's tile, its menu added to the card
 @(private = "file")
-card_building_breakdown :: proc(card: ^Card, kind: ^Building_Kind, food: f32) -> Maybe(int) {
+card_slot_tile :: proc(game: ^Game, card: ^Card, town_id: Piece_Id, slot: int) -> (tile: Card_Tile) {
+	piece := slot_map_get(&game.pieces, town_id)
+	town := &piece.town
+	allows := town.building_orders[slot]
+	cost_of :: proc(kind: ^Building_Kind) -> string {
+		if kind.build_coin > 0 do return fmt.tprintf("%.0f turns, %.0f coin", kind.build_turns, kind.build_coin)
+		return fmt.tprintf("%.0f turns", kind.build_turns)
+	}
+
+	menu: Card_Menu
+	here := town.buildings[slot]
+	project := town.projects[slot]
+	if here != 0 {
+		kind := &game.building_kinds[here]
+		tile.name = name_to_string(&kind.name)
+		tile.breakdown = card_building_breakdown(game, card, kind, town.slot_food[slot])
+	}
+	if project.active {
+		if project.kind == 0 {
+			tile.project = "Demolishing"
+		} else {
+			target := &game.building_kinds[project.kind]
+			tile.project = fmt.tprintf("%s (%.0f)", name_to_string(&target.name), math.ceil(project.turns_left))
+		}
+		append(
+			&menu.actions,
+			Card_Menu_Action {
+				label = "Cancel",
+				detail = "No refund",
+				enabled = allows.cancel,
+				order = Town_Order{town = town_id, slot = slot, action = .Cancel},
+			},
+		)
+	} else {
+		for k in allows.offered {
+			kind := &game.building_kinds[k]
+			label := name_to_string(&kind.name)
+			if here != 0 do label = fmt.tprintf("Upgrade to %s", label)
+			append(
+				&menu.actions,
+				Card_Menu_Action {
+					label = label,
+					detail = cost_of(kind),
+					enabled = k in allows.buildable,
+					breakdown = card_building_breakdown(game, card, kind, kind.food + kind.food_fertility * town.fertility),
+					order = Town_Order{town = town_id, slot = slot, action = .Build, kind = Building_Kind_Id(k)},
+				},
+			)
+		}
+		if here != 0 && slot != MAIN_SLOT {
+			append(
+				&menu.actions,
+				Card_Menu_Action {
+					label = "Demolish",
+					detail = "Next turn",
+					enabled = allows.demolish,
+					order = Town_Order{town = town_id, slot = slot, action = .Demolish},
+				},
+			)
+		}
+	}
+	menu.title = tile.name != "" ? tile.name : "Empty slot"
+	if append(&card.menus, menu) > 0 do tile.click = Card_Menu_Id(len(card.menus) - 1)
+	return
+}
+
+// Food is given: it depends on the town
+@(private = "file")
+card_building_breakdown :: proc(game: ^Game, card: ^Card, kind: ^Building_Kind, food: f32) -> Maybe(int) {
 	breakdown := Card_Breakdown {
 		description = description_to_string(&kind.description),
 	}
 	append(&breakdown.terms, Card_Term{"Population", fmt.tprintf("%.0f", kind.population)})
 	if food != 0 do append(&breakdown.terms, Card_Term{"Food", fmt.tprintf("%+.0f", food)})
-	if kind.labour != 0 do append(&breakdown.terms, Card_Term{"Labour", fmt.tprintf("%+.0f", kind.labour)})
 	if kind.income != 0 do append(&breakdown.terms, Card_Term{"Income", fmt.tprintf("%+.1f", kind.income)})
 	if kind.upkeep != 0 do append(&breakdown.terms, Card_Term{"Upkeep", fmt.tprintf("%.0f", kind.upkeep)})
 	if kind.control != 0 do append(&breakdown.terms, Card_Term{"Control", fmt.tprintf("%.0f", kind.control)})
 	if kind.public_order != 0 do append(&breakdown.terms, Card_Term{"Public order", fmt.tprintf("%+.1f", kind.public_order)})
 	if kind.food_store != 0 do append(&breakdown.terms, Card_Term{"Food store", fmt.tprintf("%+.0f", kind.food_store)})
-	if kind.features != {} {
-		names := make([dynamic]string, context.temp_allocator)
-		for feature in kind.features do append(&names, fmt.tprint(feature))
-		append(&breakdown.terms, Card_Term{"Features", strings.join(names[:], ", ", context.temp_allocator)})
+	if kind.title_salary_global != 0 do append(&breakdown.terms, Card_Term{"Salary", fmt.tprintf("%.1f", kind.title_salary_global)})
+	if kind.title_salary_local != 0 do append(&breakdown.terms, Card_Term{"Local salary", fmt.tprintf("%.1f", kind.title_salary_local)})
+	if kind.title_salary_local_share != 0 do append(&breakdown.terms, Card_Term{"Local share", fmt.tprintf("%.0f", kind.title_salary_local_share)})
+	if kind.title != 0 {
+		title := &game.office_kinds[kind.title]
+		append(&breakdown.terms, Card_Term{"Office", name_to_string(&title.name)})
+		if title.army_type != 0 do append(&breakdown.terms, Card_Term{"Army", name_to_string(&game.army_types[title.army_type].name)})
+	}
+	if .Main in kind.flags {
+		append(&breakdown.terms, Card_Term{"Size", ICON_TITLES[kind.icon]})
+		append(&breakdown.terms, Card_Term{"Slots", fmt.tprint(kind.slots)})
 	}
 	if append(&card.breakdowns, breakdown) == 0 do return nil
 	return len(card.breakdowns) - 1
@@ -377,6 +534,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 
 	status := &cards.status
 	status.title = fmt.tprintf("Turn %d", game.turn)
+	status.map_modes = true
 	append(&status.fields, Card_Field{label = "Playing", value = faction_title(game, game.player)})
 	{
 		faction := &game.factions[game.player]
@@ -405,7 +563,121 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			},
 		)
 	}
-	append(&status.actions, Card_Action{"End turn", .End_Turn, game_turn_endable(game)})
+	{
+		stability := game.factions[game.player].stability
+		append(
+			&status.fields,
+			Card_Field {
+				label = "Stability",
+				value = fmt.tprintf("%.0f%%", stability),
+				fill = stability / 100,
+				graded = true,
+				breakdown = card_note(status, "Its characters' loyalty, weighted by their influence"),
+			},
+		)
+	}
+	append(&status.actions, Card_Action{"End turn", Game_Ask.End_Turn, game.endable})
+	append(&status.actions, Card_Action{"Court", Game_Ask.Court, true})
+
+	// The court
+	{
+		court := &cards.court
+		court.title = fmt.tprintf("Court of %s", faction_title(game, game.player))
+
+		for &character, c in game.characters {
+			if c == 0 || character.faction != game.player do continue
+			row := Court_Row {
+				name        = name_to_string(&character.name),
+				rank        = character.rank,
+				influence   = character.influence,
+				loyalty     = character.loyalty,
+				age         = character.age,
+				temperament = fmt.tprint(character.temperament),
+				background  = fmt.tprint(character.background),
+				disposition = fmt.tprint(character.disposition),
+				character   = Character_Id(c),
+			}
+			if office := slot_map_get(&game.offices, character.office); office != nil {
+				kind := &game.office_kinds[office.kind]
+				row.office = name_to_string(&office.title)
+				row.office_id = character.office
+				row.office_influence = kind.influence
+				row.wealth_bonus = character.influence_target - kind.influence
+				row.wealth = office.wealth
+				switch office.dismissal {
+				case .For_Life:
+					row.undismissable = "Held for life"
+				case .Not_Dismissable:
+					row.undismissable = "Not dismissable"
+				case .In_Term:
+					row.undismissable = fmt.tprintf("Term: %d %s left", office.term_left, office.term_left == 1 ? "turn" : "turns")
+				case .Allowed:
+					row.dismiss = Dismiss_Order{character.office}
+					if .Feudal in kind.flags {
+						row.dismiss_note = fmt.tprintf("A fief: every feudal holder loses %d loyalty", FEUDAL_DISMISSAL_LOYALTY)
+					}
+				}
+				base := slot_map_get(&game.pieces, office.muster_at)
+				if kind.army_type != 0 && base != nil {
+					row.army = name_to_string(&game.army_types[kind.army_type].name)
+					row.base = name_to_string(&base.name)
+					row.men_max = f32(office.men_max)
+					row.men = f32(office.men)
+					if army := slot_map_get(&game.pieces, office.army); army != nil do row.men = f32(army.army.men)
+				}
+			}
+			append(&court.rows, row)
+			court.influence_max = max(court.influence_max, row.influence)
+			court.wealth_max = max(court.wealth_max, row.wealth)
+			court.rank_max = max(court.rank_max, row.rank)
+		}
+		slice.sort_by(court.rows[:], proc(a, b: Court_Row) -> bool {
+			return a.rank != b.rank ? a.rank > b.rank : a.influence > b.influence
+		})
+
+		for office_id in game.offices_ranked {
+			office := slot_map_get(&game.offices, office_id)
+			if office.faction != game.player do continue
+			kind := &game.office_kinds[office.kind]
+			court.rank_max = max(court.rank_max, kind.rank)
+			holder := -1
+			for &row, r in court.rows do if office.holder != 0 && row.character == office.holder do holder = r
+			traits := make([dynamic]string, context.temp_allocator)
+			for flag in kind.flags do if flag != .Dismissable do append(&traits, fmt.tprint(flag))
+			append(
+				&court.offices,
+				Court_Office {
+					title = name_to_string(&office.title),
+					rank = kind.rank,
+					influence = kind.influence,
+					holder = holder,
+					filling = office_id == game.appointment.office,
+					traits = strings.join(traits[:], ", ", context.temp_allocator),
+					id = office_id,
+				},
+			)
+		}
+
+		if vacancy := slot_map_get(&game.offices, game.appointment.office); vacancy != nil {
+			kind := &game.office_kinds[vacancy.kind]
+			court.vacancy.office = game.appointment.office
+			court.vacancy.title = name_to_string(&vacancy.title)
+			court.vacancy.rank = kind.rank
+			if kind.army_type != 0 do court.vacancy.army = name_to_string(&game.army_types[kind.army_type].name)
+			for candidate in game.appointment.candidates {
+				row := -1
+				for &each, r in court.rows do if each.character == candidate.character do row = r
+				passes := ""
+				if candidate.passed_over > 0 {
+					passes = fmt.tprintf("Passes over %d, -%d loyalty each", candidate.passed_over, PASSED_OVER_LOYALTY)
+				}
+				append(
+					&court.vacancy.candidates,
+					Court_Candidate{row = row, passes = passes, order = {game.appointment.office, candidate.character}},
+				)
+			}
+		}
+	}
 
 	if piece := slot_map_get(&game.pieces, focus); piece != nil {
 		cards.focus_shown = true
@@ -423,10 +695,8 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				}
 			}
 		}
-		// The piece, the same on every tab
 		army := piece.army
 		is_army := .Has_Army in piece.flags
-		// An army's type, described on hover; or else what the piece is
 		type_field := Card_Field {
 			label = "Type",
 			value = ICON_TITLES[piece.icon],
@@ -439,9 +709,20 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			}
 			if append(&card.breakdowns, described) > 0 do type_field.breakdown = len(card.breakdowns) - 1
 		}
+		if .Has_Town in piece.flags {
+			main := card_slot_tile(game, card, focus, MAIN_SLOT)
+			type_field.value = main.name
+			type_field.breakdown = main.breakdown
+			type_field.click = main.click
+		}
 		append(&card.fields, type_field)
 		append(&card.fields, Card_Field{label = "Faction", value = faction_title(game, piece.owner)})
 		append(&card.fields, Card_Field{label = "Culture", value = name_to_string(&game.cultures[piece.culture].name)})
+		if title := slot_map_get(&game.offices, army.title); is_army && title != nil && title.army == focus {
+			if piece.owner == game.player {
+				append(&card.buttons, Card_Action{"Demobilise", Game_Order(Title_Order{army.title, .Demobilise}), true})
+			}
+		}
 		statuses := make([dynamic]string, context.temp_allocator)
 		if is_army && army.spent do append(&statuses, "Spent")
 		if piece.inside != {} do append(&statuses, "Garrisoning")
@@ -475,50 +756,52 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				},
 			)
 
-			// Recruiting: every army type the culture recruits, with its cost and what the town lacks for it. Hovered,
-			// the army it makes
-			recruit := Card_Tile {
-				name = "Recruit",
+			// Mobilising: the owner's titles here, and at its capital the faction's own
+			mobilise := Card_Menu {
+				title = "Mobilise",
 			}
 			acting := piece.owner == game.player
-			treasury := game.factions[piece.owner].treasury
-			for &army_type, a in game.army_types {
-				if a == 0 || !game.culture_army_types[piece.culture][a] do continue
-				detail := fmt.tprintf("%.0f labour a turn", army_type.upkeep_labour)
-				if army_type.upkeep_coin > 0 {
-					detail = fmt.tprintf("%.0f coin, %.0f coin a turn", army_type.recruit_coin, army_type.upkeep_coin)
-				}
-				missing := army_type.recruit_requires - piece.town.features
-				if missing != {} {
-					names := make([dynamic]string, context.temp_allocator)
-					for feature in missing do append(&names, fmt.tprint(feature))
-					detail = fmt.tprintf("Needs %s", strings.join(names[:], ", ", context.temp_allocator))
-				}
+			titles := slot_map_iterator(&game.offices)
+			for office, office_id in slot_map_iterate(&titles) {
+				kind := &game.office_kinds[office.kind]
+				if office.faction != piece.owner || kind.army_type == 0 || office.muster_at != focus do continue
+				army_type := &game.army_types[kind.army_type]
+				holder := name_to_string(&game.characters[office.holder].name)
+				men := compact_number(f64(office.men))
+				detail := fmt.tprintf("%s, %s men", holder, men)
+				if office.holder == 0 do detail = fmt.tprintf("Vacant, %s men", men)
+				if office.army != {} do detail = fmt.tprintf("%s, in the field", holder)
 
 				breakdown := Card_Breakdown {
 					description = description_to_string(&army_type.description),
 				}
+				append(&breakdown.terms, Card_Term{"Army", name_to_string(&army_type.name)})
 				append(&breakdown.terms, Card_Term{"Scope", fmt.tprint(army_type.scope)})
-				append(&breakdown.terms, Card_Term{"Men", compact_number(f64(army_type.men))})
+				append(
+					&breakdown.terms,
+					Card_Term{"Men", fmt.tprintf("%s of %s", men, compact_number(f64(office.men_max)))},
+				)
+				append(&breakdown.terms, Card_Term{"Pay", fmt.tprintf("%.1f a turn", office.wealth)})
 				append(&breakdown.terms, Card_Term{"Proficiency", fmt.tprintf("%.0f%%", army_type.proficiency)})
 				append(&breakdown.terms, Card_Term{"Foraging", fmt.tprintf("%.0f%%", army_type.foraging)})
 				append(&breakdown.terms, Card_Term{"Mobility", fmt.tprintf("%.0f", army_type.mobility)})
-				action := Card_Tile_Action {
-					label   = name_to_string(&army_type.name),
+				action := Card_Menu_Action {
+					label   = name_to_string(&kind.name),
 					detail  = detail,
-					enabled = acting && missing == {} && treasury >= army_type.recruit_coin,
-					order   = Town_Order{town = focus, action = .Recruit, army_type = Army_Type_Id(a)},
+					enabled = acting && office.can_mobilise,
+					order   = Title_Order{office = office_id, action = .Mobilise},
 				}
 				if append(&card.breakdowns, breakdown) > 0 do action.breakdown = len(card.breakdowns) - 1
-				append(&recruit.actions, action)
+				append(&mobilise.actions, action)
 			}
-			card.recruit = recruit
+			if len(mobilise.actions) > 0 && append(&card.menus, mobilise) > 0 {
+				append(&card.buttons, Card_Action{"Mobilise", Card_Menu_Id(len(card.menus) - 1), true})
+			}
 		}
 
-		// The tab's own section
 		if card.tab == .Town {
 			town := &piece.town
-			// Population: its people, and a balance of them against the staff its buildings need
+			// Population: a balance against the staff its buildings need
 			staff_net := town.population - town.staff_needed
 			append(
 				&card.stats,
@@ -534,8 +817,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				},
 			)
 
-			// Balances, from the middle: supply less demand, over the larger of the two. All of it spare fills the right
-			// half; none of the demand met, the left
+			// Balances, from the middle: supply less demand, over the larger of the two
 			Balance :: struct {
 				label, note:    string,
 				supply, demand: f32,
@@ -553,8 +835,17 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					town.food,
 					town.food_eaten,
 				},
-				{"Labour", fmt.tprintf("%.0f produced, %.0f used", town.labour, town.labour_used), town.labour, town.labour_used},
-				{"Income", fmt.tprintf("%.1f income, %.1f upkeep", town.income, town.upkeep), town.income, town.upkeep},
+				{
+					"Income",
+					fmt.tprintf(
+						"%.1f to the treasury, %.1f upkeep, of which %.1f salaries",
+						town.income,
+						town.upkeep,
+						town.salaries_global,
+					),
+					town.income,
+					town.upkeep,
+				},
 				{
 					"Public order",
 					fmt.tprintf("%.1f order, %.1f unrest", town.public_order, town.unrest),
@@ -579,6 +870,21 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			append(
 				&card.stats,
 				Card_Field {
+					label = "Wealth",
+					value = fmt.tprintf("%.1f", town.wealth),
+					breakdown = card_note(
+						card,
+						fmt.tprintf(
+							"%.1f a turn kept locally: %.1f in salaries, the rest shared by its titles",
+							town.wealth,
+							town.salaries_local,
+						),
+					),
+				},
+			)
+			append(
+				&card.stats,
+				Card_Field {
 					label = "Control",
 					value = fmt.tprintf("%.0f%%", town.control),
 					fill = town.control / 100,
@@ -586,109 +892,26 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				},
 			)
 
-			feature_names := make([dynamic]string, context.temp_allocator)
-			for feature in town.features do append(&feature_names, fmt.tprint(feature))
-			features := len(feature_names) > 0 ? strings.join(feature_names[:], ", ", context.temp_allocator) : "None"
-			append(&card.stats, Card_Field{label = "Features", value = features})
-
-			// The tiles: two rows, a town's slots filling the first columns of both, the rest disabled. A slot shows its
-			// building, with what it does here on hover, or is empty. Clicked, it offers what can be built there
+			// Two rows: the slots fill the first columns, the rest disabled
 			columns := town.slots / 2
-			// Only the playing faction acts on its towns
-			acting := piece.owner == game.player
-			treasury := game.factions[piece.owner].treasury
-			// What building a kind costs, and whether the treasury can pay its coin
-			Cost :: struct {
-				detail:  string,
-				payable: bool,
-			}
-			cost_of :: proc(kind: ^Building_Kind, treasury: f32) -> Cost {
-				detail := fmt.tprintf("%.0f labour a turn, %.0f turns", kind.build_labour, kind.build_turns)
-				if kind.build_coin > 0 do detail = fmt.tprintf("%s, %.0f coin", detail, kind.build_coin)
-				return {detail, treasury >= kind.build_coin}
-			}
 			for position in 0 ..< TOWN_SLOTS_MAX {
 				row := position / (TOWN_SLOTS_MAX / 2)
 				column := position % (TOWN_SLOTS_MAX / 2)
-				tile: Card_Tile
 				if column >= columns {
-					tile.disabled = true
-					append(&card.tiles, tile)
+					append(&card.tiles, Card_Tile{disabled = true})
 					continue
 				}
-				slot := row * columns + column
-				here := town.buildings[slot]
-				project := town.projects[slot]
-				if here != 0 {
-					kind := &game.building_kinds[here]
-					tile.name = name_to_string(&kind.name)
-					tile.breakdown = card_building_breakdown(card, kind, town.slot_food[slot])
-				}
-				if project.active {
-					// Under way: its progress, and cancelling
-					if project.kind == 0 {
-						tile.project = "Demolishing"
-					} else {
-						target := &game.building_kinds[project.kind]
-						tile.project = fmt.tprintf("%s (%.0f)", name_to_string(&target.name), math.ceil(project.turns_left))
-					}
-					append(
-						&tile.actions,
-						Card_Tile_Action {
-							label = "Cancel",
-							detail = "No refund",
-							enabled = acting,
-							order = Town_Order{town = focus, slot = slot, action = .Cancel},
-						},
-					)
-				} else if here != 0 {
-					kind := &game.building_kinds[here]
-					if kind.upgrade != 0 {
-						next := &game.building_kinds[kind.upgrade]
-						cost := cost_of(next, treasury)
-						append(
-							&tile.actions,
-							Card_Tile_Action {
-								label = fmt.tprintf("Upgrade to %s", name_to_string(&next.name)),
-								detail = cost.detail,
-								enabled = acting && cost.payable && game.culture_buildings[piece.culture][kind.upgrade],
-								breakdown = card_building_breakdown(card, next, next.food + next.food_fertility * town.fertility),
-								order = Town_Order{town = focus, slot = slot, action = .Build, kind = kind.upgrade},
-							},
-						)
-					}
-					append(
-						&tile.actions,
-						Card_Tile_Action {
-							label = "Demolish",
-							detail = "Next turn",
-							enabled = acting,
-							order = Town_Order{town = focus, slot = slot, action = .Demolish},
-						},
-					)
-				} else {
-					// The first level of every chain the town's culture can build
-					for &kind, k in game.building_kinds {
-						if k == 0 || kind.upgraded_from != 0 || !game.culture_buildings[piece.culture][k] do continue
-						cost := cost_of(&kind, treasury)
-						append(
-							&tile.actions,
-							Card_Tile_Action {
-								label = name_to_string(&kind.name),
-								detail = cost.detail,
-								enabled = acting && cost.payable,
-								breakdown = card_building_breakdown(card, &kind, kind.food + kind.food_fertility * town.fertility),
-								order = Town_Order{town = focus, slot = slot, action = .Build, kind = Building_Kind_Id(k)},
-							},
-						)
-					}
-				}
-				append(&card.tiles, tile)
+				append(&card.tiles, card_slot_tile(game, card, focus, row * columns + column))
 			}
 		} else {
 			if piece.general != 0 {
-				general := name_to_string(&game.characters[piece.general].name)
-				append(&card.stats, Card_Field{label = "General", value = general})
+				character := &game.characters[piece.general]
+				general := Card_Field {
+					label = "General",
+					value = name_to_string(&character.name),
+				}
+				if character.faction == game.player do general.click = piece.general
+				append(&card.stats, general)
 			}
 			if is_army {
 				append(
@@ -808,5 +1031,5 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 		}
 	}
 
-	append(&card.actions, Card_Action{"Next", .Next, game.movement.marches[.Leader].piece == {}})
+	append(&card.actions, Card_Action{"Next", Game_Ask.Next, game.movement.marches[.Leader].piece == {}})
 }

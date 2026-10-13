@@ -61,11 +61,24 @@ REGIONS_MAX :: 256
 PIECE_MAX :: 1024
 FACTIONS_MAX :: 16
 CHARACTERS_MAX :: 1024
+FACTION_CHARACTERS_MAX :: 128
 BUILDING_KINDS_MAX :: 64
 CULTURES_MAX :: 16
 ARMY_TYPES_MAX :: 32
-// The most building slots a settlement has
 TOWN_SLOTS_MAX :: 8
+// The main building's slot follows the ordinary ones
+MAIN_SLOT :: TOWN_SLOTS_MAX
+TOWN_SLOT_COUNT :: TOWN_SLOTS_MAX + 1
+OFFICE_KINDS_MAX :: 64
+// The most offices one faction's court shows
+FACTION_OFFICES_MAX :: 64
+OFFICES_MAX :: FACTIONS_MAX * FACTION_OFFICES_MAX
+CULTURE_NAMES_MAX :: 256
+// Per vacancy: new characters are made up to MIN, and at most MAX shown
+CANDIDATES_MIN :: 3
+CANDIDATES_MAX :: 5
+PASSED_OVER_LOYALTY :: 10
+FEUDAL_DISMISSAL_LOYALTY :: 10
 
 ARMY_FORAGING_DEFAULT :: 40
 ARMY_MOBILITY_DEFAULT :: 2
@@ -79,22 +92,34 @@ Game :: struct {
 	characters:         [dynamic; CHARACTERS_MAX]Character,
 	building_kinds:     [dynamic; BUILDING_KINDS_MAX]Building_Kind,
 	cultures:           [dynamic; CULTURES_MAX]Culture,
-	// Which building kinds each culture can build
 	culture_buildings:  [CULTURES_MAX][BUILDING_KINDS_MAX]bool,
 	army_types:         [dynamic; ARMY_TYPES_MAX]Army_Type,
-	// Which army types each culture can recruit
-	culture_army_types: [CULTURES_MAX][ARMY_TYPES_MAX]bool,
-	// What a recruited army starts from: pieces.txt's army kind
+	// pieces.txt's army kind
 	army_template:      Piece_Data,
 	turn:               int,
 	player:             Faction_Id,
 	ending:             bool,
+	// Each step, once battle and movement are done. Endable: nothing under way, and no vacancy
+	under_way:          bit_set[Under_Way],
+	endable:            bool,
 	contacts:           [dynamic; CONTACTS_MAX]Contact,
 	interaction:        Interaction,
 	movement:           Movement,
 	supply_network:     [MAP_CELLS]u8,
-	// The playing faction's control over the land, 0..100
+	// The playing faction's, 0..100
 	control_network:    [MAP_CELLS]u8,
+	office_kinds:       [dynamic; OFFICE_KINDS_MAX]Office_Kind,
+	offices:            Slot_Map(Office, OFFICES_MAX, Office_Id),
+	// Each step: highest rank first, a faction's own offices first within a rank
+	offices_ranked:     [dynamic; OFFICES_MAX]Office_Id,
+	appointment:        Appointment,
+}
+
+Under_Way :: enum u8 {
+	March,
+	Contact,
+	Battle,
+	Ending,
 }
 
 Region_Id :: distinct u8
@@ -154,59 +179,131 @@ Army :: struct {
 	supply:            f32,
 	supply_source:     Supply_Source,
 	supply_efficiency: f32,
-	// Recruited: its type, which sets its upkeep. 0: none, as for a scenario's armies
+	// None: a garrison, or its title destroyed
 	type:              Army_Type_Id,
-	// A local army's home region: it reinforces only there, and its labour comes from its town. 0: global
+	title:             Office_Id,
+	// A local army reinforces only there. 0: global
 	home:              Region_Id,
 }
 
-// A settlement's economy
 Town :: struct {
 	population:           f32,
-	// Its region's, copied at load
+	// Its region's
 	fertility:            f32,
-	// Its kind's: at most this many buildings
+	// Its main building's
 	slots:                int,
-	// The building in each slot, 0: empty. And what each slot is turning into
-	buildings:            [TOWN_SLOTS_MAX]Building_Kind_Id,
-	projects:             [TOWN_SLOTS_MAX]Project,
-	// Each step, from its buildings and population. Per turn
-	// The population its buildings need as staff, and the share of it they have, 0..1: every output is scaled by it
+	// The main building last. 0: empty
+	buildings:            [TOWN_SLOT_COUNT]Building_Kind_Id,
+	projects:             [TOWN_SLOT_COUNT]Project,
+	// Each step. Locked: its title's army is in the field, so no demolishing or upgrading
+	titles:               [TOWN_SLOT_COUNT]Office_Id,
+	locked:               [TOWN_SLOT_COUNT]bool,
+	building_orders:      [TOWN_SLOT_COUNT]Building_Orders,
+	// Each step, per turn. Staffing: 0..1, scaling every output
 	staff_needed:         f32,
 	staffing:             f32,
-	// The food of the building in each slot, here
-	slot_food:            [TOWN_SLOTS_MAX]f32,
+	slot_food:            [TOWN_SLOT_COUNT]f32,
 	food:                 f32,
 	food_eaten:           f32,
-	labour:               f32,
-	labour_used:          f32,
-	// Into its owner's treasury: scaled by its control
+	// Split by control: the controlled share to the treasury, the rest kept as local wealth
 	income:               f32,
+	wealth:               f32,
 	upkeep:               f32,
-	// 0..100: the share of what it sends to the global pool that reaches it. Set with the networks, at load and each
-	// turn change
+	// Global salaries are part of upkeep. The wealth left after local ones is shared by the titles' weights
+	salaries_global:      f32,
+	salaries_local:       f32,
+	wealth_shared:        f32,
+	shares:               f32,
+	// 0..100: the share of global outputs reaching the pool. Set with the networks
 	control:              f32,
-	// Its buildings' public order, as given: what keeps order, and what stirs unrest
 	public_order:         f32,
 	unrest:               f32,
-	// Food into its owner's central store: its surplus and its buildings' sending, scaled by its control. And food its
-	// buildings take out of the store
+	// To and from the central store, scaled by control
 	food_sent:            f32,
 	food_taken:           f32,
-	// The population its food feeds
 	population_supported: f32,
-	features:             bit_set[Feature],
 }
 
 Building_Kind_Id :: distinct u8
 
-// What a slot is turning into
+Building_Flag :: enum u8 {
+	// Built in the main slot only, and nothing else is
+	Main,
+}
+
+Office_Kind_Id :: distinct u8
+
+Office_Id :: distinct Slot_Map_Key
+
+Office_Flag :: enum u8 {
+	// Held for life
+	Eternal,
+	// Once its term is served
+	Dismissable,
+	// Dismissing one costs every feudal holder of the faction loyalty
+	Feudal,
+}
+
+Office_Kind :: struct {
+	id:        Name,
+	name:      Name,
+	rank:      int,
+	influence: f32,
+	// Turns before its holder can be promoted or dismissed
+	term:      int,
+	flags:     bit_set[Office_Flag],
+	// 0: none
+	army_type: Army_Type_Id,
+	// A faction office's, paid out of the treasury
+	salary:    f32,
+}
+
+// A building's office elapses when its town is lost, and is destroyed then or once its army leaves the field
+Office :: struct {
+	kind:         Office_Kind_Id,
+	faction:      Faction_Id,
+	// "Kind of Town", or a faction office's kind name
+	title:        Name,
+	// None: a faction office
+	town:         Piece_Id,
+	slot:         int,
+	building:     Building_Kind_Id,
+	holder:       Character_Id,
+	term_left:    int,
+	// While demobilised; while mobilised the army has them
+	men:          int,
+	// Each step: its town held by another faction
+	elapsed:      bool,
+	// None: demobilised
+	army:         Piece_Id,
+	// Each step. Wealth: paid to its holder per turn, 0 while vacant or elapsed. Men_max: wealth times the type's rate
+	wealth:       f32,
+	men_max:      int,
+	// Each step. Muster_at: its town, or its faction's capital
+	muster_at:    Piece_Id,
+	dismissal:    Office_Dismissal,
+	can_mobilise: bool,
+}
+
+// Each step. Offered: what fits and the culture builds. Buildable: of those, what can be ordered now
+Building_Orders :: struct {
+	offered:   bit_set[0 ..< BUILDING_KINDS_MAX],
+	buildable: bit_set[0 ..< BUILDING_KINDS_MAX],
+	demolish:  bool,
+	cancel:    bool,
+}
+
+Office_Dismissal :: enum u8 {
+	Allowed,
+	For_Life,
+	Not_Dismissable,
+	In_Term,
+}
+
 Project :: struct {
 	active:     bool,
-	// The building it becomes: new on an empty slot, or the next level of the one there, which keeps working until then.
-	// 0: the slot is cleared, demolished
+	// 0: demolishing
 	kind:       Building_Kind_Id,
-	// Turns left
 	turns_left: f32,
 }
 
@@ -214,77 +311,78 @@ Culture_Id :: distinct u8
 
 Army_Type_Id :: distinct u8
 
-// Local: tied to a home region, the one it was recruited in. Global: none
+// Local: tied to the home region it was mobilised in
 Army_Scope :: enum u8 {
 	Global,
 	Local,
 }
 
-// A type of army that towns recruit, from army_types.txt
 Army_Type :: struct {
-	id:               Name,
-	name:             Name,
-	scope:            Army_Scope,
+	id:          Name,
+	name:        Name,
+	scope:       Army_Scope,
+	men_per_wealth: f32,
 	// At full strength
-	men:              int,
-	proficiency:      f32,
-	foraging:         f32,
-	mobility:         f32,
-	// The features its town must have
-	recruit_requires: bit_set[Feature],
-	// Paid on recruiting
-	recruit_coin:     f32,
-	// Per turn: coin out of the treasury, and labour out of its home town
-	upkeep_coin:      f32,
-	upkeep_labour:    f32,
-	// What it is, shown when it is hovered
-	description:      Description,
+	proficiency: f32,
+	foraging:    f32,
+	mobility:    f32,
+	description: Description,
 }
 
-// A culture, from cultures.txt
 Culture :: struct {
-	id:   Name,
-	name: Name,
-	// The art its pawns and medallions are drawn with
-	look: Culture_Look,
+	id:    Name,
+	name:  Name,
+	look:  Culture_Look,
+	names: [dynamic; CULTURE_NAMES_MAX]Name,
 }
 
-// Local, on or off: what a town's buildings provide
-Feature :: enum u8 {
-	Horses,
-	Drill,
-	Court,
+// Each step. None: every office is held
+Appointment :: struct {
+	office:     Office_Id,
+	candidates: [dynamic; CANDIDATES_MAX]Candidate,
 }
 
-// A kind of building and its effects, per turn, from buildings.txt. A negative flow is consumed
+// Passed over: the candidates above him, ranked higher
+Candidate :: struct {
+	character:   Character_Id,
+	passed_over: int,
+}
+
+// Effects per turn. A negative flow is consumed
 Building_Kind :: struct {
 	id:             Name,
 	name:           Name,
-	// The population it occupies
+	// Staff it needs
 	population:     f32,
 	food:           f32,
-	// Food times its town's fertility
+	// Times its town's fertility
 	food_fertility: f32,
-	labour:         f32,
-	// Into its owner's treasury, and out of it
 	income:         f32,
 	upkeep:         f32,
-	// Spread over the land to its owner's towns, less the travel cost. A town's control sums every source's, capped at
-	// 100
+	// Radiated over the land, less travel cost. A town sums what reaches it, up to 100
 	control:        f32,
-	// Its town's public order: positive keeps order, negative stirs unrest
+	// Negative: unrest
 	public_order:   f32,
-	// Food into its owner's central store, scaled by its town's control; or, negative, food taken out of it
+	// Into the central store, scaled by control. Negative: taken out of it
 	food_store:     f32,
-	features:       bit_set[Feature],
-	// Building it: coin paid at the start, labour used each turn, and turns
+	// Paid to its title's holder: global from the treasury, local from its town's wealth. Share: its weight in what is left
+	title_salary_global:      f32,
+	title_salary_local:       f32,
+	title_salary_local_share: f32,
+	flags:          bit_set[Building_Flag],
+	// Named after its town. 0: none
+	title:          Office_Kind_Id,
+	// A main building's, copied onto its settlement
+	icon:           Map_Icon,
+	slots:          int,
+	supply:         f32,
+	hindrance:      f32,
+	contact:        f32,
+	body:           f32,
 	build_coin:     f32,
-	build_labour:   f32,
 	build_turns:    f32,
-	// What it is, shown when it is hovered
 	description:    Description,
-	// The next level, which it can be upgraded into, and the level before, upgraded into it. 0: none, and 0 for the
-	// first level of a chain, the one built on an empty slot
+	// 0: none. Upgraded_from 0: a chain's first level
 	upgrade:        Building_Kind_Id,
 	upgraded_from:  Building_Kind_Id,
 }
@@ -304,9 +402,13 @@ Faction :: struct {
 	culture:    Culture_Id,
 	color:      [3]f32,
 	treasury:   f32,
-	// The central store of food its towns send to, and its buildings draw on
 	food_store: f32,
-	// Each step, from its towns. Per turn
+	// Where its own offices' armies mobilise
+	capital:    Piece_Id,
+	// Each step. Stability 0..100: loyalty weighted by influence
+	stability:  f32,
+	characters: int,
+	// Each step, per turn
 	income:     f32,
 	upkeep:     f32,
 	food_sent:  f32,
@@ -315,7 +417,37 @@ Faction :: struct {
 
 Character :: struct {
 	name:        Name,
+	faction:     Faction_Id,
+	// In turns
+	age:         int,
+	// Never lowered
+	rank:        int,
+	influence:   f32,
+	// 0..100
+	loyalty:     f32,
 	temperament: Temperament,
+	background:  Background,
+	disposition: Disposition,
+	// Each step
+	office:           Office_Id,
+	influence_target: f32,
+}
+
+Background :: enum u8 {
+	Soldier,
+	Official,
+	Aristocrat,
+	Courtier,
+	Churchman,
+	Federate,
+}
+
+Disposition :: enum u8 {
+	Ambitious,
+	Devout,
+	Proud,
+	Greedy,
+	Loyal,
 }
 
 Way_Type :: enum {
@@ -333,7 +465,6 @@ name_to_string :: proc(name: ^Name) -> string {
 	return strings.truncate_to_byte(string(name.buffer[:]), 0)
 }
 
-// A longer text, describing something
 Description :: struct {
 	buffer: [DESCRIPTION_CAPACITY]u8,
 }
@@ -353,7 +484,7 @@ Region :: struct {
 	name:      Name,
 	color:     [3]u8,
 	capital:   Piece_Id,
-	// Scales the food of its farms: 1 poor, 2 ordinary, 3 good, 4 rich
+	// 1 poor .. 4 rich
 	fertility: f32,
 }
 
@@ -623,19 +754,103 @@ game_load :: proc(
 		for water, i in geo_out.water do sea[i] = water ? 1 : 0
 	}
 
-	// Load the building kinds; kind 0 is none
+	// Army types; 0 is none
+	{
+		path := fmt.tprintf("assets/scenarios/%s/army_types.txt", scenario_name)
+		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
+		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+
+		append(&game.army_types, Army_Type{})
+		for row in root.children {
+			assert(row.key == "army_type")
+			// Every key a field, every field given
+			for key in row.children {
+				fmt.assertf(
+					reflect.struct_field_by_name(Army_Type, key.key).type != nil,
+					"%s: no army type key %q",
+					path,
+					key.key,
+				)
+			}
+			for field in reflect.struct_field_names(Army_Type) {
+				_, given := tbl.find(row, field)
+				fmt.assertf(given, "%s: army type %q lacks %q", path, tbl.get_text(row, "id"), field)
+			}
+
+			army_type := Army_Type {
+				id          = name_from_string(tbl.get_text(row, "id")),
+				name        = name_from_string(tbl.get_text(row, "name")),
+				scope       = enum_from_text(Army_Scope, tbl.get_text(row, "scope")),
+				men_per_wealth = tbl.get_num(row, "men_per_wealth"),
+				proficiency = tbl.get_num(row, "proficiency"),
+				foraging    = tbl.get_num(row, "foraging"),
+				mobility    = tbl.get_num(row, "mobility"),
+			}
+			description_ok: bool
+			army_type.description, description_ok = description_from_string(tbl.get_text(row, "description"))
+			fmt.assertf(description_ok, "%s: description of %q longer than %d bytes", path, tbl.get_text(row, "id"), DESCRIPTION_CAPACITY)
+			fmt.assertf(
+				append(&game.army_types, army_type) == 1,
+				"%s: more than %d army types",
+				path,
+				ARMY_TYPES_MAX - 1,
+			)
+		}
+	}
+
+	// Office kinds; 0 is none
+	{
+		path := fmt.tprintf("assets/scenarios/%s/offices.txt", scenario_name)
+		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
+		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+
+		append(&game.office_kinds, Office_Kind{})
+		for row in root.children {
+			assert(row.key == "office")
+			// Every key a field
+			for key in row.children {
+				fmt.assertf(
+					reflect.struct_field_by_name(Office_Kind, key.key).type != nil,
+					"%s: no office key %q",
+					path,
+					key.key,
+				)
+			}
+			office := Office_Kind {
+				id        = name_from_string(tbl.get_text(row, "id")),
+				name      = name_from_string(tbl.get_text(row, "name")),
+				rank      = int(tbl.get_num(row, "rank")),
+				influence = tbl.get_num(row, "influence"),
+				term      = int(tbl.get_num(row, "term")),
+				salary    = tbl.get_num(row, "salary"),
+			}
+			flags := tbl.get_children(row, "flags")
+			for flag in flags {
+				office.flags += {enum_from_text(Office_Flag, flag.text)}
+			}
+			if type_text, has_army := tbl.get_text(row, "army_type"); has_army {
+				for &army_type, a in game.army_types {
+					if a > 0 && name_to_string(&army_type.id) == type_text do office.army_type = Army_Type_Id(a)
+				}
+				fmt.assertf(office.army_type != 0, "%s: no army type %q", path, type_text)
+			}
+			fmt.assertf(append(&game.office_kinds, office) == 1, "%s: more than %d office kinds", path, OFFICE_KINDS_MAX - 1)
+		}
+	}
+
+	// Building kinds; 0 is none
 	{
 		path := fmt.tprintf("assets/scenarios/%s/buildings.txt", scenario_name)
 		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
 		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
 
 		append(&game.building_kinds, Building_Kind{})
-		// Each kind's upgrade, by id: resolved once every kind is in, as it may come later in the file
+		// Upgrades by id, resolved once every kind is in
 		upgrades := make([dynamic]string, 0, len(root.children) + 1, context.temp_allocator)
 		append(&upgrades, "")
 		for row in root.children {
 			assert(row.key == "building")
-			// A mistyped effect would read as 0: every key must be a field
+			// Every key a field
 			for key in row.children {
 				fmt.assertf(
 					reflect.struct_field_by_name(Building_Kind, key.key).type != nil,
@@ -651,22 +866,36 @@ game_load :: proc(
 				population     = tbl.get_num(row, "population"),
 				food           = tbl.get_num(row, "food"),
 				food_fertility = tbl.get_num(row, "food_fertility"),
-				labour         = tbl.get_num(row, "labour"),
 				income         = tbl.get_num(row, "income"),
 				upkeep         = tbl.get_num(row, "upkeep"),
 				control        = tbl.get_num(row, "control"),
 				public_order   = tbl.get_num(row, "public_order"),
 				food_store     = tbl.get_num(row, "food_store"),
+				title_salary_global      = tbl.get_num(row, "title_salary_global"),
+				title_salary_local       = tbl.get_num(row, "title_salary_local"),
+				title_salary_local_share = tbl.get_num(row, "title_salary_local_share"),
 				build_coin     = tbl.get_num(row, "build_coin"),
-				build_labour   = tbl.get_num(row, "build_labour"),
 				build_turns    = tbl.get_num(row, "build_turns"),
+				slots          = int(tbl.get_num(row, "slots")),
+				supply         = tbl.get_num(row, "supply"),
+				hindrance      = tbl.get_num(row, "hindrance"),
+				contact        = tbl.get_num(row, "contact"),
+				body           = tbl.get_num(row, "body"),
 			}
+			if icon, has_icon := tbl.get_text(row, "icon"); has_icon do kind.icon = enum_from_text(Map_Icon, icon)
+			fmt.assertf(kind.slots <= TOWN_SLOTS_MAX, "%s: more than %d slots", path, TOWN_SLOTS_MAX)
 			description_ok: bool
 			kind.description, description_ok = description_from_string(tbl.get_text(row, "description"))
 			fmt.assertf(description_ok, "%s: description of %q longer than %d bytes", path, tbl.get_text(row, "id"), DESCRIPTION_CAPACITY)
-			features := tbl.get_children(row, "features")
-			for feature in features {
-				kind.features += {enum_from_text(Feature, feature.text)}
+			building_flags := tbl.get_children(row, "flags")
+			for flag in building_flags {
+				kind.flags += {enum_from_text(Building_Flag, flag.text)}
+			}
+			if title, titled := tbl.get_text(row, "title"); titled {
+				for &office, o in game.office_kinds {
+					if o > 0 && name_to_string(&office.id) == title do kind.title = Office_Kind_Id(o)
+				}
+				fmt.assertf(kind.title != 0, "%s: no office %q", path, title)
 			}
 			fmt.assertf(
 				append(&game.building_kinds, kind) == 1,
@@ -688,58 +917,7 @@ game_load :: proc(
 		}
 	}
 
-	// Load the army types; type 0 is none
-	{
-		path := fmt.tprintf("assets/scenarios/%s/army_types.txt", scenario_name)
-		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
-		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
-
-		append(&game.army_types, Army_Type{})
-		for row in root.children {
-			assert(row.key == "army_type")
-			// A mistyped key would read as 0: every key must be a field. And every field must be given: none has a default
-			for key in row.children {
-				fmt.assertf(
-					reflect.struct_field_by_name(Army_Type, key.key).type != nil,
-					"%s: no army type key %q",
-					path,
-					key.key,
-				)
-			}
-			for field in reflect.struct_field_names(Army_Type) {
-				_, given := tbl.find(row, field)
-				fmt.assertf(given, "%s: army type %q lacks %q", path, tbl.get_text(row, "id"), field)
-			}
-
-			army_type := Army_Type {
-				id            = name_from_string(tbl.get_text(row, "id")),
-				name          = name_from_string(tbl.get_text(row, "name")),
-				scope         = enum_from_text(Army_Scope, tbl.get_text(row, "scope")),
-				men           = int(tbl.get_num(row, "men")),
-				proficiency   = tbl.get_num(row, "proficiency"),
-				foraging      = tbl.get_num(row, "foraging"),
-				mobility      = tbl.get_num(row, "mobility"),
-				recruit_coin  = tbl.get_num(row, "recruit_coin"),
-				upkeep_coin   = tbl.get_num(row, "upkeep_coin"),
-				upkeep_labour = tbl.get_num(row, "upkeep_labour"),
-			}
-			description_ok: bool
-			army_type.description, description_ok = description_from_string(tbl.get_text(row, "description"))
-			fmt.assertf(description_ok, "%s: description of %q longer than %d bytes", path, tbl.get_text(row, "id"), DESCRIPTION_CAPACITY)
-			requires := tbl.get_children(row, "recruit_requires")
-			for feature in requires {
-				army_type.recruit_requires += {enum_from_text(Feature, feature.text)}
-			}
-			fmt.assertf(
-				append(&game.army_types, army_type) == 1,
-				"%s: more than %d army types",
-				path,
-				ARMY_TYPES_MAX - 1,
-			)
-		}
-	}
-
-	// Load the cultures, which buildings each can build, and which army types it can recruit; culture 0 is none
+	// Cultures; 0 is none
 	{
 		path := fmt.tprintf("assets/scenarios/%s/cultures.txt", scenario_name)
 		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
@@ -753,6 +931,10 @@ game_load :: proc(
 				id   = name_from_string(tbl.get_text(row, "id")),
 				name = name_from_string(tbl.get_text(row, "name")),
 				look = enum_from_text(Culture_Look, tbl.get_text(row, "look")),
+			}
+			names := tbl.get_children(row, "names")
+			for name in names {
+				fmt.assertf(append(&culture.names, name_from_string(name.text)) == 1, "%s: more than %d names", path, CULTURE_NAMES_MAX)
 			}
 			fmt.assertf(
 				append(&game.cultures, culture) == 1,
@@ -771,19 +953,23 @@ game_load :: proc(
 				}
 				fmt.assertf(found, "%s: no building %q", path, building.text)
 			}
-
-			army_types := tbl.get_children(row, "army_types")
-			for army in army_types {
-				found := false
-				for &army_type, a in game.army_types {
-					if a == 0 || name_to_string(&army_type.id) != army.text do continue
-					game.culture_army_types[culture_id][a] = true
-					found = true
-				}
-				fmt.assertf(found, "%s: no army type %q", path, army.text)
-			}
 		}
 	}
+
+	// Applied once the start step has made the offices
+	Holding :: struct {
+		character: Character_Id,
+		kind:      Office_Kind_Id,
+		town:      string,
+		men:       int,
+	}
+	holdings := make([dynamic]Holding, context.temp_allocator)
+	Army_Title :: struct {
+		army: Piece_Id,
+		kind: Office_Kind_Id,
+		town: string,
+	}
+	army_titles := make([dynamic]Army_Title, context.temp_allocator)
 
 	{
 		path := fmt.tprintf("assets/scenarios/%s/pieces.txt", scenario_name)
@@ -806,7 +992,8 @@ game_load :: proc(
 					name = tbl.get_text(row, "name"),
 				}
 				piece := &kind.piece
-				piece.icon = enum_from_text(Map_Icon, tbl.get_text(row, "icon"))
+				// A settlement's from its main building
+				if icon, has_icon := tbl.get_text(row, "icon"); has_icon do piece.icon = enum_from_text(Map_Icon, icon)
 				if moves, moving := tbl.get_text(row, "moves"); moving {
 					piece.domain = enum_from_text(Pathfind_Domain, moves)
 				}
@@ -845,6 +1032,18 @@ game_load :: proc(
 					},
 				)
 
+				faction_offices := tbl.get_children(row, "offices")
+				for name in faction_offices {
+					kind: Office_Kind_Id
+					for &office, o in game.office_kinds {
+						if o > 0 && name_to_string(&office.id) == name.text do kind = Office_Kind_Id(o)
+					}
+					fmt.assertf(kind != 0, "%s: no office %q", path, name.text)
+					slot_map_insert(&game.offices, Office{kind = kind, faction = owner, title = game.office_kinds[kind].name})
+				}
+				capital := tbl.get_text(row, "capital")
+				fmt.assertf(capital != "", "%s: no capital for %s", path, tbl.get_text(row, "name"))
+
 				for entry in row.children {
 					if entry.key != "piece" do continue
 
@@ -872,9 +1071,17 @@ game_load :: proc(
 						piece.town.fertility = game.regions[region].fertility
 						piece.town.population = tbl.get_num(entry, "population")
 
+						main_text := tbl.get_text(entry, "main")
+						main_id: Building_Kind_Id
+						for &kind, k in game.building_kinds {
+							if k > 0 && name_to_string(&kind.id) == main_text do main_id = Building_Kind_Id(k)
+						}
+						fmt.assertf(main_id != 0 && .Main in game.building_kinds[main_id].flags, "%s: no main building %q", path, main_text)
+						piece.town.buildings[MAIN_SLOT] = main_id
+
 						buildings := tbl.get_children(entry, "buildings")
 						fmt.assertf(
-							len(buildings) <= piece.town.slots,
+							len(buildings) <= game.building_kinds[main_id].slots,
 							"%s: more buildings than slots in %s",
 							path,
 							name_to_string(&piece.name),
@@ -885,34 +1092,27 @@ game_load :: proc(
 								if k > 0 && name_to_string(&kind.id) == building.text do kind_id = Building_Kind_Id(k)
 							}
 							fmt.assertf(kind_id != 0, "%s: no building %q", path, building.text)
+							fmt.assertf(.Main not_in game.building_kinds[kind_id].flags, "%s: %q is a main building", path, building.text)
 							piece.town.buildings[slot] = kind_id
 						}
 					}
 
-					if general, has_general := tbl.get_text(entry, "general"); has_general {
-						character := Character {
-							name        = name_from_string(general),
-							temperament = .Steady,
-						}
-						if temperament, has_temperament := tbl.get_text(entry, "temperament");
-						   has_temperament {
-							character.temperament = enum_from_text(Temperament, temperament)
-						}
-						piece.general = Character_Id(len(game.characters))
-						append(&game.characters, character)
-					}
 
-					// An army: of a type, at its full strength; or, for a settlement's garrison, as given
-					if type_text, has_type := tbl.get_text(entry, "army_type"); has_type {
-						type_id: Army_Type_Id
-						for &army_type, a in game.army_types {
-							if a > 0 && name_to_string(&army_type.id) == type_text do type_id = Army_Type_Id(a)
+					// A title's army, or a settlement's garrison
+					title_kind: Office_Kind_Id
+					if title_text, titled := tbl.get_text(entry, "title"); titled {
+						for &office_kind, o in game.office_kinds {
+							if o > 0 && name_to_string(&office_kind.id) == title_text do title_kind = Office_Kind_Id(o)
 						}
-						fmt.assertf(type_id != 0, "%s: no army type %q", path, type_text)
+						fmt.assertf(title_kind != 0, "%s: no office %q", path, title_text)
+						type_id := game.office_kinds[title_kind].army_type
+						fmt.assertf(type_id != 0, "%s: office %q has no army", path, title_text)
 						army_type := &game.army_types[type_id]
+						men, has_men := tbl.get_num(entry, "men")
+						fmt.assertf(has_men, "%s: no men for %s", path, tbl.get_text(entry, "name"))
 						piece.army = {
-							men         = army_type.men,
-							men_max     = army_type.men,
+							men         = int(men),
+							men_max     = int(men),
 							proficiency = army_type.proficiency,
 							readiness   = 100,
 							foraging    = army_type.foraging,
@@ -920,7 +1120,7 @@ game_load :: proc(
 							supply      = 100,
 							type        = type_id,
 						}
-						// A local one's home is where it starts
+						// Home: where it starts
 						if army_type.scope == .Local {
 							piece.army.home = Region_Id(game.terrain.regions[grid_index(cell_of(piece.pos), MAP_SIZE)])
 						}
@@ -939,6 +1139,8 @@ game_load :: proc(
 					}
 
 					id := slot_map_insert(&game.pieces, piece)
+					if title_kind != 0 do append(&army_titles, Army_Title{id, title_kind, tbl.get_text(entry, "of")})
+					if name_to_string(&piece.name) == capital do game.factions[owner].capital = id
 
 					if capital_of, is_capital := tbl.get_text(entry, "capital_of"); is_capital {
 						for &region in game.regions {
@@ -946,18 +1148,116 @@ game_load :: proc(
 						}
 					}
 				}
+				fmt.assertf(game.factions[owner].capital != {}, "%s: no piece %q, capital of %s", path, capital, tbl.get_text(row, "name"))
 			}
+		}
+	}
+
+
+	// Characters
+	{
+		path := fmt.tprintf("assets/scenarios/%s/characters.txt", scenario_name)
+		source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
+		root, _, _ := tbl.parse(transmute(string)source, context.temp_allocator)
+
+		counts: [FACTIONS_MAX]int
+		for row in root.children {
+			assert(row.key == "character")
+			// Every key a field, every field given but the derived ones
+			for key in row.children {
+				known := reflect.struct_field_by_name(Character, key.key).type != nil || key.key == "of" || key.key == "men"
+				fmt.assertf(known, "%s: no character key %q", path, key.key)
+			}
+			for field in reflect.struct_field_names(Character) {
+				if field == "office" || field == "influence_target" do continue
+				_, given := tbl.find(row, field)
+				fmt.assertf(given, "%s: character %q lacks %q", path, tbl.get_text(row, "name"), field)
+			}
+
+			faction_name := tbl.get_text(row, "faction")
+			faction: Faction_Id
+			for &known, f in game.factions do if f > 0 && name_to_string(&known.name) == faction_name do faction = Faction_Id(f)
+			fmt.assertf(faction != 0, "%s: no faction %q", path, faction_name)
+			character := Character {
+				name        = name_from_string(tbl.get_text(row, "name")),
+				faction     = faction,
+				age         = int(tbl.get_num(row, "age")),
+				rank        = int(tbl.get_num(row, "rank")),
+				influence   = tbl.get_num(row, "influence"),
+				loyalty     = tbl.get_num(row, "loyalty"),
+				temperament = enum_from_text(Temperament, tbl.get_text(row, "temperament")),
+				background  = enum_from_text(Background, tbl.get_text(row, "background")),
+				disposition = enum_from_text(Disposition, tbl.get_text(row, "disposition")),
+			}
+			id := Character_Id(len(game.characters))
+			fmt.assertf(append(&game.characters, character) == 1, "%s: more than %d characters", path, CHARACTERS_MAX - 1)
+
+			if office_text, holds := tbl.get_text(row, "office"); holds {
+				kind: Office_Kind_Id
+				for &office_kind, o in game.office_kinds {
+					if o > 0 && name_to_string(&office_kind.id) == office_text do kind = Office_Kind_Id(o)
+				}
+				fmt.assertf(kind != 0, "%s: no office %q", path, office_text)
+				fmt.assertf(character.rank >= game.office_kinds[kind].rank, "%s: %q is below his office's rank", path, tbl.get_text(row, "name"))
+				append(&holdings, Holding{id, kind, tbl.get_text(row, "of"), int(tbl.get_num(row, "men"))})
+			}
+			counts[faction] += 1
+			fmt.assertf(counts[faction] <= FACTION_CHARACTERS_MAX, "%s: more than %d characters of %s", path, FACTION_CHARACTERS_MAX, faction_name)
+		}
+	}
+
+	game.turn = 1
+	game.player = 1
+
+	// Start step: makes the building offices
+	start_events := new([dynamic; GAME_EVENTS_MAX]Game_Event, context.temp_allocator)
+	game_step(game, {}, {}, start_events)
+
+	// The scenario's office holders, and armies' titles
+	{
+		for holding in holdings {
+			faction := game.characters[holding.character].faction
+			held: ^Office
+			offices := slot_map_iterator(&game.offices)
+			for office in slot_map_iterate(&offices) {
+				if office.kind != holding.kind || office.faction != faction || office.holder != 0 do continue
+				town := slot_map_get(&game.pieces, office.town)
+				matches := holding.town != "" ? town != nil && name_to_string(&town.name) == holding.town : town == nil
+				if matches {
+					held = office
+					break
+				}
+			}
+			name := name_to_string(&game.characters[holding.character].name)
+			fmt.assertf(held != nil, "characters.txt: no vacant %s for %q", name_to_string(&game.office_kinds[holding.kind].id), name)
+			held.holder = holding.character
+			held.men = holding.men
+		}
+
+		taken: [OFFICES_MAX]bool
+		for linked in army_titles {
+			army := slot_map_get(&game.pieces, linked.army)
+			offices := slot_map_iterator(&game.offices)
+			for office, office_id in slot_map_iterate(&offices) {
+				if office.kind != linked.kind || office.faction != army.owner || taken[office_id.index] do continue
+				town := slot_map_get(&game.pieces, office.town)
+				matches := linked.town != "" ? town != nil && name_to_string(&town.name) == linked.town : town == nil
+				if !matches do continue
+				army.army.title = office_id
+				taken[office_id.index] = true
+				break
+			}
+			fmt.assertf(army.army.title != {}, "pieces.txt: no free title for %s", name_to_string(&army.name))
 		}
 	}
 
 	fmt.assertf(
 		game.army_template.icon == .Army,
-		"pieces.txt: no army kind, which recruited armies start from",
+		"pieces.txt: no army kind, which mobilised armies start from",
 	)
 	success &= len(game.factions) > 1
-	game.turn = 1
-	game.player = 1
-	game_networks_build(game)
+	// Settle the derived records
+	game_step(game, {}, {}, start_events)
 	return
 }
 

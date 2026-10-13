@@ -5,44 +5,49 @@
 #       source value 0..100, default 0 = not a source), traits (Capturable changes hands when dissolved by a Captures
 #       piece, and the army inside surrenders; Can_Enter can enter an empty Can_Contain of its faction; Fortified
 #       fights sorties from its walls, as does an army inside it; Shares_Supply counts in nearby armies' supply
-#       shares; Has_Town has a town economy: population and buildings), slots (building slots of a Has_Town)
+#       shares; Has_Town has a town economy: population and buildings, and a main building, which gives it its icon,
+#       contact, body, hindrance and supply instead of its kind)
 # faction: name, culture (by id, from cultures.txt), color [r, g, b] 0..255, treasury (starting coin), food_store
-# (starting food in its central store, default 0). Factions play in file order. Then one piece row per piece:
+# (starting food in its central store, default 0), offices (its own offices, by id from offices.txt), capital (the
+# name of one of its pieces, where its own offices' armies mobilise). Factions play in file order. Then one piece row
+# per piece:
 #   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
-#   region), general (creates a character), army_type (by id, from army_types.txt; makes it an army of that type at
-#   full strength and 100% readiness, a local one at home where it starts), temperament (the general's: Bold, Steady,
-#   Cautious or Cunning; default Steady). A settlement's garrison is given instead as men + proficiency 0..100,
-#   foraging 0..100 (army skill at living off the land, default 40) and mobility (1..4, default 2)
-#   population and buildings (a Has_Town's starting population, and its buildings by id, at most its slots)
+#   region), title and of (an army's: the office whose army it is, by id from offices.txt, with an army_type; a
+#   building's office also names its town, with of. Its holder leads it, with men, at 100% readiness, a local one at
+#   home where it starts; its full strength follows its holder's wealth). A settlement's garrison is given instead as
+#   men + proficiency 0..100, foraging 0..100 (army skill at living off the land, default 40) and mobility (1..4,
+#   default 2)
+#   population, main and buildings (a Has_Town's starting population; its main building, by id, one with the Main
+#   flag, which sets its icon, slots, supply, hindrance and radii; and its other buildings, by id, at most its slots)
 
-kind = { name = town        icon = Town                                  contact = 8   contact_on = [Land]  body = 2.5  hindrance = 2.5  supply = 65  slots = 4  traits = [Capturable, Can_Contain, Fortified, Has_Town] }
-kind = { name = city        icon = City                                  contact = 9   contact_on = [Land]  body = 3    hindrance = 3    supply = 80  slots = 8  traits = [Capturable, Can_Contain, Fortified, Has_Town] }
-kind = { name = large_city  icon = Large_City                            contact = 10  contact_on = [Land]  body = 3.5  hindrance = 3.5  supply = 90  slots = 8  traits = [Capturable, Can_Contain, Fortified, Has_Town] }
+kind = { name = settlement  contact_on = [Land]  traits = [Capturable, Can_Contain, Fortified, Has_Town] }
 kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 9   contact_on = [Land]  body = 2    hindrance = 3                traits = [Captures, Can_Enter, Shares_Supply] }
 kind = { name = fleet       icon = Fleet       moves = Sea   per_turn = 80  contact = 9   contact_on = [Sea]   body = 2    hindrance = 2 }
 
 faction = {
 	name = "Rome"
 	culture = roman
+	offices = [augustus, magister_militum, praetorian_prefect, magister_officiorum]
+	capital = "Roma"
 	color = [190, 80, 70]
 	treasury = 200
-	piece = { kind = large_city  name = "Roma"        at = [342, 432]  capital_of = roma        men = 10000  proficiency = 30  population = 24  buildings = [wheat_fields, wheat_fields, wheat_fields, wheat_fields, cattle_herds, barracks, stables, praetorium] }
-	piece = { kind = large_city  name = "Mediolanum"  at = [296, 374]  capital_of = mediolanum  men = 10000  proficiency = 30  population = 30  buildings = [wheat_farm, wheat_farm, wheat_mill, cattle_herds, barracks, stables, praetorium] }
-	piece = { kind = city        name = "Ravenna"     at = [351, 400]  capital_of = ravenna     men = 6000   proficiency = 30  population = 22  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, barracks, palace, curia] }
-	piece = { kind = city        name = "Tarentum"    at = [412, 462]  capital_of = tarentum    men = 6000   proficiency = 30  population = 12  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, stables, curia] }
-	piece = { kind = town        name = "Aquileia"    at = [367, 369]  capital_of = aquileia    men = 3000   proficiency = 30  population = 11  buildings = [wheat_fields, wheat_fields, cattle_herds, curia] }
-	piece = { kind = town        name = "Neapolis"    at = [367, 449]  capital_of = neapolis    men = 3000   proficiency = 30  population = 20  buildings = [wheat_fields, wheat_fields, cattle_herds] }
-	piece = { kind = town        name = "Florentia"   at = [330, 401]  capital_of = florentia   men = 3000   proficiency = 30  population = 13  buildings = [wheat_fields, wheat_fields, cattle_herds, curia] }
-	piece = { kind = town        name = "Genua"       at = [296, 391]  capital_of = genua       men = 3000   proficiency = 30  population = 9  buildings = [wheat_fields, wheat_fields, cattle_herds, curia] }
-	piece = { kind = town        name = "Verona"      at = [327, 374]  capital_of = verona      men = 3000   proficiency = 30  population = 15  buildings = [wheat_fields, wheat_fields, cattle_herds, curia] }
-	piece = { kind = town        name = "Segusio"     at = [260, 379]  capital_of = segusio     men = 3000   proficiency = 30  population = 6  buildings = [wheat_fields, wheat_fields, cattle_herds] }
-	piece = { kind = town        name = "Rhegium"     at = [393, 506]  capital_of = rhegium     men = 3000   proficiency = 30  population = 11  buildings = [wheat_fields, wheat_fields, cattle_herds] }
-	piece = { kind = town        name = "Syracusae"   at = [385, 527]  capital_of = syracusae   men = 3000   proficiency = 30  population = 12  buildings = [wheat_fields, wheat_fields, cattle_herds] }
-	piece = { kind = town        name = "Siscia"      at = [419, 374]  capital_of = siscia      men = 3000   proficiency = 30  population = 8  buildings = [wheat_fields, wheat_fields, cattle_herds] }
-	piece = { kind = town        name = "Domavia"     at = [470, 396]  capital_of = domavia     men = 3000   proficiency = 30  population = 7  buildings = [wheat_fields, wheat_fields, cattle_herds] }
-	piece = { kind = city        name = "Salona"      at = [421, 405]  capital_of = salona      men = 6000   proficiency = 30  population = 15  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, barracks, praetorium, curia] }
-	piece = { kind = army        name = "Legio I"     at = [334, 419]  general = "Flavius Aetius"  army_type = palatini  temperament = Cunning }
-	piece = { kind = army        name = "Legio II"    at = [338, 410]  general = "Bonifacius"      army_type = comitatenses }
+	piece = { kind = settlement  name = "Roma"        at = [342, 432]  capital_of = roma        men = 10000  proficiency = 30  population = 24  buildings = [wheat_fields, wheat_fields, wheat_fields, wheat_fields, cattle_herds, barracks, stables, praetorium]  main = metropolis }
+	piece = { kind = settlement  name = "Mediolanum"  at = [296, 374]  capital_of = mediolanum  men = 10000  proficiency = 30  population = 30  buildings = [wheat_farm, wheat_farm, wheat_mill, cattle_herds, barracks, stables, praetorium]  main = metropolis }
+	piece = { kind = settlement  name = "Ravenna"     at = [351, 400]  capital_of = ravenna     men = 6000   proficiency = 30  population = 22  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, palace, curia]  main = civitas }
+	piece = { kind = settlement  name = "Tarentum"    at = [412, 462]  capital_of = tarentum    men = 6000   proficiency = 30  population = 12  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, stables, curia]  main = civitas }
+	piece = { kind = settlement  name = "Aquileia"    at = [367, 369]  capital_of = aquileia    men = 3000   proficiency = 30  population = 11  buildings = [wheat_fields, wheat_fields, cattle_herds, curia]  main = municipium }
+	piece = { kind = settlement  name = "Neapolis"    at = [367, 449]  capital_of = neapolis    men = 3000   proficiency = 30  population = 20  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Florentia"   at = [330, 401]  capital_of = florentia   men = 3000   proficiency = 30  population = 13  buildings = [wheat_fields, wheat_fields, cattle_herds, curia]  main = municipium }
+	piece = { kind = settlement  name = "Genua"       at = [296, 391]  capital_of = genua       men = 3000   proficiency = 30  population = 9  buildings = [wheat_fields, wheat_fields, cattle_herds, curia]  main = municipium }
+	piece = { kind = settlement  name = "Verona"      at = [327, 374]  capital_of = verona      men = 3000   proficiency = 30  population = 15  buildings = [wheat_fields, wheat_fields, cattle_herds, curia]  main = municipium }
+	piece = { kind = settlement  name = "Segusio"     at = [260, 379]  capital_of = segusio     men = 3000   proficiency = 30  population = 6  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Rhegium"     at = [393, 506]  capital_of = rhegium     men = 3000   proficiency = 30  population = 11  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Syracusae"   at = [385, 527]  capital_of = syracusae   men = 3000   proficiency = 30  population = 12  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Siscia"      at = [419, 374]  capital_of = siscia      men = 3000   proficiency = 30  population = 8  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Domavia"     at = [470, 396]  capital_of = domavia     men = 3000   proficiency = 30  population = 7  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
+	piece = { kind = settlement  name = "Salona"      at = [421, 405]  capital_of = salona      men = 6000   proficiency = 30  population = 15  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, praetorium, curia]  main = civitas }
+	piece = { kind = army        name = "Legio I"     at = [334, 419]  title = magister_militum  men = 5000 }
+	piece = { kind = army        name = "Legio II"    at = [338, 410]  title = tribune  of = "Roma"  men = 10000 }
 	piece = { kind = fleet   at = [353, 455] }
 	piece = { kind = fleet   at = [355, 393] }
 }
@@ -50,12 +55,14 @@ faction = {
 faction = {
 	name = "Alamanni"
 	culture = germanic
+	offices = [maior_domus, dux]
+	capital = "Augusta Vindelicorum"
 	color = [80, 120, 170]
 	treasury = 50
-	piece = { kind = large_city  name = "Augusta Vindelicorum"  at = [325, 327]  capital_of = augusta_vindelicorum  men = 10000  proficiency = 30  population = 14  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, cattle_herds, stables, barracks] }
-	piece = { kind = city        name = "Vesontio"              at = [242, 345]  capital_of = vesontio              men = 6000   proficiency = 30  population = 13  buildings = [wheat_fields, wheat_fields, cattle_herds, cattle_herds, stables] }
-	piece = { kind = city        name = "Virunum"               at = [385, 354]  capital_of = virunum               men = 6000   proficiency = 30  population = 7  buildings = [wheat_fields, wheat_fields, sheep_flocks, sheep_flocks, stables] }
-	piece = { kind = town        name = "Octodurum"             at = [253, 367]  capital_of = octodurum             men = 3000   proficiency = 30  population = 5  buildings = [wheat_fields, sheep_flocks, sheep_flocks] }
-	piece = { kind = town        name = "Iuvavum"               at = [362, 336]  capital_of = iuvavum               men = 3000   proficiency = 30  population = 5  buildings = [wheat_fields, sheep_flocks, sheep_flocks] }
-	piece = { kind = army        name = "Cuneus Gibuldi"        at = [316, 342]  general = "Gibuld"  army_type = warband  temperament = Bold }
+	piece = { kind = settlement  name = "Augusta Vindelicorum"  at = [325, 327]  capital_of = augusta_vindelicorum  men = 10000  proficiency = 30  population = 14  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds, muster_hall]  main = konigshof }
+	piece = { kind = settlement  name = "Vesontio"              at = [242, 345]  capital_of = vesontio              men = 6000   proficiency = 30  population = 13  buildings = [wheat_fields, wheat_fields, cattle_herds, cattle_herds, muster_hall]  main = burg }
+	piece = { kind = settlement  name = "Virunum"               at = [385, 354]  capital_of = virunum               men = 6000   proficiency = 30  population = 7  buildings = [wheat_fields, wheat_fields, sheep_flocks, muster_hall]  main = heim }
+	piece = { kind = settlement  name = "Octodurum"             at = [253, 367]  capital_of = octodurum             men = 3000   proficiency = 30  population = 5  buildings = [wheat_fields, sheep_flocks, sheep_flocks]  main = heim }
+	piece = { kind = settlement  name = "Iuvavum"               at = [362, 336]  capital_of = iuvavum               men = 3000   proficiency = 30  population = 5  buildings = [wheat_fields, sheep_flocks, sheep_flocks]  main = heim }
+	piece = { kind = army        name = "Comitatus Gibuldi"     at = [316, 342]  title = king  of = "Augusta Vindelicorum"  men = 4000 }
 }

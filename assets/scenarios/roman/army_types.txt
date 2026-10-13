@@ -1,24 +1,19 @@
-# The types of army towns recruit. Each has an id, a snake_case word the other files name it by, and a name. Then:
-#   scope: Local, tied to a home region, the one it is recruited in; or Global, with none
-#   men, proficiency 0..100, foraging 0..100, mobility 1..4: at full strength. Recruited, it starts weak and reinforces
-#   recruit_requires: the features its town must have, written as declared (Horses, Drill, Court)
-#   recruit_coin: paid on recruiting
-#   upkeep_coin, upkeep_labour: per turn, coin out of the treasury and labour out of its home town
+# The types of army. Each has an id, a snake_case word the other files name it by, and a name. Then:
+#   scope: Local, tied to a home region, the one it is mobilised in; or Global, with none
+#   men_per_wealth: its full strength, per coin a turn of its holder's wealth
+#   proficiency 0..100, foraging 0..100, mobility 1..4: at full strength
 #   description: what it is, shown when it is hovered
-# Every key is given: none has a default. Which cultures recruit which types is in cultures.txt.
+# Every key is given: none has a default. Titles raise them: the offices in offices.txt name their army types, and
+# their holders' wealth, their salaries and shares, sizes them.
 
 army_type = {
 	id = comitatenses
 	name = "Comitatenses"
 	scope = Global
-	men = 10000
+	men_per_wealth = 1600
 	proficiency = 60
 	foraging = 40
 	mobility = 2
-	recruit_requires = [Drill]
-	recruit_coin = 60
-	upkeep_coin = 6
-	upkeep_labour = 0
 	description = "Comitatenses: the regular troops of the late Roman field armies, named after the comitatus, the entourage of the emperor. Unlike frontier troops they were not tied to one province and moved where they were needed. Most were infantry, paid in coin and in kind."
 }
 
@@ -26,14 +21,10 @@ army_type = {
 	id = palatini
 	name = "Palatini"
 	scope = Global
-	men = 5000
+	men_per_wealth = 625
 	proficiency = 75
 	foraging = 40
 	mobility = 2
-	recruit_requires = [Court]
-	recruit_coin = 80
-	upkeep_coin = 8
-	upkeep_labour = 0
 	description = "Palatini: the senior units of the field armies, named after the palatium, the imperial palace. They first formed the army that accompanied the emperor in person, and ranked above the comitatenses in pay and prestige."
 }
 
@@ -41,14 +32,10 @@ army_type = {
 	id = limitanei
 	name = "Limitanei"
 	scope = Local
-	men = 10000
+	men_per_wealth = 1000
 	proficiency = 40
 	foraging = 40
 	mobility = 1
-	recruit_requires = [Drill]
-	recruit_coin = 0
-	upkeep_coin = 0
-	upkeep_labour = 2
 	description = "Limitanei: frontier troops, named after the limes, the fortified border of the empire. They garrisoned the forts along the frontier, were often recruited locally, and in some regions held land in return for service."
 }
 
@@ -56,14 +43,10 @@ army_type = {
 	id = vexillationes
 	name = "Vexillationes"
 	scope = Global
-	men = 2000
+	men_per_wealth = 400
 	proficiency = 60
 	foraging = 50
 	mobility = 3
-	recruit_requires = [Horses, Drill]
-	recruit_coin = 50
-	upkeep_coin = 5
-	upkeep_labour = 0
 	description = "Vexillationes: cavalry units of the late Roman army, named after the vexillum, the square banner carried by detachments. The word first meant any detachment drawn from a larger unit; by the fourth century it named the cavalry regiments of the field armies."
 }
 
@@ -71,14 +54,10 @@ army_type = {
 	id = warband
 	name = "Cuneus"
 	scope = Local
-	men = 10000
+	men_per_wealth = 10000
 	proficiency = 40
 	foraging = 60
 	mobility = 2
-	recruit_requires = []
-	recruit_coin = 0
-	upkeep_coin = 0
-	upkeep_labour = 3
 	description = "Cuneus: Latin for wedge, a word the Romans used both for barbarian units and for their massed attack formation. Germanic war bands were made up of free men who followed a chief on campaign and returned to their farms afterwards."
 }
 
@@ -86,13 +65,9 @@ army_type = {
 	id = retinue
 	name = "Ambactii"
 	scope = Global
-	men = 4000
+	men_per_wealth = 1000
 	proficiency = 65
 	foraging = 60
 	mobility = 3
-	recruit_requires = [Horses]
-	recruit_coin = 30
-	upkeep_coin = 3
-	upkeep_labour = 0
 	description = "Retinue: the sworn followers of a Germanic chief or king, described by Tacitus as the comitatus. They lived in their lord's household, fought at his side, and were rewarded with gifts, weapons and land."
 }

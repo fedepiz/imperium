@@ -2,28 +2,30 @@
 # each 0 or none when left out:
 #   population: the population it occupies
 #   food: food per turn; food_fertility: food per turn, times its region's fertility
-#   labour: labour per turn
 #   income, upkeep: coin per turn into its owner's treasury, and out of it
 #   control: radiated to its owner's towns, less their distance. A town sums what reaches it, up to 100
 #   public_order: its town's public order, as given: positive keeps order, negative stirs unrest
 #   food_store: food into its owner's central store, scaled by its town's control; negative, food taken out of it,
 #   which adds no food to the town by itself
-#   features: the local features it provides, written as declared (Horses, Drill, Court)
+#   title_salary_global, title_salary_local: coin per turn paid to its title's holder while held, out of the treasury
+#   (counted in its town's upkeep), and out of its town's local wealth
+#   title_salary_local_share: its title's weight in the share of its town's local wealth left after local salaries
+#   flags: Main, a main building: what kind of settlement its town is, how big and how governed. Built in the main
+#   slot only, and nothing else is
+#   icon, slots, supply, hindrance, contact, body: a main building's settlement, copied onto it: its map icon (Town,
+#   City, Large_City), its ordinary slots, the supply it gives, the hindrance in its zone, its contact and body radius
+#   title: the office it creates, by id from offices.txt, named after its town
 #   upgrade: the building it can be upgraded into, by id: its next level
-#   build_labour, build_turns, build_coin: building it uses labour each turn for build_turns turns, and coin at the
-#   start
+#   build_turns, build_coin: building it takes build_turns turns, and coin at the start
 #   description: what it is, shown when it is hovered
-# A negative food or labour is consumed; a town using more labour than it makes runs a deficit. Income is scaled by its
-# town's control.
+# A negative food is consumed. Income is scaled by its town's control.
 
 building = {
 	id = wheat_fields
 	name = "Wheat Fields"
 	population = 2
 	food_fertility = 2
-	labour = 1
 	upgrade = wheat_farm
-	build_labour = 2
 	build_turns = 2
 	description = "Wheat Fields: arable land sown with wheat and barley, the staple of the Mediterranean diet. Most fields were worked by smallholders and their families with an ox-drawn plough, and a field was usually left fallow every other year."
 }
@@ -33,10 +35,8 @@ building = {
 	name = "Wheat Farm"
 	population = 3
 	food_fertility = 2.5
-	labour = 1
 	food_store = 1
 	upgrade = wheat_mill
-	build_labour = 3
 	build_turns = 3
 	description = "Wheat Farm: an agricultural estate centred on a villa rustica, a working farmhouse with barns, granaries and threshing floors. By the late empire much of the work was done by coloni, tenant farmers legally bound to the land they worked."
 }
@@ -46,10 +46,8 @@ building = {
 	name = "Wheat Mill"
 	population = 4
 	food_fertility = 3
-	labour = 1
 	income = 1
 	food_store = 3
-	build_labour = 4
 	build_turns = 4
 	description = "Wheat Mill: a watermill for grinding grain into flour. Water power was known from the first century BC, and large milling complexes, such as the one at Barbegal in Gaul, could supply whole cities."
 }
@@ -60,10 +58,8 @@ building = {
 	population = 1
 	food = 1
 	food_fertility = 0.5
-	labour = 1
 	income = 0.5
 	upgrade = cattle_pastures
-	build_labour = 1
 	build_turns = 2
 	description = "Cattle Herds: oxen and cows kept on common grazing land. Oxen were the main draught animals of ancient farming, pulling ploughs and carts; cows gave milk, and beef was eaten less often than pork."
 }
@@ -74,10 +70,8 @@ building = {
 	population = 2
 	food = 2
 	food_fertility = 1
-	labour = 1
 	income = 1
 	upgrade = cattle_ranch
-	build_labour = 2
 	build_turns = 3
 	description = "Cattle Pastures: enclosed meadows and hay fields set aside for cattle. Raising cattle for sale at market, beyond a farm's own needs, was common in the wetter northern provinces and in the Po valley."
 }
@@ -88,9 +82,7 @@ building = {
 	population = 3
 	food = 3
 	food_fertility = 1.5
-	labour = 1
 	income = 1.5
-	build_labour = 3
 	build_turns = 4
 	description = "Cattle Ranch: large-scale cattle raising on the latifundia, the great estates of the senatorial aristocracy. Herds were moved between summer pastures in the hills and winter pastures in the lowlands, a practice called transhumance."
 }
@@ -100,10 +92,8 @@ building = {
 	name = "Sheep Flocks"
 	population = 1
 	food = 1
-	labour = 1
 	income = 1
 	upgrade = sheep_pens
-	build_labour = 1
 	build_turns = 1
 	description = "Sheep Flocks: sheep kept on hillsides and poor ground unsuited to the plough. They provided wool, milk for cheese and some meat, and were the main livestock of the mountain regions."
 }
@@ -113,10 +103,8 @@ building = {
 	name = "Sheep Pens"
 	population = 2
 	food = 2
-	labour = 1
 	income = 2
 	upgrade = sheep_farm
-	build_labour = 2
 	build_turns = 2
 	description = "Sheep Pens: folds and shearing sheds for larger flocks. Wool was spun and woven at home across the empire, and the surplus was sold at local markets."
 }
@@ -126,9 +114,7 @@ building = {
 	name = "Sheep Farm"
 	population = 3
 	food = 3
-	labour = 1
 	income = 3
-	build_labour = 3
 	build_turns = 3
 	description = "Sheep Farm: wool production on a commercial scale. Some regions were known for the quality of their cloth, and the state ran its own weaving workshops, the gynaecea, to clothe the army and the court."
 }
@@ -138,8 +124,8 @@ building = {
 	name = "Stables"
 	population = 1
 	upkeep = 1
-	features = [Horses]
-	build_labour = 2
+	title = praepositus
+	title_salary_global = 5
 	build_turns = 2
 	description = "Stables: horses bred and kept for riding, transport and war. Horses were costly to keep, and the state bought many for the army and for the cursus publicus, the imperial post and transport service."
 }
@@ -149,10 +135,20 @@ building = {
 	name = "Barracks"
 	population = 2
 	upkeep = 1
-	features = [Drill]
-	build_labour = 3
+	title = tribune
+	title_salary_global = 6
 	build_turns = 3
 	description = "Barracks: living quarters, armouries and exercise grounds for soldiers. Late Roman recruits trained in marching, weapon drill and fighting in formation, as described by the military writer Vegetius."
+}
+
+building = {
+	id = muster_hall
+	name = "Muster Hall"
+	population = 1
+	title = hunno
+	title_salary_local = 1
+	build_turns = 1
+	description = "Muster Hall: where the free men of a district gathered under arms when their leader called them out. A Germanic war band was raised from farmers for a campaign, and went home to its fields afterwards."
 }
 
 building = {
@@ -161,8 +157,6 @@ building = {
 	population = 3
 	upkeep = 4
 	control = 100
-	features = [Court]
-	build_labour = 4
 	build_turns = 5
 	build_coin = 20
 	description = "Palace: an imperial residence, or palatium, named after the Palatine hill in Rome where Augustus and his successors lived. In late antiquity emperors resided in cities such as Milan, Ravenna and Constantinople, and the palace housed the court and the central ministries."
@@ -174,7 +168,6 @@ building = {
 	population = 2
 	upkeep = 2
 	control = 60
-	build_labour = 3
 	build_turns = 4
 	build_coin = 10
 	public_order = 1.0
@@ -185,10 +178,8 @@ building = {
 	id = curia
 	name = "Curia"
 	population = 2
-	labour = -3
 	income = 3
 	public_order = -1
-	build_labour = 2
 	build_turns = 3
 	description = "Curia: the council of a Roman town, made up of the decurions, its wealthiest landowners. In the late empire the decurions were held personally responsible for collecting the town's taxes, and many tried to escape the duty."
 }
@@ -200,7 +191,6 @@ building = {
 	food = 3
 	food_store = -3
 	upgrade = horrea
-	build_labour = 2
 	build_turns = 2
 	description = "Granary: a storehouse for grain, raised on pillars or built with ventilated floors to keep the harvest dry and away from vermin. Towns kept reserves against bad years and to feed troops passing through."
 }
@@ -212,7 +202,6 @@ building = {
 	food = 6
 	food_store = -6
 	upgrade = annona_office
-	build_labour = 3
 	build_turns = 3
 	description = "Horrea: the great public warehouses of Roman cities, named after horreum, the Latin for granary. The largest, at Rome and its port of Ostia, held the grain shipped from Africa and Egypt to feed the capital."
 }
@@ -223,7 +212,122 @@ building = {
 	population = 3
 	food = 10
 	food_store = -10
-	build_labour = 4
 	build_turns = 4
 	description = "Annona Office: the administration of the annona, the public food supply, named after Annona, the personification of the yearly harvest. It collected grain as a tax in kind, and handed out bread to the people of Rome and Constantinople and rations to the army."
+}
+
+building = {
+	id = municipium
+	name = "Municipium"
+	population = 1
+	flags = [Main]
+	title = roman_curator
+	title_salary_local_share = 1
+	icon = Town
+	slots = 4
+	supply = 65
+	hindrance = 2.5
+	contact = 8
+	body = 2.5
+	upgrade = civitas
+	build_turns = 3
+	description = "Municipium: a self-governing Roman town whose citizens chose their own magistrates and council. By the late empire its council of decurions answered for the town's taxes, and the state sent a curator to oversee its finances."
+}
+
+building = {
+	id = civitas
+	name = "Civitas"
+	population = 2
+	public_order = 1
+	flags = [Main]
+	title = roman_governor
+	title_salary_local_share = 1
+	icon = City
+	slots = 6
+	supply = 80
+	hindrance = 3
+	contact = 9
+	body = 3
+	upgrade = metropolis
+	build_turns = 5
+	build_coin = 20
+	description = "Civitas: a city together with its surrounding territory, the basic unit of Roman local government. Its council ran the town and its lands under the eye of the provincial governor."
+}
+
+building = {
+	id = metropolis
+	name = "Metropolis"
+	population = 3
+	public_order = 1
+	flags = [Main]
+	title = roman_governor
+	title_salary_local_share = 1
+	icon = Large_City
+	slots = 8
+	supply = 90
+	hindrance = 3.5
+	contact = 10
+	body = 3.5
+	build_turns = 8
+	build_coin = 50
+	description = "Metropolis: from the Greek for mother city, the capital of a province and the seat of its governor; from the fourth century also of its leading bishop, the metropolitan. The greatest were cities of markets, baths, churches and palaces."
+}
+
+building = {
+	id = heim
+	name = "Heim"
+	population = 1
+	income = 1
+	flags = [Main]
+	title = germanic_lord
+	title_salary_local_share = 1
+	icon = Town
+	slots = 4
+	supply = 65
+	hindrance = 2.5
+	contact = 8
+	body = 2.5
+	upgrade = burg
+	build_turns = 2
+	description = "Heim: an Alamannic farming settlement, a cluster of farmsteads around the hall of a local lord. Many places in the old Alamannic lands still carry the ending -heim, or -ingen, the people of a founder."
+}
+
+building = {
+	id = burg
+	name = "Burg"
+	population = 2
+	income = 2
+	public_order = 1
+	flags = [Main]
+	title = germanic_count
+	title_salary_local_share = 1
+	icon = City
+	slots = 6
+	supply = 80
+	hindrance = 3
+	contact = 9
+	body = 3
+	build_turns = 4
+	build_coin = 10
+	description = "Burg: a fortified stronghold, often a walled hilltop such as the Runder Berg near Urach, where an Alamannic lord lived with his household and followers, and craftsmen worked for him."
+}
+
+building = {
+	id = konigshof
+	name = "Konigshof"
+	population = 3
+	income = 4
+	public_order = 1
+	flags = [Main]
+	title = king
+	title_salary_local_share = 1
+	icon = Large_City
+	slots = 8
+	supply = 90
+	hindrance = 3.5
+	contact = 10
+	body = 3.5
+	build_turns = 8
+	build_coin = 50
+	description = "Konigshof: German for king's court, from Old High German kuning, king, and hof, court or farmstead. A royal estate, in Latin curtis regia. Early medieval kings had no fixed capital: they travelled between such estates with their household and followers, living off what each produced."
 }

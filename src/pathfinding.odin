@@ -291,17 +291,13 @@ Pathfind_Source :: struct {
 	value: f32,
 }
 
-// How the sources' values meet in a cell
 Pathfind_Combine :: enum u8 {
-	// The strongest
 	Max,
-	// Added up
 	Sum,
 }
 
-// Multi-source decaying spread over a domain: out[cell] = the max, or the sum, over sources of value − decay × path
-// cost, each source counting 0 where it does not reach. Blocked cells, if given, are never reached; a source in one
-// still holds its own cell. blocked and out are MAP_CELLS long.
+// Out: out. Multi-source decaying spread: per cell, the max or sum over sources of value − decay × path cost.
+// Blocked cells are never reached; a source in one still holds its own cell
 pathfind_spread :: proc(
 	domain: Pathfind_Domain,
 	sources: []Pathfind_Source,
@@ -315,7 +311,7 @@ pathfind_spread :: proc(
 	grid := GRIDS[domain][:]
 	slice.fill(out, 0)
 
-	// Max: one Dijkstra from every source at once, into out. Sum: one per source, each into a scratch spread added to out
+	// Max: one Dijkstra from every source at once. Sum: one per source, added up
 	passes := combine == .Max ? 1 : len(sources)
 	spread := combine == .Max ? out : make([]f32, MAP_CELLS, context.temp_allocator)
 	queue := make([dynamic]Heap_Entry, context.temp_allocator)

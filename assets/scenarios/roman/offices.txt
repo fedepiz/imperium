@@ -1,0 +1,159 @@
+# The kinds of office. Each has an id, a snake_case word the other files name it by, and a name. Then:
+#   rank: its place in the order of offices; whoever is appointed rises to it
+#   influence: what holding it gives
+#   term: turns its holder serves before he can be promoted or dismissed
+#   flags: Eternal, held for life; Dismissable, its holder can be dismissed once his term is served; Feudal, held as a
+#   fief: dismissing the holder of one costs every holder of one in the faction loyalty
+#   salary: a faction office's, coin per turn paid to its holder while held, out of the treasury. A building's office
+#   is paid by its building instead
+#   army_type, optional: the army its holder commands, by id from army_types.txt. Demobilised, the title gathers its
+#   strength; mobilised, beside its town or, for a faction's own office, its capital, it takes the field
+# Factions list in pieces.txt the offices they have of their own. Buildings name in buildings.txt the office each
+# creates, which takes its town's name: Governor of Ravenna.
+
+office = {
+	id = augustus
+	name = "Augustus"
+	rank = 5
+	influence = 60
+	term = 0
+	flags = [Eternal]
+	salary = 0
+}
+
+office = {
+	id = magister_militum
+	name = "Magister Militum"
+	rank = 4
+	influence = 40
+	term = 4
+	flags = [Dismissable]
+	salary = 8
+	army_type = palatini
+}
+
+office = {
+	id = praetorian_prefect
+	name = "Praetorian Prefect"
+	rank = 4
+	influence = 40
+	term = 4
+	flags = [Dismissable]
+	salary = 0
+}
+
+office = {
+	id = magister_officiorum
+	name = "Magister Officiorum"
+	rank = 4
+	influence = 35
+	term = 4
+	flags = [Dismissable]
+	salary = 0
+}
+
+office = {
+	id = roman_governor
+	name = "Governor"
+	rank = 3
+	influence = 25
+	term = 3
+	flags = [Dismissable]
+	salary = 0
+}
+
+office = {
+	id = roman_curator
+	name = "Curator"
+	rank = 2
+	influence = 15
+	term = 2
+	flags = [Dismissable]
+	salary = 0
+}
+
+office = {
+	id = tribune
+	name = "Tribune"
+	rank = 2
+	influence = 15
+	term = 2
+	flags = [Dismissable]
+	salary = 0
+	army_type = comitatenses
+}
+
+office = {
+	id = praepositus
+	name = "Praepositus"
+	rank = 1
+	influence = 8
+	term = 2
+	flags = [Dismissable]
+	salary = 0
+	army_type = vexillationes
+}
+
+office = {
+	id = king
+	name = "King"
+	rank = 5
+	influence = 60
+	term = 0
+	flags = [Eternal]
+	salary = 0
+	army_type = retinue
+}
+
+office = {
+	id = maior_domus
+	name = "Maior Domus"
+	rank = 4
+	influence = 40
+	term = 4
+	flags = [Dismissable]
+	salary = 0
+}
+
+office = {
+	id = dux
+	name = "Dux"
+	rank = 4
+	influence = 40
+	term = 4
+	flags = [Dismissable]
+	salary = 0
+}
+
+office = {
+	id = germanic_count
+	name = "Count"
+	rank = 3
+	influence = 25
+	term = 3
+	flags = [Dismissable, Feudal]
+	salary = 0
+	army_type = retinue
+}
+
+office = {
+	id = germanic_lord
+	name = "Lord"
+	rank = 2
+	influence = 15
+	term = 2
+	flags = [Dismissable, Feudal]
+	salary = 0
+	army_type = retinue
+}
+
+office = {
+	id = hunno
+	name = "Hunno"
+	rank = 1
+	influence = 8
+	term = 2
+	flags = [Dismissable]
+	salary = 0
+	army_type = warband
+}

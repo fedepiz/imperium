@@ -1,0 +1,465 @@
+# The characters: the elites of every faction. Each has a name, the faction it belongs to, by name, and:
+#   age, in turns
+#   rank: raised to the rank of every office it is appointed to, and never lowered; at least its office's
+#   influence, and loyalty 0..100
+#   temperament (Bold, Steady, Cautious or Cunning: how it fights), background (Soldier, Official, Aristocrat, Courtier,
+#   Churchman or Federate) and disposition (Ambitious, Devout, Proud, Greedy or Loyal)
+#   office, optional: the office it holds, by id from offices.txt; a building's office also names its town, with of
+#   men, optional: with an office whose army is not in the field, the men it has gathered
+# Every key but office and of is given. An army is led by its title's holder.
+
+
+character = {
+	name = "Valentinian III"
+	faction = "Rome"
+	age = 15
+	rank = 5
+	influence = 60
+	loyalty = 100
+	temperament = Cautious
+	background = Courtier
+	disposition = Proud
+	office = augustus
+}
+
+character = {
+	name = "Flavius Aetius"
+	faction = "Rome"
+	age = 40
+	rank = 4
+	influence = 70
+	loyalty = 55
+	temperament = Cunning
+	background = Soldier
+	disposition = Ambitious
+	office = magister_militum
+}
+
+character = {
+	name = "Petronius Maximus"
+	faction = "Rome"
+	age = 34
+	rank = 4
+	influence = 45
+	loyalty = 60
+	temperament = Cunning
+	background = Aristocrat
+	disposition = Ambitious
+	office = praetorian_prefect
+}
+
+character = {
+	name = "Flavius Felix"
+	faction = "Rome"
+	age = 50
+	rank = 4
+	influence = 40
+	loyalty = 70
+	temperament = Steady
+	background = Soldier
+	disposition = Loyal
+	office = magister_officiorum
+}
+
+character = {
+	name = "Acilius Glabrio Faustus"
+	faction = "Rome"
+	age = 50
+	rank = 3
+	influence = 30
+	loyalty = 75
+	temperament = Steady
+	background = Aristocrat
+	disposition = Devout
+	office = roman_governor
+	of = "Roma"
+}
+
+character = {
+	name = "Litorius"
+	faction = "Rome"
+	age = 40
+	rank = 3
+	influence = 25
+	loyalty = 65
+	temperament = Bold
+	background = Soldier
+	disposition = Devout
+	office = roman_governor
+	of = "Mediolanum"
+}
+
+character = {
+	name = "Eparchius Avitus"
+	faction = "Rome"
+	age = 45
+	rank = 3
+	influence = 30
+	loyalty = 70
+	temperament = Steady
+	background = Aristocrat
+	disposition = Proud
+	office = roman_governor
+	of = "Ravenna"
+}
+
+character = {
+	name = "Marcellinus"
+	faction = "Rome"
+	age = 30
+	rank = 3
+	influence = 25
+	loyalty = 50
+	temperament = Cunning
+	background = Soldier
+	disposition = Ambitious
+	office = roman_governor
+	of = "Salona"
+}
+
+character = {
+	name = "Sigisvultus"
+	faction = "Rome"
+	age = 50
+	rank = 2
+	influence = 15
+	loyalty = 60
+	temperament = Cautious
+	background = Soldier
+	disposition = Loyal
+	office = roman_curator
+	of = "Aquileia"
+}
+
+character = {
+	name = "Censorius"
+	faction = "Rome"
+	age = 44
+	rank = 2
+	influence = 15
+	loyalty = 70
+	temperament = Steady
+	background = Official
+	disposition = Devout
+	office = roman_curator
+	of = "Neapolis"
+}
+
+character = {
+	name = "Carpilio"
+	faction = "Rome"
+	age = 22
+	rank = 2
+	influence = 20
+	loyalty = 60
+	temperament = Bold
+	background = Aristocrat
+	disposition = Ambitious
+	office = roman_curator
+	of = "Florentia"
+}
+
+character = {
+	name = "Iovinus"
+	faction = "Rome"
+	age = 50
+	rank = 2
+	influence = 10
+	loyalty = 75
+	temperament = Cautious
+	background = Official
+	disposition = Loyal
+	office = roman_curator
+	of = "Genua"
+}
+
+character = {
+	name = "Arcadius"
+	faction = "Rome"
+	age = 38
+	rank = 2
+	influence = 10
+	loyalty = 65
+	temperament = Steady
+	background = Churchman
+	disposition = Devout
+	office = roman_curator
+	of = "Verona"
+}
+
+character = {
+	name = "Bonifacius"
+	faction = "Rome"
+	age = 45
+	rank = 3
+	influence = 50
+	loyalty = 40
+	temperament = Steady
+	background = Soldier
+	disposition = Proud
+	office = tribune
+	of = "Roma"
+}
+
+character = {
+	name = "Merobaudes"
+	faction = "Rome"
+	age = 35
+	rank = 3
+	influence = 20
+	loyalty = 80
+	temperament = Steady
+	background = Courtier
+	disposition = Loyal
+}
+
+character = {
+	name = "Majorian"
+	faction = "Rome"
+	age = 18
+	rank = 0
+	influence = 5
+	loyalty = 85
+	temperament = Bold
+	background = Soldier
+	disposition = Ambitious
+}
+
+character = {
+	name = "Paulinus"
+	faction = "Rome"
+	age = 44
+	rank = 2
+	influence = 15
+	loyalty = 60
+	temperament = Steady
+	background = Official
+	disposition = Loyal
+	office = roman_curator
+	of = "Segusio"
+}
+
+character = {
+	name = "Caecina Decius"
+	faction = "Rome"
+	age = 38
+	rank = 2
+	influence = 15
+	loyalty = 55
+	temperament = Cautious
+	background = Aristocrat
+	disposition = Proud
+	office = roman_curator
+	of = "Rhegium"
+}
+
+character = {
+	name = "Anicius Probus"
+	faction = "Rome"
+	age = 31
+	rank = 2
+	influence = 15
+	loyalty = 50
+	temperament = Cunning
+	background = Aristocrat
+	disposition = Ambitious
+	office = roman_curator
+	of = "Syracusae"
+}
+
+character = {
+	name = "Venantius"
+	faction = "Rome"
+	age = 52
+	rank = 2
+	influence = 15
+	loyalty = 65
+	temperament = Steady
+	background = Official
+	disposition = Greedy
+	office = roman_curator
+	of = "Siscia"
+}
+
+character = {
+	name = "Severinus"
+	faction = "Rome"
+	age = 47
+	rank = 2
+	influence = 15
+	loyalty = 70
+	temperament = Cautious
+	background = Churchman
+	disposition = Devout
+	office = roman_curator
+	of = "Domavia"
+}
+
+character = {
+	name = "Ricimer"
+	faction = "Rome"
+	age = 24
+	rank = 1
+	influence = 8
+	loyalty = 60
+	temperament = Bold
+	background = Federate
+	disposition = Ambitious
+	office = praepositus
+	of = "Roma"
+	men = 2000
+}
+
+character = {
+	name = "Opilio"
+	faction = "Rome"
+	age = 35
+	rank = 1
+	influence = 8
+	loyalty = 55
+	temperament = Steady
+	background = Soldier
+	disposition = Loyal
+	office = praepositus
+	of = "Mediolanum"
+	men = 2000
+}
+
+character = {
+	name = "Gibuld"
+	faction = "Alamanni"
+	age = 40
+	rank = 5
+	influence = 60
+	loyalty = 100
+	temperament = Bold
+	background = Aristocrat
+	disposition = Ambitious
+	office = king
+	of = "Augusta Vindelicorum"
+}
+
+character = {
+	name = "Vadomar"
+	faction = "Alamanni"
+	age = 45
+	rank = 4
+	influence = 40
+	loyalty = 60
+	temperament = Cunning
+	background = Aristocrat
+	disposition = Proud
+	office = maior_domus
+}
+
+character = {
+	name = "Macrianus"
+	faction = "Alamanni"
+	age = 38
+	rank = 4
+	influence = 45
+	loyalty = 45
+	temperament = Bold
+	background = Federate
+	disposition = Ambitious
+	office = dux
+}
+
+character = {
+	name = "Hortar"
+	faction = "Alamanni"
+	age = 50
+	rank = 3
+	influence = 25
+	loyalty = 70
+	temperament = Steady
+	background = Aristocrat
+	disposition = Loyal
+}
+
+character = {
+	name = "Suomar"
+	faction = "Alamanni"
+	age = 42
+	rank = 3
+	influence = 25
+	loyalty = 75
+	temperament = Cautious
+	background = Federate
+	disposition = Devout
+	office = germanic_count
+	of = "Vesontio"
+	men = 2000
+}
+
+character = {
+	name = "Ur"
+	faction = "Alamanni"
+	age = 35
+	rank = 2
+	influence = 15
+	loyalty = 80
+	temperament = Steady
+	background = Soldier
+	disposition = Loyal
+	office = germanic_lord
+	of = "Virunum"
+	men = 1000
+}
+
+character = {
+	name = "Vestralp"
+	faction = "Alamanni"
+	age = 25
+	rank = 2
+	influence = 15
+	loyalty = 55
+	temperament = Bold
+	background = Soldier
+	disposition = Proud
+	office = germanic_lord
+	of = "Iuvavum"
+	men = 3000
+}
+
+character = {
+	name = "Gundomad"
+	faction = "Alamanni"
+	age = 20
+	rank = 0
+	influence = 5
+	loyalty = 65
+	temperament = Bold
+	background = Soldier
+	disposition = Ambitious
+}
+
+character = {
+	name = "Fraomar"
+	faction = "Alamanni"
+	age = 29
+	rank = 1
+	influence = 8
+	loyalty = 60
+	temperament = Bold
+	background = Soldier
+	disposition = Proud
+	office = hunno
+	of = "Vesontio"
+	men = 10000
+}
+
+character = {
+	name = "Hariobaud"
+	faction = "Alamanni"
+	age = 33
+	rank = 1
+	influence = 8
+	loyalty = 65
+	temperament = Cunning
+	background = Soldier
+	disposition = Greedy
+	office = hunno
+	of = "Virunum"
+	men = 10000
+}
