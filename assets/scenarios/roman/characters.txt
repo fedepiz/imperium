@@ -484,48 +484,6 @@ character = {
 }
 
 character = {
-	name = "Paulinus Pellaeus"
-	faction = "Rome"
-	age = 54
-	rank = 3
-	influence = 25
-	loyalty = 65
-	temperament = Cautious
-	background = Aristocrat
-	disposition = Devout
-	office = roman_governor
-	of = "Burdigala"
-}
-
-character = {
-	name = "Orientius"
-	faction = "Rome"
-	age = 50
-	rank = 2
-	influence = 12
-	loyalty = 70
-	temperament = Cautious
-	background = Churchman
-	disposition = Devout
-	office = roman_curator
-	of = "Elusa"
-}
-
-character = {
-	name = "Germanus"
-	faction = "Rome"
-	age = 52
-	rank = 2
-	influence = 20
-	loyalty = 65
-	temperament = Bold
-	background = Churchman
-	disposition = Devout
-	office = roman_curator
-	of = "Avaricum"
-}
-
-character = {
 	name = "Brictius"
 	faction = "Rome"
 	age = 60
@@ -1002,4 +960,84 @@ character = {
 	temperament = Bold
 	background = Soldier
 	disposition = Loyal
+}
+
+character = {
+	name = "Theodoric"
+	faction = "Visigoths"
+	age = 40
+	rank = 5
+	influence = 65
+	loyalty = 100
+	temperament = Bold
+	background = Aristocrat
+	disposition = Ambitious
+	office = king
+	of = "Burdigala"
+}
+
+character = {
+	name = "Vetericus"
+	faction = "Visigoths"
+	age = 45
+	rank = 4
+	influence = 40
+	loyalty = 60
+	temperament = Cunning
+	background = Aristocrat
+	disposition = Ambitious
+	office = maior_domus
+}
+
+character = {
+	name = "Agiulf"
+	faction = "Visigoths"
+	age = 30
+	rank = 4
+	influence = 40
+	loyalty = 65
+	temperament = Bold
+	background = Soldier
+	disposition = Proud
+	office = dux
+}
+
+character = {
+	name = "Anaolsus"
+	faction = "Visigoths"
+	age = 35
+	rank = 3
+	influence = 30
+	loyalty = 70
+	temperament = Bold
+	background = Soldier
+	disposition = Proud
+	office = germanic_lord
+	of = "Elusa"
+}
+
+character = {
+	name = "Sunieric"
+	faction = "Visigoths"
+	age = 28
+	rank = 2
+	influence = 15
+	loyalty = 60
+	temperament = Steady
+	background = Soldier
+	disposition = Ambitious
+	office = germanic_lord
+	of = "Avaricum"
+}
+
+character = {
+	name = "Thorismund"
+	faction = "Visigoths"
+	age = 12
+	rank = 0
+	influence = 5
+	loyalty = 85
+	temperament = Bold
+	background = Aristocrat
+	disposition = Proud
 }

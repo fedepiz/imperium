@@ -26,7 +26,7 @@ kind = { name = fleet       icon = Fleet       moves = Sea   per_turn = 80  cont
 
 faction = {
 	name = "Rome"
-	culture = roman
+	culture = latin
 	offices = [augustus, magister_militum, praetorian_prefect, magister_officiorum]
 	capital = "Roma"
 	color = [190, 80, 70]
@@ -55,9 +55,6 @@ faction = {
 	piece = { kind = settlement  name = "Vienna"             at = [238, 389]  capital_of = vienna              men = 3000  proficiency = 30  population = 13  buildings = [wheat_fields, wheat_fields, cattle_herds, curia]  main = municipium }
 	piece = { kind = settlement  name = "Aquae Sextiae"      at = [248, 408]  capital_of = aquae_sextiae       men = 3000  proficiency = 30  population = 8  buildings = [wheat_fields, wheat_fields, sheep_flocks, curia]  main = municipium }
 	piece = { kind = settlement  name = "Narbo"              at = [213, 415]  capital_of = narbo               men = 6000  proficiency = 30  population = 12  buildings = [wheat_fields, wheat_fields, wheat_fields, sheep_flocks, curia]  main = civitas }
-	piece = { kind = settlement  name = "Burdigala"          at = [162, 384]  capital_of = burdigala           men = 6000  proficiency = 30  population = 14  buildings = [wheat_fields, wheat_fields, cattle_herds, curia]  main = civitas }
-	piece = { kind = settlement  name = "Elusa"              at = [172, 402]  capital_of = elusa               men = 3000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = municipium }
-	piece = { kind = settlement  name = "Avaricum"           at = [205, 344]  capital_of = avaricum            men = 3000  proficiency = 30  population = 9  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
 	piece = { kind = settlement  name = "Turonum"            at = [180, 338]  capital_of = turonum             men = 3000  proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
 	piece = { kind = settlement  name = "Rotomagus"          at = [186, 300]  capital_of = rotomagus           men = 3000  proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
 	piece = { kind = army        name = "Legio I"     at = [334, 419]  title = magister_militum  men = 5000 }
@@ -68,7 +65,7 @@ faction = {
 
 faction = {
 	name = "Alamanni"
-	culture = germanic
+	culture = germanic_west
 	offices = [maior_domus, dux]
 	capital = "Augusta Vindelicorum"
 	color = [80, 120, 170]
@@ -82,7 +79,7 @@ faction = {
 
 faction = {
 	name = "Burgundians"
-	culture = germanic
+	culture = germanic_east
 	offices = [maior_domus, dux]
 	capital = "Argentoratum"
 	color = [150, 85, 160]
@@ -93,7 +90,7 @@ faction = {
 
 faction = {
 	name = "Franks"
-	culture = germanic
+	culture = germanic_west
 	offices = [maior_domus, dux]
 	capital = "Flevum"
 	color = [70, 150, 90]
@@ -104,7 +101,7 @@ faction = {
 
 faction = {
 	name = "Saxons"
-	culture = germanic
+	culture = anglo_saxon
 	offices = [maior_domus, dux]
 	capital = "Tulifurdum"
 	color = [200, 170, 70]
@@ -115,7 +112,7 @@ faction = {
 
 faction = {
 	name = "Angles"
-	culture = germanic
+	culture = anglo_saxon
 	offices = [maior_domus, dux]
 	capital = "Angulus"
 	color = [150, 110, 70]
@@ -126,7 +123,7 @@ faction = {
 
 faction = {
 	name = "Thuringians"
-	culture = germanic
+	culture = germanic_west
 	offices = [maior_domus, dux]
 	capital = "Lupfurdum"
 	color = [215, 120, 50]
@@ -137,11 +134,25 @@ faction = {
 
 faction = {
 	name = "Langobards"
-	culture = germanic
+	culture = germanic_west
 	offices = [maior_domus, dux]
 	capital = "Aregelia"
 	color = [90, 170, 180]
 	treasury = 30
 	piece = { kind = settlement  name = "Aregelia"              at = [346, 266]  capital_of = aregelia  men = 6000  proficiency = 30  population = 9  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = konigsburg }
 	piece = { kind = army        name = "Comitatus Agilmundi"   at = [334, 262]  title = king  of = "Aregelia"  men = 2500 }
+}
+
+faction = {
+	name = "Visigoths"
+	culture = germanic_east
+	offices = [maior_domus, dux]
+	capital = "Burdigala"
+	color = [170, 200, 80]
+	treasury = 60
+	piece = { kind = settlement  name = "Burdigala"             at = [162, 384]  capital_of = burdigala  men = 6000  proficiency = 30  population = 14  buildings = [wheat_fields, wheat_fields, cattle_herds, sheep_flocks]  main = konigsburg }
+	piece = { kind = settlement  name = "Elusa"                 at = [172, 402]  capital_of = elusa      men = 3000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = heim }
+	piece = { kind = settlement  name = "Avaricum"              at = [205, 344]  capital_of = avaricum   men = 3000  proficiency = 30  population = 9  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = heim }
+	piece = { kind = army        name = "Comitatus Theodorici"  at = [167, 381]  title = king  of = "Burdigala"  men = 5000 }
+	piece = { kind = army        name = "Comitatus Anaolsi"     at = [182, 405]  title = germanic_lord  of = "Elusa"  men = 3000 }
 }

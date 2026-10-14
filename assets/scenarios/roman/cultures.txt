@@ -3,8 +3,8 @@
 # names its new characters are given: an unused one at random, or once all are used, one with a number.
 
 culture = {
-	id = roman
-	name = "Roman"
+	id = latin
+	name = "Latin"
 	look = Roman
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
@@ -35,30 +35,78 @@ culture = {
 }
 
 culture = {
-	id = germanic
-	name = "Germanic"
+	id = anglo_saxon
+	name = "Anglo-Saxon"
 	look = Germanic
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
 		sheep_farm, muster_hall, heim, burg, konigsburg, konigshof,
 	]
 	names = [
-		"Chnodomar", "Serapio", "Mederich", "Agenarich", "Rando", "Vithicab", "Priarius", "Butilin", "Leuthari", "Urius",
-		"Ursicin", "Gamo", "Crocus", "Agilo", "Scudilo", "Bitherid", "Hortari", "Mallobaud", "Richomer", "Teutomer",
-		"Charietto", "Nevitta", "Dagalaif", "Bauto", "Arbogast", "Marcomer", "Sunno", "Genobaud", "Ascaric", "Merogais",
-		"Alaric", "Ataulf", "Sigeric", "Wallia", "Theoderic", "Thorismund", "Euric", "Gundobad", "Gundioc", "Godegisel",
-		"Godomar", "Chilperic", "Clodio", "Childeric", "Sigibert", "Ragnachar", "Chararic", "Fridigern", "Gundahar",
-		"Winithar", "Marobod", "Adalric", "Ansgisel", "Berthari", "Chlodomar", "Eburwin", "Hariwulf", "Hildebald",
-		"Hrodgar", "Leudomar", "Raginfrid", "Ricwin", "Sigiwald", "Theudebert", "Theudomar", "Wolfhari", "Agilmund",
-		"Ansbald", "Chariobaud", "Eburhard", "Fridomar", "Gundomar", "Hildemar", "Hrodomar", "Leudegisel", "Ragnomar",
-		"Sigismar", "Theudegisel", "Wiliarit", "Adalgis", "Amalric", "Ansovald", "Audomar", "Authari", "Baudegisel",
-		"Berowulf", "Bertefrid", "Chlodobert", "Chramnus", "Dagobert", "Ebroin", "Ermanaric", "Frotmund", "Gairovald",
-		"Gislahar", "Godila", "Grimoald", "Gundovald", "Gunthar", "Hariulf", "Heribald", "Hildegar", "Hrodulf", "Hunald",
-		"Ingomar", "Leudast", "Liutfrid", "Magnachar", "Marcovech", "Nantwin", "Odomar", "Ostrogotha", "Radagais",
-		"Ragnovald", "Ricbert", "Rothari", "Sigimund", "Sigivuld", "Sunnegisel", "Theudowin", "Thrasaric", "Ulfila",
-		"Uraias", "Waldo", "Walaric", "Wandil", "Widigis", "Wilimer", "Winigis", "Witigis", "Wulfila", "Adalhard",
-		"Agiulf", "Alboin", "Ansegisel", "Arnulf", "Audovald", "Bertoald", "Chlothar", "Cunimund", "Eberwin",
-		"Faroald", "Fredegar", "Gisulf", "Haimo", "Hildeprand", "Hrodbert", "Ibba", "Liutprand", "Malaric",
-		"Mummolin", "Odo", "Ratchis", "Rodwald", "Sisebut", "Thrasamund", "Wacho",
+		"Hengest", "Horsa", "Aesc", "Octa", "Eormenric", "Aethelberht", "Eadbald", "Eorcenberht", "Ecgberht",
+		"Hlothhere", "Eadric", "Wihtred", "Aelle", "Cissa", "Cymen", "Wlencing", "Cerdic", "Cynric", "Ceawlin", "Ceol",
+		"Ceolwulf", "Cuthwulf", "Cutha", "Cynegils", "Cwichelm", "Cenwalh", "Aescwine", "Centwine", "Ceadwalla", "Ine",
+		"Ida", "Glappa", "Adda", "Aethelric", "Frithuwald", "Hussa", "Aethelfrith", "Eadwine", "Osweald", "Oswiu",
+		"Ecgfrith", "Aldfrith", "Osred", "Cynewald", "Creoda", "Pybba", "Penda", "Eowa", "Wulfhere", "Aethelred",
+		"Coenred", "Ceolred", "Aethelbald", "Offa", "Wuffa", "Wehha", "Tytila", "Raedwald", "Eorpwald", "Sigeberht",
+		"Ecgric", "Aethelhere", "Aethelwold", "Ealdwulf", "Aelfwald", "Sledd", "Saeberht", "Sexred", "Swithhelm",
+		"Sighere", "Sebbi", "Wihtlaeg", "Wermund", "Angeltheow", "Hrothgar", "Beowulf", "Wiglaf", "Hygelac",
+		"Ongentheow", "Eadgils", "Ohthere", "Finn", "Hnaef", "Scyld", "Healfdene", "Heorogar", "Hrothulf", "Unferth",
+		"Wulfgar", "Ecgtheow", "Weohstan", "Byrhtnoth", "Leofric", "Godric", "Wulfstan", "Aelfric", "Aethelstan",
+		"Eadmund", "Eadweard", "Aelfred", "Eadgar", "Aethelweard", "Beorhtric", "Cuthred", "Sigered", "Ealhmund",
+		"Cyneheard", "Cynewulf", "Oswine", "Aethelwalh", "Eadberht", "Hereward", "Wulfric", "Ordgar", "Brihtwold",
+		"Eadwulf", "Cuthbert", "Wilfrid", "Aldhelm", "Beorhtwulf", "Heahberht", "Wigheard",
+	]
+}
+
+culture = {
+	id = germanic_east
+	name = "East Germanic"
+	look = Germanic
+	buildings = [
+		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
+		sheep_farm, muster_hall, heim, burg, konigsburg, konigshof,
+	]
+	names = [
+		"Alaric", "Ataulf", "Sigeric", "Wallia", "Theoderic", "Thorismund", "Euric", "Gundobad", "Gundioc",
+		"Godegisel", "Godomar", "Chilperic", "Fridigern", "Gundahar", "Winithar", "Ermanaric", "Ostrogotha",
+		"Radagais", "Thrasaric", "Ulfila", "Uraias", "Wandil", "Widigis", "Witigis", "Wulfila", "Amalric", "Gislahar",
+		"Sigimund", "Thrasamund", "Sisebut", "Malaric", "Cunimund", "Godila", "Ibba", "Gundomar", "Theudegisel",
+		"Sigivuld", "Agiulf", "Athanaric", "Alatheus", "Saphrax", "Videric", "Valamir", "Thiudimir", "Vidimir",
+		"Hunimund", "Beremud", "Vetericus", "Anaolsus", "Sunieric", "Theudis", "Agila", "Athanagild", "Liuva",
+		"Leovigild", "Reccared", "Hermenegild", "Gesalic", "Tulga", "Chindasuinth", "Recceswinth", "Wamba", "Ervig",
+		"Egica", "Witiza", "Roderic", "Sisenand", "Chintila", "Witteric", "Totila", "Teia", "Ildibad", "Eraric",
+		"Athalaric", "Theodahad", "Gelimer", "Hilderic", "Gunthamund", "Gaiseric", "Huneric", "Godigisel", "Ardaric",
+		"Fastida", "Fravitta", "Gainas", "Tribigild", "Sarus", "Sigesar", "Ansila", "Hildigis", "Arimir", "Gibimer",
+		"Aoric", "Rothesteus",
+	]
+}
+
+culture = {
+	id = germanic_west
+	name = "West Germanic"
+	look = Germanic
+	buildings = [
+		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
+		sheep_farm, muster_hall, heim, burg, konigsburg, konigshof,
+	]
+	names = [
+		"Chnodomar", "Serapio", "Mederich", "Agenarich", "Rando", "Vithicab", "Priarius", "Butilin", "Leuthari",
+		"Urius", "Ursicin", "Gamo", "Crocus", "Agilo", "Scudilo", "Bitherid", "Hortari", "Mallobaud", "Richomer",
+		"Teutomer", "Charietto", "Nevitta", "Dagalaif", "Bauto", "Arbogast", "Marcomer", "Sunno", "Genobaud",
+		"Ascaric", "Merogais", "Clodio", "Childeric", "Sigibert", "Ragnachar", "Chararic", "Marobod", "Adalric",
+		"Ansgisel", "Berthari", "Chlodomar", "Eburwin", "Hariwulf", "Hildebald", "Leudomar", "Raginfrid", "Ricwin",
+		"Sigiwald", "Theudebert", "Theudomar", "Wolfhari", "Agilmund", "Ansbald", "Chariobaud", "Eburhard", "Fridomar",
+		"Hildemar", "Hrodomar", "Leudegisel", "Ragnomar", "Sigismar", "Wiliarit", "Adalgis", "Ansovald", "Audomar",
+		"Authari", "Baudegisel", "Berowulf", "Bertefrid", "Chlodobert", "Chramnus", "Dagobert", "Ebroin", "Frotmund",
+		"Gairovald", "Grimoald", "Gundovald", "Gunthar", "Hariulf", "Heribald", "Hildegar", "Hrodulf", "Hunald",
+		"Ingomar", "Leudast", "Liutfrid", "Magnachar", "Marcovech", "Nantwin", "Odomar", "Ragnovald", "Ricbert",
+		"Rothari", "Sunnegisel", "Theudowin", "Waldo", "Walaric", "Wilimer", "Winigis", "Adalhard", "Alboin",
+		"Ansegisel", "Arnulf", "Audovald", "Bertoald", "Chlothar", "Eberwin", "Faroald", "Fredegar", "Gisulf", "Haimo",
+		"Hildeprand", "Hrodbert", "Liutprand", "Mummolin", "Odo", "Ratchis", "Rodwald", "Wacho", "Chlodovech",
+		"Theuderic", "Chlodomer", "Childebert", "Charibert", "Guntram", "Merovech", "Bisin", "Herminafrid", "Baderic",
+		"Berthachar", "Amalafrid", "Lamissio", "Lethuc", "Aldihoc", "Godehoc", "Claffo", "Tato", "Audoin", "Cleph",
+		"Agilulf", "Adaloald", "Arioald", "Aripert", "Perctarit", "Godepert", "Garibald", "Cunincpert", "Ansprand",
+		"Aistulf", "Arechis",
 	]
 }
