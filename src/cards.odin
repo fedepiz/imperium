@@ -70,9 +70,13 @@ COURT_TRAIT_EM :: 6
 @(private = "file")
 LABEL_EM :: 6
 @(private = "file")
-FIELD_VALUE_EM :: 7
+FIELD_VALUE_EM :: 11
 @(private = "file")
-STAT_VALUE_EM :: 7
+STAT_VALUE_EM :: CHARACTER_VALUE_EM
+@(private = "file")
+COLUMN_SLACK_EM :: 1
+@(private = "file")
+LIST_EM :: 8
 @(private = "file")
 VALUE_EMS :: [2]f32{FIELD_VALUE_EM, STAT_VALUE_EM}
 // Wide enough for an army's name
@@ -351,7 +355,8 @@ card_ui :: proc(
 			columns := [2][]Card_Field{card.fields[:], card.stats[:]}
 			for fields, column in columns {
 				if len(fields) == 0 do continue
-				if ui_column({width = ui_fit(), height = ui_fit(), gap = FIELD_GAP}) {
+				width := ui_em(LABEL_EM + value_ems[column] + COLUMN_SLACK_EM)
+				if ui_column({width = width, height = ui_fit(), gap = FIELD_GAP}) {
 					for &field, f in fields {
 						// Keyed by its breakdown for hovering; a button needs a key either way
 						key: string
@@ -367,6 +372,24 @@ card_ui :: proc(
 							style.disabled = !button.enabled
 							if ui_button(key, style).pressed do take(button.click, &asks, order, menu, court_view)
 							if id, opens := button.click.(Card_Menu_Id); opens do anchors[id] = key
+						}
+					}
+				}
+			}
+
+			if .Army in card.tabs && card.tab == .Army {
+				lists := [2]struct {
+					title:   string,
+					entries: []Card_Part,
+				}{{"Status", card.statuses[:]}, {"Traits", card.traits[:]}}
+				if ui_column({width = ui_em(LIST_EM), height = ui_grow(), gap = FIELD_GAP}) {
+					for list in lists {
+						if ui_column({width = ui_grow(), height = ui_grow(), gap = FIELD_GAP}) {
+							ui_label(list.title, {text_color = colors.faded_ink})
+							if len(list.entries) == 0 do ui_label("None")
+							for entry in list.entries {
+								ui_label_text({breakdown_run(entry.text, entry.breakdown)}, {height = ui_px(line_height)})
+							}
 						}
 					}
 				}

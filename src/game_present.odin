@@ -227,6 +227,8 @@ Card :: struct {
 	breakdowns: [dynamic; CARD_BREAKDOWNS_MAX]Card_Breakdown,
 	fields:     [dynamic; CARD_FIELDS_MAX]Card_Field,
 	stats:      [dynamic; CARD_FIELDS_MAX]Card_Field,
+	statuses:   [dynamic; len(Army_Status) + 2]Card_Part,
+	traits:     [dynamic; ARMY_TRAITS_MAX]Card_Part,
 	tiles:      [dynamic; CARD_TILES_MAX]Card_Tile,
 	menus:      [dynamic; CARD_MENUS_MAX]Card_Menu,
 	// Under its fields, and at its bottom
@@ -808,38 +810,6 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				append(&card.buttons, Card_Action{"Demobilise", Game_Order(Title_Order{army.title, .Demobilise}), true})
 			}
 		}
-		statuses := make([dynamic]string, context.temp_allocator)
-		if is_army do for status in army.statuses do append(&statuses, fmt.tprint(status))
-		if piece.inside != {} do append(&statuses, "Garrisoning")
-		if piece.contains != {} do append(&statuses, "Garrisoned")
-		status := "None"
-		if len(statuses) > 0 do status = strings.join(statuses[:], ", ", context.temp_allocator)
-		append(&card.fields, Card_Field{label = "Status", value = status})
-		if is_army {
-			names := make([dynamic]string, context.temp_allocator)
-			descriptions := make([dynamic]string, context.temp_allocator)
-			described: Card_Breakdown
-			for trait in game.army_types[army.type].traits {
-				each := &game.army_traits[trait]
-				modifiers := make([dynamic]string, context.temp_allocator)
-				if each.modifiers.agility != 0 do append(&modifiers, fmt.tprintf("Agility %+.0f", each.modifiers.agility))
-				if each.modifiers.movement != 0 do append(&modifiers, fmt.tprintf("Movement %+.0f", each.modifiers.movement))
-				if each.modifiers.readiness_recovery != 0 {
-					append(&modifiers, fmt.tprintf("Readiness recovery %+.0f", each.modifiers.readiness_recovery))
-				}
-				for prevented in each.modifiers.prevent_status do append(&modifiers, fmt.tprintf("Never %v", prevented))
-				append(&names, name_to_string(&each.name))
-				append(&descriptions, description_to_string(&each.description))
-				append(&described.terms, Card_Term{name_to_string(&each.name), strings.join(modifiers[:], ", ", context.temp_allocator)})
-			}
-			traits := Card_Field{label = "Traits", value = "None"}
-			if len(names) > 0 {
-				traits.value = strings.join(names[:], ", ", context.temp_allocator)
-				described.description = strings.join(descriptions[:], " ", context.temp_allocator)
-				if append(&card.breakdowns, described) > 0 do traits.breakdown = len(card.breakdowns) - 1
-			}
-			append(&card.fields, traits)
-		}
 		if piece.domain != nil {
 			left := piece.this_turn.movement_left
 			per_turn := piece.movement_per_turn
@@ -1075,6 +1045,28 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					},
 				)
 				append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.supply_source)})
+
+				for each in army.statuses do append(&card.statuses, Card_Part{text = fmt.tprint(each)})
+				if piece.inside != {} do append(&card.statuses, Card_Part{text = "Garrisoning"})
+				if piece.contains != {} do append(&card.statuses, Card_Part{text = "Garrisoned"})
+				for trait in game.army_types[army.type].traits {
+					each := &game.army_traits[trait]
+					modifiers := each.modifiers
+					described := Card_Breakdown {
+						description = description_to_string(&each.description),
+					}
+					if modifiers.agility != 0 do append(&described.terms, Card_Term{"Agility", fmt.tprintf("%+.0f", modifiers.agility)})
+					if modifiers.movement != 0 do append(&described.terms, Card_Term{"Movement", fmt.tprintf("%+.0f", modifiers.movement)})
+					if modifiers.readiness_recovery != 0 {
+						append(&described.terms, Card_Term{"Readiness recovery", fmt.tprintf("%+.0f", modifiers.readiness_recovery)})
+					}
+					for prevented in modifiers.prevent_status do append(&described.terms, Card_Term{"Prevents", fmt.tprint(prevented)})
+					part := Card_Part {
+						text = name_to_string(&each.name),
+					}
+					if append(&card.breakdowns, described) > 0 do part.breakdown = len(card.breakdowns) - 1
+					append(&card.traits, part)
+				}
 			}
 		}
 	}
