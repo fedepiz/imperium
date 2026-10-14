@@ -1,6 +1,16 @@
-# The cultures. Each has an id, a snake_case word the other files name it by, a name, and a look: the art its pawns
-# and medallions are drawn with, written as declared (Roman, Germanic). Then the buildings it can build, by id, and the
-# names its new characters are given: an unused one at random, or once all are used, one with a number.
+
+# The cultures. Every key, in order; a culture gives those marked required, and the others only when it differs from
+# their default:
+#
+# culture = {
+#   id = example                             required. A snake_case word the other files name it by
+#   name = "Example"                         required
+#   look = Roman                             required. The art its pawns and medallions are drawn with: Roman,
+#                                            Germanic
+#   buildings = [example_building]          required. The buildings it can build, by id
+#   names = ["Example"]                      required. Its new characters' names: an unused one at random, or once
+#                                            all are used, one with a number
+# }
 
 culture = {
 	id = latin
@@ -40,7 +50,7 @@ culture = {
 	look = Germanic
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, muster_hall, heim, burg,
+		sheep_farm, ham, tun,
 	]
 	names = [
 		"Hengest", "Horsa", "Aesc", "Octa", "Eormenric", "Aethelberht", "Eadbald", "Eorcenberht", "Ecgberht",
@@ -65,7 +75,7 @@ culture = {
 	look = Germanic
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, muster_hall, heim, burg,
+		sheep_farm, muster_hall, haims, baurgs, stud_farm,
 	]
 	names = [
 		"Alaric", "Ataulf", "Sigeric", "Wallia", "Theoderic", "Thorismund", "Euric", "Gundobad", "Gundioc",

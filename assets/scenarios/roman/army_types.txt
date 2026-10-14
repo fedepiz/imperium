@@ -56,7 +56,7 @@ army_type = {
 }
 
 army_type = {
-	id = warband
+	id = cuneus
 	name = "Cuneus"
 	scope = Local
 	men_per_wealth = 10000
@@ -66,12 +66,55 @@ army_type = {
 }
 
 army_type = {
-	id = retinue
+	id = ambactii
 	name = "Ambactii"
 	scope = Global
 	men_per_wealth = 1000
 	proficiency = 65
 	foraging = 60
-	agility = 3
 	description = "Retinue: the sworn followers of a Germanic chief or king, described by Tacitus as the comitatus. They lived in their lord's household, fought at his side, and were rewarded with gifts, weapons and land."
+}
+
+army_type = {
+	id = buccellarii
+	name = "Buccellarii"
+	scope = Global
+	men_per_wealth = 1000
+	proficiency = 65
+	foraging = 60
+	traits = [mounted]
+	description = "Buccellarii: armed retainers kept by Roman generals, and by Gothic kings and nobles, named after the buccellatum, the hard biscuit of their rations. The Visigothic laws of Euric deal with them. Among the Goths they fought on horseback."
+}
+
+army_type = {
+	id = equites
+	name = "Equites"
+	scope = Global
+	men_per_wealth = 400
+	proficiency = 60
+	foraging = 50
+	traits = [mounted]
+	description = "Equites: Latin for horsemen. The Goths had lived on the steppe north of the Black Sea beside Alans and Sarmatians, and it was their horsemen, with Alan allies, who broke the Roman army at Adrianople in 378."
+}
+
+army_type = {
+	id = bellatores_iuniores
+	name = "Bellatores Iuniores"
+	scope = Local
+	men_per_wealth = 8000
+	proficiency = 45
+	foraging = 60
+	traits = [marines]
+	description = "Bellatores Iuniores: the young warriors. Old English poems split a lord's war band into the geoguth, youths still winning a name, and the duguth, its tried men. The Saxons and Angles who raided the coasts of Britain and Gaul came by ship."
+}
+
+army_type = {
+	id = bellatores_seniores
+	name = "Bellatores Seniores"
+	scope = Global
+	men_per_wealth = 1000
+	proficiency = 65
+	foraging = 60
+	traits = [marines]
+	description = "Bellatores Seniores: the tried warriors, the duguth of a lord's hall, who had earned his gifts of rings and land in his wars. They fought on foot, in the shield wall."
 }

@@ -1,13 +1,22 @@
-# The characters: the elites of every faction. Each has a name, the faction it belongs to, by name, and:
-#   age, in turns
-#   rank: raised to the rank of every office it is appointed to, and never lowered; at least its office's
-#   influence, and loyalty 0..100
-#   temperament (Bold, Steady, Cautious or Cunning: how it fights), background (Soldier, Official, Aristocrat, Courtier,
-#   Churchman or Federate) and disposition (Ambitious, Devout, Proud, Greedy or Loyal)
-#   office, optional: the office it holds, by id from offices.txt; a building's office also names its town, with of
-#   men, optional: with an office whose army is not in the field, the men it has gathered
-# Every key but office and of is given. An army is led by its title's holder.
 
+# The characters: the elites of every faction. An army is led by its title's holder. Every key, in order; a character
+# gives those marked required, and the others only when it differs from their default:
+#
+# character = {
+#   name = "Example"          required
+#   faction = "Rome"          required. By name
+#   age = 40                  required. In turns
+#   rank = 3                  required. Raised to the rank of every office it is appointed to, never lowered; at
+#                             least its office's
+#   influence = 25            required
+#   loyalty = 60              required. 0..100
+#   temperament = Steady      required. How it fights: Bold, Steady, Cautious, Cunning
+#   background = Soldier      required. Soldier, Official, Aristocrat, Courtier, Churchman, Federate
+#   disposition = Loyal       required. Ambitious, Devout, Proud, Greedy, Loyal
+#   office = example_office   default none. The office it holds, by id from offices.txt
+#   of = "Roma"               default none. With a building's office, its town
+#   men = 2000                default none. With an office whose army is not in the field, the men it has gathered
+# }
 
 character = {
 	name = "Valentinian III"
@@ -661,7 +670,7 @@ character = {
 	temperament = Bold
 	background = Aristocrat
 	disposition = Proud
-	office = king
+	office = east_germanic_king
 }
 
 character = {
@@ -700,7 +709,7 @@ character = {
 	temperament = Cunning
 	background = Aristocrat
 	disposition = Ambitious
-	office = germanic_count
+	office = east_germanic_count
 	of = "Argentoratum"
 }
 
@@ -761,39 +770,38 @@ character = {
 	name = "Hengist"
 	faction = "Saxons"
 	age = 35
-	rank = 5
+	rank = 3
 	influence = 55
 	loyalty = 100
 	temperament = Cunning
 	background = Federate
 	disposition = Ambitious
-	office = king
+	office = ealdorman
+	of = "Tulifurdum"
 }
 
 character = {
 	name = "Wihtgils"
 	faction = "Saxons"
 	age = 58
-	rank = 4
+	rank = 3
 	influence = 40
 	loyalty = 75
 	temperament = Cautious
 	background = Aristocrat
 	disposition = Devout
-	office = maior_domus
 }
 
 character = {
 	name = "Horsa"
 	faction = "Saxons"
 	age = 32
-	rank = 4
+	rank = 3
 	influence = 40
 	loyalty = 70
 	temperament = Bold
 	background = Soldier
 	disposition = Proud
-	office = dux
 }
 
 character = {
@@ -818,47 +826,44 @@ character = {
 	temperament = Bold
 	background = Soldier
 	disposition = Ambitious
-	office = germanic_count
-	of = "Tulifurdum"
 }
 
 character = {
 	name = "Eomer"
 	faction = "Angles"
 	age = 45
-	rank = 5
+	rank = 3
 	influence = 55
 	loyalty = 100
 	temperament = Steady
 	background = Aristocrat
 	disposition = Proud
-	office = king
+	office = ealdorman
+	of = "Angulus"
 }
 
 character = {
 	name = "Wiliarit"
 	faction = "Angles"
 	age = 50
-	rank = 4
+	rank = 3
 	influence = 40
 	loyalty = 70
 	temperament = Cautious
 	background = Aristocrat
 	disposition = Loyal
-	office = maior_domus
 }
 
 character = {
 	name = "Icel"
 	faction = "Angles"
 	age = 25
-	rank = 4
+	rank = 3
 	influence = 35
 	loyalty = 60
 	temperament = Bold
 	background = Soldier
 	disposition = Ambitious
-	office = dux
 }
 
 character = {
@@ -883,8 +888,6 @@ character = {
 	temperament = Steady
 	background = Aristocrat
 	disposition = Loyal
-	office = germanic_count
-	of = "Angulus"
 }
 
 character = {
@@ -1003,7 +1006,7 @@ character = {
 	temperament = Bold
 	background = Aristocrat
 	disposition = Ambitious
-	office = king
+	office = east_germanic_king
 }
 
 character = {
@@ -1042,7 +1045,7 @@ character = {
 	temperament = Bold
 	background = Soldier
 	disposition = Proud
-	office = germanic_lord
+	office = east_germanic_lord
 	of = "Elusa"
 }
 
@@ -1056,7 +1059,7 @@ character = {
 	temperament = Steady
 	background = Soldier
 	disposition = Ambitious
-	office = germanic_lord
+	office = east_germanic_lord
 	of = "Avaricum"
 }
 
@@ -1082,6 +1085,6 @@ character = {
 	temperament = Cautious
 	background = Aristocrat
 	disposition = Proud
-	office = germanic_count
+	office = east_germanic_count
 	of = "Burdigala"
 }

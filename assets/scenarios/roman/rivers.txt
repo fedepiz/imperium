@@ -1,5 +1,11 @@
-# The rivers: each way the id its cells are marked with, and the cells it runs through, [x, y] from the top left
-# corner of the world. Ways that meet share the cell they meet at.
+
+# The rivers. Ways that meet share the cell they meet at. Every key, in order, all required:
+#
+# way = {
+#   id = 1                      The id its cells are marked with
+#   points = [[242, 345], ...]  The cells it runs through, [x, y] from the top left of the world
+# }
+
 way = {
 	id = 1
 	points = [

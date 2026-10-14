@@ -774,7 +774,7 @@ game_load :: proc(
 		append(&game.beaches, Beach{})
 		for row in root.children {
 			if row.key != "beach" do continue
-			row_check(row, Beach, path, {"at"})
+			row_check(row, Beach, path, {"at"}, {"id", "at"})
 			beach := Beach {
 				id  = name_from_string(tbl.get_text(row, "id")),
 				pos = tbl.get_num_array(row, "at", 2) + 0.5,
@@ -785,7 +785,7 @@ game_load :: proc(
 		append(&game.sea_lanes, Sea_Lane{})
 		for row in root.children {
 			if row.key != "lane" do continue
-			row_check(row, Sea_Lane, path, {"points"})
+			row_check(row, Sea_Lane, path, {"points"}, {"from", "to"})
 			lane: Sea_Lane
 			ends := [2]string{tbl.get_text(row, "from"), tbl.get_text(row, "to")}
 			ids := [2]^Beach_Id{&lane.from, &lane.to}
@@ -888,11 +888,10 @@ game_load :: proc(
 		append(&game.army_traits, Army_Trait{})
 		for row in root.children {
 			assert(row.key == "army_trait")
-			row_check(row, Army_Modifiers, path, {"id", "name", "description"})
-			id, has_id := tbl.get_text(row, "id")
-			name, has_name := tbl.get_text(row, "name")
-			description, has_description := tbl.get_text(row, "description")
-			fmt.assertf(has_id && has_name && has_description, "%s: a trait lacks its id, name or description", path)
+			row_check(row, Army_Modifiers, path, {"id", "name", "description"}, {"id", "name", "description"})
+			id := tbl.get_text(row, "id")
+			name := tbl.get_text(row, "name")
+			description := tbl.get_text(row, "description")
 
 			trait := Army_Trait {
 				id = name_from_string(id),
@@ -921,7 +920,7 @@ game_load :: proc(
 		append(&game.army_types, Army_Type{foraging = ARMY_FORAGING_DEFAULT, agility = ARMY_AGILITY_DEFAULT})
 		for row in root.children {
 			assert(row.key == "army_type")
-			row_check(row, Army_Type, path, required = true, skipped = {"foraging", "agility", "traits"})
+			row_check(row, Army_Type, path, required = {"id", "name", "scope", "men_per_wealth", "proficiency", "description"})
 
 			army_type := Army_Type {
 				id          = name_from_string(tbl.get_text(row, "id")),
@@ -958,7 +957,7 @@ game_load :: proc(
 		append(&game.office_kinds, Office_Kind{})
 		for row in root.children {
 			assert(row.key == "office")
-			row_check(row, Office_Kind, path)
+			row_check(row, Office_Kind, path, required = {"id", "name", "rank", "influence", "term"})
 			office := Office_Kind {
 				id           = name_from_string(tbl.get_text(row, "id")),
 				name         = name_from_string(tbl.get_text(row, "name")),
@@ -992,7 +991,7 @@ game_load :: proc(
 		append(&upgrades, "")
 		for row in root.children {
 			assert(row.key == "building")
-			row_check(row, Building_Kind, path)
+			row_check(row, Building_Kind, path, required = {"id", "name", "description"})
 
 			kind := Building_Kind {
 				id             = name_from_string(tbl.get_text(row, "id")),
@@ -1058,6 +1057,7 @@ game_load :: proc(
 		append(&game.cultures, Culture{})
 		for row in root.children {
 			assert(row.key == "culture")
+			row_check(row, Culture, path, {"buildings"}, {"id", "name", "look", "buildings", "names"})
 			culture_id := Culture_Id(len(game.cultures))
 			culture := Culture {
 				id   = name_from_string(tbl.get_text(row, "id")),
@@ -1290,7 +1290,13 @@ game_load :: proc(
 		counts: [FACTIONS_MAX]int
 		for row in root.children {
 			assert(row.key == "character")
-			row_check(row, Character, path, {"of", "men"}, true, {"office", "influence_target"})
+			row_check(
+				row,
+				Character,
+				path,
+				{"of", "men"},
+				{"name", "faction", "age", "rank", "influence", "loyalty", "temperament", "background", "disposition"},
+			)
 
 			faction_name := tbl.get_text(row, "faction")
 			faction: Faction_Id
@@ -1388,21 +1394,18 @@ scenario_file :: proc(scenario_name, file: string) -> (root: tbl.Row, path: stri
 	return
 }
 
-// Every key one of T's fields or an extra, as a mistyped key would read as 0. Required: every field given but the
-// skipped
+// Every key one of T's fields or an extra, as a mistyped key would read as 0, and every required key given
 @(private = "file")
-row_check :: proc(row: tbl.Row, $T: typeid, path: string, extra: []string = {}, required := false, skipped: []string = {}) {
+row_check :: proc(row: tbl.Row, $T: typeid, path: string, extra: []string = {}, required: []string = {}) {
 	for key in row.children {
 		known := reflect.struct_field_by_name(T, key.key).type != nil || slice.contains(extra, key.key)
 		fmt.assertf(known, "%s: no %v key %q", path, typeid_of(T), key.key)
 	}
-	if !required do return
 	row_name := tbl.get_text(row, "id")
 	if row_name == "" do row_name = tbl.get_text(row, "name")
-	for field in reflect.struct_field_names(T) {
-		if slice.contains(skipped, field) do continue
-		_, given := tbl.find(row, field)
-		fmt.assertf(given, "%s: %q lacks %q", path, row_name, field)
+	for key in required {
+		_, given := tbl.find(row, key)
+		fmt.assertf(given, "%s: %q lacks %q", path, row_name, key)
 	}
 }
 

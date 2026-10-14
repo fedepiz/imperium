@@ -1,7 +1,14 @@
-# The regions of the map, in the order of their ids, from 1. Each has an id, a snake_case word the other files name it
-# by, which no other region has. Each cell of regions.png is painted in the color of the region it lies in: [r, g, b],
-# each from 1 to 255, a color no other region has. A cell of any other color, such as the black of land in no region
-# or the white of the sea, lies in none. Fertility scales the food of its farms: 1 poor, 2 ordinary, 3 good, 4 rich.
+
+# The regions of the map, in the order of their ids, from 1. Each cell of regions.png is painted in the color of the
+# region it lies in; a cell of any other color, such as the black of land in no region or the white of the sea, lies
+# in none. Every key, in order, all required:
+#
+# region = {
+#   id = example            A snake_case word the other files name it by, no other region's
+#   name = "Example"
+#   color = [220, 50, 47]   [r, g, b], each 1..255, no other region's
+#   fertility = 3           Scales the food of its farms: 1 poor, 2 ordinary, 3 good, 4 rich
+# }
 
 # Aemilia et Liguria
 region = { id = mediolanum            name = "Mediolanum"            color = [220,  50,  47]  fertility = 4 }

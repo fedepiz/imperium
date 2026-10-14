@@ -1,23 +1,55 @@
-# Starting factions and pieces. Distances in cells; enum values written as declared (Large_City, Land).
+
+# Starting factions and pieces. Distances in cells. Every key, in order; a record gives those marked required, and the
+# others only when it differs from their default.
 #
-# kind: name, icon, moves (domain; omit = static), per_turn (movement points), contact (radius), contact_on (domains),
-#       body (radius), hindrance (enemy movement cost multiplier inside its contact zone, default 1), supply (supply
-#       source value 0..100, default 0 = not a source), traits (Capturable changes hands when dissolved by a Captures
-#       piece, and the army inside surrenders; Can_Enter can enter an empty Can_Contain of its faction; Fortified
-#       fights sorties from its walls, as does an army inside it; Shares_Supply counts in nearby armies' supply
-#       shares; Has_Town has a town economy: population and buildings, and a main building, which gives it its icon,
-#       contact, body, hindrance and supply instead of its kind)
-# faction: name, culture (by id, from cultures.txt), color [r, g, b] 0..255, treasury (starting coin), food_store
-# (starting food in its central store, default 0), offices (its own offices, by id from offices.txt), capital (the
-# name of one of its pieces, where its own offices' armies mobilise). Factions play in file order. Then one piece row
-# per piece:
-#   kind, name (optional), at [x, y] from top left, culture (default: faction's), capital_of (region id, max one per
-#   region), title and of (an army's: the office whose army it is, by id from offices.txt, with an army_type; a
-#   building's office also names its town, with of. Its holder leads it, with men, at 100% readiness, a local one at
-#   home where it starts; its full strength follows its holder's wealth). A settlement's garrison is given instead as
-#   men + proficiency 0..100 and foraging 0..100 (army skill at living off the land, default 40)
-#   population, main and buildings (a Has_Town's starting population; its main building, by id, one with the Main
-#   flag, which sets its icon, slots, supply, hindrance and radii; and its other buildings, by id, at most its slots)
+# A kind of piece:
+# kind = {
+#   name = example          required
+#   icon = Army             default none. Its map icon; a Has_Town's comes from its main building
+#   moves = Land            default none, static. The domain it moves in
+#   per_turn = 30           default 0. Movement points a turn
+#   contact = 9             default 0. Its contact radius
+#   contact_on = [Land]     default none. The domains its contact reaches
+#   body = 2                default 0. Its body radius
+#   hindrance = 3           default 1. Enemy movement cost multiplier inside its contact zone
+#   supply = 50             default 0. Supply source value 0..100; 0, not a source
+#   slots = 4               default 0. A Has_Town's ordinary slots, until its main building sets them
+#   traits = [Captures]     default none. Capturable: changes hands when dissolved by a Captures piece, and the
+#                           army inside surrenders. Can_Enter: can enter an empty Can_Contain of its faction.
+#                           Fortified: fights sorties from its walls, as does an army inside it. Shares_Supply:
+#                           counts in nearby armies' supply shares. Has_Town: has a town economy and a main building,
+#                           which gives it its icon, contact, body, hindrance and supply instead of its kind
+# }
+#
+# A faction, with its pieces. Factions play in file order:
+# faction = {
+#   name = "Example"        required
+#   culture = latin         required. By id, from cultures.txt
+#   offices = [augustus]    default none. Its own offices, by id from offices.txt
+#   capital = "Roma"        required. One of its pieces, by name, where its own offices' armies mobilise
+#   color = [190, 80, 70]   required. [r, g, b], 0..255
+#   treasury = 30           default 0. Starting coin
+#   food_store = 20         default 0. Starting food in its central store
+#   piece = { ... }         One per piece:
+# }
+#
+# piece = {
+#   kind = settlement            required. By name, from the kinds
+#   name = "Example"             default none
+#   at = [342, 432]              required. [x, y] from the top left
+#   culture = latin              default its faction's
+#   capital_of = example_region  default none. The region it is the capital of, by id; at most one per region
+#   title = tribune              default none. An army's: the office whose army it is, by id from offices.txt, with
+#                                an army_type. Its holder leads it, at 100% readiness, a local one at home where it
+#                                starts; its full strength follows its holder's wealth
+#   of = "Roma"                  default none. With a building's office, its town
+#   men = 3000                   required by an army, or by a settlement's garrison
+#   proficiency = 30             default 0. A settlement's garrison's, 0..100
+#   foraging = 40                default 40. A settlement's garrison's skill at living off the land, 0..100
+#   population = 10              default 0. A Has_Town's starting population
+#   buildings = [wheat_fields]   default none. A Has_Town's buildings besides its main, by id, at most its slots
+#   main = civitas               required by a Has_Town. Its main building, by id, one with the Main flag
+# }
 
 kind = { name = settlement  contact_on = [Land]  traits = [Capturable, Can_Contain, Fortified, Has_Town] }
 kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 9   contact_on = [Land]  body = 2    hindrance = 3                traits = [Captures, Can_Enter, Shares_Supply] }
@@ -76,12 +108,12 @@ faction = {
 faction = {
 	name = "Burgundians"
 	culture = germanic_east
-	offices = [king, maior_domus, dux]
+	offices = [east_germanic_king, maior_domus, dux]
 	capital = "Argentoratum"
 	color = [150, 85, 160]
 	treasury = 40
-	piece = { kind = settlement  name = "Argentoratum"          at = [281, 316]  capital_of = argentoratum  men = 6000  proficiency = 30  population = 12  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds]  main = burg }
-	piece = { kind = army        name = "Comitatus Gundaharii"  at = [288, 329]  title = king  men = 3000 }
+	piece = { kind = settlement  name = "Argentoratum"          at = [281, 316]  capital_of = argentoratum  men = 6000  proficiency = 30  population = 12  buildings = [wheat_fields, wheat_fields, wheat_fields, cattle_herds]  main = baurgs }
+	piece = { kind = army        name = "Comitatus Gundaharii"  at = [288, 329]  title = east_germanic_king  men = 3000 }
 }
 
 faction = {
@@ -98,23 +130,21 @@ faction = {
 faction = {
 	name = "Saxons"
 	culture = anglo_saxon
-	offices = [king, maior_domus, dux]
 	capital = "Tulifurdum"
 	color = [200, 170, 70]
 	treasury = 30
-	piece = { kind = settlement  name = "Tulifurdum"            at = [309, 247]  capital_of = tulifurdum  men = 6000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = burg }
-	piece = { kind = army        name = "Comitatus Hengisti"    at = [309, 261]  title = king  men = 2500 }
+	piece = { kind = settlement  name = "Tulifurdum"            at = [309, 247]  capital_of = tulifurdum  men = 6000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = tun }
+	piece = { kind = army        name = "Comitatus Hengisti"    at = [309, 261]  title = ealdorman  of = "Tulifurdum"  men = 2500 }
 }
 
 faction = {
 	name = "Angles"
 	culture = anglo_saxon
-	offices = [king, maior_domus, dux]
 	capital = "Angulus"
 	color = [150, 110, 70]
 	treasury = 30
-	piece = { kind = settlement  name = "Angulus"               at = [306, 208]  capital_of = angulus  men = 6000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = burg }
-	piece = { kind = army        name = "Comitatus Eomeri"      at = [306, 222]  title = king  men = 2000 }
+	piece = { kind = settlement  name = "Angulus"               at = [306, 208]  capital_of = angulus  men = 6000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = tun }
+	piece = { kind = army        name = "Comitatus Eomeri"      at = [306, 222]  title = ealdorman  of = "Angulus"  men = 2000 }
 }
 
 faction = {
@@ -142,13 +172,13 @@ faction = {
 faction = {
 	name = "Visigoths"
 	culture = germanic_east
-	offices = [king, maior_domus, dux]
+	offices = [east_germanic_king, maior_domus, dux]
 	capital = "Burdigala"
 	color = [170, 200, 80]
 	treasury = 60
-	piece = { kind = settlement  name = "Burdigala"             at = [162, 384]  capital_of = burdigala  men = 6000  proficiency = 30  population = 14  buildings = [wheat_fields, wheat_fields, cattle_herds, sheep_flocks]  main = burg }
-	piece = { kind = settlement  name = "Elusa"                 at = [172, 402]  capital_of = elusa      men = 3000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = heim }
-	piece = { kind = settlement  name = "Avaricum"              at = [205, 344]  capital_of = avaricum   men = 3000  proficiency = 30  population = 9  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = heim }
-	piece = { kind = army        name = "Comitatus Theodorici"  at = [167, 381]  title = king  men = 5000 }
-	piece = { kind = army        name = "Comitatus Anaolsi"     at = [182, 405]  title = germanic_lord  of = "Elusa"  men = 3000 }
+	piece = { kind = settlement  name = "Burdigala"             at = [162, 384]  capital_of = burdigala  men = 6000  proficiency = 30  population = 14  buildings = [wheat_fields, wheat_fields, cattle_herds, sheep_flocks]  main = baurgs }
+	piece = { kind = settlement  name = "Elusa"                 at = [172, 402]  capital_of = elusa      men = 3000  proficiency = 30  population = 7  buildings = [wheat_fields, cattle_herds, sheep_flocks]  main = haims }
+	piece = { kind = settlement  name = "Avaricum"              at = [205, 344]  capital_of = avaricum   men = 3000  proficiency = 30  population = 9  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = haims }
+	piece = { kind = army        name = "Comitatus Theodorici"  at = [167, 381]  title = east_germanic_king  men = 5000 }
+	piece = { kind = army        name = "Comitatus Anaolsi"     at = [182, 405]  title = east_germanic_lord  of = "Elusa"  men = 3000 }
 }

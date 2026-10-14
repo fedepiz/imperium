@@ -1,17 +1,25 @@
-# The kinds of office. Each has an id, a snake_case word the other files name it by, and a name. Then:
-#   rank: its place in the order of offices; whoever is appointed rises to it
-#   influence: what holding it gives
-#   term: turns its holder serves before he can be promoted or dismissed
-#   flags: Eternal, held for life; Dismissable, its holder can be dismissed once his term is served; Feudal, held as a
-#   fief: dismissing the holder of one costs every holder of one in the faction loyalty
-#   salary: a faction office's, coin per turn paid to its holder while held, out of the treasury. A building's office
-#   is paid by its building instead
-#   income_share, optional: a faction office's share of its faction's income, 0..1, paid to its holder while held,
-#   out of the treasury, besides its salary
-#   army_type, optional: the army its holder commands, by id from army_types.txt. Demobilised, the title gathers its
-#   strength; mobilised, beside its town or, for a faction's own office, its capital, it takes the field
-# Factions list in pieces.txt the offices they have of their own. Buildings name in buildings.txt the office each
-# creates, which takes its town's name: Governor of Ravenna.
+
+# The kinds of office. Factions list their own in pieces.txt; buildings name in buildings.txt the office each creates,
+# which takes its town's name: Governor of Ravenna. Every key, in order; an office gives those marked required, and
+# the others only when it differs from their default:
+#
+# office = {
+#   id = example               required. A snake_case word the other files name it by
+#   name = "Example"           required
+#   rank = 2                   required. Its place in the order of offices; whoever is appointed rises to it
+#   influence = 15             required. What holding it gives
+#   term = 2                   required. Turns its holder serves before he can be promoted or dismissed
+#   flags = [Dismissable]      default none. Eternal: held for life. Dismissable: its holder can be dismissed once his
+#                              term is served. Feudal: held as a fief; dismissing the holder of one costs every holder
+#                              of one in the faction loyalty
+#   salary = 8                 default 0. A faction office's coin a turn to its holder, out of the treasury; a
+#                              building's office is paid by its building instead
+#   income_share = 0.5         default 0. A faction office's share of its faction's income, 0..1, to its holder, out of
+#                              the treasury, besides its salary
+#   army_type = example_type   default none. The army its holder commands, by id from army_types.txt. Demobilised,
+#                              the title gathers its strength; mobilised, beside its town or, for a faction's own
+#                              office, its capital, it takes the field
+# }
 
 office = {
 	id = augustus
@@ -20,7 +28,6 @@ office = {
 	influence = 60
 	term = 0
 	flags = [Eternal]
-	salary = 0
 }
 
 office = {
@@ -41,7 +48,6 @@ office = {
 	influence = 40
 	term = 4
 	flags = [Dismissable]
-	salary = 0
 }
 
 office = {
@@ -51,7 +57,6 @@ office = {
 	influence = 35
 	term = 4
 	flags = [Dismissable]
-	salary = 0
 }
 
 office = {
@@ -61,7 +66,6 @@ office = {
 	influence = 25
 	term = 3
 	flags = [Dismissable]
-	salary = 0
 }
 
 office = {
@@ -71,7 +75,6 @@ office = {
 	influence = 15
 	term = 2
 	flags = [Dismissable]
-	salary = 0
 }
 
 office = {
@@ -81,7 +84,6 @@ office = {
 	influence = 15
 	term = 2
 	flags = [Dismissable]
-	salary = 0
 	army_type = comitatenses
 }
 
@@ -92,7 +94,6 @@ office = {
 	influence = 8
 	term = 2
 	flags = [Dismissable]
-	salary = 0
 	army_type = vexillationes
 }
 
@@ -103,9 +104,8 @@ office = {
 	influence = 60
 	term = 0
 	flags = [Eternal]
-	salary = 0
 	income_share = 0.5
-	army_type = retinue
+	army_type = ambactii
 }
 
 office = {
@@ -115,7 +115,6 @@ office = {
 	influence = 40
 	term = 4
 	flags = [Dismissable]
-	salary = 0
 }
 
 office = {
@@ -125,7 +124,6 @@ office = {
 	influence = 40
 	term = 4
 	flags = [Dismissable]
-	salary = 0
 }
 
 office = {
@@ -135,8 +133,7 @@ office = {
 	influence = 25
 	term = 3
 	flags = [Dismissable, Feudal]
-	salary = 0
-	army_type = retinue
+	army_type = ambactii
 }
 
 office = {
@@ -146,8 +143,7 @@ office = {
 	influence = 15
 	term = 2
 	flags = [Dismissable, Feudal]
-	salary = 0
-	army_type = retinue
+	army_type = ambactii
 }
 
 office = {
@@ -157,6 +153,66 @@ office = {
 	influence = 8
 	term = 2
 	flags = [Dismissable]
-	salary = 0
-	army_type = warband
+	army_type = cuneus
+}
+
+office = {
+	id = gesith
+	name = "Gesith"
+	rank = 2
+	influence = 15
+	term = 2
+	flags = [Dismissable, Feudal]
+	army_type = bellatores_iuniores
+}
+
+office = {
+	id = ealdorman
+	name = "Ealdorman"
+	rank = 3
+	influence = 25
+	term = 3
+	flags = [Dismissable, Feudal]
+	army_type = bellatores_seniores
+}
+
+office = {
+	id = thiufadus
+	name = "Thiufadus"
+	rank = 1
+	influence = 8
+	term = 2
+	flags = [Dismissable]
+	army_type = equites
+}
+
+office = {
+	id = east_germanic_king
+	name = "King"
+	rank = 5
+	influence = 60
+	term = 0
+	flags = [Eternal]
+	income_share = 0.5
+	army_type = buccellarii
+}
+
+office = {
+	id = east_germanic_count
+	name = "Count"
+	rank = 3
+	influence = 25
+	term = 3
+	flags = [Dismissable, Feudal]
+	army_type = buccellarii
+}
+
+office = {
+	id = east_germanic_lord
+	name = "Lord"
+	rank = 2
+	influence = 15
+	term = 2
+	flags = [Dismissable, Feudal]
+	army_type = buccellarii
 }

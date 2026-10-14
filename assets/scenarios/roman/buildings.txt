@@ -1,24 +1,39 @@
-# The kinds of building. Each has an id, a snake_case word the other files name it by, and a name. Then its effects,
-# each 0 or none when left out:
-#   population: the population it occupies
-#   food: food per turn; food_fertility: food per turn, times its region's fertility
-#   income, upkeep: coin per turn into its owner's treasury, and out of it
-#   control: radiated to its owner's towns, less their distance. A town takes the strongest that reaches it
-#   public_order: its town's public order, as given: positive keeps order, negative stirs unrest
-#   food_store: food into its owner's central store, scaled by its town's control; negative, food taken out of it,
-#   which adds no food to the town by itself
-#   title_salary_global, title_salary_local: coin per turn paid to its title's holder while held, out of the treasury
-#   (counted in its town's upkeep), and out of its town's local wealth
-#   title_salary_local_share: its title's weight in the share of its town's local wealth left after local salaries
-#   flags: Main, a main building: what kind of settlement its town is, how big and how governed. Built in the main
-#   slot only, and nothing else is
-#   icon, slots, supply, hindrance, contact, body: a main building's settlement, copied onto it: its map icon (Town,
-#   City, Large_City), its ordinary slots, the supply it gives, the hindrance in its zone, its contact and body radius
-#   title: the office it creates, by id from offices.txt, named after its town
-#   upgrade: the building it can be upgraded into, by id: its next level
-#   build_turns, build_coin: building it takes build_turns turns, and coin at the start
-#   description: what it is, shown when it is hovered
-# A negative food is consumed. Income is scaled by its town's control.
+
+# The kinds of building. Every key, in order; a building gives those marked required, and the others only when it
+# differs from their default:
+#
+# building = {
+#   id = example                   required. A snake_case word the other files name it by
+#   name = "Example"               required
+#   population = 1                 default 0. The population it occupies
+#   food = 2                       default 0. Food a turn; negative, consumed
+#   food_fertility = 2             default 0. Food a turn, times its region's fertility
+#   income = 1                     default 0. Coin a turn into its owner's treasury, scaled by its town's control
+#   food_store = 3                 default 0. Food a turn into its owner's central store, scaled by its town's
+#                                  control; negative, taken out of it, which adds no food to the town
+#   upkeep = 1                     default 0. Coin a turn out of its owner's treasury
+#   public_order = 1               default 0. Its town's: positive keeps order, negative stirs unrest
+#   control = 20                   default 0. Radiated to its owner's towns, less their distance; a town takes the
+#                                  strongest that reaches it
+#   flags = [Main]                 default none. Main: a main building, what kind of settlement its town is, how big
+#                                  and how governed; built in the main slot only, and nothing else is
+#   title = example_office         default none. The office it creates, by id from offices.txt, named after its town
+#   title_salary_global = 5        default 0. Coin a turn to its title's holder, out of the treasury, counted in its
+#                                  town's upkeep
+#   title_salary_local = 1         default 0. Coin a turn to its title's holder, out of its town's local wealth
+#   title_salary_local_share = 1   default 0. Its title's weight in the share of its town's local wealth left after
+#                                  local salaries
+#   icon = Town                    default none. A main building's: its settlement's map icon: Town, City, Large_City
+#   slots = 4                      default 0. A main building's: its settlement's ordinary slots
+#   supply = 65                    default 0. A main building's: the supply its settlement gives
+#   hindrance = 2.5                default 0. A main building's: the hindrance in its settlement's zone
+#   contact = 8                    default 0. A main building's: its settlement's contact radius
+#   body = 2.5                     default 0. A main building's: its settlement's body radius
+#   upgrade = example_next         default none. The building it can be upgraded into, by id: its next level
+#   build_turns = 2                default 0. Turns it takes to build
+#   build_coin = 10                default 0. Coin it costs, at the start
+#   description = "Example: ..."   required. What it is, shown when it is hovered
+# }
 
 building = {
 	id = wheat_fields
@@ -291,4 +306,90 @@ building = {
 	build_turns = 4
 	build_coin = 10
 	description = "Burg: a fortified stronghold, often a walled hilltop such as the Runder Berg near Urach, where an Alamannic lord lived with his household and followers, and craftsmen worked for him."
+}
+
+building = {
+	id = ham
+	name = "Ham"
+	population = 1
+	flags = [Main]
+	title = gesith
+	title_salary_local_share = 1
+	icon = Town
+	slots = 4
+	supply = 65
+	hindrance = 2.5
+	contact = 8
+	body = 2.5
+	upgrade = tun
+	build_turns = 2
+	description = "Ham: an Anglo-Saxon farming settlement, from the Old English word for home, a cluster of farmsteads around a lord's hall. Many English places still end in -ham."
+}
+
+building = {
+	id = tun
+	name = "Tun"
+	population = 2
+	public_order = 1
+	control = 20
+	flags = [Main]
+	title = ealdorman
+	title_salary_local_share = 1
+	icon = City
+	slots = 6
+	supply = 80
+	hindrance = 3
+	contact = 9
+	body = 3
+	build_turns = 4
+	build_coin = 10
+	description = "Tun: an enclosed estate, the seat of a great lord and his hall, from the Old English word that became town, and the ending -ton of English place names."
+}
+
+building = {
+	id = stud_farm
+	name = "Stud Farm"
+	population = 1
+	title = thiufadus
+	title_salary_local = 4
+	build_turns = 2
+	description = "Stud Farm: pastures and stables where horses were bred and kept for war. Horsemen on campaign needed herds of remounts, and a Gothic lord's wealth was counted in them as much as in land."
+}
+
+building = {
+	id = haims
+	name = "Haims"
+	population = 1
+	flags = [Main]
+	title = east_germanic_lord
+	title_salary_local_share = 1
+	icon = Town
+	slots = 4
+	supply = 65
+	hindrance = 2.5
+	contact = 8
+	body = 2.5
+	upgrade = baurgs
+	build_turns = 2
+	description = "Haims: a Gothic village, the word Wulfila used in his Gothic Bible: farmsteads around the hall of a local lord, with the herds and pastures that kept his horsemen mounted."
+}
+
+building = {
+	id = baurgs
+	name = "Baurgs"
+	population = 2
+	public_order = 1
+	control = 20
+	flags = [Main]
+	title = east_germanic_count
+	title_salary_local_share = 1
+	icon = City
+	slots = 6
+	supply = 80
+	hindrance = 3
+	contact = 9
+	body = 3
+	build_turns = 4
+	build_coin = 10
+	description = "Baurgs: a Gothic stronghold or city, the word Wulfila used in his Gothic Bible for a town, where a lord lived with his household and followers."
 }

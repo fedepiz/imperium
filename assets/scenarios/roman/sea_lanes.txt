@@ -1,7 +1,19 @@
-# The sea network. Beaches: landing zones on the coast, where armies embark and land; each has an id, a snake_case
-# word the lanes name it by, and a point, [x, y] in cells from the top left, on land by the sea. Lanes: routes along
-# the coast between two beaches, from and to, by id, and the points the route curves through between them, over
-# water. The game smooths them into curves.
+
+# The sea network. Every key, in order; a record gives those marked required, and the others only when it differs
+# from their default.
+#
+# A beach, a landing zone on the coast, where armies embark and land:
+# beach = {
+#   id = example            required. A snake_case word the lanes name it by
+#   at = [339, 434]         required. [x, y] in cells from the top left, on land by the sea
+# }
+#
+# A lane, a route along the coast between two beaches, which the game smooths into a curve:
+# lane = {
+#   from = example          required. A beach, by id
+#   to = other              required. A beach, by id
+#   points = [[347, 454]]   default none. The points it curves through between them, over water
+# }
 
 beach = { id = roma  at = [343, 438] }
 beach = { id = ravenna  at = [346, 395] }
