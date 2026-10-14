@@ -198,10 +198,11 @@ Mover :: enum u8 {
 	Chaser,
 }
 
-// Movement spent per cell walked
+// Spent per cell walked: movement on and off road, and readiness
 March_Rate :: struct {
-	road:     f32,
-	off_road: f32,
+	road:      f32,
+	off_road:  f32,
+	readiness: f32,
 }
 
 // One piece's walk along its own smoothed path
@@ -218,6 +219,17 @@ March :: struct {
 	rates:    [dynamic; WALK_POINTS_MAX]March_Rate,
 	next:     int,
 	sails:    bool,
+	// The whole walk's
+	movement_spent: f32,
+	readiness_lost: f32,
+}
+
+// What a move order would do. Its march's piece: none when it has no route
+March_Prediction :: struct {
+	march:         March,
+	// Its piece's, on arrival
+	movement_left: f32,
+	readiness:     f32,
 }
 
 Sea_Reach :: struct {
@@ -240,6 +252,9 @@ Movement :: struct {
 	enemy_zones:  [dynamic; PIECE_MAX]Pathfind_Zone,
 	friend_zones: [dynamic; PIECE_MAX]Disc,
 	bodies:       [dynamic; PIECE_MAX]Disc,
+	// Each step: the move ordered, else the move hovered while nothing is under way. Its piece none: neither
+	predicted:    Move_Order,
+	prediction:   March_Prediction,
 }
 
 GAME_EVENTS_MAX :: 2048
@@ -427,6 +442,14 @@ Game_Event :: union {
 	Event_Dismissed,
 }
 
+// The marches a step plans, in order. Move: the one ordered, else the selected piece's
+@(private = "file")
+Planned_March :: enum u8 {
+	Leader,
+	Chaser,
+	Move,
+}
+
 @(private = "file")
 Walk_Order :: struct {
 	piece:       Piece_Id,
@@ -441,6 +464,8 @@ Walk_Order :: struct {
 	clear_of:    Piece_Id,
 	// Chaser: heads where the leader ends, not where it starts
 	follows:     bool,
+	// False: only flooded, for its reach
+	aimed:       bool,
 }
 
 // Built at load and each turn change. Supply: the strongest source, kept out of enemy zones. Control: the strongest
@@ -507,184 +532,11 @@ pieces_friendly :: proc(a, b: ^Piece_Data) -> bool {
 	return a.owner != 0 && a.owner == b.owner
 }
 
-// In/out: march.next.
-// Moves pos along the march by up to stride. Returns the movement spent, on and off road
-@(private = "file")
-walk_along :: proc(
-	march: ^March,
-	pos: [2]f32,
-	stride: f32,
-) -> (
-	moved: [2]f32,
-	road, off_road: f32,
-) {
-	moved = pos
-	stride := stride
-	path := march.path.points[:]
-	for stride > 0 && march.next < len(path) {
-		target := path[march.next]
-		rate := march.rates[march.next]
-		distance := linalg.distance(moved, target)
-		walked := min(stride, distance)
-		if walked < distance {
-			moved += linalg.normalize(target - moved) * walked
-		} else {
-			moved = target
-			march.next += 1
-		}
-		stride -= walked
-		road += walked * rate.road
-		off_road += walked * rate.off_road
-	}
-	return
-}
-
-// Floods from subject within budget (0: its movement left), unless the last flood matches.
-// Leaves out ignored's zone and body. False if subject is gone or does not move
-@(private = "file")
-flood_from :: proc(game: ^Game, subject_id: Piece_Id, budget: f32, ignored: Piece_Id) -> bool {
-	movement := &game.movement
-	clear(&movement.enemy_zones)
-	clear(&movement.friend_zones)
-	clear(&movement.bodies)
-	subject := slot_map_get(&game.pieces, subject_id)
-	domain, moves := Pathfind_Domain{}, false
-	if subject != nil do domain, moves = subject.domain.?
-	if !moves {
-		movement.flooded = {}
-		movement.flood_key = 0
-		return false
-	}
-
-	budget := budget > 0 ? budget : subject.this_turn.movement_left
-	half: f32 = PATHFIND_FLOOD_SIZE / 2 + 1
-	lo := subject.pos - half
-	hi := subject.pos + half
-	others := slot_map_iterator(&game.pieces)
-	for other, other_id in slot_map_iterate(&others) {
-		if other_id == subject_id || other_id == ignored do continue
-		body := Disc{other.pos, subject.body_radius + other.body_radius}
-		if disc_overlaps_box(body, lo, hi) do append(&movement.bodies, body)
-		if other.contact_radius == 0 || domain not_in other.contact_domains do continue
-		zone := Disc{other.pos, other.contact_radius}
-		if !disc_overlaps_box(zone, lo, hi) do continue
-		if pieces_friendly(subject, other) {
-			append(&movement.friend_zones, zone)
-		} else {
-			append(&movement.enemy_zones, Pathfind_Zone{zone, other.hindrance})
-		}
-	}
-
-	key_source := [4]u64 {
-		transmute(u64)subject_id,
-		transmute(u64)subject.pos,
-		u64(transmute(u32)budget),
-		u64(domain),
-	}
-	key := hash.fnv64a(mem.slice_to_bytes(key_source[:]))
-	key = hash.fnv64a(mem.slice_to_bytes(movement.enemy_zones[:]), key)
-	key = hash.fnv64a(mem.slice_to_bytes(movement.bodies[:]), key)
-	if key != movement.flood_key {
-		pathfind_flood(
-			subject.pos,
-			domain,
-			budget,
-			movement.enemy_zones[:],
-			movement.bodies[:],
-			&movement.flood,
-		)
-		movement.flooded = subject_id
-		movement.flood_key = key
-	}
-	return true
-}
-
-// Out: game.movement.marches[mover], written only when a route is found; events.
-// Floods from the order's piece, picks where to stop, then traces and smooths the path
-@(private = "file")
-march_plan :: proc(
-	game: ^Game,
-	order: Walk_Order,
-	mover: Mover,
-	events: ^[dynamic; GAME_EVENTS_MAX]Game_Event,
-) -> bool {
-	if !flood_from(game, order.piece, order.budget, order.ignored) {
-		append(events, Event_Order_Refused{order.piece, .Cannot_Move})
-		return false
-	}
-
-	flood := &game.movement.flood
-	stop: [2]int
-	stoppable := false
-	settlement := slot_map_get(&game.pieces, order.into)
-	if settlement != nil {
-		stop, stoppable = cell_of(settlement.pos), true
-	} else if target := slot_map_get(&game.pieces, order.target); target != nil {
-		if flood.domain in target.contact_domains {
-			target_zone := Disc{target.pos, target.contact_radius}
-			stop, stoppable = pathfind_flood_stop_within(flood, target_zone)
-		}
-	} else {
-		stop, stoppable = pathfind_flood_stop(flood, order.destination, order.snap)
-	}
-
-	cells: [dynamic; PATHFIND_PATH_MAX][2]f32
-	cell_costs: [dynamic; PATHFIND_PATH_MAX]f32
-	traced := stoppable && pathfind_flood_trace(flood, cell_center(stop), &cells, &cell_costs)
-	if !traced {
-		append(events, Event_Order_Refused{order.piece, .No_Route})
-		return false
-	}
-
-	cell_roads: [dynamic; PATHFIND_PATH_MAX]bool
-	for cell in cells {
-		append(&cell_roads, game.terrain.road[grid_index(cell_of(cell), MAP_SIZE)])
-	}
-	// Movement spent reaching each raw point: road, off road
-	spent := new([PATHFIND_PATH_MAX + 1][2]f32, context.temp_allocator)
-	for cost, k in cell_costs {
-		spent[k + 1] = spent[k] + (cell_roads[k] ? {cost, 0} : {0, cost})
-	}
-	if settlement != nil && len(cells) > 0 do cells[len(cells) - 1] = settlement.pos
-	walker := slot_map_get(&game.pieces, order.piece)
-	raw := new(Polylines(PATHFIND_PATH_MAX + 1, 1), context.temp_allocator)
-	raw_points := polylines_reserve(len(cells) + 1, false, raw)
-	raw_points[0] = walker.pos
-	copy(raw_points[1:], cells[:])
-
-	march := &game.movement.marches[mover]
-	spent_along := new([WALK_POINTS_MAX][2]f32, context.temp_allocator)
-	polylines_clear(&march.path)
-	polylines_smooth(raw, WALK_SMOOTHING, &march.path, spent[:len(cells) + 1], spent_along[:])
-	if len(march.path.points) == 0 {
-		polylines_reserve(1, false, &march.path)[0] = walker.pos
-	}
-
-	// Each segment's share of the movement, per cell walked
-	clear(&march.rates)
-	append(&march.rates, March_Rate{})
-	points := march.path.points[:]
-	for q in 1 ..< len(points) {
-		length := linalg.distance(points[q - 1], points[q])
-		share := spent_along[q] - spent_along[q - 1]
-		rate: March_Rate
-		if length > 0 do rate = {share[0] / length, share[1] / length}
-		append(&march.rates, rate)
-	}
-
-	march.piece = order.piece
-	march.target = order.target
-	march.into = order.into
-	march.clear_of = order.clear_of
-	march.next = 1
-	march_end := march.path.points[len(march.path.points) - 1]
-	append(events, Event_March{order.piece, mover, order.target, march_end, false})
-	return true
-}
-
+// Hover: the move order a right click would give, its piece none when there is none
 game_step :: proc(
 	game: ^Game,
 	focus: Piece_Id,
+	hover: Move_Order,
 	input: Game_Order,
 	events: ^[dynamic; GAME_EVENTS_MAX]Game_Event,
 ) {
@@ -900,6 +752,7 @@ game_step :: proc(
 					snap        = 2 * int(reach) + 1,
 					budget      = reach,
 					ignored     = winner,
+					aimed       = true,
 				}
 				if !result.caught do orders[.Leader].clear_of = winner
 				if result.follows {
@@ -910,6 +763,7 @@ game_step :: proc(
 						budget  = victor.this_turn.movement_left + result.follow_overdraw,
 						ignored = loser,
 						follows = result.caught,
+						aimed   = true,
 					}
 				}
 				if result.caught {
@@ -1091,51 +945,201 @@ game_step :: proc(
 		}
 	}
 
-	// Step: Move order. To a landable beach: sails
-	if player_order, ordered := input.(Move_Order); ordered {
-		piece := slot_map_get(&game.pieces, player_order.piece)
-		refusal: Maybe(Order_Refusal)
-		switch {
-		case orders[.Leader].piece != {}:
-			refusal = .Superseded
-		case piece == nil:
-			refusal = .No_Such_Piece
-		case !game.can_move:
-			refusal = .Not_Now
-		case piece.owner != game.player:
-			refusal = .Not_Yours
-		}
-
-		landing: Beach_Id
-		for beach, b in game.beaches {
-			if b in reach.landable && linalg.distance(beach.pos, player_order.destination) <= BEACH_RADIUS do landing = Beach_Id(b)
-		}
-		route: [dynamic; BEACHES_MAX]Sea_Lane_Id
-		count := 1
-		if refusal == nil && landing != 0 {
-			for at := landing; at != reach.start; {
+	// Step: Marches. Fall back and chase, then the move: ordered, else the selected piece's, aimed where hovered while
+	// nothing is under way
+	movement.predicted = {}
+	march_orders: [Planned_March]Walk_Order
+	march_orders[.Leader] = orders[.Leader]
+	march_orders[.Chaser] = orders[.Chaser]
+	landing: Beach_Id
+	sea_route: [dynamic; BEACHES_MAX]Sea_Lane_Id
+	sea_points := 1
+	{
+		move, ordered := input.(Move_Order)
+		hovering := slot_map_get(&game.pieces, hover.piece)
+		aimed := ordered || hovering != nil && hover.piece == focus && hovering.owner == game.player && game.under_way == {}
+		if !ordered do move = aimed ? hover : Move_Order{piece = focus}
+		piece := slot_map_get(&game.pieces, move.piece)
+		if aimed && piece != nil {
+			movement.predicted = move
+			for beach, b in game.beaches {
+				if b in reach.landable && linalg.distance(beach.pos, move.destination) <= BEACH_RADIUS do landing = Beach_Id(b)
+			}
+			for at := landing; landing != 0 && at != reach.start; {
 				lane := &game.sea_lanes[reach.reached_by[at]]
-				append(&route, reach.reached_by[at])
-				count += game.sea_lane_curves.runs[reach.reached_by[at] - 1].len
+				append(&sea_route, reach.reached_by[at])
+				sea_points += game.sea_lane_curves.runs[reach.reached_by[at] - 1].len
 				at = lane.from == at ? lane.to : lane.from
 			}
-			if count > WALK_POINTS_MAX do refusal = .No_Route
+		}
+		march_orders[.Move] = {
+			piece       = move.piece,
+			target      = move.target,
+			destination = move.destination,
+			snap        = move.snap,
+			aimed       = aimed && landing == 0,
+		}
+		target := slot_map_get(&game.pieces, move.target)
+		enters :=
+			piece != nil &&
+			target != nil &&
+			.Can_Enter in piece.flags &&
+			.Can_Contain in target.flags &&
+			target.contains == {} &&
+			pieces_friendly(piece, target)
+		if enters {
+			march_orders[.Move].target = {}
+			march_orders[.Move].into = move.target
+		}
+	}
+
+	// Step: March plans. Flooded unless the last flood matches, then, aimed: stopped, traced and smoothed. The move's
+	// flood is last: it stays for its reach
+	planned := new([Planned_March]March, context.temp_allocator)
+	march_refusals: [Planned_March]Maybe(Order_Refusal)
+	for &order, planned_march in march_orders {
+		if order.piece == {} do continue
+		if planned_march == .Chaser {
+			leader := planned[.Leader].path.points[:]
+			if len(leader) == 0 do continue
+			order.destination = order.follows ? leader[len(leader) - 1] : leader[0]
 		}
 
-		if reason, refused := refusal.?; refused {
-			append(events, Event_Order_Refused{player_order.piece, reason})
-		} else if landing != 0 {
-			march := &movement.marches[.Leader]
+		clear(&movement.enemy_zones)
+		clear(&movement.friend_zones)
+		clear(&movement.bodies)
+		marcher := slot_map_get(&game.pieces, order.piece)
+		domain, moves := Pathfind_Domain{}, false
+		if marcher != nil do domain, moves = marcher.domain.?
+		if !moves {
+			movement.flooded = {}
+			movement.flood_key = 0
+			march_refusals[planned_march] = .Cannot_Move
+			continue
+		}
+		budget := order.budget > 0 ? order.budget : marcher.this_turn.movement_left
+		half: f32 = PATHFIND_FLOOD_SIZE / 2 + 1
+		lo := marcher.pos - half
+		hi := marcher.pos + half
+		others := slot_map_iterator(&game.pieces)
+		for other, other_id in slot_map_iterate(&others) {
+			if other_id == order.piece || other_id == order.ignored do continue
+			body := Disc{other.pos, marcher.body_radius + other.body_radius}
+			if disc_overlaps_box(body, lo, hi) do append(&movement.bodies, body)
+			if other.contact_radius == 0 || domain not_in other.contact_domains do continue
+			zone := Disc{other.pos, other.contact_radius}
+			if !disc_overlaps_box(zone, lo, hi) do continue
+			if pieces_friendly(marcher, other) {
+				append(&movement.friend_zones, zone)
+			} else {
+				append(&movement.enemy_zones, Pathfind_Zone{zone, other.hindrance})
+			}
+		}
+		key_source := [4]u64 {
+			transmute(u64)order.piece,
+			transmute(u64)marcher.pos,
+			u64(transmute(u32)budget),
+			u64(domain),
+		}
+		key := hash.fnv64a(mem.slice_to_bytes(key_source[:]))
+		key = hash.fnv64a(mem.slice_to_bytes(movement.enemy_zones[:]), key)
+		key = hash.fnv64a(mem.slice_to_bytes(movement.bodies[:]), key)
+		if key != movement.flood_key {
+			pathfind_flood(marcher.pos, domain, budget, movement.enemy_zones[:], movement.bodies[:], &movement.flood)
+			movement.flooded = order.piece
+			movement.flood_key = key
+		}
+		if !order.aimed do continue
+
+		flood := &movement.flood
+		stop: [2]int
+		stoppable := false
+		settlement := slot_map_get(&game.pieces, order.into)
+		if settlement != nil {
+			stop, stoppable = cell_of(settlement.pos), true
+		} else if target := slot_map_get(&game.pieces, order.target); target != nil {
+			if flood.domain in target.contact_domains {
+				target_zone := Disc{target.pos, target.contact_radius}
+				stop, stoppable = pathfind_flood_stop_within(flood, target_zone)
+			}
+		} else {
+			stop, stoppable = pathfind_flood_stop(flood, order.destination, order.snap)
+		}
+
+		cells: [dynamic; PATHFIND_PATH_MAX][2]f32
+		cell_costs: [dynamic; PATHFIND_PATH_MAX]f32
+		traced := stoppable && pathfind_flood_trace(flood, cell_center(stop), &cells, &cell_costs)
+		if !traced {
+			march_refusals[planned_march] = .No_Route
+			continue
+		}
+
+		cell_roads: [dynamic; PATHFIND_PATH_MAX]bool
+		for cell in cells {
+			append(&cell_roads, game.terrain.road[grid_index(cell_of(cell), MAP_SIZE)])
+		}
+		// Movement spent reaching each raw point: road, off road
+		spent := new([PATHFIND_PATH_MAX + 1][2]f32, context.temp_allocator)
+		for cost, k in cell_costs {
+			spent[k + 1] = spent[k] + (cell_roads[k] ? {cost, 0} : {0, cost})
+		}
+		if settlement != nil && len(cells) > 0 do cells[len(cells) - 1] = settlement.pos
+		raw := new(Polylines(PATHFIND_PATH_MAX + 1, 1), context.temp_allocator)
+		raw_points := polylines_reserve(len(cells) + 1, false, raw)
+		raw_points[0] = marcher.pos
+		copy(raw_points[1:], cells[:])
+
+		march := &planned[planned_march]
+		spent_along := new([WALK_POINTS_MAX][2]f32, context.temp_allocator)
+		polylines_smooth(raw, WALK_SMOOTHING, &march.path, spent[:len(cells) + 1], spent_along[:])
+		if len(march.path.points) == 0 {
+			polylines_reserve(1, false, &march.path)[0] = marcher.pos
+		}
+
+		// Each segment's share of the movement and the readiness, per cell walked
+		append(&march.rates, March_Rate{})
+		points := march.path.points[:]
+		for q in 1 ..< len(points) {
+			length := linalg.distance(points[q - 1], points[q])
+			share := spent_along[q] - spent_along[q - 1]
+			rate: March_Rate
+			if length > 0 {
+				lost := share[0] * ROAD_READINESS_PER_MOVEMENT + share[1] * READINESS_PER_MOVEMENT
+				rate = {share[0] / length, share[1] / length, lost / length}
+				march.movement_spent += share[0] + share[1]
+				march.readiness_lost += lost
+			}
+			append(&march.rates, rate)
+		}
+
+		march.piece = order.piece
+		march.target = order.target
+		march.into = order.into
+		march.clear_of = order.clear_of
+		march.next = 1
+	}
+
+	// Step: Prediction. Of the aimed move: its sail, or its walk
+	movement.prediction = {}
+	{
+		piece := slot_map_get(&game.pieces, movement.predicted.piece)
+		prediction := &movement.prediction
+		march := &prediction.march
+		switch {
+		case piece == nil:
+		case landing != 0 && sea_points > WALK_POINTS_MAX:
+			march_refusals[.Move] = .No_Route
+		case landing != 0:
 			march^ = {
-				piece = player_order.piece,
+				piece = movement.predicted.piece,
 				next  = 1,
 				sails = true,
 			}
-			points := polylines_reserve(count, false, &march.path)
+			points := polylines_reserve(sea_points, false, &march.path)
 			points[0] = piece.pos
 			filled := 1
 			at := reach.start
-			#reverse for lane_id in route {
+			#reverse for lane_id in sea_route {
 				lane := &game.sea_lanes[lane_id]
 				run := game.sea_lane_curves.runs[lane_id - 1]
 				leg := points[filled:][:run.len]
@@ -1144,46 +1148,64 @@ game_step :: proc(
 				filled += run.len
 				at = lane.from == at ? lane.to : lane.from
 			}
-			// Sailing spends no movement
-			for _ in 0 ..< count do append(&march.rates, March_Rate{})
-			piece.this_turn.movement_left = 0
-			append(events, Event_March{player_order.piece, .Leader, {}, points[count - 1], true})
-		} else {
-			order := &orders[.Leader]
-			order^ = {
-				piece       = player_order.piece,
-				target      = player_order.target,
-				destination = player_order.destination,
-				snap        = player_order.snap,
-			}
-			target := slot_map_get(&game.pieces, player_order.target)
-			enters :=
-				target != nil &&
-				.Can_Enter in piece.flags &&
-				.Can_Contain in target.flags &&
-				target.contains == {} &&
-				pieces_friendly(piece, target)
-			if enters do order.target, order.into = {}, player_order.target
+			// Sailing spends no movement, and takes all that is left
+			for _ in 0 ..< sea_points do append(&march.rates, March_Rate{})
+			prediction.movement_left = 0
+			prediction.readiness = piece.army.readiness
+			planned[.Move] = march^
+		case march_refusals[.Move] != nil:
+		case:
+			march^ = planned[.Move]
+			prediction.movement_left = max(0, piece.this_turn.movement_left - march.movement_spent)
+			prediction.readiness = max(0, piece.army.readiness - march.readiness_lost)
 		}
 	}
 
-	// The ordered marches: the leader's, then the chaser's toward where the leader starts or ends
-	for &order, mover in orders {
-		if order.piece == {} do continue
-		if mover == .Chaser {
-			leader := movement.marches[.Leader].path.points[:]
-			order.destination = order.follows ? leader[len(leader) - 1] : leader[0]
+	// Step: Confirmed marches. The fall back and the chase, and the move when ordered
+	{
+		confirmed: [Planned_March]bool
+		confirmed[.Leader] = march_orders[.Leader].piece != {}
+		confirmed[.Chaser] = march_orders[.Chaser].piece != {} && march_refusals[.Leader] == nil
+		if move, ordered := input.(Move_Order); ordered {
+			piece := slot_map_get(&game.pieces, move.piece)
+			confirmed[.Move] = true
+			switch {
+			case orders[.Leader].piece != {}:
+				march_refusals[.Move] = .Superseded
+			case piece == nil:
+				march_refusals[.Move] = .No_Such_Piece
+			case !game.can_move:
+				march_refusals[.Move] = .Not_Now
+			case piece.owner != game.player:
+				march_refusals[.Move] = .Not_Yours
+			}
 		}
-		if !march_plan(game, order, mover, events) do break
+		movers := [Planned_March]Mover {
+			.Leader = .Leader,
+			.Chaser = .Chaser,
+			.Move   = .Leader,
+		}
+		for planned_march in Planned_March {
+			if !confirmed[planned_march] do continue
+			order := march_orders[planned_march]
+			if refusal, refused := march_refusals[planned_march].?; refused {
+				append(events, Event_Order_Refused{order.piece, refusal})
+				continue
+			}
+			march := &planned[planned_march]
+			movement.marches[movers[planned_march]] = march^
+			if marcher := slot_map_get(&game.pieces, order.piece); march.sails do marcher.this_turn.movement_left = 0
+			march_end := march.path.points[len(march.path.points) - 1]
+			append(events, Event_March{order.piece, movers[planned_march], march.target, march_end, march.sails})
+		}
 	}
-	// Otherwise, the focused piece's reach
-	if orders[.Leader].piece == {} do flood_from(game, focus, 0, {})
 
 	walks: [Mover]struct {
 		piece:            Piece_Id,
 		marched_road:     f32,
 		marched_off_road: f32,
 		overdrawn:        f32,
+		readiness_lost:   f32,
 	}
 	leader := slot_map_get(&game.pieces, movement.marches[.Leader].piece)
 	walk_done := leader == nil
@@ -1201,9 +1223,26 @@ game_step :: proc(
 				mover == .Chaser &&
 				linalg.distance(piece.pos, leader.pos) <= piece.body_radius + leader.body_radius
 			if touching || march.next == len(march.path.points) do continue
-			moved, road, off_road := walk_along(&march, piece.pos, march.sails ? SAIL_CELLS_PER_STEP : WALK_CELLS_PER_STEP)
-			piece.pos = moved
-			walks[mover] = {march.piece, road, off_road, 0}
+			walk := &walks[mover]
+			walk.piece = march.piece
+			stride: f32 = march.sails ? SAIL_CELLS_PER_STEP : WALK_CELLS_PER_STEP
+			path := march.path.points[:]
+			for stride > 0 && march.next < len(path) {
+				target := path[march.next]
+				rate := march.rates[march.next]
+				distance := linalg.distance(piece.pos, target)
+				walked := min(stride, distance)
+				if walked < distance {
+					piece.pos += linalg.normalize(target - piece.pos) * walked
+				} else {
+					piece.pos = target
+					march.next += 1
+				}
+				stride -= walked
+				walk.marched_road += walked * rate.road
+				walk.marched_off_road += walked * rate.off_road
+				walk.readiness_lost += walked * rate.readiness
+			}
 			if march.sails {
 				piece.this_turn.moved_sea = true
 				piece.army.statuses += {.Seasick} - piece.army.prevent_status
@@ -1224,6 +1263,7 @@ game_step :: proc(
 			spent := min(due, piece.this_turn.movement_left)
 			piece.this_turn.movement_left -= spent
 			walk.overdrawn = due - spent
+			walk.readiness_lost += walk.overdrawn * OVERDRAW_READINESS
 			append(
 				events,
 				Event_Moved{walk.piece, piece.pos, piece.this_turn.movement_left, walk.overdrawn},
@@ -1261,6 +1301,7 @@ game_step :: proc(
 	if game.ending do game.under_way += {.Ending}
 	game.can_move = game.under_way & {.Battle, .Ending} == {}
 	turn_ending := game.under_way == {.Ending}
+
 
 	// Step: Projects (turn end)
 	if turn_ending {
@@ -1721,9 +1762,7 @@ game_step :: proc(
 		for walk in walks {
 			if walk.piece != id do continue
 			changes += {.March}
-			readiness -= walk.marched_road * ROAD_READINESS_PER_MOVEMENT
-			readiness -= walk.marched_off_road * READINESS_PER_MOVEMENT
-			readiness -= walk.overdrawn * OVERDRAW_READINESS
+			readiness -= walk.readiness_lost
 		}
 
 		if turn_ending && piece.owner == game.player {

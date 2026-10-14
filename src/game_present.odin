@@ -64,6 +64,8 @@ LANDINGS_SLOT :: 4
 // Movers whose march is drawn as an arrow
 @(private = "file")
 MARCH_ARROWS :: bit_set[Mover]{.Leader, .Chaser}
+@(private = "file")
+PREDICTION_ARROW_OPACITY :: 0.5
 
 @(private = "file", rodata)
 ICON_TITLES := [Map_Icon]string {
@@ -164,8 +166,17 @@ Card_Field :: struct {
 	fill_origin: f32,
 	// Coloured bad to good by its fill
 	graded:      bool,
+	// Its bar eases toward a new fill
+	eased:       bool,
+	prediction:  Maybe(Card_Prediction),
 	// Nil: a plain value
 	click:       Card_Click,
+}
+
+// A field's value after an action: shown after its bar, which goes to its fill
+Card_Prediction :: struct {
+	value: string,
+	fill:  f32,
 }
 
 Card_Term :: struct {
@@ -351,6 +362,15 @@ game_present_map :: proc(
 		arrow := polylines_reserve(len(ahead) + 1, false, &frame.arrows) or_continue
 		arrow[0] = walker.pos
 		copy(arrow[1:], ahead)
+	}
+	// Always alone: a move is only predicted while nothing is under way
+	frame.arrow_opacity = 1
+	predicted := &movement.prediction.march
+	if movement.predicted.piece == focus && predicted.piece != {} && leader_march.piece == {} {
+		if arrow, reserved := polylines_reserve(len(predicted.path.points), false, &frame.arrows); reserved {
+			copy(arrow, predicted.path.points[:])
+			frame.arrow_opacity = PREDICTION_ARROW_OPACITY
+		}
 	}
 
 	if mode == .Supply {
@@ -810,9 +830,19 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				append(&card.buttons, Card_Action{"Demobilise", Game_Order(Title_Order{army.title, .Demobilise}), true})
 			}
 		}
+		predicted := &game.movement.prediction
+		predicting := game.movement.predicted.piece == focus
+		reachable := predicted.march.piece != {}
 		if piece.domain != nil {
 			left := piece.this_turn.movement_left
 			per_turn := piece.movement_per_turn
+			movement_prediction: Maybe(Card_Prediction)
+			if predicting && reachable {
+				movement_prediction = Card_Prediction {
+					value = compact_number(f64(predicted.movement_left)),
+					fill  = per_turn > 0 ? predicted.movement_left / per_turn : 0,
+				}
+			}
 			append(
 				&card.fields,
 				Card_Field {
@@ -820,6 +850,8 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					value = compact_number(f64(left)),
 					fill = per_turn > 0 ? left / per_turn : 0,
 					graded = true,
+					eased = true,
+					prediction = movement_prediction,
 					breakdown = tally_add(
 						&card.breakdowns,
 						{
@@ -1015,13 +1047,22 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					},
 				)
 				// Percentages: the bar is out of 100
+				readiness_prediction: Maybe(Card_Prediction)
+				if predicting && reachable {
+					readiness_prediction = Card_Prediction {
+						value = fmt.tprintf("%.0f%%", predicted.readiness),
+						fill  = predicted.readiness / 100,
+					}
+				}
 				percents := [?]struct {
-					label: string,
-					value: f32,
+					label:      string,
+					value:      f32,
+					eased:      bool,
+					prediction: Maybe(Card_Prediction),
 				} {
-					{"Proficiency", army.proficiency},
-					{"Readiness", army.readiness},
-					{"Supply", army.supply},
+					{"Proficiency", army.proficiency, false, nil},
+					{"Readiness", army.readiness, true, readiness_prediction},
+					{"Supply", army.supply, false, nil},
 				}
 				for percent in percents {
 					append(
@@ -1031,6 +1072,8 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 							value = fmt.tprintf("%.0f%%", percent.value),
 							fill = percent.value / 100,
 							graded = true,
+							eased = percent.eased,
+							prediction = percent.prediction,
 						},
 					)
 				}

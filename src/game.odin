@@ -1335,7 +1335,7 @@ game_load :: proc(
 
 	// Start step: makes the building offices
 	start_events := new([dynamic; GAME_EVENTS_MAX]Game_Event, context.temp_allocator)
-	game_step(game, {}, {}, start_events)
+	game_step(game, {}, {}, {}, start_events)
 
 	// The scenario's office holders, and armies' titles
 	{
@@ -1381,7 +1381,7 @@ game_load :: proc(
 	)
 	success &= len(game.factions) > 1
 	// Settle the derived records
-	game_step(game, {}, {}, start_events)
+	game_step(game, {}, {}, {}, start_events)
 	return
 }
 

@@ -362,7 +362,8 @@ card_ui :: proc(
 						key: string
 						if index, has_breakdown := field.breakdown.?; has_breakdown do key = breakdown_key(index)
 						else if field.click != nil do key = fmt.tprintf("%s field %d %d", label, column, f)
-						if field_ui(&field, theme, value_ems[column], key).pressed do take(field.click, &asks, order, menu, court_view)
+						ease_key := field.eased ? fmt.tprintf("%s field ease %d %d", label, column, f) : ""
+						if field_ui(&field, theme, value_ems[column], key, ease_key).pressed do take(field.click, &asks, order, menu, court_view)
 						if id, opens := field.click.(Card_Menu_Id); opens do anchors[id] = fmt.tprintf("%s###%s", field.value, key)
 					}
 					if column == 0 {
@@ -559,12 +560,15 @@ breakdown_ui :: proc(breakdown: ^Card_Breakdown, colors: Card_Colors) {
 }
 
 // A field's row: its label, if any, then its value as a bar after its number, a button, or one line of text. Keyed:
-// the bar or the text hovers, and a button needs it
+// the bar or the text hovers, and a button needs it. Ease key: an eased bar's
 @(private = "file")
-field_ui :: proc(field: ^Card_Field, theme: Card_Theme, value_em: f32, key: string) -> (signal: UI_Signal) {
+field_ui :: proc(field: ^Card_Field, theme: Card_Theme, value_em: f32, key: string, ease_key: string) -> (signal: UI_Signal) {
 	if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
 		if field.label != "" do ui_label(field.label, {width = ui_em(LABEL_EM), text_color = theme.colors.faded_ink})
+		prediction, predicting := field.prediction.?
 		if fill, has_fill := field.fill.?; has_fill {
+			if predicting do fill = prediction.fill
+			if ease_key != "" do fill = ui_anim(ease_key, fill, fill)
 			ui_label(field.value, {width = ui_em(NUMBER_EM)})
 			style := theme.meter
 			height: f32 = BAR_HEIGHT
@@ -596,6 +600,7 @@ field_ui :: proc(field: ^Card_Field, theme: Card_Theme, value_em: f32, key: stri
 			// One line, cut short rather than wrapped
 			signal = ui_label_text({run}, {width = ui_em(value_em), height = ui_px(theme.line_height)})
 		}
+		if predicting do ui_label(prediction.value)
 	}
 	return
 }
@@ -750,7 +755,7 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 									for &stat, s in row.stats {
 										index, tipped := stat.breakdown.?
 										key := tipped ? fmt.tprintf("court stat %d %d", i, s) : ""
-										field_ui(&stat, theme, STAT_VALUE_EM, key)
+										field_ui(&stat, theme, STAT_VALUE_EM, key, "")
 										if !tipped do continue
 										clicked |= ui_signal(key).pressed
 										if ui_tooltip(fmt.tprintf("court stat tip %d %d", i, s), ui_signal(key).hovered, tooltip) {
@@ -761,7 +766,7 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 								if ui_column({width = ui_em(COURT_ARMY_EM), height = ui_fit(), gap = FIELD_GAP}) {
 									if row.army != "" {
 										ui_label(row.army, {width = ui_em(COURT_ARMY_EM)})
-										field_ui(&row.men, theme, STAT_VALUE_EM, "")
+										field_ui(&row.men, theme, STAT_VALUE_EM, "", "")
 										ui_label(fmt.tprintf("at %s", row.base), {width = ui_em(COURT_ARMY_EM), text_color = colors.faded_ink})
 									} else {
 										ui_label("No army", {width = ui_em(COURT_ARMY_EM), text_color = colors.faded_ink})

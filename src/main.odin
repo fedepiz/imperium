@@ -126,7 +126,7 @@ run_headless :: proc(options: Options) {
 		steps := command_apply(&GLOBAL.game, command, &input, &GLOBAL.camera)
 		for _ in 0 ..< steps {
 			clear(&GLOBAL.game_events)
-			game_step(&GLOBAL.game, {}, input, &GLOBAL.game_events)
+			game_step(&GLOBAL.game, {}, {}, input, &GLOBAL.game_events)
 			input = {}
 			if options.rules_log != "" do rules_log_events(&GLOBAL.game, GLOBAL.game_events[:])
 			free_all(context.temp_allocator)
@@ -372,10 +372,14 @@ run_windowed :: proc(options: Options) {
 			focus = found ? GLOBAL.pawn_pieces[index] : {}
 			cards_view.menu = nil
 		}
-		if order_click && focus != {} {
+		// The move a right click gives. None over the selected pawn
+		hover: Move_Order
+		under, over_pawn := map_pawns_pick(&GLOBAL.pawns, view, window_size, input.cursor, -1)
+		over_focus := over_pawn && GLOBAL.pawn_pieces[under] == focus
+		if focus != {} && !over_focus && input.cursor_valid && !ui_hovered_any() {
 			focus_index := -1
 			for piece, index in GLOBAL.pawn_pieces do if piece == focus do focus_index = index
-			order := Move_Order {
+			hover = {
 				piece       = focus,
 				destination = cursor_cell,
 				snap        = CLICK_MOVE_SNAP,
@@ -387,16 +391,16 @@ run_windowed :: proc(options: Options) {
 				input.cursor,
 				focus_index,
 			)
-			if found do order.target = GLOBAL.pawn_pieces[index]
-			game_input = order
+			if found do hover.target = GLOBAL.pawn_pieces[index]
 		}
+		if order_click && hover.piece != {} do game_input = hover
 
 		unstepped = min(unstepped + dt, STEPS_PER_FRAME_MAX * STEP_SECONDS)
 		steps := int(unstepped / STEP_SECONDS)
 		unstepped -= f32(steps) * STEP_SECONDS
 		for _ in 0 ..< steps {
 			clear(&GLOBAL.game_events)
-			game_step(&GLOBAL.game, focus, game_input, &GLOBAL.game_events)
+			game_step(&GLOBAL.game, focus, hover, game_input, &GLOBAL.game_events)
 			game_input = {}
 			commands_waiting = max(0, commands_waiting - 1)
 			if options.rules_log != "" do rules_log_events(&GLOBAL.game, GLOBAL.game_events[:])

@@ -486,8 +486,8 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         let dist = stroke_distance(p, i) * px;
         let half = stroke.width * 0.5 * view.pixel_density;
         let edge = stroke.edge_width * 0.5 * view.pixel_density;
-        col = mix(col, stroke.fill, line_aa(dist, half));
-        col = mix(col, stroke.color, line_aa(abs(dist - (half - edge)), edge));
+        col = mix(col, stroke.fill, line_aa(dist, half) * stroke.strength);
+        col = mix(col, stroke.color, line_aa(abs(dist - (half - edge)), edge) * stroke.strength);
     }
 
     // Edge darkening: 0.84 at the grid border, 1 from 12 cells in

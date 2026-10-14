@@ -112,6 +112,8 @@ Render_Terrain_Frame :: struct {
 	highlight_circles: [dynamic; RENDER_TERRAIN_HIGHLIGHT_CIRCLES_MAX]Render_Circle,
 	// One open run per arrow: a path as points in cells, tail to head, with an arrowhead at its end
 	arrows:            Polylines(RENDER_TERRAIN_ARROW_POINTS_MAX, RENDER_TERRAIN_ARROWS_MAX),
+	// Of every arrow, 0..1
+	arrow_opacity:     f32,
 	// A value per cell, 0..255, RENDER_TERRAIN_CELLS long: a wash over the land, from the style's
 	// wash_low at 0 to wash_high at 255. Empty = none. For map modes such as supply
 	wash:              [dynamic; RENDER_TERRAIN_CELLS]u8,
@@ -709,7 +711,7 @@ Stroke_Kind :: enum i32 {
 	// factor 0.6..1.4. Mixed toward fill * base colour by strength
 	Double,
 	// A filled line (fill) with an edge line either side (color, edge_width), the same width on screen at
-	// any zoom. width: outer, edges included. Heads: see ground_stroke_write
+	// any zoom. width: outer, edges included. strength: opacity. Heads: see ground_stroke_write
 	Arrow,
 }
 
@@ -1263,6 +1265,7 @@ terrain_frame :: proc(
 	// Step: Uniforms
 	uniform := ground_uniform_from_style(style^, len(frame.wash) > 0)
 	for &layer, i in uniform.areas do layer.circle_count = GROUND_AREAS.layers[i].circle_count
+	uniform.strokes[STROKE_ARROWS].strength = frame.arrow_opacity
 	wgpu.QueueWriteBuffer(rend.queue, TERRAIN.ground_uniforms, 0, &uniform, size_of(uniform))
 
 	// Step: Marks in view
