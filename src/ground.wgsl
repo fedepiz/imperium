@@ -45,7 +45,7 @@ struct Area_Layer {
 }
 
 // STROKES
-const STROKE_COUNT = 3;
+const STROKE_COUNT = 4;
 
 // Must match Stroke_Uniform in renderer_terrain.odin
 struct Stroke {

@@ -56,6 +56,10 @@ REACH_SLOT :: 0
 FRIEND_ZONES_SLOT :: 1
 @(private = "file")
 ENEMY_ZONES_SLOT :: 2
+@(private = "file")
+BEACHES_SLOT :: 3
+@(private = "file")
+LANDINGS_SLOT :: 4
 
 // Movers whose march is drawn as an arrow
 @(private = "file")
@@ -317,6 +321,27 @@ game_present_map :: proc(
 		enemies.circles_len = len(frame.highlight_circles) - enemies.circles_begin
 	}
 
+	reach := &movement.sea_reach
+	if reach.piece == focus && leader_march.piece != focus {
+		piece := slot_map_get(&game.pieces, focus)
+		controlled := piece != nil && game.can_move && piece.owner == game.player
+		landings := &frame.highlights[LANDINGS_SLOT]
+		landings^ = {
+			kind          = controlled ? .Reach : .Foreign_Reach,
+			circles_begin = len(frame.highlight_circles),
+		}
+		for beach, b in game.beaches do if b in reach.landable do append(&frame.highlight_circles, Render_Circle{beach.pos, BEACH_RADIUS})
+		landings.circles_len = len(frame.highlight_circles) - landings.circles_begin
+	}
+
+	beaches := &frame.highlights[BEACHES_SLOT]
+	beaches^ = {
+		kind          = .Beach,
+		circles_begin = len(frame.highlight_circles),
+	}
+	for beach, b in game.beaches do if b > 0 do append(&frame.highlight_circles, Render_Circle{beach.pos, BEACH_RADIUS})
+	beaches.circles_len = len(frame.highlight_circles) - beaches.circles_begin
+
 	for &march, mover in movement.marches {
 		walker := slot_map_get(&game.pieces, march.piece)
 		if walker == nil || mover not_in MARCH_ARROWS do continue
@@ -351,9 +376,11 @@ game_present_pawns :: proc(
 	it := slot_map_iterator(&game.pieces)
 	for piece, id in slot_map_iterate(&it) {
 		engaged := id == game.interaction.actor || id == game.interaction.target
+		icon := piece.icon
+		for march in game.movement.marches do if march.piece == id && march.sails do icon = .Fleet
 		pawn := Map_Pawn {
 			pos         = piece.pos,
-			icon        = piece.icon,
+			icon        = icon,
 			look        = game.cultures[piece.culture].look,
 			highlighted = engaged,
 			pulsing     = id == focus,
@@ -782,12 +809,37 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			}
 		}
 		statuses := make([dynamic]string, context.temp_allocator)
-		if is_army && army.spent do append(&statuses, "Spent")
+		if is_army do for status in army.statuses do append(&statuses, fmt.tprint(status))
 		if piece.inside != {} do append(&statuses, "Garrisoning")
 		if piece.contains != {} do append(&statuses, "Garrisoned")
 		status := "None"
 		if len(statuses) > 0 do status = strings.join(statuses[:], ", ", context.temp_allocator)
 		append(&card.fields, Card_Field{label = "Status", value = status})
+		if is_army {
+			names := make([dynamic]string, context.temp_allocator)
+			descriptions := make([dynamic]string, context.temp_allocator)
+			described: Card_Breakdown
+			for trait in game.army_types[army.type].traits {
+				each := &game.army_traits[trait]
+				modifiers := make([dynamic]string, context.temp_allocator)
+				if each.modifiers.agility != 0 do append(&modifiers, fmt.tprintf("Agility %+.0f", each.modifiers.agility))
+				if each.modifiers.movement != 0 do append(&modifiers, fmt.tprintf("Movement %+.0f", each.modifiers.movement))
+				if each.modifiers.readiness_recovery != 0 {
+					append(&modifiers, fmt.tprintf("Readiness recovery %+.0f", each.modifiers.readiness_recovery))
+				}
+				for prevented in each.modifiers.prevent_status do append(&modifiers, fmt.tprintf("Never %v", prevented))
+				append(&names, name_to_string(&each.name))
+				append(&descriptions, description_to_string(&each.description))
+				append(&described.terms, Card_Term{name_to_string(&each.name), strings.join(modifiers[:], ", ", context.temp_allocator)})
+			}
+			traits := Card_Field{label = "Traits", value = "None"}
+			if len(names) > 0 {
+				traits.value = strings.join(names[:], ", ", context.temp_allocator)
+				described.description = strings.join(descriptions[:], " ", context.temp_allocator)
+				if append(&card.breakdowns, described) > 0 do traits.breakdown = len(card.breakdowns) - 1
+			}
+			append(&card.fields, traits)
+		}
 		if piece.domain != nil {
 			left := piece.this_turn.movement_left
 			per_turn := piece.movement_per_turn
@@ -848,7 +900,10 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				append(&breakdown.terms, Card_Term{"Pay", fmt.tprintf("%.1f a turn", office.wealth)})
 				append(&breakdown.terms, Card_Term{"Proficiency", fmt.tprintf("%.0f%%", army_type.proficiency)})
 				append(&breakdown.terms, Card_Term{"Foraging", fmt.tprintf("%.0f%%", army_type.foraging)})
-				append(&breakdown.terms, Card_Term{"Mobility", fmt.tprintf("%.0f", army_type.mobility)})
+				append(&breakdown.terms, Card_Term{"Agility", fmt.tprintf("%.0f", army_type.agility)})
+				for trait in army_type.traits {
+					append(&breakdown.terms, Card_Term{"Trait", name_to_string(&game.army_traits[trait].name)})
+				}
 				action := Card_Menu_Action {
 					label   = name_to_string(&kind.name),
 					detail  = detail,

@@ -1,0 +1,35 @@
+# The traits of armies. Army types name theirs in army_types.txt; an army's modifiers are its traits', added
+# together. Every key, in order; a trait gives those marked required, and the others only when it differs from their
+# default:
+#
+# army_trait = {
+#   id = example               required. A snake_case word the other files name it by
+#   name = "Example"           required
+#   agility = 0                default 0. Added to its agility
+#   movement = 0               default 0. Movement points added a turn
+#   readiness_recovery = 0     default 0. Readiness regained a turn, toward its supply level, when not resting
+#   prevent_status = []        default none. Statuses it never takes: Spent, Resting, Seasick
+#   description = "Example: ..."  required. What it is, shown when it is hovered
+# }
+
+army_trait = {
+	id = field_logistics
+	name = "Field Logistics"
+	readiness_recovery = 5
+	description = "Field Logistics: the late Roman field armies were supplied through the annona militaris, a tax paid in kind and gathered in depots along their routes, so they could recover even while on campaign."
+}
+
+army_trait = {
+	id = marines
+	name = "Marines"
+	prevent_status = [Seasick]
+	description = "Marines: warriors at home on ships, who land ready to fight."
+}
+
+army_trait = {
+	id = mounted
+	name = "Mounted"
+	agility = 1
+	movement = 10
+	description = "Mounted: horsemen, who cover more ground on the march and are quicker to break off or pursue in battle."
+}

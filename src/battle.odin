@@ -8,9 +8,9 @@ NUMBERS_SCALE :: 1.5
 @(private = "file")
 NUMBERS_MAX :: 2
 @(private = "file")
-MOBILITY_BONUS :: 2
+AGILITY_BONUS :: 2
 @(private = "file")
-MOBILITY_TARGET :: 8
+AGILITY_TARGET :: 8
 @(private = "file")
 ONSET_TIE :: 0.5
 @(private = "file")
@@ -37,6 +37,9 @@ COHESION_TARGET :: 10
 AVOID_READINESS :: 5
 @(private = "file")
 PURSUIT_READINESS :: -10
+// Share of proficiency lost from power
+@(private = "file")
+SEASICK_POWER :: 0.3
 
 Temperament :: enum u8 {
 	Bold,
@@ -509,6 +512,7 @@ ROLE_LABELS := [Role]string {
 
 Battle_Side_Flag :: enum u8 {
 	Spent,
+	Seasick,
 	Garrisoning,
 	// Fights from a fortified piece; names the battle
 	Behind_Walls,
@@ -530,7 +534,7 @@ Battle_Side :: struct {
 	proficiency:   f32,
 	readiness:     f32,
 	flags:         bit_set[Battle_Side_Flag],
-	mobility:      f32,
+	agility:       f32,
 	temperament:   Temperament,
 	// The piece's title
 	name:          string,
@@ -600,6 +604,7 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		proficiency := side.proficiency / 10
 		report_tally_add(power, "Proficiency", proficiency)
 		report_tally_add(power, "Readiness", -proficiency * (0.5 - side.readiness / 200))
+		if .Seasick in side.flags do report_tally_add(power, "Seasick", -proficiency * SEASICK_POWER)
 		men_ratio := men_engaged[1 - i] > 0 ? men_engaged[i] / men_engaged[1 - i] : 1
 		numbers := clamp(NUMBERS_SCALE * math.log2(max(men_ratio, 1e-6)), 0, NUMBERS_MAX)
 		report_tally_add(power, "Numbers", numbers)
@@ -693,10 +698,10 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		if .Can_Avoid in defender.flags && avoid == .Avoid_Try {
 			roll: Report_Tally
 			report_tally_add(&roll, "Roll", roll_2d6(&rng))
-			report_tally_add(&roll, "Mobility", MOBILITY_BONUS * (defender.mobility - attacker.mobility))
+			report_tally_add(&roll, "Agility", AGILITY_BONUS * (defender.agility - attacker.agility))
 			reason := report_because(report, held, absent, FACT_TITLES)
 			tries := Report_Note{"tries to avoid battle", reason}
-			if check(report, names[.Defender], roll, MOBILITY_TARGET, tries) {
+			if check(report, names[.Defender], roll, AGILITY_TARGET, tries) {
 				result.outcome = .Avoided
 				loser = .Defender
 				decided = true
@@ -881,9 +886,9 @@ battle_resolve :: proc(battle: Battle) -> (result: Battle_Result) {
 		if pursued {
 			roll: Report_Tally
 			report_tally_add(&roll, "Roll", roll_2d6(&rng))
-			report_tally_add(&roll, "Mobility", MOBILITY_BONUS * (victor.mobility - beaten.mobility))
+			report_tally_add(&roll, "Agility", AGILITY_BONUS * (victor.agility - beaten.agility))
 			pursues := Report_Note{"pursues", reason}
-			result.caught = check(report, names[winner], roll, MOBILITY_TARGET, pursues)
+			result.caught = check(report, names[winner], roll, AGILITY_TARGET, pursues)
 			if result.caught {
 				out := &result.sides[at[loser]]
 				out.pursuit_men.unit = .Men

@@ -1,0 +1,86 @@
+# The sea network. Beaches: landing zones on the coast, where armies embark and land; each has an id, a snake_case
+# word the lanes name it by, and a point, [x, y] in cells from the top left, on land by the sea. Lanes: routes along
+# the coast between two beaches, from and to, by id, and the points the route curves through between them, over
+# water. The game smooths them into curves.
+
+beach = { id = roma  at = [343, 438] }
+beach = { id = ravenna  at = [346, 395] }
+beach = { id = tarentum  at = [408, 467] }
+beach = { id = aquileia  at = [361, 368] }
+beach = { id = neapolis  at = [361, 449] }
+beach = { id = genua  at = [302, 393] }
+beach = { id = rhegium  at = [399, 507] }
+beach = { id = syracusae  at = [385, 521] }
+beach = { id = salona  at = [416, 414] }
+beach = { id = aquae_sextiae  at = [242, 409] }
+beach = { id = narbo  at = [213, 421] }
+beach = { id = rotomagus  at = [185, 292] }
+beach = { id = flevum  at = [237, 240] }
+beach = { id = angulus  at = [312, 207] }
+beach = { id = burdigala  at = [155, 386] }
+
+lane = {
+	from = roma
+	to = neapolis
+	points = [[347, 454]]
+}
+lane = {
+	from = roma
+	to = genua
+	points = [[326, 435], [311, 426], [312, 408]]
+}
+lane = {
+	from = ravenna
+	to = tarentum
+	points = [[355, 396], [362, 401], [369, 406], [373, 414], [375, 421], [382, 428], [399, 431], [409, 443], [424, 452], [436, 464], [437, 481], [422, 478]]
+}
+lane = {
+	from = ravenna
+	to = aquileia
+	points = [[349, 387], [349, 379], [352, 374], [357, 371]]
+}
+lane = {
+	from = tarentum
+	to = rhegium
+	points = [[416, 480], [423, 492], [414, 504]]
+}
+lane = {
+	from = aquileia
+	to = salona
+	points = [[362, 375], [362, 383], [367, 388], [374, 392], [377, 399], [382, 405], [396, 414], [402, 420], [408, 425], [415, 423]]
+}
+lane = {
+	from = neapolis
+	to = rhegium
+	points = [[361, 463], [373, 469], [385, 479], [390, 492], [392, 505]]
+}
+lane = {
+	from = genua
+	to = aquae_sextiae
+	points = [[286, 407], [270, 419], [251, 424]]
+}
+lane = {
+	from = rhegium
+	to = syracusae
+	points = []
+}
+lane = {
+	from = aquae_sextiae
+	to = narbo
+	points = [[230, 418]]
+}
+lane = {
+	from = rotomagus
+	to = flevum
+	points = [[190, 273], [206, 263], [220, 250]]
+}
+lane = {
+	from = rotomagus
+	to = burdigala
+	points = [[178, 288], [170, 293], [163, 297], [155, 293], [147, 292], [139, 295], [130, 296], [124, 303], [117, 308], [108, 308], [94, 316], [99, 333], [114, 339], [130, 347], [140, 361]]
+}
+lane = {
+	from = flevum
+	to = angulus
+	points = [[234, 226], [249, 219], [265, 216], [280, 209], [278, 192], [277, 174], [283, 159], [300, 156], [307, 151], [314, 148], [322, 146], [328, 153], [331, 160], [328, 168], [329, 177], [325, 184], [326, 192], [327, 196], [327, 200], [326, 202], [325, 204], [324, 205], [322, 206], [319, 207], [317, 207], [315, 207]]
+}

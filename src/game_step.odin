@@ -23,6 +23,11 @@ WALK_POINTS_MAX :: (PATHFIND_PATH_MAX + 1) << uint(WALK_SMOOTHING.cut_iter)
 @(private = "file")
 WALK_CELLS_PER_STEP :: 10 * STEP_SECONDS
 @(private = "file")
+SAIL_CELLS_PER_STEP :: 40 * STEP_SECONDS
+// In cells along the lanes
+@(private = "file")
+SEA_RANGE :: 300
+@(private = "file")
 ROAD_READINESS_PER_MOVEMENT :: 0.2
 @(private = "file")
 READINESS_PER_MOVEMENT :: 1
@@ -47,7 +52,7 @@ PIECES_TO_REMOVE_MAX :: 32
 @(private = "file")
 TITLE_GATHER_SHARE :: 0.05
 @(private = "file")
-MOBILISE_READINESS :: 20
+MOBILISE_READINESS :: 50
 // Share of the gap to its target closed per turn, never less than INFLUENCE_STEP_MIN
 @(private = "file")
 INFLUENCE_RATE :: 0.1
@@ -69,6 +74,9 @@ NEW_CHARACTER_LOYALTY :: 50
 // Control lost per unit of travel cost from its source
 @(private = "file")
 CONTROL_DECAY :: 1
+// Path cost per cell along a sea lane
+@(private = "file")
+SEA_LANE_COST :: 0.2
 @(private = "file")
 FOOD_PER_POPULATION :: 1
 // Share of the gap to what food supports closed per turn, and the most it grows per turn, as a share of itself
@@ -209,10 +217,23 @@ March :: struct {
 	// On the segment ending at each point. [0] unused
 	rates:    [dynamic; WALK_POINTS_MAX]March_Rate,
 	next:     int,
+	sails:    bool,
+}
+
+Sea_Reach :: struct {
+	piece:      Piece_Id,
+	// 0: not at a beach
+	start:      Beach_Id,
+	// In cells along the lanes. INF: out of reach
+	cost:       [BEACHES_MAX]f32,
+	reached_by: [BEACHES_MAX]Sea_Lane_Id,
+	// Reached and unoccupied
+	landable:   bit_set[0 ..< BEACHES_MAX],
 }
 
 Movement :: struct {
 	marches:      [Mover]March,
+	sea_reach:    Sea_Reach,
 	flood:        Pathfind_Flood,
 	flooded:      Piece_Id,
 	flood_key:    u64,
@@ -261,6 +282,7 @@ Event_March :: struct {
 	mover:  Mover,
 	target: Piece_Id,
 	to:     [2]f32,
+	sails:  bool,
 }
 
 Event_Moved :: struct {
@@ -445,11 +467,17 @@ game_networks_build :: proc(game: ^Game) {
 				}
 			}
 		}
-		pathfind_spread(.Land, sources[:], blocked, SUPPLY_DECAY, .Max, spread)
+		pathfind_spread(.Land, sources[:], blocked, nil, SUPPLY_DECAY, .Max, spread)
 		for value, i in spread do game.supply_network[i] = u8(clamp(value, 0, 100) + 0.5)
 	}
 
 	// Control, per faction: never outside its regions
+	lanes: [dynamic; SEA_LANES_MAX]Pathfind_Link
+	for lane, l in game.sea_lanes {
+		if l == 0 do continue
+		ends := [2][2]int{cell_of(game.beaches[lane.from].pos), cell_of(game.beaches[lane.to].pos)}
+		append(&lanes, Pathfind_Link{ends, lane.length * SEA_LANE_COST})
+	}
 	for faction in 1 ..< len(game.factions) {
 		owner := Faction_Id(faction)
 		for region, i in game.terrain.regions do blocked[i] = game.regions[region].owner != owner
@@ -462,7 +490,7 @@ game_networks_build :: proc(game: ^Game) {
 			for kind_id in piece.town.buildings do strength += game.building_kinds[kind_id].control
 			if strength > 0 do append(&sources, Pathfind_Source{piece.pos, strength})
 		}
-		pathfind_spread(.Land, sources[:], blocked, CONTROL_DECAY, .Max, spread)
+		pathfind_spread(.Land, sources[:], blocked, lanes[:], CONTROL_DECAY, .Max, spread)
 		if owner == game.player {
 			for value, i in spread do game.control_network[i] = u8(clamp(value, 0, 100) + 0.5)
 		}
@@ -650,7 +678,7 @@ march_plan :: proc(
 	march.clear_of = order.clear_of
 	march.next = 1
 	march_end := march.path.points[len(march.path.points) - 1]
-	append(events, Event_March{order.piece, mover, order.target, march_end})
+	append(events, Event_March{order.piece, mover, order.target, march_end, false})
 	return true
 }
 
@@ -754,7 +782,6 @@ game_step :: proc(
 						proficiency = army_type.proficiency,
 						readiness   = MOBILISE_READINESS,
 						foraging    = army_type.foraging,
-						mobility    = army_type.mobility,
 						supply      = 100,
 						type        = army_type_id,
 						title       = order.office,
@@ -961,8 +988,8 @@ game_step :: proc(
 			fortified := .Fortified in piece.flags
 			held := holder != nil && .Fortified in holder.flags
 			behind_walls[i] = fortified || held
-			guarded := occupant != nil && .Has_Army in occupant.flags && !occupant.army.spent
-			if (fortified && guarded) || (held && piece.army.spent) do sheltered = true
+			guarded := occupant != nil && .Has_Army in occupant.flags && .Spent not_in occupant.army.statuses
+			if (fortified && guarded) || (held && .Spent in piece.army.statuses) do sheltered = true
 		}
 		if sheltered {
 			append(events, event)
@@ -978,7 +1005,8 @@ game_step :: proc(
 			army := piece.army
 			limited := behind_walls[1 - i]
 			flags: bit_set[Battle_Side_Flag]
-			if army.spent do flags += {.Spent}
+			if .Spent in army.statuses do flags += {.Spent}
+			if .Seasick in army.statuses do flags += {.Seasick}
 			if piece.inside != {} do flags += {.Garrisoning}
 			if behind_walls[i] do flags += {.Behind_Walls}
 			if .Fortified in piece.flags do flags += {.Inherent_Garrison}
@@ -993,13 +1021,19 @@ game_step :: proc(
 				proficiency   = army.proficiency,
 				readiness     = army.readiness,
 				flags         = flags,
-				mobility      = army.mobility,
+				agility       = army.agility,
 				temperament   = army.temperament,
 				name          = game_piece_title(piece),
 			}
 		}
 
 		result := battle_resolve(battle)
+		if result.fought {
+			for piece in pieces {
+				piece.this_turn.fought = true
+				piece.army.statuses -= {.Resting}
+			}
+		}
 		event.outcome = result.fought ? .Battle : result.refused ? .Refused : .Declined
 		append(events, event)
 		if !result.fought && !result.refused do continue
@@ -1014,6 +1048,50 @@ game_step :: proc(
 		game.interaction.result = result
 	}
 
+	// Step: Sea reach. Of the piece ordered to move, else of the focused piece
+	reach := &movement.sea_reach
+	{
+		reach^ = {piece = focus}
+		if order, ordered := input.(Move_Order); ordered do reach.piece = order.piece
+		for &cost in reach.cost do cost = math.INF_F32
+		sailor := slot_map_get(&game.pieces, reach.piece)
+		if sailor != nil && .Has_Army in sailor.flags {
+			for beach, b in game.beaches {
+				if b > 0 && linalg.distance(sailor.pos, beach.pos) <= BEACH_RADIUS do reach.start = Beach_Id(b)
+			}
+		}
+		// Only through beaches in the sailor's regions
+		if reach.start != 0 && sailor.this_turn.movement_left > 0 {
+			reach.cost[reach.start] = 0
+			done: bit_set[0 ..< BEACHES_MAX]
+			for {
+				at := 0
+				for b in 1 ..< len(game.beaches) do if b not_in done && reach.cost[b] < reach.cost[at] do at = b
+				if at == 0 do break
+				done += {at}
+				if Beach_Id(at) != reach.start && game.regions[game.beaches[at].region].owner != sailor.owner do continue
+				for lane, l in game.sea_lanes {
+					other := lane.from == Beach_Id(at) ? lane.to : lane.to == Beach_Id(at) ? lane.from : 0
+					cost := reach.cost[at] + lane.length
+					if other == 0 || cost > SEA_RANGE || cost >= reach.cost[other] do continue
+					reach.cost[other] = cost
+					reach.reached_by[other] = Sea_Lane_Id(l)
+				}
+			}
+			for beach, b in game.beaches {
+				if b == 0 || Beach_Id(b) == reach.start || reach.cost[b] == math.INF_F32 do continue
+				taken := false
+				others := slot_map_iterator(&game.pieces)
+				for other, other_id in slot_map_iterate(&others) {
+					if other_id == reach.piece do continue
+					if linalg.distance(other.pos, beach.pos) < other.body_radius + sailor.body_radius do taken = true
+				}
+				if !taken do reach.landable += {b}
+			}
+		}
+	}
+
+	// Step: Move order. To a landable beach: sails
 	if player_order, ordered := input.(Move_Order); ordered {
 		piece := slot_map_get(&game.pieces, player_order.piece)
 		refusal: Maybe(Order_Refusal)
@@ -1027,8 +1105,49 @@ game_step :: proc(
 		case piece.owner != game.player:
 			refusal = .Not_Yours
 		}
+
+		landing: Beach_Id
+		for beach, b in game.beaches {
+			if b in reach.landable && linalg.distance(beach.pos, player_order.destination) <= BEACH_RADIUS do landing = Beach_Id(b)
+		}
+		route: [dynamic; BEACHES_MAX]Sea_Lane_Id
+		count := 1
+		if refusal == nil && landing != 0 {
+			for at := landing; at != reach.start; {
+				lane := &game.sea_lanes[reach.reached_by[at]]
+				append(&route, reach.reached_by[at])
+				count += game.sea_lane_curves.runs[reach.reached_by[at] - 1].len
+				at = lane.from == at ? lane.to : lane.from
+			}
+			if count > WALK_POINTS_MAX do refusal = .No_Route
+		}
+
 		if reason, refused := refusal.?; refused {
 			append(events, Event_Order_Refused{player_order.piece, reason})
+		} else if landing != 0 {
+			march := &movement.marches[.Leader]
+			march^ = {
+				piece = player_order.piece,
+				next  = 1,
+				sails = true,
+			}
+			points := polylines_reserve(count, false, &march.path)
+			points[0] = piece.pos
+			filled := 1
+			at := reach.start
+			#reverse for lane_id in route {
+				lane := &game.sea_lanes[lane_id]
+				run := game.sea_lane_curves.runs[lane_id - 1]
+				leg := points[filled:][:run.len]
+				copy(leg, game.sea_lane_curves.points[run.begin:][:run.len])
+				if lane.from != at do slice.reverse(leg)
+				filled += run.len
+				at = lane.from == at ? lane.to : lane.from
+			}
+			// Sailing spends no movement
+			for _ in 0 ..< count do append(&march.rates, March_Rate{})
+			piece.this_turn.movement_left = 0
+			append(events, Event_March{player_order.piece, .Leader, {}, points[count - 1], true})
 		} else {
 			order := &orders[.Leader]
 			order^ = {
@@ -1082,9 +1201,16 @@ game_step :: proc(
 				mover == .Chaser &&
 				linalg.distance(piece.pos, leader.pos) <= piece.body_radius + leader.body_radius
 			if touching || march.next == len(march.path.points) do continue
-			moved, road, off_road := walk_along(&march, piece.pos, WALK_CELLS_PER_STEP)
+			moved, road, off_road := walk_along(&march, piece.pos, march.sails ? SAIL_CELLS_PER_STEP : WALK_CELLS_PER_STEP)
 			piece.pos = moved
 			walks[mover] = {march.piece, road, off_road, 0}
+			if march.sails {
+				piece.this_turn.moved_sea = true
+				piece.army.statuses += {.Seasick} - piece.army.prevent_status
+			} else {
+				piece.this_turn.moved_land = true
+			}
+			piece.army.statuses -= {.Resting}
 		}
 
 		for &walk in walks {
@@ -1170,6 +1296,21 @@ game_step :: proc(
 			piece.hindrance = main.hindrance
 			piece.contact_radius = main.contact
 			piece.body_radius = main.body
+		}
+	}
+
+	// Step: Army stats
+	{
+		armies := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&armies) {
+			if .Has_Army not_in piece.flags do continue
+			army_type := &game.army_types[piece.army.type]
+			modifiers: Army_Modifiers
+			for trait in army_type.traits do modifiers = army_modifiers_combine(modifiers, game.army_traits[trait].modifiers)
+			piece.army.agility = army_type.agility + modifiers.agility
+			piece.army.readiness_recovery = modifiers.readiness_recovery
+			piece.army.prevent_status = modifiers.prevent_status
+			if _, moves := piece.domain.?; moves do piece.movement_per_turn = game.army_template.movement_per_turn + modifiers.movement
 		}
 	}
 
@@ -1587,19 +1728,25 @@ game_step :: proc(
 
 		if turn_ending && piece.owner == game.player {
 			changes += {.Turn_End}
-			exertion: f32 =
-				piece.movement_per_turn > 0 ? 1 - piece.this_turn.movement_left / piece.movement_per_turn : 0
-			// Recovery: toward the supply level; gains scaled by rest
-			delta := clamp(army.supply - readiness, -READINESS_SPEED, READINESS_SPEED)
-			if delta > 0 do delta *= 1 - exertion
-			readiness += delta
-			if army.spent && readiness >= SPENT_READINESS {
+			if !piece.this_turn.moved_sea do army.statuses -= {.Seasick}
+			if !piece.this_turn.moved_land && !piece.this_turn.moved_sea && !piece.this_turn.fought {
+				army.statuses += {.Resting} - army.prevent_status
+				enemies := slot_map_iterator(&game.pieces)
+				for enemy in slot_map_iterate(&enemies) {
+					if pieces_friendly(piece, enemy) || .Land not_in enemy.contact_domains do continue
+					if linalg.distance(piece.pos, enemy.pos) < enemy.contact_radius do army.statuses -= {.Resting}
+				}
+			}
+			// Recovery: toward the supply level
+			gain_max: f32 = .Resting in army.statuses ? READINESS_SPEED : army.readiness_recovery
+			readiness += clamp(army.supply - readiness, -READINESS_SPEED, gain_max)
+			if .Spent in army.statuses && readiness >= SPENT_READINESS {
 				rng := seed_from(u64(game.turn), u64(game.player), transmute(u64)id)
 				roll := roll_2d6(&rng)
 				total := roll + (readiness - SPENT_READINESS) * SPENT_ROLL_PER_READINESS
 				append(events, Event_Spent_Roll{id, readiness, roll, total, SPENT_ROLL_TARGET})
 				if total > SPENT_ROLL_TARGET {
-					army.spent = false
+					army.statuses -= {.Spent}
 					append(events, Event_Unspent{id})
 				}
 			}
@@ -1618,8 +1765,9 @@ game_step :: proc(
 		}
 
 		army.readiness = clamp(readiness, 0, 100)
-		if army.readiness < SPENT_READINESS && !army.spent {
-			army.spent = true
+		spent := army.readiness < SPENT_READINESS && .Spent not_in army.prevent_status
+		if spent && .Spent not_in army.statuses {
+			army.statuses += {.Spent}
 			append(events, Event_Spent{id, army.readiness})
 		}
 		if changes != {} do append(events, Event_Army{id, changes, army^})
@@ -1673,9 +1821,13 @@ game_step :: proc(
 		game.player = Faction_Id(next_player)
 		append(events, Event_Turn{game.turn, game.player})
 
+		game_networks_build(game)
+	}
+
+	// Step: Turn start
+	if turn_ending || starting {
 		all := slot_map_iterator(&game.pieces)
 		for piece in slot_map_iterate(&all) do piece.this_turn = {movement_left = piece.movement_per_turn}
-		game_networks_build(game)
 	}
 }
 

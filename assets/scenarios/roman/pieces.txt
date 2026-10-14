@@ -15,14 +15,12 @@
 #   region), title and of (an army's: the office whose army it is, by id from offices.txt, with an army_type; a
 #   building's office also names its town, with of. Its holder leads it, with men, at 100% readiness, a local one at
 #   home where it starts; its full strength follows its holder's wealth). A settlement's garrison is given instead as
-#   men + proficiency 0..100, foraging 0..100 (army skill at living off the land, default 40) and mobility (1..4,
-#   default 2)
+#   men + proficiency 0..100 and foraging 0..100 (army skill at living off the land, default 40)
 #   population, main and buildings (a Has_Town's starting population; its main building, by id, one with the Main
 #   flag, which sets its icon, slots, supply, hindrance and radii; and its other buildings, by id, at most its slots)
 
 kind = { name = settlement  contact_on = [Land]  traits = [Capturable, Can_Contain, Fortified, Has_Town] }
 kind = { name = army        icon = Army        moves = Land  per_turn = 30  contact = 9   contact_on = [Land]  body = 2    hindrance = 3                traits = [Captures, Can_Enter, Shares_Supply] }
-kind = { name = fleet       icon = Fleet       moves = Sea   per_turn = 80  contact = 9   contact_on = [Sea]   body = 2    hindrance = 2 }
 
 faction = {
 	name = "Rome"
@@ -59,8 +57,6 @@ faction = {
 	piece = { kind = settlement  name = "Rotomagus"          at = [186, 300]  capital_of = rotomagus           men = 3000  proficiency = 30  population = 10  buildings = [wheat_fields, wheat_fields, cattle_herds]  main = municipium }
 	piece = { kind = army        name = "Legio I"     at = [334, 419]  title = magister_militum  men = 5000 }
 	piece = { kind = army        name = "Legio II"    at = [338, 410]  title = tribune  of = "Roma"  men = 10000 }
-	piece = { kind = fleet   at = [353, 455] }
-	piece = { kind = fleet   at = [355, 393] }
 }
 
 faction = {

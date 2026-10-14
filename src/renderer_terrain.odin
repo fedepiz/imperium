@@ -53,6 +53,7 @@ Render_Geography :: struct {
 	// nearest point, within RENDER_TERRAIN_COURSE_REACH cells
 	rivers:    Render_Courses,
 	roads:     Render_Courses,
+	sea_lanes: Render_Courses,
 	to_river:  [RENDER_TERRAIN_CELLS][2]f32,
 	to_road:   [RENDER_TERRAIN_CELLS][2]f32,
 	// Region per cell, 0 = none. On land only. Gives the region washes and the borders between
@@ -158,6 +159,7 @@ Render_Highlight_Kind :: enum {
 	Zone,
 	// Friendly contact
 	Contact,
+	Beach,
 }
 
 // In cells
@@ -188,6 +190,7 @@ Render_Terrain_Style :: struct {
 	// Outer width, including two ink lines of road_stroke each
 	road_width:              f32,
 	road_stroke:             f32,
+	sea_lane_width:          f32,
 	road_fill:               [3]f32,
 	// 0..1
 	road_fill_strength:      f32,
@@ -269,6 +272,7 @@ RENDER_TERRAIN_STYLE_DEFAULT :: Render_Terrain_Style {
 	river_width = 12,
 	road_width = 8,
 	road_stroke = 1.1,
+	sea_lane_width = 3.5,
 	road_fill = {0.950, 0.840, 0.660},
 	road_fill_strength = 0.55,
 	border_width = 1.5,
@@ -284,6 +288,7 @@ RENDER_TERRAIN_STYLE_DEFAULT :: Render_Terrain_Style {
 		.Foreign_Reach = {color = {0.450, 0.420, 0.380}, band = {0.7, 1.5, 0.1}, widen = 1},
 		.Zone = {color = {0.700, 0.250, 0.160}, band = {0.6, 2, 0.25}},
 		.Contact = {color = {0.850, 0.700, 0.200}, band = {0.6, 2, 0.2}},
+		.Beach = {color = {0.700, 0.560, 0.330}, band = {0.6, 2, 0.3}},
 	},
 	arrow_width = 5,
 	arrow_fill = {0.700, 0.250, 0.160},
@@ -338,6 +343,7 @@ renderer_terrain_build :: proc(
 	// Step: Courses, each kind to its stroke
 	ground_stroke_write(rend, STROKE_RIVERS, &geography.rivers)
 	ground_stroke_write(rend, STROKE_ROADS, &geography.roads)
+	ground_stroke_write(rend, STROKE_SEA_LANES, &geography.sea_lanes)
 	// Rivers thin with elevation
 	ground_grid_write(rend, .Taper, raw_data(geography.elevation[:]), len(geography.elevation))
 
@@ -379,6 +385,7 @@ HIGHLIGHT_LAYERS := [Render_Highlight_Kind]int {
 	.Foreign_Reach = LAYER_REACH,
 	.Zone          = LAYER_ZONES,
 	.Contact       = LAYER_CONTACTS,
+	.Beach         = LAYER_CONTACTS,
 }
 
 // Strokes
@@ -388,6 +395,8 @@ STROKE_RIVERS :: 0
 STROKE_ROADS :: 1
 @(private = "file")
 STROKE_ARROWS :: 2
+@(private = "file")
+STROKE_SEA_LANES :: 3
 
 // Rate at which region and highlight looks move toward their targets, per second
 @(private = "file")
@@ -422,7 +431,7 @@ AREAS_PER_LAYER :: 256
 @(private = "file")
 AREA_CIRCLES_MAX :: 512
 @(private = "file")
-STROKES :: 3
+STROKES :: 4
 // Line segments per stroke
 @(private = "file")
 STROKE_SEGMENTS_MAX :: 1 << 16
@@ -1393,6 +1402,12 @@ ground_uniform_from_style :: proc(style: Render_Terrain_Style, wash_shown: bool)
 		strength   = style.road_fill_strength,
 		edge_width = style.road_stroke,
 		clip       = i32(Ground_Clip.Land),
+	}
+	uniform.strokes[STROKE_SEA_LANES] = {
+		kind  = .Line,
+		color = style.ink + (style.sea_shallow - style.ink) * 0.65,
+		width = style.sea_lane_width,
+		clip  = i32(Ground_Clip.Water),
 	}
 	uniform.strokes[STROKE_ARROWS] = {
 		kind       = .Arrow,

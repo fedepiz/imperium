@@ -296,12 +296,19 @@ Pathfind_Combine :: enum u8 {
 	Sum,
 }
 
+// Bidirectional
+Pathfind_Link :: struct {
+	cells: [2][2]int,
+	cost:  f32,
+}
+
 // Out: out. Multi-source decaying spread: per cell, the max or sum over sources of value − decay × path cost.
 // Blocked cells are never reached; a source in one still holds its own cell
 pathfind_spread :: proc(
 	domain: Pathfind_Domain,
 	sources: []Pathfind_Source,
 	blocked: []bool,
+	links: []Pathfind_Link,
 	decay: f32,
 	combine: Pathfind_Combine,
 	out: []f32,
@@ -310,6 +317,8 @@ pathfind_spread :: proc(
 	assert(blocked == nil || len(blocked) == MAP_CELLS)
 	grid := GRIDS[domain][:]
 	slice.fill(out, 0)
+	linked := make([]bool, len(links) > 0 ? MAP_CELLS : 0, context.temp_allocator)
+	for link in links do for cell in link.cells do linked[grid_index(cell, MAP_SIZE)] = true
 
 	// Max: one Dijkstra from every source at once. Sum: one per source, added up
 	passes := combine == .Max ? 1 : len(sources)
@@ -346,6 +355,20 @@ pathfind_spread :: proc(
 				spread[next] = reached
 				append(&queue, Heap_Entry{-reached, u32(next)})
 				heap.push(queue[:], heap_entry_less)
+			}
+			if len(linked) == 0 || !linked[entry.index] do continue
+			for link in links {
+				ends := [2]int{grid_index(link.cells[0], MAP_SIZE), grid_index(link.cells[1], MAP_SIZE)}
+				for end, e in ends {
+					if end != int(entry.index) do continue
+					next := ends[1 - e]
+					if grid[next] == 0 || (blocked != nil && blocked[next]) do continue
+					reached := value - decay * link.cost
+					if reached <= spread[next] do continue
+					spread[next] = reached
+					append(&queue, Heap_Entry{-reached, u32(next)})
+					heap.push(queue[:], heap_entry_less)
+				}
 			}
 		}
 

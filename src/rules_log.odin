@@ -266,9 +266,11 @@ write_army :: proc(w: ^Json_Writer, army: ^Army) {
 	json_field_int(w, "men_max", i64(army.men_max))
 	json_field_float(w, "proficiency", army.proficiency)
 	json_field_float(w, "readiness", army.readiness)
-	json_field_bool(w, "spent", army.spent)
+	field_set(w, "statuses", army.statuses)
 	json_field_float(w, "foraging", army.foraging)
-	json_field_float(w, "mobility", army.mobility)
+	json_field_float(w, "agility", army.agility)
+	json_field_float(w, "readiness_recovery", army.readiness_recovery)
+	field_set(w, "prevent_status", army.prevent_status)
 	json_field_float(w, "supply", army.supply)
 	field_enum(w, "supply_source", army.supply_source)
 	json_field_float(w, "supply_efficiency", army.supply_efficiency)
@@ -416,6 +418,7 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		field_enum(w, "mover", record.event.mover)
 		field_piece(w, "target", record.event.target)
 		json_field_vec2(w, "to", record.event.to)
+		json_field_bool(w, "sails", record.event.sails)
 
 	case .Moved:
 		record := (^Event_Record(Event_Moved))(raw_data(payload))

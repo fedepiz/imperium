@@ -43,7 +43,8 @@
 
 ## Data
 
-- **Every key in a data file is a struct field.** A mistyped key stops loading rather than reading as 0. Files that need every field require them, except derived ones.
+- **Every key in a data file is a struct field.** A mistyped key stops loading rather than reading as 0. Keys without a default are required.
+- **A data file opens with a commented example record:** every key in order, each annotated, with its default or marked required. Records give the required keys, and defaulted keys only when they differ, in the example's order (`army_types.txt`).
 
 ## Code
 

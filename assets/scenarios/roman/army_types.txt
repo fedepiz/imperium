@@ -1,10 +1,18 @@
-# The types of army. Each has an id, a snake_case word the other files name it by, and a name. Then:
-#   scope: Local, tied to a home region, the one it is mobilised in; or Global, with none
-#   men_per_wealth: its full strength, per coin a turn of its holder's wealth
-#   proficiency 0..100, foraging 0..100, mobility 1..4: at full strength
-#   description: what it is, shown when it is hovered
-# Every key is given: none has a default. Titles raise them: the offices in offices.txt name their army types, and
-# their holders' wealth, their salaries and shares, sizes them.
+# The types of army. Titles raise them: the offices in offices.txt name their army types, and their holders' wealth,
+# their salaries and shares, size them. Every key, in order; a type gives those marked required, and the others only
+# when it differs from their default:
+#
+# army_type = {
+#   id = example                  required. A snake_case word the other files name it by
+#   name = "Example"              required
+#   scope = Global                required. Local: tied to a home region, the one it is mobilised in. Global: none
+#   men_per_wealth = 1000         required. Its full strength, per coin a turn of its holder's wealth
+#   proficiency = 50              required. 0..100, at full strength
+#   foraging = 40                 default 40. 0..100, at full strength
+#   agility = 2                   default 2. 1..4, at full strength
+#   traits = []                   default none. By id, from army_traits.txt
+#   description = "Example: ..."  required. What it is, shown when it is hovered
+# }
 
 army_type = {
 	id = comitatenses
@@ -12,8 +20,7 @@ army_type = {
 	scope = Global
 	men_per_wealth = 1600
 	proficiency = 60
-	foraging = 40
-	mobility = 2
+	traits = [field_logistics]
 	description = "Comitatenses: the regular troops of the late Roman field armies, named after the comitatus, the entourage of the emperor. Unlike frontier troops they were not tied to one province and moved where they were needed. Most were infantry, paid in coin and in kind."
 }
 
@@ -23,8 +30,7 @@ army_type = {
 	scope = Global
 	men_per_wealth = 625
 	proficiency = 75
-	foraging = 40
-	mobility = 2
+	traits = [field_logistics]
 	description = "Palatini: the senior units of the field armies, named after the palatium, the imperial palace. They first formed the army that accompanied the emperor in person, and ranked above the comitatenses in pay and prestige."
 }
 
@@ -34,8 +40,7 @@ army_type = {
 	scope = Local
 	men_per_wealth = 1000
 	proficiency = 40
-	foraging = 40
-	mobility = 1
+	agility = 1
 	description = "Limitanei: frontier troops, named after the limes, the fortified border of the empire. They garrisoned the forts along the frontier, were often recruited locally, and in some regions held land in return for service."
 }
 
@@ -46,7 +51,7 @@ army_type = {
 	men_per_wealth = 400
 	proficiency = 60
 	foraging = 50
-	mobility = 3
+	traits = [mounted]
 	description = "Vexillationes: cavalry units of the late Roman army, named after the vexillum, the square banner carried by detachments. The word first meant any detachment drawn from a larger unit; by the fourth century it named the cavalry regiments of the field armies."
 }
 
@@ -57,7 +62,6 @@ army_type = {
 	men_per_wealth = 10000
 	proficiency = 40
 	foraging = 60
-	mobility = 2
 	description = "Cuneus: Latin for wedge, a word the Romans used both for barbarian units and for their massed attack formation. Germanic war bands were made up of free men who followed a chief on campaign and returned to their farms afterwards."
 }
 
@@ -68,6 +72,6 @@ army_type = {
 	men_per_wealth = 1000
 	proficiency = 65
 	foraging = 60
-	mobility = 3
+	agility = 3
 	description = "Retinue: the sworn followers of a Germanic chief or king, described by Tacitus as the comitatus. They lived in their lord's household, fought at his side, and were rewarded with gifts, weapons and land."
 }

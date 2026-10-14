@@ -34,6 +34,10 @@ ROAD_SMOOTHING :: Polyline_Smoothing {
 	cut_ratio = 0.25,
 	cut_max   = 1.5,
 }
+SEA_LANE_SMOOTHING :: Polyline_Smoothing {
+	cut_iter  = 4,
+	cut_ratio = 0.25,
+}
 
 RIVER_DIST_MAX :: 12
 ROAD_DIST_MAX :: 1.5
@@ -66,10 +70,16 @@ FACTION_CHARACTERS_MAX :: 128
 BUILDING_KINDS_MAX :: 64
 CULTURES_MAX :: 16
 ARMY_TYPES_MAX :: 32
+ARMY_TRAITS_MAX :: 64
 TOWN_SLOTS_MAX :: 8
 // The main building's slot follows the ordinary ones
 MAIN_SLOT :: TOWN_SLOTS_MAX
 TOWN_SLOT_COUNT :: TOWN_SLOTS_MAX + 1
+BEACHES_MAX :: 128
+SEA_LANES_MAX :: 256
+SEA_LANE_POINTS_MAX :: 1 << 14
+// Armies this near a beach stand at it
+BEACH_RADIUS :: 2.5
 OFFICE_KINDS_MAX :: 64
 // The most offices one faction's court shows
 FACTION_OFFICES_MAX :: 64
@@ -82,7 +92,7 @@ PASSED_OVER_LOYALTY :: 10
 FEUDAL_DISMISSAL_LOYALTY :: 10
 
 ARMY_FORAGING_DEFAULT :: 40
-ARMY_MOBILITY_DEFAULT :: 2
+ARMY_AGILITY_DEFAULT :: 2
 
 Game :: struct {
 	terrain:            Terrain,
@@ -94,6 +104,8 @@ Game :: struct {
 	building_kinds:     [dynamic; BUILDING_KINDS_MAX]Building_Kind,
 	cultures:           [dynamic; CULTURES_MAX]Culture,
 	culture_buildings:  [CULTURES_MAX][BUILDING_KINDS_MAX]bool,
+	// 0: none
+	army_traits:        [dynamic; ARMY_TRAITS_MAX]Army_Trait,
 	army_types:         [dynamic; ARMY_TYPES_MAX]Army_Type,
 	// pieces.txt's army kind
 	army_template:      Piece_Data,
@@ -111,6 +123,12 @@ Game :: struct {
 	supply_network:     [MAP_CELLS]u8,
 	// The playing faction's, 0..100
 	control_network:    [MAP_CELLS]u8,
+	// 0: none
+	beaches:            [dynamic; BEACHES_MAX]Beach,
+	// 0: none
+	sea_lanes:          [dynamic; SEA_LANES_MAX]Sea_Lane,
+	// Run l - 1: lane l's, from its from beach
+	sea_lane_curves:    Polylines(SEA_LANE_POINTS_MAX, SEA_LANES_MAX),
 	office_kinds:       [dynamic; OFFICE_KINDS_MAX]Office_Kind,
 	offices:            Slot_Map(Office, OFFICES_MAX, Office_Id),
 	// Each step: highest rank first, a faction's own offices first within a rank
@@ -123,6 +141,23 @@ Under_Way :: enum u8 {
 	Contact,
 	Battle,
 	Ending,
+}
+
+Beach_Id :: distinct u8
+
+Sea_Lane_Id :: distinct u8
+
+Beach :: struct {
+	id:     Name,
+	pos:    [2]f32,
+	region: Region_Id,
+}
+
+Sea_Lane :: struct {
+	from:   Beach_Id,
+	to:     Beach_Id,
+	// In cells, along its curve
+	length: f32,
 }
 
 Region_Id :: distinct u8
@@ -170,14 +205,49 @@ Piece_Data :: struct {
 	town:              Town,
 }
 
+Army_Status :: enum u8 {
+	Spent,
+	// After a still turn outside enemy zones, until it moves or fights
+	Resting,
+	// After a voyage, until a turn without one
+	Seasick,
+}
+
+Army_Modifiers :: struct {
+	agility:            f32,
+	// Points a turn
+	movement:           f32,
+	// A turn, when not resting
+	readiness_recovery: f32,
+	prevent_status:     bit_set[Army_Status],
+}
+
+army_modifiers_combine :: proc(a, b: Army_Modifiers) -> Army_Modifiers {
+	return {
+		agility = a.agility + b.agility,
+		movement = a.movement + b.movement,
+		readiness_recovery = a.readiness_recovery + b.readiness_recovery,
+		prevent_status = a.prevent_status + b.prevent_status,
+	}
+}
+
+Army_Trait :: struct {
+	id:          Name,
+	name:        Name,
+	modifiers:   Army_Modifiers,
+	description: Description,
+}
+
 Army :: struct {
 	men:               int,
 	men_max:           int,
 	proficiency:       f32,
 	readiness:         f32,
-	spent:             bool,
+	statuses:          bit_set[Army_Status],
 	foraging:          f32,
-	mobility:          f32,
+	agility:            f32,
+	readiness_recovery: f32,
+	prevent_status:     bit_set[Army_Status],
 	// Share of needs met, 0..100
 	supply:            f32,
 	supply_source:     Supply_Source,
@@ -333,7 +403,8 @@ Army_Type :: struct {
 	// At full strength
 	proficiency: f32,
 	foraging:    f32,
-	mobility:    f32,
+	agility:     f32,
+	traits:      bit_set[0 ..< ARMY_TRAITS_MAX],
 	description: Description,
 }
 
@@ -398,6 +469,9 @@ Building_Kind :: struct {
 
 Piece_Turn :: struct {
 	attacked:      bool,
+	moved_land:    bool,
+	moved_sea:     bool,
+	fought:        bool,
 	// From its movement per turn at each turn change
 	movement_left: f32,
 }
@@ -693,6 +767,51 @@ game_load :: proc(
 		geo_out.regions = game.terrain.regions
 	}
 
+	// Beaches and sea lanes
+	{
+		root, path := scenario_file(scenario_name, "sea_lanes.txt")
+		lines_in := new(Polylines(SEA_LANE_POINTS_MAX >> uint(SEA_LANE_SMOOTHING.cut_iter), SEA_LANES_MAX), context.temp_allocator)
+		append(&game.beaches, Beach{})
+		for row in root.children {
+			if row.key != "beach" do continue
+			row_check(row, Beach, path, {"at"})
+			beach := Beach {
+				id  = name_from_string(tbl.get_text(row, "id")),
+				pos = tbl.get_num_array(row, "at", 2) + 0.5,
+			}
+			beach.region = Region_Id(game.terrain.regions[grid_index(cell_of(beach.pos), MAP_SIZE)])
+			fmt.assertf(append(&game.beaches, beach) == 1, "%s: more than %d beaches", path, BEACHES_MAX - 1)
+		}
+		append(&game.sea_lanes, Sea_Lane{})
+		for row in root.children {
+			if row.key != "lane" do continue
+			row_check(row, Sea_Lane, path, {"points"})
+			lane: Sea_Lane
+			ends := [2]string{tbl.get_text(row, "from"), tbl.get_text(row, "to")}
+			ids := [2]^Beach_Id{&lane.from, &lane.to}
+			for end, e in ends {
+				for &beach, b in game.beaches do if b > 0 && name_to_string(&beach.id) == end do ids[e]^ = Beach_Id(b)
+				fmt.assertf(ids[e]^ != 0, "%s: no beach %q", path, end)
+			}
+			points_in := tbl.get_children(row, "points")
+			points, fits := polylines_reserve(len(points_in) + 2, false, lines_in)
+			fmt.assertf(fits, "%s: more than %d lane points", path, cap(lines_in.points))
+			points[0] = game.beaches[lane.from].pos
+			for point, i in points_in do points[i + 1] = {point.children[0].num, point.children[1].num} + 0.5
+			points[len(points) - 1] = game.beaches[lane.to].pos
+			fmt.assertf(append(&game.sea_lanes, lane) == 1, "%s: more than %d lanes", path, SEA_LANES_MAX - 1)
+		}
+		polylines_clear(&game.sea_lane_curves)
+		polylines_smooth(lines_in, SEA_LANE_SMOOTHING, &game.sea_lane_curves)
+		polylines_clear(&geo_out.sea_lanes)
+		for run, r in game.sea_lane_curves.runs {
+			curve := game.sea_lane_curves.points[run.begin:][:run.len]
+			lane := &game.sea_lanes[r + 1]
+			for i in 1 ..< len(curve) do lane.length += linalg.distance(curve[i - 1], curve[i])
+			copy(polylines_reserve(run.len, false, &geo_out.sea_lanes), curve)
+		}
+	}
+
 	// Classify terrian (Cover)
 	for i in 0 ..< MAP_CELLS {
 		cell: Render_Cover_Cell
@@ -762,14 +881,47 @@ game_load :: proc(
 		for water, i in geo_out.water do sea[i] = water ? 1 : 0
 	}
 
-	// Army types; 0 is none
+	// Army traits; 0 is none
+	{
+		root, path := scenario_file(scenario_name, "army_traits.txt")
+
+		append(&game.army_traits, Army_Trait{})
+		for row in root.children {
+			assert(row.key == "army_trait")
+			row_check(row, Army_Modifiers, path, {"id", "name", "description"})
+			id, has_id := tbl.get_text(row, "id")
+			name, has_name := tbl.get_text(row, "name")
+			description, has_description := tbl.get_text(row, "description")
+			fmt.assertf(has_id && has_name && has_description, "%s: a trait lacks its id, name or description", path)
+
+			trait := Army_Trait {
+				id = name_from_string(id),
+				name = name_from_string(name),
+				modifiers = {
+					agility = tbl.get_num(row, "agility"),
+					movement = tbl.get_num(row, "movement"),
+					readiness_recovery = tbl.get_num(row, "readiness_recovery"),
+				},
+			}
+			prevented := tbl.get_children(row, "prevent_status")
+			for status in prevented {
+				trait.modifiers.prevent_status += {enum_from_text(Army_Status, status.text)}
+			}
+			description_ok: bool
+			trait.description, description_ok = description_from_string(description)
+			fmt.assertf(description_ok, "%s: description of %q longer than %d bytes", path, id, DESCRIPTION_CAPACITY)
+			fmt.assertf(append(&game.army_traits, trait) == 1, "%s: more than %d traits", path, ARMY_TRAITS_MAX - 1)
+		}
+	}
+
+	// Army types; 0 is none, with the defaults
 	{
 		root, path := scenario_file(scenario_name, "army_types.txt")
 
-		append(&game.army_types, Army_Type{})
+		append(&game.army_types, Army_Type{foraging = ARMY_FORAGING_DEFAULT, agility = ARMY_AGILITY_DEFAULT})
 		for row in root.children {
 			assert(row.key == "army_type")
-			row_check(row, Army_Type, path, required = true)
+			row_check(row, Army_Type, path, required = true, skipped = {"foraging", "agility", "traits"})
 
 			army_type := Army_Type {
 				id          = name_from_string(tbl.get_text(row, "id")),
@@ -777,8 +929,15 @@ game_load :: proc(
 				scope       = enum_from_text(Army_Scope, tbl.get_text(row, "scope")),
 				men_per_wealth = tbl.get_num(row, "men_per_wealth"),
 				proficiency = tbl.get_num(row, "proficiency"),
-				foraging    = tbl.get_num(row, "foraging"),
-				mobility    = tbl.get_num(row, "mobility"),
+				foraging    = tbl.get_num(row, "foraging", ARMY_FORAGING_DEFAULT),
+				agility     = tbl.get_num(row, "agility", ARMY_AGILITY_DEFAULT),
+			}
+			traits := tbl.get_children(row, "traits")
+			for trait_text in traits {
+				trait := 0
+				for &each, t in game.army_traits do if t > 0 && name_to_string(&each.id) == trait_text.text do trait = t
+				fmt.assertf(trait != 0, "%s: no trait %q", path, trait_text.text)
+				army_type.traits += {trait}
 			}
 			description_ok: bool
 			army_type.description, description_ok = description_from_string(tbl.get_text(row, "description"))
@@ -1088,7 +1247,6 @@ game_load :: proc(
 							proficiency = army_type.proficiency,
 							readiness   = 100,
 							foraging    = army_type.foraging,
-							mobility    = army_type.mobility,
 							supply      = 100,
 							type        = type_id,
 						}
@@ -1104,7 +1262,6 @@ game_load :: proc(
 							proficiency = tbl.get_num(entry, "proficiency"),
 							readiness   = 100,
 							foraging    = tbl.get_num(entry, "foraging", ARMY_FORAGING_DEFAULT),
-							mobility    = tbl.get_num(entry, "mobility", ARMY_MOBILITY_DEFAULT),
 							supply      = 100,
 						}
 						piece.flags += {.Has_Army}
