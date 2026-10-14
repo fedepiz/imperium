@@ -119,6 +119,7 @@ Game :: struct {
 	endable:            bool,
 	contacts:           [dynamic; CONTACTS_MAX]Contact,
 	interaction:        Interaction,
+	battle_prediction:  Battle_Prediction,
 	movement:           Movement,
 	supply_network:     [MAP_CELLS]u8,
 	// The playing faction's, 0..100
@@ -259,6 +260,9 @@ Army :: struct {
 	home:              Region_Id,
 	// Each step: its general's
 	temperament:       Temperament,
+	// Each step: after its turn end
+	turn_end_readiness: f32,
+	turn_end_statuses:  bit_set[Army_Status],
 }
 
 Town :: struct {

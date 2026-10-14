@@ -61,6 +61,31 @@ BEACHES_SLOT :: 3
 @(private = "file")
 LANDINGS_SLOT :: 4
 
+@(private = "file", rodata)
+FORECAST_TITLES := [Battle_Forecast]string {
+	.Clear_Win    = "Clear win",
+	.Close_Win    = "Close win",
+	.Stalemate    = "Stalemate",
+	.Close_Defeat = "Close defeat",
+	.Clear_Defeat = "Clear defeat",
+	.Evasion      = "Evasion",
+	.No_Battle    = "No battle",
+}
+
+// From the least share each starts at
+@(private = "file", rodata)
+CHANCE_WORDS := [?]struct {
+	from: f32,
+	word: string,
+} {
+	{0.99, "Certain"},
+	{0.85, "Very likely"},
+	{0.6, "Likely"},
+	{0.35, "Possible"},
+	{0.1, "Unlikely"},
+	{0, "Very unlikely"},
+}
+
 // Movers whose march is drawn as an arrow
 @(private = "file")
 MARCH_ARROWS :: bit_set[Mover]{.Leader, .Chaser}
@@ -152,9 +177,16 @@ Court :: struct {
 	vacancy:       Court_Vacancy,
 }
 
+Card_Change :: enum u8 {
+	None,
+	Coming,
+	Going,
+}
+
 Card_Part :: struct {
 	text:      string,
 	breakdown: Maybe(int),
+	change:    Card_Change,
 }
 
 Card_Field :: struct {
@@ -166,18 +198,15 @@ Card_Field :: struct {
 	fill_origin: f32,
 	// Coloured bad to good by its fill
 	graded:      bool,
-	// Its bar eases toward a new fill
+	// Its bar keeps a value it leaves, easing away
 	eased:       bool,
-	prediction:  Maybe(Card_Prediction),
+	// Its fill after a predicted change
+	change:      Maybe(f32),
 	// Nil: a plain value
 	click:       Card_Click,
 }
 
-// A field's value after an action: shown after its bar, which goes to its fill
-Card_Prediction :: struct {
-	value: string,
-	fill:  f32,
-}
+
 
 Card_Term :: struct {
 	label: string,
@@ -245,6 +274,9 @@ Card :: struct {
 	// Under its fields, and at its bottom
 	buttons:    [dynamic; CARD_ACTIONS_MAX]Card_Action,
 	actions:    [dynamic; CARD_ACTIONS_MAX]Card_Action,
+	// About what the piece is aimed at. Empty title: nothing
+	aimed_title: string,
+	aimed:      [dynamic; CARD_FIELDS_MAX]Card_Field,
 	tabs:       bit_set[Card_Tab],
 	tab:        Card_Tab,
 	map_modes:  bool,
@@ -836,13 +868,8 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 		if piece.domain != nil {
 			left := piece.this_turn.movement_left
 			per_turn := piece.movement_per_turn
-			movement_prediction: Maybe(Card_Prediction)
-			if predicting && reachable {
-				movement_prediction = Card_Prediction {
-					value = compact_number(f64(predicted.movement_left)),
-					fill  = per_turn > 0 ? predicted.movement_left / per_turn : 0,
-				}
-			}
+			movement_change: Maybe(f32)
+			if predicting && reachable && per_turn > 0 do movement_change = predicted.movement_left / per_turn
 			append(
 				&card.fields,
 				Card_Field {
@@ -851,7 +878,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					fill = per_turn > 0 ? left / per_turn : 0,
 					graded = true,
 					eased = true,
-					prediction = movement_prediction,
+					change = movement_change,
 					breakdown = tally_add(
 						&card.breakdowns,
 						{
@@ -1047,21 +1074,16 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					},
 				)
 				// Percentages: the bar is out of 100
-				readiness_prediction: Maybe(Card_Prediction)
-				if predicting && reachable {
-					readiness_prediction = Card_Prediction {
-						value = fmt.tprintf("%.0f%%", predicted.readiness),
-						fill  = predicted.readiness / 100,
-					}
-				}
+				// A predicted march, else its turn end
+				readiness_change := (predicting && reachable ? predicted.readiness : army.turn_end_readiness) / 100
 				percents := [?]struct {
-					label:      string,
-					value:      f32,
-					eased:      bool,
-					prediction: Maybe(Card_Prediction),
+					label:  string,
+					value:  f32,
+					eased:  bool,
+					change: Maybe(f32),
 				} {
 					{"Proficiency", army.proficiency, false, nil},
-					{"Readiness", army.readiness, true, readiness_prediction},
+					{"Readiness", army.readiness, true, readiness_change},
 					{"Supply", army.supply, false, nil},
 				}
 				for percent in percents {
@@ -1073,7 +1095,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 							fill = percent.value / 100,
 							graded = true,
 							eased = percent.eased,
-							prediction = percent.prediction,
+							change = percent.change,
 						},
 					)
 				}
@@ -1089,7 +1111,12 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				)
 				append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.supply_source)})
 
-				for each in army.statuses do append(&card.statuses, Card_Part{text = fmt.tprint(each)})
+				// A predicted march's, else its turn end's
+				coming := predicting && reachable ? predicted.statuses : army.turn_end_statuses
+				for each in army.statuses + coming {
+					change := each not_in army.statuses ? Card_Change.Coming : each not_in coming ? .Going : .None
+					append(&card.statuses, Card_Part{text = fmt.tprint(each), change = change})
+				}
 				if piece.inside != {} do append(&card.statuses, Card_Part{text = "Garrisoning"})
 				if piece.contains != {} do append(&card.statuses, Card_Part{text = "Garrisoned"})
 				for trait in game.army_types[army.type].traits {
@@ -1111,6 +1138,27 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					append(&card.traits, part)
 				}
 			}
+		}
+	}
+
+	// A predicted battle
+	predicting := &game.battle_prediction
+	marcher := slot_map_get(&game.pieces, predicting.marcher)
+	target := slot_map_get(&game.pieces, predicting.target)
+	if predicting.marcher == focus && predicting.runs > 0 && marcher != nil && target != nil {
+		card := &cards.focus
+		card.aimed_title = fmt.tprintf("Against %s", game_piece_title(target))
+		power := fmt.tprintf("%.1f against %.1f", predicting.power[0].total, predicting.power[1].total)
+		append(&card.aimed, Card_Field{label = "Power", value = power})
+		for share, forecast in predicting.outcomes {
+			if share == 0 do continue
+			word: string
+			for chance in CHANCE_WORDS {
+				if share < chance.from do continue
+				word = chance.word
+				break
+			}
+			append(&card.aimed, Card_Field{label = FORECAST_TITLES[forecast], value = word})
 		}
 	}
 

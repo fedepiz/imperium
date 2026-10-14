@@ -18,6 +18,16 @@ BAD_INK :: [4]f32{0.70, 0.40, 0.29, 1}
 // Yellow ochre, between them
 @(private = "file")
 MIDDLE_INK :: [4]f32{0.76, 0.62, 0.32, 1}
+// A bar's part about to go, or come
+@(private = "file")
+LOSS_INK :: [4]f32{0.70, 0.40, 0.29, 0.45}
+@(private = "file")
+GAIN_INK :: [4]f32{0.47, 0.58, 0.47, 0.45}
+// A status about to come, or go
+@(private = "file")
+COMING_INK :: [4]f32{0.47, 0.58, 0.47, 0.9}
+@(private = "file")
+GOING_INK :: [4]f32{0.70, 0.40, 0.29, 0.9}
 // A balance bar's notch: how far it stands out of its halves, and its gap
 @(private = "file")
 NOTCH_STAND_OUT :: 3
@@ -77,6 +87,8 @@ STAT_VALUE_EM :: CHARACTER_VALUE_EM
 COLUMN_SLACK_EM :: 1
 @(private = "file")
 LIST_EM :: 8
+@(private = "file")
+AIMED_VALUE_EM :: 9
 @(private = "file")
 VALUE_EMS :: [2]f32{FIELD_VALUE_EM, STAT_VALUE_EM}
 // Wide enough for an army's name
@@ -211,15 +223,11 @@ cards_ui :: proc(
 	order: Game_Order
 	if ui_column({width = ui_grow(), height = ui_grow(), padding = SCREEN_MARGIN}) {
 		if ui_row({width = ui_grow(), height = ui_fit()}) {
-			ui_spacer(ui_grow())
-			asks += card_ui("status card", &cards.status, theme, VALUE_EMS, view, &order)
-		}
-		ui_spacer(ui_grow())
-		if ui_row({width = ui_grow(), height = ui_fit()}) {
 			if cards.interaction_shown {
 				asks += card_ui("interaction card", &cards.interaction, theme, {REPORT_VALUE_EM, REPORT_VALUE_EM}, view, &order)
 			}
 			ui_spacer(ui_grow())
+			asks += card_ui("status card", &cards.status, theme, VALUE_EMS, view, &order)
 		}
 		ui_spacer(ui_grow())
 		if cards.focus_shown {
@@ -389,10 +397,17 @@ card_ui :: proc(
 							ui_label(list.title, {text_color = colors.faded_ink})
 							if len(list.entries) == 0 do ui_label("None")
 							for entry in list.entries {
-								ui_label_text({breakdown_run(entry.text, entry.breakdown)}, {height = ui_px(line_height)})
+								style := UI_Style{height = ui_px(line_height)}
+								if entry.change == .Coming do style.text_color = COMING_INK
+								if entry.change == .Going do style.text_color = GOING_INK
+								ui_label_text({breakdown_run(entry.text, entry.breakdown)}, style)
 							}
 						}
 					}
+				}
+				if ui_column({width = ui_em(LABEL_EM + AIMED_VALUE_EM + COLUMN_SLACK_EM), height = ui_grow(), gap = FIELD_GAP}) {
+					if card.aimed_title != "" do ui_label(card.aimed_title, {text_color = colors.faded_ink})
+					for &field in card.aimed do field_ui(&field, theme, AIMED_VALUE_EM, "", "")
 				}
 			}
 
@@ -565,10 +580,14 @@ breakdown_ui :: proc(breakdown: ^Card_Breakdown, colors: Card_Colors) {
 field_ui :: proc(field: ^Card_Field, theme: Card_Theme, value_em: f32, key: string, ease_key: string) -> (signal: UI_Signal) {
 	if ui_row({width = ui_fit(), height = ui_fit(), gap = LABEL_GAP}) {
 		if field.label != "" do ui_label(field.label, {width = ui_em(LABEL_EM), text_color = theme.colors.faded_ink})
-		prediction, predicting := field.prediction.?
 		if fill, has_fill := field.fill.?; has_fill {
-			if predicting do fill = prediction.fill
-			if ease_key != "" do fill = ui_anim(ease_key, fill, fill)
+			// The other end: the change ahead, else the value it left easing to its fill
+			change := field.change
+			if ease_key != "" {
+				left := ui_anim(ease_key, fill, fill)
+				if _, changing := change.?; !changing do change = left
+			}
+			other := change.? or_else fill
 			ui_label(field.value, {width = ui_em(NUMBER_EM)})
 			style := theme.meter
 			height: f32 = BAR_HEIGHT
@@ -583,7 +602,7 @@ field_ui :: proc(field: ^Card_Field, theme: Card_Theme, value_em: f32, key: stri
 			if field.graded do style.focus_border = graded_ink(fill)
 			centre := [2]f32{0, (theme.line_height - height) / 2}
 			if ui_column({width = ui_fit(), height = ui_fit(), padding = centre}) {
-				signal = ui_meter(key, fill, field.fill_origin, style)
+				signal = ui_meter(key, fill, field.fill_origin, style, change, other < fill ? LOSS_INK : GAIN_INK)
 			}
 		} else if field.click != nil {
 			// A character's name gets more room
@@ -600,7 +619,6 @@ field_ui :: proc(field: ^Card_Field, theme: Card_Theme, value_em: f32, key: stri
 			// One line, cut short rather than wrapped
 			signal = ui_label_text({run}, {width = ui_em(value_em), height = ui_px(theme.line_height)})
 		}
-		if predicting do ui_label(prediction.value)
 	}
 	return
 }

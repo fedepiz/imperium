@@ -23,7 +23,6 @@ Rules_Tag :: enum u32 {
 	Removed,
 	Army,
 	Spent,
-	Spent_Roll,
 	Unspent,
 	Turn,
 	Project_Started,
@@ -161,8 +160,6 @@ rules_log_events :: proc(game: ^Game, events: []Game_Event) {
 			push_event(.Army, game.step, e)
 		case Event_Spent:
 			push_event(.Spent, game.step, e)
-		case Event_Spent_Roll:
-			push_event(.Spent_Roll, game.step, e)
 		case Event_Unspent:
 			push_event(.Unspent, game.step, e)
 		case Event_Turn:
@@ -488,15 +485,6 @@ rules_log_format :: proc(w: ^Json_Writer, tag: u32, payload: []u8) {
 		write_header(w, record.step, "spent")
 		field_piece(w, "piece", record.event.piece)
 		json_field_float(w, "readiness", record.event.readiness)
-
-	case .Spent_Roll:
-		record := (^Event_Record(Event_Spent_Roll))(raw_data(payload))
-		write_header(w, record.step, "spent_roll")
-		field_piece(w, "piece", record.event.piece)
-		json_field_float(w, "readiness", record.event.readiness)
-		json_field_float(w, "roll", record.event.roll)
-		json_field_float(w, "total", record.event.total)
-		json_field_float(w, "target", record.event.target)
 
 	case .Unspent:
 		record := (^Event_Record(Event_Unspent))(raw_data(payload))

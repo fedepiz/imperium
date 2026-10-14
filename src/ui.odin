@@ -1882,8 +1882,16 @@ ui_slider :: proc(label: string, value: ^f32, lo, hi: f32, style := UI_Style{}) 
 // horizontal padding. With origin 0 the track is one framed bar, filled from the left. With origin above 0 it is cut in
 // two framed halves, either side of a notch of the track's full height in the border color: the halves stand in from the
 // track's top and bottom by its vertical padding and from the notch by its gap, and t falls in one half or the other. The
-// label is only the key: keyed, the meter takes the mouse, so hovering it can open a tooltip.
-ui_meter :: proc(label: string, t: f32, origin: f32 = 0, style := UI_Style{}) -> UI_Signal {
+// label is only the key: keyed, the meter takes the mouse, so hovering it can open a tooltip. With origin 0, a change:
+// the fill stops at the lower of t and change, and the part up to the higher is in change_color.
+ui_meter :: proc(
+	label: string,
+	t: f32,
+	origin: f32 = 0,
+	style := UI_Style{},
+	change: Maybe(f32) = nil,
+	change_color: [4]f32 = {},
+) -> UI_Signal {
 	ui_style_next(style)
 	id, signal := box_make(key_from_string(label), {})
 	track := &UI.boxes[id]
@@ -1913,7 +1921,24 @@ ui_meter :: proc(label: string, t: f32, origin: f32 = 0, style := UI_Style{}) ->
 	if start <= 0 {
 		track.flags += {.Background, .Border}
 		track.gap = 0
-		fill_between(0, end, fill_style)
+		other, changing := change.?
+		if !changing {
+			fill_between(0, end, fill_style)
+			return signal
+		}
+		other = clamp(other, 0, 1)
+		low := min(end, other)
+		high := max(end, other)
+		kept := fill_style
+		kept.width = ui_grow(low)
+		kept_id, _ := box_make({}, kept)
+		UI.boxes[kept_id].flags += {.Background}
+		changed := fill_style
+		changed.width = ui_grow(high - low)
+		changed.background = change_color
+		changed_id, _ := box_make({}, changed)
+		UI.boxes[changed_id].flags += {.Background}
+		ui_spacer(ui_grow(1 - high))
 		return signal
 	}
 

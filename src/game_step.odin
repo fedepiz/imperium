@@ -98,9 +98,36 @@ SORTIE_ENEMY_SHARE :: 0.5
 @(private = "file")
 SPENT_READINESS :: 25
 @(private = "file")
-SPENT_ROLL_TARGET :: 6
+SPENT_CLEAR_READINESS :: 50
 @(private = "file")
-SPENT_ROLL_PER_READINESS :: 0.2
+BATTLE_PREDICTION_RUNS :: 100
+
+// By whether the marcher won, then by the battle's outcome
+@(private = "file", rodata)
+BATTLE_FORECASTS := [2][Battle_Outcome]Battle_Forecast {
+	{
+		.None = .No_Battle,
+		.Avoided = .Evasion,
+		.Stalemate = .Stalemate,
+		.Probed = .Close_Win,
+		.Withdrew = .Close_Win,
+		.Repulsed = .Close_Win,
+		.Defeat = .Clear_Win,
+		.Heavy_Defeat = .Clear_Win,
+		.Rout = .Clear_Win,
+	},
+	{
+		.None = .No_Battle,
+		.Avoided = .Evasion,
+		.Stalemate = .Stalemate,
+		.Probed = .Close_Defeat,
+		.Withdrew = .Close_Defeat,
+		.Repulsed = .Close_Defeat,
+		.Defeat = .Clear_Defeat,
+		.Heavy_Defeat = .Clear_Defeat,
+		.Rout = .Clear_Defeat,
+	},
+}
 
 @(private = "file", rodata)
 FORAGE_YIELD := [Render_Cover]f32 {
@@ -192,6 +219,29 @@ Interaction :: struct {
 	result: Battle_Result,
 }
 
+// How a battle goes, for one side
+Battle_Forecast :: enum u8 {
+	Clear_Win,
+	Close_Win,
+	Stalemate,
+	Close_Defeat,
+	Clear_Defeat,
+	Evasion,
+	No_Battle,
+}
+
+// Each step: the last prediction's marcher, as it would arrive, and its target, each attacking the other
+// BATTLE_PREDICTION_RUNS times. Runs 0: none
+Battle_Prediction :: struct {
+	marcher:  Piece_Id,
+	target:   Piece_Id,
+	runs:     int,
+	// For the marcher. Shares of the runs, 0..1
+	outcomes: [Battle_Forecast]f32,
+	// The marcher's first, from the first run
+	power:    [2]Report_Tally,
+}
+
 // The ordered piece, and the piece pursuing it
 Mover :: enum u8 {
 	Leader,
@@ -230,6 +280,7 @@ March_Prediction :: struct {
 	// Its piece's, on arrival
 	movement_left: f32,
 	readiness:     f32,
+	statuses:      bit_set[Army_Status],
 }
 
 Sea_Reach :: struct {
@@ -358,14 +409,6 @@ Event_Spent :: struct {
 	readiness: f32,
 }
 
-Event_Spent_Roll :: struct {
-	piece:     Piece_Id,
-	readiness: f32,
-	roll:      f32,
-	total:     f32,
-	target:    f32,
-}
-
 Event_Unspent :: struct {
 	piece: Piece_Id,
 }
@@ -430,7 +473,6 @@ Game_Event :: union {
 	Event_Removed,
 	Event_Army,
 	Event_Spent,
-	Event_Spent_Roll,
 	Event_Unspent,
 	Event_Turn,
 	Event_Project_Started,
@@ -808,25 +850,55 @@ game_step :: proc(
 		}
 	}
 
-	for len(game.contacts) > 0 && game.interaction.actor == {} {
-		contact := game.contacts[0]
-		ordered_remove(&game.contacts, 0)
+	// Step: Battles. The contacts in turn until one opens an interaction, each run once with its seed. Then the last
+	// prediction's marcher, as it would arrive, and its target attacking each other, BATTLE_PREDICTION_RUNS times each
+	Battle_Entry :: struct {
+		contact:      Contact,
+		predicted:    bool,
+		// The marcher's side, predicted
+		marcher_side: int,
+	}
+	entries: [dynamic; CONTACTS_MAX + 2]Battle_Entry
+	for contact in game.contacts do append(&entries, Battle_Entry{contact = contact})
+	predicted_march := &movement.prediction.march
+	game.battle_prediction = {}
+	arrival: Piece_Data
+	if marcher := slot_map_get(&game.pieces, predicted_march.piece); marcher != nil && predicted_march.target != {} {
+		game.battle_prediction.marcher = predicted_march.piece
+		game.battle_prediction.target = predicted_march.target
+		game.battle_prediction.runs = 2 * BATTLE_PREDICTION_RUNS
+		append(&entries, Battle_Entry{{predicted_march.piece, predicted_march.target, true}, true, 0})
+		append(&entries, Battle_Entry{{predicted_march.target, predicted_march.piece, true}, true, 1})
+		arrival = marcher^
+		arrival.pos = predicted_march.path.points[len(predicted_march.path.points) - 1]
+		arrival.inside = {}
+		arrival.army.readiness = movement.prediction.readiness
+		arrival.army.statuses = movement.prediction.statuses
+	}
+	predicted_runs := 0
+	contacts_done := 0
+	for entry in entries {
+		contact := entry.contact
+		if !entry.predicted && game.interaction.actor != {} do continue
+		if !entry.predicted do contacts_done += 1
 		event := Event_Contact{contact.initiator, contact.other, contact.targeted, .Lapsed}
 		initiator := slot_map_get(&game.pieces, contact.initiator)
 		other := slot_map_get(&game.pieces, contact.other)
+		if entry.predicted && entry.marcher_side == 0 do initiator = &arrival
+		if entry.predicted && entry.marcher_side == 1 do other = &arrival
 		if initiator == nil || other == nil || pieces_friendly(initiator, other) {
-			append(events, event)
+			if !entry.predicted do append(events, event)
 			continue
 		}
 		reach := max(initiator.contact_radius, other.contact_radius)
 		if linalg.distance(initiator.pos, other.pos) >= reach {
-			append(events, event)
+			if !entry.predicted do append(events, event)
 			continue
 		}
 
 		if .Has_Army not_in initiator.flags || .Has_Army not_in other.flags {
 			event.outcome = .Met
-			append(events, event)
+			if !entry.predicted do append(events, event)
 			continue
 		}
 
@@ -846,14 +918,13 @@ game_step :: proc(
 			if (fortified && guarded) || (held && .Spent in piece.army.statuses) do sheltered = true
 		}
 		if sheltered {
-			append(events, event)
+			if !entry.predicted do append(events, event)
 			continue
 		}
 		sortie := behind_walls[0] || behind_walls[1]
 
 		battle := Battle {
 			ordered = contact.targeted,
-			seed    = seed_from(u64(game.turn), u64(game.player), transmute(u64)ids[0], transmute(u64)ids[1]),
 		}
 		for piece, i in pieces {
 			army := piece.army
@@ -881,25 +952,48 @@ game_step :: proc(
 			}
 		}
 
-		result := battle_resolve(battle)
-		if result.fought {
-			for piece in pieces {
-				piece.this_turn.fought = true
-				piece.army.statuses -= {.Resting}
+		runs := entry.predicted ? BATTLE_PREDICTION_RUNS : 1
+		for run in 0 ..< runs {
+			battle.seed = seed_from(u64(game.turn), u64(game.player), transmute(u64)ids[0], transmute(u64)ids[1])
+			if entry.predicted do battle.seed = seed_from(u64(run), transmute(u64)ids[0], transmute(u64)ids[1])
+			result := battle_resolve(battle)
+
+			if entry.predicted {
+				predicting := &game.battle_prediction
+				if predicted_runs == 0 {
+					predicting.power[0] = result.sides[entry.marcher_side].power
+					predicting.power[1] = result.sides[1 - entry.marcher_side].power
+				}
+				predicted_runs += 1
+				predicting.outcomes[BATTLE_FORECASTS[result.winner == entry.marcher_side ? 0 : 1][result.outcome]] += 1
+				continue
 			}
+
+			if result.fought {
+				for piece in pieces {
+					piece.this_turn.fought = true
+					piece.army.statuses -= {.Resting}
+				}
+			}
+			event.outcome = result.fought ? .Battle : result.refused ? .Refused : .Declined
+			append(events, event)
+			if !result.fought && !result.refused do continue
+			if result.fought && !behind_walls[result.attacker] {
+				pieces[result.attacker].this_turn.attacked = true
+			}
+			game.interaction = {
+				actor  = ids[0],
+				target = ids[1],
+				stage  = result.fought ? .Announce : .Refused,
+			}
+			game.interaction.result = result
 		}
-		event.outcome = result.fought ? .Battle : result.refused ? .Refused : .Declined
-		append(events, event)
-		if !result.fought && !result.refused do continue
-		if result.fought && !behind_walls[result.attacker] {
-			pieces[result.attacker].this_turn.attacked = true
-		}
-		game.interaction = {
-			actor  = ids[0],
-			target = ids[1],
-			stage  = result.fought ? .Announce : .Refused,
-		}
-		game.interaction.result = result
+	}
+	for _ in 0 ..< contacts_done do ordered_remove(&game.contacts, 0)
+	// Runs of a battle that never started: no battle
+	if predicting := &game.battle_prediction; predicting.runs > 0 {
+		predicting.outcomes[.No_Battle] += f32(predicting.runs - predicted_runs)
+		for &share in predicting.outcomes do share /= f32(predicting.runs)
 	}
 
 	// Step: Sea reach. Of the piece ordered to move, else of the focused piece
@@ -1152,12 +1246,15 @@ game_step :: proc(
 			for _ in 0 ..< sea_points do append(&march.rates, March_Rate{})
 			prediction.movement_left = 0
 			prediction.readiness = piece.army.readiness
+			sailed := piece.army.statuses - {.Resting} + ({.Seasick} - piece.army.prevent_status)
+			prediction.statuses = army_spent_statuses(sailed, piece.army.prevent_status, prediction.readiness)
 			planned[.Move] = march^
 		case march_refusals[.Move] != nil:
 		case:
 			march^ = planned[.Move]
 			prediction.movement_left = max(0, piece.this_turn.movement_left - march.movement_spent)
 			prediction.readiness = max(0, piece.army.readiness - march.readiness_lost)
+			prediction.statuses = army_spent_statuses(piece.army.statuses - {.Resting}, piece.army.prevent_status, prediction.readiness)
 		}
 	}
 
@@ -1697,6 +1794,7 @@ game_step :: proc(
 		if .Has_Army not_in piece.flags do continue
 		army := &piece.army
 		readiness := army.readiness
+		was_spent := .Spent in army.statuses
 		changes: bit_set[Army_Change]
 
 		for loss in losses {
@@ -1765,30 +1863,27 @@ game_step :: proc(
 			readiness -= walk.readiness_lost
 		}
 
+		// Turn end forecast. Still and no enemy within reach: rests. Recovers toward the supply level
+		{
+			statuses := army.statuses
+			if !piece.this_turn.moved_sea do statuses -= {.Seasick}
+			rests := !piece.this_turn.moved_land && !piece.this_turn.moved_sea && !piece.this_turn.fought
+			enemies := slot_map_iterator(&game.pieces)
+			for enemy in slot_map_iterate(&enemies) {
+				if pieces_friendly(piece, enemy) || .Land not_in enemy.contact_domains do continue
+				if linalg.distance(piece.pos, enemy.pos) < enemy.contact_radius do rests = false
+			}
+			if rests do statuses += {.Resting} - army.prevent_status
+			else do statuses -= {.Resting}
+			gain_max: f32 = .Resting in statuses ? READINESS_SPEED : army.readiness_recovery
+			army.turn_end_readiness = clamp(readiness + clamp(army.supply - readiness, -READINESS_SPEED, gain_max), 0, 100)
+			army.turn_end_statuses = army_spent_statuses(statuses, army.prevent_status, army.turn_end_readiness)
+		}
+
 		if turn_ending && piece.owner == game.player {
 			changes += {.Turn_End}
-			if !piece.this_turn.moved_sea do army.statuses -= {.Seasick}
-			if !piece.this_turn.moved_land && !piece.this_turn.moved_sea && !piece.this_turn.fought {
-				army.statuses += {.Resting} - army.prevent_status
-				enemies := slot_map_iterator(&game.pieces)
-				for enemy in slot_map_iterate(&enemies) {
-					if pieces_friendly(piece, enemy) || .Land not_in enemy.contact_domains do continue
-					if linalg.distance(piece.pos, enemy.pos) < enemy.contact_radius do army.statuses -= {.Resting}
-				}
-			}
-			// Recovery: toward the supply level
-			gain_max: f32 = .Resting in army.statuses ? READINESS_SPEED : army.readiness_recovery
-			readiness += clamp(army.supply - readiness, -READINESS_SPEED, gain_max)
-			if .Spent in army.statuses && readiness >= SPENT_READINESS {
-				rng := seed_from(u64(game.turn), u64(game.player), transmute(u64)id)
-				roll := roll_2d6(&rng)
-				total := roll + (readiness - SPENT_READINESS) * SPENT_ROLL_PER_READINESS
-				append(events, Event_Spent_Roll{id, readiness, roll, total, SPENT_ROLL_TARGET})
-				if total > SPENT_ROLL_TARGET {
-					army.statuses -= {.Spent}
-					append(events, Event_Unspent{id})
-				}
-			}
+			army.statuses = army.turn_end_statuses
+			readiness = army.turn_end_readiness
 
 			// Reinforcement on home land: any held region, or a local army's own only
 			gain := 0
@@ -1804,11 +1899,9 @@ game_step :: proc(
 		}
 
 		army.readiness = clamp(readiness, 0, 100)
-		spent := army.readiness < SPENT_READINESS && .Spent not_in army.prevent_status
-		if spent && .Spent not_in army.statuses {
-			army.statuses += {.Spent}
-			append(events, Event_Spent{id, army.readiness})
-		}
+		army.statuses = army_spent_statuses(army.statuses, army.prevent_status, army.readiness)
+		if .Spent in army.statuses && !was_spent do append(events, Event_Spent{id, army.readiness})
+		if .Spent not_in army.statuses && was_spent do append(events, Event_Unspent{id})
 		if changes != {} do append(events, Event_Army{id, changes, army^})
 	}
 
@@ -1868,6 +1961,15 @@ game_step :: proc(
 		all := slot_map_iterator(&game.pieces)
 		for piece in slot_map_iterate(&all) do piece.this_turn = {movement_left = piece.movement_per_turn}
 	}
+}
+
+// Spent below SPENT_READINESS unless prevented, and no longer above SPENT_CLEAR_READINESS
+@(private = "file")
+army_spent_statuses :: proc(statuses, prevented: bit_set[Army_Status], readiness: f32) -> bit_set[Army_Status] {
+	statuses := statuses
+	if readiness < SPENT_READINESS do statuses += {.Spent} - prevented
+	if readiness > SPENT_CLEAR_READINESS do statuses -= {.Spent}
+	return statuses
 }
 
 // Above full strength, DESERTION_SHARE of the men leave, at least one
