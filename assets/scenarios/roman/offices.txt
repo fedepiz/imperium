@@ -6,6 +6,8 @@
 #   fief: dismissing the holder of one costs every holder of one in the faction loyalty
 #   salary: a faction office's, coin per turn paid to its holder while held, out of the treasury. A building's office
 #   is paid by its building instead
+#   income_share, optional: a faction office's share of its faction's income, 0..1, paid to its holder while held,
+#   out of the treasury, besides its salary
 #   army_type, optional: the army its holder commands, by id from army_types.txt. Demobilised, the title gathers its
 #   strength; mobilised, beside its town or, for a faction's own office, its capital, it takes the field
 # Factions list in pieces.txt the offices they have of their own. Buildings name in buildings.txt the office each
@@ -102,6 +104,7 @@ office = {
 	term = 0
 	flags = [Eternal]
 	salary = 0
+	income_share = 0.5
 	army_type = retinue
 }
 

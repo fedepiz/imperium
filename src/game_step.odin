@@ -421,8 +421,8 @@ Walk_Order :: struct {
 	follows:     bool,
 }
 
-// Built at load and each turn change. Supply: the strongest source, kept out of enemy zones. Control: summed, within
-// the owner's regions, up to 100
+// Built at load and each turn change. Supply: the strongest source, kept out of enemy zones. Control: the strongest
+// source, within the owner's regions, up to 100
 game_networks_build :: proc(game: ^Game) {
 	spread := make([]f32, MAP_CELLS, context.temp_allocator)
 	blocked := make([]bool, MAP_CELLS, context.temp_allocator)
@@ -462,7 +462,7 @@ game_networks_build :: proc(game: ^Game) {
 			for kind_id in piece.town.buildings do strength += game.building_kinds[kind_id].control
 			if strength > 0 do append(&sources, Pathfind_Source{piece.pos, strength})
 		}
-		pathfind_spread(.Land, sources[:], blocked, CONTROL_DECAY, .Sum, spread)
+		pathfind_spread(.Land, sources[:], blocked, CONTROL_DECAY, .Max, spread)
 		if owner == game.player {
 			for value, i in spread do game.control_network[i] = u8(clamp(value, 0, 100) + 0.5)
 		}
@@ -1367,8 +1367,9 @@ game_step :: proc(
 			office.wealth = 0
 			town := slot_map_get(&game.pieces, office.town)
 			if office.holder != 0 && town == nil {
-				office.wealth = kind.salary
-				game.factions[office.faction].upkeep += kind.salary
+				office.wealth =
+					kind.salary + kind.income_share * game.factions[office.faction].income
+				game.factions[office.faction].upkeep += office.wealth
 			}
 			if office.holder != 0 && town != nil && !office.elapsed {
 				building := &game.building_kinds[office.building]

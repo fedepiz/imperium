@@ -3,7 +3,7 @@
 #   population: the population it occupies
 #   food: food per turn; food_fertility: food per turn, times its region's fertility
 #   income, upkeep: coin per turn into its owner's treasury, and out of it
-#   control: radiated to its owner's towns, less their distance. A town sums what reaches it, up to 100
+#   control: radiated to its owner's towns, less their distance. A town takes the strongest that reaches it
 #   public_order: its town's public order, as given: positive keeps order, negative stirs unrest
 #   food_store: food into its owner's central store, scaled by its town's control; negative, food taken out of it,
 #   which adds no food to the town by itself
@@ -25,6 +25,7 @@ building = {
 	name = "Wheat Fields"
 	population = 2
 	food_fertility = 2
+	income = 1
 	upgrade = wheat_farm
 	build_turns = 2
 	description = "Wheat Fields: arable land sown with wheat and barley, the staple of the Mediterranean diet. Most fields were worked by smallholders and their families with an ox-drawn plough, and a field was usually left fallow every other year."
@@ -35,6 +36,7 @@ building = {
 	name = "Wheat Farm"
 	population = 3
 	food_fertility = 2.5
+	income = 2
 	food_store = 1
 	upgrade = wheat_mill
 	build_turns = 3
@@ -46,7 +48,7 @@ building = {
 	name = "Wheat Mill"
 	population = 4
 	food_fertility = 3
-	income = 1
+	income = 3
 	food_store = 3
 	build_turns = 4
 	description = "Wheat Mill: a watermill for grinding grain into flour. Water power was known from the first century BC, and large milling complexes, such as the one at Barbegal in Gaul, could supply whole cities."
@@ -58,7 +60,7 @@ building = {
 	population = 1
 	food = 1
 	food_fertility = 0.5
-	income = 0.5
+	income = 1.5
 	upgrade = cattle_pastures
 	build_turns = 2
 	description = "Cattle Herds: oxen and cows kept on common grazing land. Oxen were the main draught animals of ancient farming, pulling ploughs and carts; cows gave milk, and beef was eaten less often than pork."
@@ -70,7 +72,7 @@ building = {
 	population = 2
 	food = 2
 	food_fertility = 1
-	income = 1
+	income = 3
 	upgrade = cattle_ranch
 	build_turns = 3
 	description = "Cattle Pastures: enclosed meadows and hay fields set aside for cattle. Raising cattle for sale at market, beyond a farm's own needs, was common in the wetter northern provinces and in the Po valley."
@@ -82,7 +84,7 @@ building = {
 	population = 3
 	food = 3
 	food_fertility = 1.5
-	income = 1.5
+	income = 4.5
 	build_turns = 4
 	description = "Cattle Ranch: large-scale cattle raising on the latifundia, the great estates of the senatorial aristocracy. Herds were moved between summer pastures in the hills and winter pastures in the lowlands, a practice called transhumance."
 }
@@ -92,7 +94,7 @@ building = {
 	name = "Sheep Flocks"
 	population = 1
 	food = 1
-	income = 1
+	income = 2
 	upgrade = sheep_pens
 	build_turns = 1
 	description = "Sheep Flocks: sheep kept on hillsides and poor ground unsuited to the plough. They provided wool, milk for cheese and some meat, and were the main livestock of the mountain regions."
@@ -103,7 +105,7 @@ building = {
 	name = "Sheep Pens"
 	population = 2
 	food = 2
-	income = 2
+	income = 4
 	upgrade = sheep_farm
 	build_turns = 2
 	description = "Sheep Pens: folds and shearing sheds for larger flocks. Wool was spun and woven at home across the empire, and the surplus was sold at local markets."
@@ -114,7 +116,7 @@ building = {
 	name = "Sheep Farm"
 	population = 3
 	food = 3
-	income = 3
+	income = 6
 	build_turns = 3
 	description = "Sheep Farm: wool production on a commercial scale. Some regions were known for the quality of their cloth, and the state ran its own weaving workshops, the gynaecea, to clothe the army and the court."
 }
@@ -152,36 +154,14 @@ building = {
 }
 
 building = {
-	id = palace
-	name = "Palace"
+	id = palatium
+	name = "Palatium"
 	population = 3
 	upkeep = 4
 	control = 100
 	build_turns = 5
 	build_coin = 20
-	description = "Palace: an imperial residence, or palatium, named after the Palatine hill in Rome where Augustus and his successors lived. In late antiquity emperors resided in cities such as Milan, Ravenna and Constantinople, and the palace housed the court and the central ministries."
-}
-
-building = {
-	id = praetorium
-	name = "Praetorium"
-	population = 2
-	upkeep = 2
-	control = 60
-	build_turns = 4
-	build_coin = 10
-	public_order = 1.0
-	description = "Praetorium: the official residence and headquarters of a provincial governor, named after the praetor, a senior Roman magistrate. The governor heard lawsuits, oversaw the collection of taxes and kept order with a staff of clerks and soldiers."
-}
-
-building = {
-	id = curia
-	name = "Curia"
-	population = 2
-	income = 3
-	public_order = -1
-	build_turns = 3
-	description = "Curia: the council of a Roman town, made up of the decurions, its wealthiest landowners. In the late empire the decurions were held personally responsible for collecting the town's taxes, and many tried to escape the duty."
+	description = "Palatium: an imperial residence, named after the Palatine hill in Rome where Augustus and his successors lived. In late antiquity emperors resided in cities such as Milan, Ravenna and Constantinople, and the palatium housed the court and the central ministries."
 }
 
 building = {
@@ -239,6 +219,7 @@ building = {
 	name = "Civitas"
 	population = 2
 	public_order = 1
+	control = 20
 	flags = [Main]
 	title = roman_governor
 	title_salary_local_share = 1
@@ -259,6 +240,7 @@ building = {
 	name = "Metropolis"
 	population = 3
 	public_order = 1
+	control = 20
 	flags = [Main]
 	title = roman_governor
 	title_salary_local_share = 1
@@ -277,7 +259,6 @@ building = {
 	id = heim
 	name = "Heim"
 	population = 1
-	income = 1
 	flags = [Main]
 	title = germanic_lord
 	title_salary_local_share = 1
@@ -296,8 +277,8 @@ building = {
 	id = burg
 	name = "Burg"
 	population = 2
-	income = 2
 	public_order = 1
+	control = 20
 	flags = [Main]
 	title = germanic_count
 	title_salary_local_share = 1
@@ -310,44 +291,4 @@ building = {
 	build_turns = 4
 	build_coin = 10
 	description = "Burg: a fortified stronghold, often a walled hilltop such as the Runder Berg near Urach, where an Alamannic lord lived with his household and followers, and craftsmen worked for him."
-}
-
-building = {
-	id = konigsburg
-	name = "Konigsburg"
-	population = 2
-	income = 2
-	public_order = 1
-	flags = [Main]
-	title = king
-	title_salary_local_share = 1
-	icon = City
-	slots = 6
-	supply = 80
-	hindrance = 3
-	contact = 9
-	body = 3
-	build_turns = 4
-	build_coin = 10
-	description = "Konigsburg: German for king's stronghold. A fortified royal seat where a king kept his household, his treasure and his followers: the seat of a kingdom, but no great city."
-}
-
-building = {
-	id = konigshof
-	name = "Konigshof"
-	population = 3
-	income = 4
-	public_order = 1
-	flags = [Main]
-	title = king
-	title_salary_local_share = 1
-	icon = Large_City
-	slots = 8
-	supply = 90
-	hindrance = 3.5
-	contact = 10
-	body = 3.5
-	build_turns = 8
-	build_coin = 50
-	description = "Konigshof: German for king's court, from Old High German kuning, king, and hof, court or farmstead. A royal estate, in Latin curtis regia. Early medieval kings had no fixed capital: they travelled between such estates with their household and followers, living off what each produced."
 }

@@ -522,7 +522,6 @@ character = {
 	background = Aristocrat
 	disposition = Ambitious
 	office = king
-	of = "Augusta Vindelicorum"
 }
 
 character = {
@@ -561,6 +560,8 @@ character = {
 	temperament = Steady
 	background = Aristocrat
 	disposition = Loyal
+	office = germanic_count
+	of = "Augusta Vindelicorum"
 }
 
 character = {
@@ -661,7 +662,6 @@ character = {
 	background = Aristocrat
 	disposition = Proud
 	office = king
-	of = "Argentoratum"
 }
 
 character = {
@@ -694,12 +694,14 @@ character = {
 	name = "Gundioc"
 	faction = "Burgundians"
 	age = 24
-	rank = 1
+	rank = 3
 	influence = 10
 	loyalty = 65
 	temperament = Cunning
 	background = Aristocrat
 	disposition = Ambitious
+	office = germanic_count
+	of = "Argentoratum"
 }
 
 character = {
@@ -713,7 +715,6 @@ character = {
 	background = Aristocrat
 	disposition = Ambitious
 	office = king
-	of = "Flevum"
 }
 
 character = {
@@ -746,12 +747,14 @@ character = {
 	name = "Chlodomar"
 	faction = "Franks"
 	age = 30
-	rank = 2
+	rank = 3
 	influence = 15
 	loyalty = 70
 	temperament = Steady
 	background = Soldier
 	disposition = Loyal
+	office = germanic_count
+	of = "Flevum"
 }
 
 character = {
@@ -765,7 +768,6 @@ character = {
 	background = Federate
 	disposition = Ambitious
 	office = king
-	of = "Tulifurdum"
 }
 
 character = {
@@ -807,6 +809,20 @@ character = {
 }
 
 character = {
+	name = "Aelle"
+	faction = "Saxons"
+	age = 30
+	rank = 3
+	influence = 25
+	loyalty = 70
+	temperament = Bold
+	background = Soldier
+	disposition = Ambitious
+	office = germanic_count
+	of = "Tulifurdum"
+}
+
+character = {
 	name = "Eomer"
 	faction = "Angles"
 	age = 45
@@ -817,7 +833,6 @@ character = {
 	background = Aristocrat
 	disposition = Proud
 	office = king
-	of = "Angulus"
 }
 
 character = {
@@ -859,6 +874,20 @@ character = {
 }
 
 character = {
+	name = "Wermund"
+	faction = "Angles"
+	age = 50
+	rank = 3
+	influence = 25
+	loyalty = 75
+	temperament = Steady
+	background = Aristocrat
+	disposition = Loyal
+	office = germanic_count
+	of = "Angulus"
+}
+
+character = {
 	name = "Bisin"
 	faction = "Thuringians"
 	age = 30
@@ -869,7 +898,6 @@ character = {
 	background = Aristocrat
 	disposition = Proud
 	office = king
-	of = "Lupfurdum"
 }
 
 character = {
@@ -902,12 +930,14 @@ character = {
 	name = "Sigiwald"
 	faction = "Thuringians"
 	age = 27
-	rank = 2
+	rank = 3
 	influence = 15
 	loyalty = 65
 	temperament = Cunning
 	background = Soldier
 	disposition = Proud
+	office = germanic_count
+	of = "Lupfurdum"
 }
 
 character = {
@@ -921,7 +951,6 @@ character = {
 	background = Aristocrat
 	disposition = Proud
 	office = king
-	of = "Aregelia"
 }
 
 character = {
@@ -954,12 +983,14 @@ character = {
 	name = "Gisulf"
 	faction = "Langobards"
 	age = 22
-	rank = 1
+	rank = 3
 	influence = 10
 	loyalty = 70
 	temperament = Bold
 	background = Soldier
 	disposition = Loyal
+	office = germanic_count
+	of = "Aregelia"
 }
 
 character = {
@@ -973,7 +1004,6 @@ character = {
 	background = Aristocrat
 	disposition = Ambitious
 	office = king
-	of = "Burdigala"
 }
 
 character = {
@@ -1040,4 +1070,18 @@ character = {
 	temperament = Bold
 	background = Aristocrat
 	disposition = Proud
+}
+
+character = {
+	name = "Beremud"
+	faction = "Visigoths"
+	age = 45
+	rank = 3
+	influence = 25
+	loyalty = 65
+	temperament = Cautious
+	background = Aristocrat
+	disposition = Proud
+	office = germanic_count
+	of = "Burdigala"
 }

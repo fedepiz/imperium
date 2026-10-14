@@ -8,7 +8,7 @@ culture = {
 	look = Roman
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, stables, barracks, palace, praetorium, curia, granary, horrea, annona_office, municipium, civitas, metropolis,
+		sheep_farm, stables, barracks, granary, horrea, annona_office, municipium, civitas, metropolis,
 	]
 	names = [
 		"Symmachus", "Albinus", "Avienus", "Volusianus", "Anthemius", "Olybrius", "Glycerius", "Orestes", "Placidus",
@@ -40,7 +40,7 @@ culture = {
 	look = Germanic
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, muster_hall, heim, burg, konigsburg, konigshof,
+		sheep_farm, muster_hall, heim, burg,
 	]
 	names = [
 		"Hengest", "Horsa", "Aesc", "Octa", "Eormenric", "Aethelberht", "Eadbald", "Eorcenberht", "Ecgberht",
@@ -65,7 +65,7 @@ culture = {
 	look = Germanic
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, muster_hall, heim, burg, konigsburg, konigshof,
+		sheep_farm, muster_hall, heim, burg,
 	]
 	names = [
 		"Alaric", "Ataulf", "Sigeric", "Wallia", "Theoderic", "Thorismund", "Euric", "Gundobad", "Gundioc",
@@ -88,7 +88,7 @@ culture = {
 	look = Germanic
 	buildings = [
 		wheat_fields, wheat_farm, wheat_mill, cattle_herds, cattle_pastures, cattle_ranch, sheep_flocks, sheep_pens,
-		sheep_farm, muster_hall, heim, burg, konigsburg, konigshof,
+		sheep_farm, muster_hall, heim, burg,
 	]
 	names = [
 		"Chnodomar", "Serapio", "Mederich", "Agenarich", "Rando", "Vithicab", "Priarius", "Butilin", "Leuthari",

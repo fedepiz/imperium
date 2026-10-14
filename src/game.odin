@@ -249,17 +249,19 @@ Office_Flag :: enum u8 {
 }
 
 Office_Kind :: struct {
-	id:        Name,
-	name:      Name,
-	rank:      int,
-	influence: f32,
+	id:           Name,
+	name:         Name,
+	rank:         int,
+	influence:    f32,
 	// Turns before its holder can be promoted or dismissed
-	term:      int,
-	flags:     bit_set[Office_Flag],
+	term:         int,
+	flags:        bit_set[Office_Flag],
 	// 0: none
-	army_type: Army_Type_Id,
+	army_type:    Army_Type_Id,
 	// A faction office's, paid out of the treasury
-	salary:    f32,
+	salary:       f32,
+	// A faction office's share of its faction's income, 0..1, paid out of the treasury besides its salary
+	income_share: f32,
 }
 
 // A building's office elapses when its town is lost, and is destroyed then or once its army leaves the field
@@ -799,12 +801,13 @@ game_load :: proc(
 			assert(row.key == "office")
 			row_check(row, Office_Kind, path)
 			office := Office_Kind {
-				id        = name_from_string(tbl.get_text(row, "id")),
-				name      = name_from_string(tbl.get_text(row, "name")),
-				rank      = int(tbl.get_num(row, "rank")),
-				influence = tbl.get_num(row, "influence"),
-				term      = int(tbl.get_num(row, "term")),
-				salary    = tbl.get_num(row, "salary"),
+				id           = name_from_string(tbl.get_text(row, "id")),
+				name         = name_from_string(tbl.get_text(row, "name")),
+				rank         = int(tbl.get_num(row, "rank")),
+				influence    = tbl.get_num(row, "influence"),
+				term         = int(tbl.get_num(row, "term")),
+				salary       = tbl.get_num(row, "salary"),
+				income_share = tbl.get_num(row, "income_share"),
 			}
 			flags := tbl.get_children(row, "flags")
 			for flag in flags {
