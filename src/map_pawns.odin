@@ -53,13 +53,15 @@ Culture_Look :: enum {
 // Pawn state: the scene, refilled every frame, and what is kept between frames
 Map_Pawns :: struct {
 	// This frame's pawns. Past the capacity, pawns are dropped
-	scene:       [dynamic; MAP_PAWNS_MAX]Map_Pawn,
-	images:      [Pawn_Set][Culture_Look][Map_Icon]Pawn_Image,
-	label_font:  Text_Font_Id,
+	scene:        [dynamic; MAP_PAWNS_MAX]Map_Pawn,
+	images:       [Pawn_Set][Culture_Look][Map_Icon]Pawn_Image,
+	label_font:   Text_Font_Id,
 	// 0: pictures. 1: medallions
-	medallion_t: f32,
+	medallion_t:  f32,
 	// Seconds. Phase of the pulse, shared by all pawns
-	time:        f32,
+	time:         f32,
+	// Label opacity by icon, 0..1
+	label_alphas: [Map_Icon]f32,
 }
 
 // Atlas rects. Empty = missing
@@ -126,17 +128,18 @@ PULSE_PERIOD :: 1.2
 @(private = "file")
 VIEW_TOLERANCE :: 0.1
 
-// Zoom, in logical pixels per cell: labels that fade go from shown, down to gone. The rest always show
-@(private = "file")
-LABEL_ZOOM_SHOWN :: 6
-@(private = "file")
-LABEL_ZOOM_GONE :: 4
+// Zoom, in logical pixels per cell, at and under which an icon's labels are hidden.
+// 0: always shown. Fade: seconds
 @(private = "file", rodata)
-LABEL_FADES := #partial [Map_Icon]bool {
-	.Town  = true,
-	.Army  = true,
-	.Fleet = true,
+LABEL_ZOOMS := [Map_Icon]f32 {
+	.Town       = 5,
+	.City       = 3,
+	.Large_City = 1.5,
+	.Army       = 5,
+	.Fleet      = 5,
 }
+@(private = "file")
+LABEL_FADE :: 0.25
 
 @(private = "file")
 LABEL_HALO :: 1.5
@@ -230,7 +233,7 @@ map_pawns_quads :: proc(
 		}
 	}
 
-	// Phase: Clocks. The pulse, and the fade between pictures and medallions
+	// Phase: Clocks. The pulse, the fade between pictures and medallions, and the label fades
 	pawns.time += dt
 	pulse := 0.5 - 0.5 * math.cos(2 * math.PI * pawns.time / PULSE_PERIOD)
 	target: f32 = view.zoom < MEDALLION_ZOOM ? 1 : 0
@@ -239,6 +242,11 @@ map_pawns_quads :: proc(
 	weights := [Pawn_Set]f32 {
 		.Picture   = 1 - pawns.medallion_t,
 		.Medallion = pawns.medallion_t,
+	}
+	label_fade := dt / LABEL_FADE
+	for &alpha, icon in pawns.label_alphas {
+		shown: f32 = view.zoom <= LABEL_ZOOMS[icon] ? 0 : 1
+		alpha += clamp(shown - alpha, -label_fade, label_fade)
 	}
 
 	// Phase: Tints. One per pawn
@@ -313,9 +321,8 @@ map_pawns_quads :: proc(
 		top_left: [2]f32,
 	}
 	labels := make([dynamic]Label, 0, len(pawns.scene), context.temp_allocator)
-	zoom_fade := clamp((view.zoom - LABEL_ZOOM_GONE) / (LABEL_ZOOM_SHOWN - LABEL_ZOOM_GONE), 0, 1)
 	for pawn, index in pawns.scene {
-		label_alpha: f32 = LABEL_FADES[pawn.icon] ? zoom_fade : 1
+		label_alpha := pawns.label_alphas[pawn.icon]
 		if pawn.label == "" || label_weights[index] <= 0 || label_alpha <= 0 do continue
 		ink_color := [4]f32{style.ink.r, style.ink.g, style.ink.b, label_alpha}
 		halo_color := [4]f32{style.paper.r, style.paper.g, style.paper.b, label_alpha}
