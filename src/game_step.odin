@@ -101,6 +101,9 @@ SPENT_READINESS :: 25
 SPENT_CLEAR_READINESS :: 50
 @(private = "file")
 BATTLE_PREDICTION_RUNS :: 100
+// In movement: farther, no enemy counts as near
+@(private = "file")
+ENEMY_DISTANCE_MAX :: 150
 
 // By whether the marcher won, then by the battle's outcome
 @(private = "file", rodata)
@@ -147,6 +150,57 @@ Move_Order :: struct {
 	target:      Piece_Id,
 	destination: [2]f32,
 	snap:        int,
+}
+
+MOVE_QUESTIONS_MAX :: 2048
+BATTLE_QUESTIONS_MAX :: 16384
+FLOOD_QUESTIONS_MAX :: 32
+
+// Asked of one step and answered by it: the caller fills in what is asked, the step what is answered
+Game_Questions :: struct {
+	moves:   [dynamic; MOVE_QUESTIONS_MAX]Move_Question,
+	battles: [dynamic; BATTLE_QUESTIONS_MAX]Battle_Question,
+	floods:  [dynamic; FLOOD_QUESTIONS_MAX]Flood_Question,
+}
+
+// A walk's piece, as it would arrive
+Arrival :: struct {
+	at:            [2]f32,
+	movement_left: f32,
+	readiness:     f32,
+	statuses:      bit_set[Army_Status],
+}
+
+// Drawn: the hover, also predicted in full on game.movement for the UI; at most one
+Move_Question :: struct {
+	order:    Move_Order,
+	// Of the battle on arrival, the mover attacking. 0: not fought
+	runs:     int,
+	drawn:    bool,
+	// The walk's: whether a move can be ordered now is can_move
+	refusal:  Maybe(Order_Refusal),
+	arrival:  Arrival,
+	// For the mover, shares of the runs. No battle unless one starts
+	outcomes: [Battle_Forecast]f32,
+}
+
+// The attacker as resting would leave it, in contact with the defender as it is
+Battle_Question :: struct {
+	attacker: Piece_Id,
+	defender: Piece_Id,
+	runs:     int,
+	// For the attacker, shares of the runs. No battle unless one starts
+	outcomes: [Battle_Forecast]f32,
+}
+
+// The army's flood over its box, with the zones and bodies around it as they are, not capped at its movement left
+Flood_Question :: struct {
+	army:   Piece_Id,
+	// The box's top left cell. Cost: per cell of the box, as Pathfind_Flood's; INF: not reached
+	corner: [2]int,
+	cost:   [PATHFIND_FLOOD_CELLS]f32,
+	// Per site: the movement to it. INF: outside the box, or not reached
+	sites:  [SITES_MAX]f32,
 }
 
 // At most one a step
@@ -276,11 +330,8 @@ March :: struct {
 
 // What a move order would do. Its march's piece: none when it has no route
 March_Prediction :: struct {
-	march:         March,
-	// Its piece's, on arrival
-	movement_left: f32,
-	readiness:     f32,
-	statuses:      bit_set[Army_Status],
+	march:   March,
+	arrival: Arrival,
 }
 
 Sea_Reach :: struct {
@@ -511,8 +562,9 @@ Walk_Order :: struct {
 }
 
 // Built at load and each turn change. Supply: the strongest source, kept out of enemy zones. Control: the strongest
-// source, within the owner's regions, up to 100
-game_networks_build :: proc(game: ^Game) {
+// source, within the owner's regions, up to 100; for every faction when starting, else for the playing one. Enemy
+// distance: from every enemy army at once, up to ENEMY_DISTANCE_MAX
+game_networks_build :: proc(game: ^Game, starting: bool) {
 	spread := make([]f32, MAP_CELLS, context.temp_allocator)
 	blocked := make([]bool, MAP_CELLS, context.temp_allocator)
 
@@ -535,7 +587,7 @@ game_networks_build :: proc(game: ^Game) {
 			}
 		}
 		pathfind_spread(&game.pathfind, .Land, sources[:], blocked, nil, SUPPLY_DECAY, .Max, spread)
-		for value, i in spread do game.supply_network[i] = u8(clamp(value, 0, 100) + 0.5)
+		for value, i in spread do game.supply_network.values[i] = u8(clamp(value, 0, 100) + 0.5)
 	}
 
 	// Control, per faction: never outside its regions
@@ -547,6 +599,7 @@ game_networks_build :: proc(game: ^Game) {
 	}
 	for faction in 1 ..< len(game.factions) {
 		owner := Faction_Id(faction)
+		if !starting && owner != game.player do continue
 		for region, i in game.terrain.regions do blocked[i] = game.regions[region].owner != owner
 
 		sources: [dynamic; PIECE_MAX]Pathfind_Source
@@ -559,13 +612,23 @@ game_networks_build :: proc(game: ^Game) {
 		}
 		pathfind_spread(&game.pathfind, .Land, sources[:], blocked, lanes[:], CONTROL_DECAY, .Max, spread)
 		if owner == game.player {
-			for value, i in spread do game.control_network[i] = u8(clamp(value, 0, 100) + 0.5)
+			for value, i in spread do game.control_network.values[i] = u8(clamp(value, 0, 100) + 0.5)
 		}
 		read := slot_map_iterator(&game.pieces)
 		for piece in slot_map_iterate(&read) {
 			if .Has_Town not_in piece.flags || piece.owner != owner do continue
 			piece.town.control = min(spread[grid_index(cell_of(piece.pos), MAP_SIZE)], 100)
 		}
+	}
+
+	// Enemy distance
+	{
+		enemies: [dynamic; PIECE_MAX][2]f32
+		it := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&it) {
+			if .Has_Army in piece.flags && piece.domain != nil && piece.owner != game.player do append(&enemies, piece.pos)
+		}
+		pathfind_distance(&game.pathfind, .Land, enemies[:], ENEMY_DISTANCE_MAX, game.enemy_distance.values[:], nil)
 	}
 }
 
@@ -574,18 +637,20 @@ pieces_friendly :: proc(a, b: ^Piece_Data) -> bool {
 	return a.owner != 0 && a.owner == b.owner
 }
 
-// Hover: the move order a right click would give, its piece none when there is none
+// Questions: nil when none. Its drawn move is the hover: the move order a right click would give
 game_step :: proc(
 	game: ^Game,
 	focus: Piece_Id,
-	hover: Move_Order,
 	input: Game_Order,
+	questions: ^Game_Questions,
 	events: ^[dynamic; GAME_EVENTS_MAX]Game_Event,
 ) {
 	// The start step: taken by loading
 	starting := game.step == 0
 	game.step += 1
 	movement := &game.movement
+	hover: Move_Order
+	if questions != nil do for question in questions.moves do if question.drawn do hover = question.order
 
 	_, ending := input.(End_Turn_Order)
 	end_turn_accepted := ending && game.endable
@@ -850,152 +915,6 @@ game_step :: proc(
 		}
 	}
 
-	// Step: Battles. The contacts in turn until one opens an interaction, each run once with its seed. Then the last
-	// prediction's marcher, as it would arrive, and its target attacking each other, BATTLE_PREDICTION_RUNS times each
-	Battle_Entry :: struct {
-		contact:      Contact,
-		predicted:    bool,
-		// The marcher's side, predicted
-		marcher_side: int,
-	}
-	entries: [dynamic; CONTACTS_MAX + 2]Battle_Entry
-	for contact in game.contacts do append(&entries, Battle_Entry{contact = contact})
-	predicted_march := &movement.prediction.march
-	game.battle_prediction = {}
-	arrival: Piece_Data
-	if marcher := slot_map_get(&game.pieces, predicted_march.piece); marcher != nil && predicted_march.target != {} {
-		game.battle_prediction.marcher = predicted_march.piece
-		game.battle_prediction.target = predicted_march.target
-		game.battle_prediction.runs = 2 * BATTLE_PREDICTION_RUNS
-		append(&entries, Battle_Entry{{predicted_march.piece, predicted_march.target, true}, true, 0})
-		append(&entries, Battle_Entry{{predicted_march.target, predicted_march.piece, true}, true, 1})
-		arrival = marcher^
-		arrival.pos = predicted_march.path.points[len(predicted_march.path.points) - 1]
-		arrival.inside = {}
-		arrival.army.readiness = movement.prediction.readiness
-		arrival.army.statuses = movement.prediction.statuses
-	}
-	predicted_runs := 0
-	contacts_done := 0
-	for entry in entries {
-		contact := entry.contact
-		if !entry.predicted && game.interaction.actor != {} do continue
-		if !entry.predicted do contacts_done += 1
-		event := Event_Contact{contact.initiator, contact.other, contact.targeted, .Lapsed}
-		initiator := slot_map_get(&game.pieces, contact.initiator)
-		other := slot_map_get(&game.pieces, contact.other)
-		if entry.predicted && entry.marcher_side == 0 do initiator = &arrival
-		if entry.predicted && entry.marcher_side == 1 do other = &arrival
-		if initiator == nil || other == nil || pieces_friendly(initiator, other) {
-			if !entry.predicted do append(events, event)
-			continue
-		}
-		reach := max(initiator.contact_radius, other.contact_radius)
-		if linalg.distance(initiator.pos, other.pos) >= reach {
-			if !entry.predicted do append(events, event)
-			continue
-		}
-
-		if .Has_Army not_in initiator.flags || .Has_Army not_in other.flags {
-			event.outcome = .Met
-			if !entry.predicted do append(events, event)
-			continue
-		}
-
-		ids := [2]Piece_Id{contact.initiator, contact.other}
-		pieces := [2]^Piece_Data{initiator, other}
-
-		// Fighting from a fortified piece: as its garrison, or as an army inside it
-		behind_walls: [2]bool
-		sheltered := false
-		for piece, i in pieces {
-			holder := slot_map_get(&game.pieces, piece.inside)
-			occupant := slot_map_get(&game.pieces, piece.contains)
-			fortified := .Fortified in piece.flags
-			held := holder != nil && .Fortified in holder.flags
-			behind_walls[i] = fortified || held
-			guarded := occupant != nil && .Has_Army in occupant.flags && .Spent not_in occupant.army.statuses
-			if (fortified && guarded) || (held && .Spent in piece.army.statuses) do sheltered = true
-		}
-		if sheltered {
-			if !entry.predicted do append(events, event)
-			continue
-		}
-		sortie := behind_walls[0] || behind_walls[1]
-
-		battle := Battle {
-			ordered = contact.targeted,
-		}
-		for piece, i in pieces {
-			army := piece.army
-			limited := behind_walls[1 - i]
-			flags: bit_set[Battle_Side_Flag]
-			if .Spent in army.statuses do flags += {.Spent}
-			if .Seasick in army.statuses do flags += {.Seasick}
-			if piece.inside != {} do flags += {.Garrisoning}
-			if behind_walls[i] do flags += {.Behind_Walls}
-			if .Fortified in piece.flags do flags += {.Inherent_Garrison}
-			// Only the initiator attacks
-			if i == 0 && (behind_walls[i] || !piece.this_turn.attacked) do flags += {.Can_Attack}
-			if !sortie do flags += {.Can_Avoid, .Can_Fall_Back, .Can_Pursue}
-			battle.sides[i] = {
-				men           = f32(army.men),
-				men_max       = f32(army.men_max),
-				engaged_share = limited ? SORTIE_ENEMY_SHARE : 1,
-				engaged_max   = limited ? f32(pieces[1 - i].army.men) : math.INF_F32,
-				proficiency   = army.proficiency,
-				readiness     = army.readiness,
-				flags         = flags,
-				agility       = army.agility,
-				temperament   = army.temperament,
-				name          = game_piece_title(piece),
-			}
-		}
-
-		runs := entry.predicted ? BATTLE_PREDICTION_RUNS : 1
-		for run in 0 ..< runs {
-			battle.seed = seed_from(u64(game.turn), u64(game.player), transmute(u64)ids[0], transmute(u64)ids[1])
-			if entry.predicted do battle.seed = seed_from(u64(run), transmute(u64)ids[0], transmute(u64)ids[1])
-			result := battle_resolve(battle)
-
-			if entry.predicted {
-				predicting := &game.battle_prediction
-				if predicted_runs == 0 {
-					predicting.power[0] = result.sides[entry.marcher_side].power
-					predicting.power[1] = result.sides[1 - entry.marcher_side].power
-				}
-				predicted_runs += 1
-				predicting.outcomes[BATTLE_FORECASTS[result.winner == entry.marcher_side ? 0 : 1][result.outcome]] += 1
-				continue
-			}
-
-			if result.fought {
-				for piece in pieces {
-					piece.this_turn.fought = true
-					piece.army.statuses -= {.Resting}
-				}
-			}
-			event.outcome = result.fought ? .Battle : result.refused ? .Refused : .Declined
-			append(events, event)
-			if !result.fought && !result.refused do continue
-			if result.fought && !behind_walls[result.attacker] {
-				pieces[result.attacker].this_turn.attacked = true
-			}
-			game.interaction = {
-				actor  = ids[0],
-				target = ids[1],
-				stage  = result.fought ? .Announce : .Refused,
-			}
-			game.interaction.result = result
-		}
-	}
-	for _ in 0 ..< contacts_done do ordered_remove(&game.contacts, 0)
-	// Runs of a battle that never started: no battle
-	if predicting := &game.battle_prediction; predicting.runs > 0 {
-		predicting.outcomes[.No_Battle] += f32(predicting.runs - predicted_runs)
-		for &share in predicting.outcomes do share /= f32(predicting.runs)
-	}
-
 	// Step: Sea reach. Of the piece ordered to move, else of the focused piece
 	reach := &movement.sea_reach
 	{
@@ -1008,24 +927,8 @@ game_step :: proc(
 				if b > 0 && linalg.distance(sailor.pos, beach.pos) <= BEACH_RADIUS do reach.start = Beach_Id(b)
 			}
 		}
-		// Only through beaches in the sailor's regions
 		if reach.start != 0 && sailor.this_turn.movement_left > 0 {
-			reach.cost[reach.start] = 0
-			done: bit_set[0 ..< BEACHES_MAX]
-			for {
-				at := 0
-				for b in 1 ..< len(game.beaches) do if b not_in done && reach.cost[b] < reach.cost[at] do at = b
-				if at == 0 do break
-				done += {at}
-				if Beach_Id(at) != reach.start && game.regions[game.beaches[at].region].owner != sailor.owner do continue
-				for lane, l in game.sea_lanes {
-					other := lane.from == Beach_Id(at) ? lane.to : lane.to == Beach_Id(at) ? lane.from : 0
-					cost := reach.cost[at] + lane.length
-					if other == 0 || cost > SEA_RANGE || cost >= reach.cost[other] do continue
-					reach.cost[other] = cost
-					reach.reached_by[other] = Sea_Lane_Id(l)
-				}
-			}
+			sea_voyage(game, reach.start, sailor.owner, &reach.cost, &reach.reached_by)
 			for beach, b in game.beaches {
 				if b == 0 || Beach_Id(b) == reach.start || reach.cost[b] == math.INF_F32 do continue
 				taken := false
@@ -1039,10 +942,21 @@ game_step :: proc(
 		}
 	}
 
+	// Step: Voyages. For the playing faction, from each beach
+	for b in 1 ..< len(game.beaches) {
+		cost: [BEACHES_MAX]f32
+		reached_by: [BEACHES_MAX]Sea_Lane_Id
+		sea_voyage(game, Beach_Id(b), game.player, &cost, &reached_by)
+		game.voyages[b] = {}
+		for c in 1 ..< len(game.beaches) do if c != b && cost[c] < math.INF_F32 do game.voyages[b] += {c}
+	}
+
 	// Step: Marches. Fall back and chase, then the move: ordered, else the selected piece's, aimed where hovered while
 	// nothing is under way
 	movement.predicted = {}
 	march_orders: [Planned_March]Walk_Order
+	// Move question q's at q
+	question_walks := new([dynamic; MOVE_QUESTIONS_MAX]Walk_Order, context.temp_allocator)
 	march_orders[.Leader] = orders[.Leader]
 	march_orders[.Chaser] = orders[.Chaser]
 	landing: Beach_Id
@@ -1066,38 +980,96 @@ game_step :: proc(
 				at = lane.from == at ? lane.to : lane.from
 			}
 		}
-		march_orders[.Move] = {
-			piece       = move.piece,
-			target      = move.target,
-			destination = move.destination,
-			snap        = move.snap,
-			aimed       = aimed && landing == 0,
-		}
-		target := slot_map_get(&game.pieces, move.target)
-		enters :=
-			piece != nil &&
-			target != nil &&
-			.Can_Enter in piece.flags &&
-			.Can_Contain in target.flags &&
-			target.contains == {} &&
-			pieces_friendly(piece, target)
-		if enters {
-			march_orders[.Move].target = {}
-			march_orders[.Move].into = move.target
+		// The move's walk, then each move question's: onto an empty friendly piece it can enter, into it
+		walks := 1
+		if questions != nil do walks += len(questions.moves)
+		for m in 0 ..< walks {
+			each := m == 0 ? move : questions.moves[m - 1].order
+			walk := Walk_Order {
+				piece       = each.piece,
+				target      = each.target,
+				destination = each.destination,
+				snap        = each.snap,
+				aimed       = m > 0 || aimed && landing == 0,
+			}
+			walker := slot_map_get(&game.pieces, each.piece)
+			target := slot_map_get(&game.pieces, each.target)
+			enters :=
+				walker != nil &&
+				target != nil &&
+				.Can_Enter in walker.flags &&
+				.Can_Contain in target.flags &&
+				target.contains == {} &&
+				pieces_friendly(walker, target)
+			if enters {
+				walk.target = {}
+				walk.into = each.target
+			}
+			if m == 0 do march_orders[.Move] = walk
+			else do append(question_walks, walk)
 		}
 	}
 
-	// Step: March plans. Flooded unless the last flood matches, then, aimed: stopped, traced and smoothed. The move's
-	// flood is last: it stays for its reach
+	// Step: March plans. The questions' walks, then the planned marches. Flooded unless the last flood matches, then,
+	// aimed: stopped, traced and smoothed, with its piece as it would arrive. A flood question takes its flood. The
+	// move's flood is last: it stays for its reach
+	Walk_Entry :: struct {
+		order:   Walk_Order,
+		march:   ^March,
+		refusal: ^Maybe(Order_Refusal),
+		// The move's and the move questions'
+		arrival: ^Arrival,
+		flood:   ^Flood_Question,
+	}
 	planned := new([Planned_March]March, context.temp_allocator)
 	march_refusals: [Planned_March]Maybe(Order_Refusal)
-	for &order, planned_march in march_orders {
+	move_arrival: Arrival
+	walk_entries_max := len(Planned_March)
+	if questions != nil do walk_entries_max += len(questions.moves) + len(questions.floods)
+	walk_entries := make([dynamic]Walk_Entry, 0, walk_entries_max, context.temp_allocator)
+	ignored_refusal: Maybe(Order_Refusal)
+	if questions != nil {
+		// The questions' walks are read as each is walked, so one march serves them all
+		question_march := new(March, context.temp_allocator)
+		for &question, q in questions.moves {
+			question.refusal = nil
+			question.arrival = {}
+			question.outcomes = {}
+			question.outcomes[.No_Battle] = 1
+			append(&walk_entries, Walk_Entry{order = question_walks[q], march = question_march, refusal = &question.refusal, arrival = &question.arrival})
+		}
+		for &question in questions.floods {
+			question.corner = {}
+			for &cost in question.cost do cost = math.INF_F32
+			for &site in question.sites do site = math.INF_F32
+			flooded := Walk_Order {
+				piece  = question.army,
+				budget = math.INF_F32,
+			}
+			append(&walk_entries, Walk_Entry{order = flooded, march = question_march, refusal = &ignored_refusal, flood = &question})
+		}
+	}
+	for order, planned_march in march_orders {
+		walk := Walk_Entry {
+			order   = order,
+			march   = &planned[planned_march],
+			refusal = &march_refusals[planned_march],
+			arrival = planned_march == .Move ? &move_arrival : nil,
+		}
+		append(&walk_entries, walk)
+	}
+	for &walk in walk_entries {
+		order := &walk.order
 		if order.piece == {} do continue
-		if planned_march == .Chaser {
+		if walk.march == &planned[.Chaser] {
 			leader := planned[.Leader].path.points[:]
 			if len(leader) == 0 do continue
 			order.destination = order.follows ? leader[len(leader) - 1] : leader[0]
 		}
+		polylines_clear(&walk.march.path)
+		clear(&walk.march.rates)
+		walk.march.movement_spent = 0
+		walk.march.readiness_lost = 0
 
 		clear(&movement.enemy_zones)
 		clear(&movement.friend_zones)
@@ -1108,7 +1080,7 @@ game_step :: proc(
 		if !moves {
 			movement.flooded = {}
 			movement.flood_key = 0
-			march_refusals[planned_march] = .Cannot_Move
+			walk.refusal^ = .Cannot_Move
 			continue
 		}
 		budget := order.budget > 0 ? order.budget : marcher.this_turn.movement_left
@@ -1135,13 +1107,24 @@ game_step :: proc(
 			u64(transmute(u32)budget),
 			u64(domain),
 		}
-		key := hash.fnv64a(mem.slice_to_bytes(key_source[:]))
-		key = hash.fnv64a(mem.slice_to_bytes(movement.enemy_zones[:]), key)
-		key = hash.fnv64a(mem.slice_to_bytes(movement.bodies[:]), key)
+		key := hash_bytes(
+			mem.slice_to_bytes(key_source[:]),
+			mem.slice_to_bytes(movement.enemy_zones[:]),
+			mem.slice_to_bytes(movement.bodies[:]),
+		)
 		if key != movement.flood_key {
 			pathfind_flood(&game.pathfind, marcher.pos, domain, budget, movement.enemy_zones[:], movement.bodies[:], &movement.flood)
 			movement.flooded = order.piece
 			movement.flood_key = key
+		}
+		if question := walk.flood; question != nil {
+			box := [2]int{PATHFIND_FLOOD_SIZE, PATHFIND_FLOOD_SIZE}
+			question.corner = movement.flood.corner
+			question.cost = movement.flood.cost
+			for site, s in game.sites {
+				local := cell_of(site) - question.corner
+				if s > 0 && grid_contains(local, box) do question.sites[s] = question.cost[grid_index(local, box)]
+			}
 		}
 		if !order.aimed do continue
 
@@ -1164,7 +1147,7 @@ game_step :: proc(
 		cell_costs: [dynamic; PATHFIND_PATH_MAX]f32
 		traced := stoppable && pathfind_flood_trace(flood, cell_center(stop), &cells, &cell_costs)
 		if !traced {
-			march_refusals[planned_march] = .No_Route
+			walk.refusal^ = .No_Route
 			continue
 		}
 
@@ -1183,7 +1166,7 @@ game_step :: proc(
 		raw_points[0] = marcher.pos
 		copy(raw_points[1:], cells[:])
 
-		march := &planned[planned_march]
+		march := walk.march
 		spent_along := new([WALK_POINTS_MAX][2]f32, context.temp_allocator)
 		polylines_smooth(raw, WALK_SMOOTHING, &march.path, spent[:len(cells) + 1], spent_along[:])
 		if len(march.path.points) == 0 {
@@ -1211,6 +1194,13 @@ game_step :: proc(
 		march.into = order.into
 		march.clear_of = order.clear_of
 		march.next = 1
+
+		if arrival := walk.arrival; arrival != nil {
+			arrival.at = points[len(points) - 1]
+			arrival.movement_left = max(0, marcher.this_turn.movement_left - march.movement_spent)
+			arrival.readiness = max(0, marcher.army.readiness - march.readiness_lost)
+			arrival.statuses = army_spent_statuses(marcher.army.statuses - {.Resting}, marcher.army.prevent_status, arrival.readiness)
+		}
 	}
 
 	// Step: Prediction. Of the aimed move: its sail, or its walk
@@ -1244,18 +1234,225 @@ game_step :: proc(
 			}
 			// Sailing spends no movement, and takes all that is left
 			for _ in 0 ..< sea_points do append(&march.rates, March_Rate{})
-			prediction.movement_left = 0
-			prediction.readiness = piece.army.readiness
 			sailed := piece.army.statuses - {.Resting} + ({.Seasick} - piece.army.prevent_status)
-			prediction.statuses = army_spent_statuses(sailed, piece.army.prevent_status, prediction.readiness)
+			prediction.arrival = {
+				at        = points[len(points) - 1],
+				readiness = piece.army.readiness,
+				statuses  = army_spent_statuses(sailed, piece.army.prevent_status, piece.army.readiness),
+			}
 			planned[.Move] = march^
 		case march_refusals[.Move] != nil:
 		case:
 			march^ = planned[.Move]
-			prediction.movement_left = max(0, piece.this_turn.movement_left - march.movement_spent)
-			prediction.readiness = max(0, piece.army.readiness - march.readiness_lost)
-			prediction.statuses = army_spent_statuses(piece.army.statuses - {.Resting}, piece.army.prevent_status, prediction.readiness)
+			prediction.arrival = move_arrival
 		}
+	}
+
+	// Step: Battles. The contacts in turn until one opens an interaction, each run once with its seed. Then the
+	// hypotheses, each run with its own seeds: the prediction's marcher, as it would arrive, and its target attacking each
+	// other, BATTLE_PREDICTION_RUNS times each; each move question's mover, as it would arrive, attacking its target; each
+	// battle question's attacker, rested, attacking its defender
+	Battle_Entry_Kind :: enum u8 {
+		Contact,
+		Forecast,
+		Move_Question,
+		Battle_Question,
+	}
+	Battle_Entry :: struct {
+		contact:      Contact,
+		kind:         Battle_Entry_Kind,
+		runs:         int,
+		// The forecast's and the move questions': the marcher's side, and its arrival
+		marcher_side: int,
+		arrival:      ^Arrival,
+		// The questions': theirs to tally
+		outcomes:     ^[Battle_Forecast]f32,
+	}
+	entries_max := len(game.contacts) + 2
+	if questions != nil do entries_max += len(questions.moves) + len(questions.battles)
+	entries := make([dynamic]Battle_Entry, 0, entries_max, context.temp_allocator)
+	for contact in game.contacts do append(&entries, Battle_Entry{contact = contact, runs = 1})
+	predicted_march := &movement.prediction.march
+	game.battle_prediction = {}
+	if slot_map_get(&game.pieces, predicted_march.piece) != nil && predicted_march.target != {} {
+		game.battle_prediction.marcher = predicted_march.piece
+		game.battle_prediction.target = predicted_march.target
+		game.battle_prediction.runs = 2 * BATTLE_PREDICTION_RUNS
+		arrival := &movement.prediction.arrival
+		marching := Contact{predicted_march.piece, predicted_march.target, true}
+		met := Contact{predicted_march.target, predicted_march.piece, true}
+		append(&entries, Battle_Entry{contact = marching, kind = .Forecast, runs = BATTLE_PREDICTION_RUNS, arrival = arrival})
+		append(&entries, Battle_Entry{contact = met, kind = .Forecast, runs = BATTLE_PREDICTION_RUNS, marcher_side = 1, arrival = arrival})
+	}
+	if questions != nil {
+		for &question, q in questions.moves {
+			if question.runs == 0 || question.refusal != nil || question_walks[q].target == {} do continue
+			contact := Contact{question.order.piece, question_walks[q].target, true}
+			entry := Battle_Entry {
+				contact  = contact,
+				kind     = .Move_Question,
+				runs     = question.runs,
+				arrival  = &question.arrival,
+				outcomes = &question.outcomes,
+			}
+			append(&entries, entry)
+		}
+		for &question in questions.battles {
+			question.outcomes = {}
+			question.outcomes[.No_Battle] = 1
+			if question.runs == 0 do continue
+			contact := Contact{question.attacker, question.defender, true}
+			append(&entries, Battle_Entry{contact = contact, kind = .Battle_Question, runs = question.runs, outcomes = &question.outcomes})
+		}
+	}
+	predicted_runs := 0
+	contacts_done := 0
+	for entry in entries {
+		contact := entry.contact
+		if entry.kind == .Contact && game.interaction.actor != {} do continue
+		if entry.kind == .Contact do contacts_done += 1
+		event := Event_Contact{contact.initiator, contact.other, contact.targeted, .Lapsed}
+		initiator := slot_map_get(&game.pieces, contact.initiator)
+		other := slot_map_get(&game.pieces, contact.other)
+		// The marcher as it would arrive
+		stand_in: Piece_Data
+		if arrival := entry.arrival; arrival != nil {
+			marcher := entry.marcher_side == 0 ? initiator : other
+			if marcher != nil {
+				stand_in = marcher^
+				stand_in.pos = arrival.at
+				stand_in.inside = {}
+				stand_in.army.readiness = arrival.readiness
+				stand_in.army.statuses = arrival.statuses
+				if entry.marcher_side == 0 do initiator = &stand_in
+				else do other = &stand_in
+			}
+		}
+		// Rested: readiness at its supply level, resting, not seasick, spent only as that readiness says, and fresh
+		if entry.kind == .Battle_Question && initiator != nil && other != nil {
+			stand_in = initiator^
+			stand_in.pos = other.pos
+			stand_in.inside = {}
+			stand_in.this_turn.attacked = false
+			stand_in.army.readiness = stand_in.army.supply
+			statuses := stand_in.army.statuses - {.Seasick} + ({.Resting} - stand_in.army.prevent_status)
+			stand_in.army.statuses = army_spent_statuses(statuses, stand_in.army.prevent_status, stand_in.army.readiness)
+			initiator = &stand_in
+		}
+		if initiator == nil || other == nil || pieces_friendly(initiator, other) {
+			if entry.kind == .Contact do append(events, event)
+			continue
+		}
+		reach := max(initiator.contact_radius, other.contact_radius)
+		if linalg.distance(initiator.pos, other.pos) >= reach {
+			if entry.kind == .Contact do append(events, event)
+			continue
+		}
+
+		if .Has_Army not_in initiator.flags || .Has_Army not_in other.flags {
+			event.outcome = .Met
+			if entry.kind == .Contact do append(events, event)
+			continue
+		}
+
+		ids := [2]Piece_Id{contact.initiator, contact.other}
+		pieces := [2]^Piece_Data{initiator, other}
+
+		// Fighting from a fortified piece: as its garrison, or as an army inside it
+		behind_walls: [2]bool
+		sheltered := false
+		for piece, i in pieces {
+			holder := slot_map_get(&game.pieces, piece.inside)
+			occupant := slot_map_get(&game.pieces, piece.contains)
+			fortified := .Fortified in piece.flags
+			held := holder != nil && .Fortified in holder.flags
+			behind_walls[i] = fortified || held
+			guarded := occupant != nil && .Has_Army in occupant.flags && .Spent not_in occupant.army.statuses
+			if (fortified && guarded) || (held && .Spent in piece.army.statuses) do sheltered = true
+		}
+		if sheltered {
+			if entry.kind == .Contact do append(events, event)
+			continue
+		}
+		sortie := behind_walls[0] || behind_walls[1]
+
+		battle := Battle {
+			ordered = contact.targeted,
+		}
+		for piece, i in pieces {
+			army := piece.army
+			limited := behind_walls[1 - i]
+			flags: bit_set[Battle_Side_Flag]
+			if .Spent in army.statuses do flags += {.Spent}
+			if .Seasick in army.statuses do flags += {.Seasick}
+			if piece.inside != {} do flags += {.Garrisoning}
+			if behind_walls[i] do flags += {.Behind_Walls}
+			if .Fortified in piece.flags do flags += {.Inherent_Garrison}
+			// Only the initiator attacks
+			if i == 0 && (behind_walls[i] || !piece.this_turn.attacked) do flags += {.Can_Attack}
+			if !sortie do flags += {.Can_Avoid, .Can_Fall_Back, .Can_Pursue}
+			battle.sides[i] = {
+				men           = f32(army.men),
+				men_max       = f32(army.men_max),
+				engaged_share = limited ? SORTIE_ENEMY_SHARE : 1,
+				engaged_max   = limited ? f32(pieces[1 - i].army.men) : math.INF_F32,
+				proficiency   = army.proficiency,
+				readiness     = army.readiness,
+				flags         = flags,
+				agility       = army.agility,
+				temperament   = army.temperament,
+				name          = game_piece_title(piece),
+			}
+		}
+
+		for run in 0 ..< entry.runs {
+			battle.seed = seed_from(u64(game.turn), u64(game.player), transmute(u64)ids[0], transmute(u64)ids[1])
+			if entry.kind != .Contact do battle.seed = seed_from(u64(run), transmute(u64)ids[0], transmute(u64)ids[1])
+			result := battle_resolve(battle)
+
+			forecast := BATTLE_FORECASTS[result.winner == entry.marcher_side ? 0 : 1][result.outcome]
+			if entry.kind == .Forecast {
+				predicting := &game.battle_prediction
+				if predicted_runs == 0 {
+					predicting.power[0] = result.sides[entry.marcher_side].power
+					predicting.power[1] = result.sides[1 - entry.marcher_side].power
+				}
+				predicted_runs += 1
+				predicting.outcomes[forecast] += 1
+				continue
+			}
+			// Every run ends in some forecast, so the shares add up to 1
+			if outcomes := entry.outcomes; outcomes != nil {
+				if run == 0 do outcomes^ = {}
+				outcomes[forecast] += 1 / f32(entry.runs)
+				continue
+			}
+
+			if result.fought {
+				for piece in pieces {
+					piece.this_turn.fought = true
+					piece.army.statuses -= {.Resting}
+				}
+			}
+			event.outcome = result.fought ? .Battle : result.refused ? .Refused : .Declined
+			append(events, event)
+			if !result.fought && !result.refused do continue
+			if result.fought && !behind_walls[result.attacker] {
+				pieces[result.attacker].this_turn.attacked = true
+			}
+			game.interaction = {
+				actor  = ids[0],
+				target = ids[1],
+				stage  = result.fought ? .Announce : .Refused,
+			}
+			game.interaction.result = result
+		}
+	}
+	for _ in 0 ..< contacts_done do ordered_remove(&game.contacts, 0)
+	// Runs of a battle that never started: no battle
+	if predicting := &game.battle_prediction; predicting.runs > 0 {
+		predicting.outcomes[.No_Battle] += f32(predicting.runs - predicted_runs)
+		for &share in predicting.outcomes do share /= f32(predicting.runs)
 	}
 
 	// Step: Confirmed marches. The fall back and the chase, and the move when ordered
@@ -1399,6 +1596,48 @@ game_step :: proc(
 	game.can_move = game.under_way & {.Battle, .Ending} == {}
 	turn_ending := game.under_way == {.Ending}
 
+	// Step: Zones. For the playing faction: the cells an enemy army's contact reaches into
+	{
+		game.zones = {}
+		stride := MAP_WIDTH / ZONES_SCALE
+		it := slot_map_iterator(&game.pieces)
+		for enemy in slot_map_iterate(&it) {
+			if .Has_Army not_in enemy.flags || enemy.owner == game.player do continue
+			zone := Disc{enemy.pos, enemy.contact_radius}
+			covered := cell_rect_clip(cell_rect_covering(zone.center - zone.radius, zone.center + zone.radius), MAP_SIZE)
+			for y in covered.min.y ..< covered.max.y do for x in covered.min.x ..< covered.max.x {
+				corner := [2]f32{f32(x), f32(y)}
+				if linalg.distance(linalg.clamp(zone.center, corner, corner + 1), zone.center) >= zone.radius do continue
+				game.zones.values[y / ZONES_SCALE * stride + x / ZONES_SCALE] = 1
+			}
+		}
+	}
+
+	// Step: Focus distance. From the focused piece to its site, through the sites, then from each cell's site to it.
+	// Rebuilt when the piece, its position or the voyages change
+	focus_distance: {
+		piece := slot_map_get(&game.pieces, focus)
+		focused, at := focus, piece != nil ? piece.pos : {}
+		key := hash_bytes(mem.ptr_to_bytes(&focused), mem.ptr_to_bytes(&at), mem.slice_to_bytes(game.voyages[:]))
+		if key == game.focus_distance_key do break focus_distance
+		game.focus_distance_key = key
+		for &distance in game.focus_distance.values do distance = math.INF_F32
+		graph := &game.site_graph
+		if piece != nil && grid_contains(cell_of(piece.pos), MAP_SIZE) && field_sample_nearest(&graph.cell_site, piece.pos) != 0 {
+			start: [SITES_MAX]f32
+			for &site in start do site = math.INF_F32
+			start[field_sample_nearest(&graph.cell_site, piece.pos)] = field_sample_nearest(&graph.cell_distance, piece.pos)
+			through: [SITES_MAX]f32
+			sites_distance(game, &start, &through)
+			stride := MAP_WIDTH / FOCUS_DISTANCE_SCALE
+			for &distance, i in game.focus_distance.values {
+				center := ([2]f32{f32(i % stride), f32(i / stride)} + 0.5) * FOCUS_DISTANCE_SCALE
+				site := field_sample_nearest(&graph.cell_site, center)
+				if site != 0 do distance = through[site] + field_sample_nearest(&graph.cell_distance, center)
+			}
+		}
+	}
+
 
 	// Step: Projects (turn end)
 	if turn_ending {
@@ -1453,7 +1692,7 @@ game_step :: proc(
 	}
 
 	// Step: Networks (start)
-	if starting do game_networks_build(game)
+	if starting do game_networks_build(game, starting)
 
 	// Step: Titles
 	// Destroyed when its building is gone or replaced, or its town lost with its army out of the field
@@ -1837,7 +2076,7 @@ game_step :: proc(
 
 				// Per source: supply points available here, and the men crowding them
 				points := [Supply_Source]f32 {
-					.Network  = f32(game.supply_network[at]),
+					.Network  = f32(field_sample_nearest(&game.supply_network, piece.pos)),
 					.Foraging = army.foraging * yield,
 				}
 				crowd := [Supply_Source]f32 {
@@ -1953,13 +2192,64 @@ game_step :: proc(
 		game.player = Faction_Id(next_player)
 		append(events, Event_Turn{game.turn, game.player})
 
-		game_networks_build(game)
+		game_networks_build(game, starting)
 	}
 
 	// Step: Turn start
 	if turn_ending || starting {
 		all := slot_map_iterator(&game.pieces)
 		for piece in slot_map_iterate(&all) do piece.this_turn = {movement_left = piece.movement_per_turn}
+	}
+}
+
+// Out: distance. Movement to each site from the starts, given per site (INF: none): over land from site to site, and
+// by the playing faction's voyages, each a turn's movement
+sites_distance :: proc(game: ^Game, start: ^[SITES_MAX]f32, distance: ^[SITES_MAX]f32) {
+	distance^ = start^
+	voyage := game.army_template.movement_per_turn
+	done: [SITES_MAX]bool
+	for {
+		at := -1
+		for site in 1 ..< len(game.sites) {
+			if done[site] || distance[site] == math.INF_F32 do continue
+			if at < 0 || distance[site] < distance[at] do at = site
+		}
+		if at < 0 do break
+		done[at] = true
+		for site in 1 ..< len(game.sites) do distance[site] = min(distance[site], distance[at] + game.site_graph.land[at][site])
+		for beach, b in game.beaches {
+			if b == 0 || int(beach.site) != at do continue
+			for c in game.voyages[b] do distance[game.beaches[c].site] = min(distance[game.beaches[c].site], distance[at] + voyage)
+		}
+	}
+}
+
+// Out: cost, reached_by. Along the lanes from start, through owner's beaches only, within one voyage's range. INF: out
+// of reach
+@(private = "file")
+sea_voyage :: proc(
+	game: ^Game,
+	start: Beach_Id,
+	owner: Faction_Id,
+	cost: ^[BEACHES_MAX]f32,
+	reached_by: ^[BEACHES_MAX]Sea_Lane_Id,
+) {
+	for &each in cost do each = math.INF_F32
+	cost[start] = 0
+	done: bit_set[0 ..< BEACHES_MAX]
+	for {
+		at := 0
+		for b in 1 ..< len(game.beaches) do if b not_in done && cost[b] < cost[at] do at = b
+		if at == 0 do break
+		done += {at}
+		if Beach_Id(at) != start && game.regions[game.beaches[at].region].owner != owner do continue
+		for lane, l in game.sea_lanes {
+			other := lane.from == Beach_Id(at) ? lane.to : lane.to == Beach_Id(at) ? lane.from : 0
+			reached := cost[at] + lane.length
+			if other == 0 || reached > SEA_RANGE || reached >= cost[other] do continue
+			cost[other] = reached
+			reached_by[other] = Sea_Lane_Id(l)
+		}
 	}
 }
 

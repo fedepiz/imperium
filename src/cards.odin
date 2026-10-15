@@ -79,6 +79,9 @@ COURT_ARMY_EM :: 8
 COURT_TRAIT_EM :: 6
 @(private = "file")
 LABEL_EM :: 6
+// Every map mode button's width
+@(private = "file")
+MAP_MODE_BUTTON_EM :: 5.5
 @(private = "file")
 FIELD_VALUE_EM :: 11
 @(private = "file")
@@ -528,14 +531,19 @@ card_ui :: proc(
 
 		if card.map_modes {
 			ui_label("Map Mode", {text_color = colors.faded_ink})
-			if ui_row({width = ui_fit(), height = ui_fit()}) {
-				for name, mode in MAP_MODE_NAMES {
-					style := action
-					if mode == view.map_mode {
-						style.background = colors.active_paper
-						style.hot_background = colors.active_paper
+			for row in 0 ..< MAP_MODE_ROWS {
+				if ui_row({width = ui_fit(), height = ui_fit()}) {
+					for name, mode in MAP_MODE_NAMES {
+						if MAP_MODE_ROW[mode] != row do continue
+						style := action
+						style.width = ui_em(MAP_MODE_BUTTON_EM)
+						style.text_align = .Center
+						if mode == view.map_mode {
+							style.background = colors.active_paper
+							style.hot_background = colors.active_paper
+						}
+						if ui_button(fmt.tprintf("%s##map mode", name), style).pressed do view.map_mode = mode
 					}
-					if ui_button(fmt.tprintf("%s##map mode", name), style).pressed do view.map_mode = mode
 				}
 			}
 		}

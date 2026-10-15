@@ -3,7 +3,9 @@ package main
 import "core:fmt"
 import img "core:image"
 import _ "core:image/png"
+import "core:math"
 import "core:math/linalg"
+import "core:mem"
 import "core:os"
 import "core:reflect"
 import "core:slice"
@@ -80,6 +82,14 @@ SEA_LANES_MAX :: 256
 SEA_LANE_POINTS_MAX :: 1 << 14
 // Armies this near a beach stand at it
 BEACH_RADIUS :: 2.5
+// The settlements' and the beaches'
+SITES_MAX :: 256
+// Cells around a settlement or a beach searched for land to put its site on
+SITE_LAND_REACH :: 4
+// Bumped whenever the site floods change how they compute: the cache keeps their results
+SITES_CACHE_VERSION :: 1
+ZONES_SCALE :: 2
+FOCUS_DISTANCE_SCALE :: 4
 OFFICE_KINDS_MAX :: 64
 // The most offices one faction's court shows
 FACTION_OFFICES_MAX :: 64
@@ -122,9 +132,24 @@ Game :: struct {
 	interaction:        Interaction,
 	battle_prediction:  Battle_Prediction,
 	movement:           Movement,
-	supply_network:     [MAP_CELLS]u8,
+	supply_network:     Field(u8, 1),
 	// The playing faction's, 0..100
-	control_network:    [MAP_CELLS]u8,
+	control_network:    Field(u8, 1),
+	// The playing faction's: movement from the nearest enemy army. INF: none reaches
+	enemy_distance:     Field(f32, 1),
+	// Each step, for the playing faction: 1 where an army ending the turn meets an enemy army's zone, in any of the
+	// block's cells
+	zones:              Field(u8, ZONES_SCALE),
+	// 0: none. The settlements', then the beaches'. Built at load
+	sites:              [dynamic; SITES_MAX][2]f32,
+	// Built at load from the sites and the land, or read back from the cache
+	site_graph:         Site_Graph,
+	// Each step, for the playing faction: from each beach, the beaches one voyage reaches
+	voyages:            [BEACHES_MAX]bit_set[0 ..< BEACHES_MAX],
+	// Each step: movement from the focused piece to each cell, through the sites. INF: no way, or no focus
+	focus_distance:     Field(f32, FOCUS_DISTANCE_SCALE),
+	// Its inputs, hashed: the focused piece, its position and the voyages
+	focus_distance_key: u64,
 	// 0: none
 	beaches:            [dynamic; BEACHES_MAX]Beach,
 	// 0: none
@@ -153,6 +178,16 @@ Beach :: struct {
 	id:     Name,
 	pos:    [2]f32,
 	region: Region_Id,
+	site:   Site_Id,
+}
+
+// What the sites give. Its bytes are its cache
+Site_Graph :: struct {
+	// Movement over land from one site to another. INF: no way
+	land:          [SITES_MAX][SITES_MAX]f32,
+	// Each cell's site, the one reaching it cheapest over land, and the movement from it. 0 and INF: none reaches it
+	cell_site:     Field(Site_Id, 1),
+	cell_distance: Field(f32, 1),
 }
 
 Sea_Lane :: struct {
@@ -169,6 +204,8 @@ Piece_Id :: distinct Slot_Map_Key
 Faction_Id :: distinct u8
 
 Character_Id :: distinct u16
+
+Site_Id :: distinct u8
 
 Name :: struct {
 	buffer: [NAME_CAPACITY]u8,
@@ -1287,6 +1324,50 @@ game_load :: proc(
 		}
 	}
 
+	// Sites: each settlement's, then each beach's, on the land cell nearest it. A flood from each gives the land between
+	// them, and one from all of them each cell's site; kept in the cache under the land and the sites
+	{
+		land := &game.pathfind.grids[.Land]
+		append(&game.sites, [2]f32{})
+		it := slot_map_iterator(&game.pieces)
+		for piece in slot_map_iterate(&it) {
+			if .Has_Town in piece.flags do fmt.assertf(append(&game.sites, piece.pos) == 1, "More than %d sites", SITES_MAX - 1)
+		}
+		for &beach in game.beaches[1:] {
+			beach.site = Site_Id(len(game.sites))
+			fmt.assertf(append(&game.sites, beach.pos) == 1, "More than %d sites", SITES_MAX - 1)
+		}
+		for &site in game.sites[1:] {
+			place, nearest := site, f32(math.INF_F32)
+			covered := cell_rect_covering(place - SITE_LAND_REACH, place + SITE_LAND_REACH)
+			for y in covered.min.y ..< covered.max.y do for x in covered.min.x ..< covered.max.x {
+				distance := linalg.distance(cell_center({x, y}), place)
+				if !grid_contains({x, y}, MAP_SIZE) || land[grid_index({x, y}, MAP_SIZE)] == 0 || distance >= nearest do continue
+				site, nearest = cell_center({x, y}), distance
+			}
+			fmt.assertf(nearest < math.INF_F32, "No land within %d cells of %v for its site", SITE_LAND_REACH, place)
+		}
+
+		graph := &game.site_graph
+		sizes := [?]u64{SITES_CACHE_VERSION, SITES_MAX, MAP_CELLS}
+		key := hash_bytes(mem.slice_to_bytes(sizes[:]), mem.slice_to_bytes(land[:]), mem.slice_to_bytes(game.sites[:]))
+		cache := fmt.tprintf("%s_sites", scenario_name)
+		if !cache_read(cache, key, mem.ptr_to_bytes(graph)) {
+			distance := make([]f32, MAP_CELLS, context.temp_allocator)
+			for from, s in game.sites {
+				if s == 0 do continue
+				pathfind_distance(&game.pathfind, .Land, {from}, math.INF_F32, distance, nil)
+				for to, t in game.sites do graph.land[s][t] = t > 0 ? distance[grid_index(cell_of(to), MAP_SIZE)] : math.INF_F32
+			}
+
+			nearest := make([]u8, MAP_CELLS, context.temp_allocator)
+			pathfind_distance(&game.pathfind, .Land, game.sites[1:], math.INF_F32, graph.cell_distance.values[:], nearest)
+			for &site, i in graph.cell_site.values {
+				site = graph.cell_distance.values[i] < math.INF_F32 ? Site_Id(nearest[i]) + 1 : 0
+			}
+			cache_write(cache, key, mem.ptr_to_bytes(graph))
+		}
+	}
 
 	// Characters
 	{
@@ -1340,7 +1421,7 @@ game_load :: proc(
 
 	// Start step: makes the building offices
 	start_events := new([dynamic; GAME_EVENTS_MAX]Game_Event, context.temp_allocator)
-	game_step(game, {}, {}, {}, start_events)
+	game_step(game, {}, {}, nil, start_events)
 
 	// The scenario's office holders, and armies' titles
 	{
@@ -1386,7 +1467,7 @@ game_load :: proc(
 	)
 	success &= len(game.factions) > 1
 	// Settle the derived records
-	game_step(game, {}, {}, {}, start_events)
+	game_step(game, {}, {}, nil, start_events)
 	return
 }
 

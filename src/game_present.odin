@@ -21,6 +21,10 @@ Map_Mode :: enum u8 {
 	Supply,
 	Fertility,
 	Plain,
+	Sites,
+	Zones,
+	Enemies,
+	Distance,
 }
 
 @(rodata)
@@ -30,6 +34,26 @@ MAP_MODE_NAMES := [Map_Mode]string {
 	.Supply    = "Supply",
 	.Fertility = "Fertility",
 	.Plain     = "Plain",
+	.Sites     = "Sites",
+	.Zones     = "Zones",
+	.Enemies   = "Enemies",
+	.Distance  = "Distance",
+}
+
+MAP_MODE_ROWS :: 2
+
+// The row of buttons each is chosen from
+@(rodata)
+MAP_MODE_ROW := [Map_Mode]int {
+	.Political = 0,
+	.Control   = 0,
+	.Supply    = 0,
+	.Fertility = 0,
+	.Plain     = 0,
+	.Sites     = 1,
+	.Zones     = 1,
+	.Enemies   = 1,
+	.Distance  = 1,
 }
 
 Card_Tab :: enum u8 {
@@ -60,6 +84,18 @@ ENEMY_ZONES_SLOT :: 2
 BEACHES_SLOT :: 3
 @(private = "file")
 LANDINGS_SLOT :: 4
+@(private = "file")
+SITES_SLOT :: 5
+
+// In cells
+@(private = "file")
+SITE_MARK_RADIUS :: 1.5
+// Shades the sites' cells apart: a step that scatters neighbouring sites over the wash
+@(private = "file")
+SITE_SHADE_STEP :: 97
+// Movement over which the distance washes fade out
+@(private = "file")
+DISTANCE_WASH_RANGE :: 150
 
 @(private = "file", rodata)
 FORECAST_TITLES := [Battle_Forecast]string {
@@ -407,7 +443,7 @@ game_present_map :: proc(
 
 	if mode == .Supply {
 		resize(&frame.wash, RENDER_TERRAIN_CELLS)
-		for supply, i in game.supply_network do frame.wash[i] = u8(u32(supply) * 255 / 100)
+		for supply, i in game.supply_network.values do frame.wash[i] = u8(u32(supply) * 255 / 100)
 	}
 	if mode == .Fertility {
 		resize(&frame.wash, RENDER_TERRAIN_CELLS)
@@ -417,7 +453,35 @@ game_present_map :: proc(
 	}
 	if mode == .Control {
 		resize(&frame.wash, RENDER_TERRAIN_CELLS)
-		for control, i in game.control_network do frame.wash[i] = u8(u32(control) * 255 / 100)
+		for control, i in game.control_network.values do frame.wash[i] = u8(u32(control) * 255 / 100)
+	}
+	if mode == .Sites {
+		resize(&frame.wash, RENDER_TERRAIN_CELLS)
+		for site, i in game.site_graph.cell_site.values do frame.wash[i] = u8(u32(site) * SITE_SHADE_STEP % 256)
+		marks := &frame.highlights[SITES_SLOT]
+		marks^ = {
+			kind          = .Contact,
+			circles_begin = len(frame.highlight_circles),
+		}
+		for site in game.sites[1:] do append(&frame.highlight_circles, Render_Circle{site, SITE_MARK_RADIUS})
+		marks.circles_len = len(frame.highlight_circles) - marks.circles_begin
+	}
+	if mode == .Zones {
+		resize(&frame.wash, RENDER_TERRAIN_CELLS)
+		for &wash, i in frame.wash do wash = 255 * field_sample_nearest(&game.zones, cell_center(grid_pos(i, MAP_SIZE)))
+	}
+	if mode == .Enemies {
+		resize(&frame.wash, RENDER_TERRAIN_CELLS)
+		for distance, i in game.enemy_distance.values {
+			frame.wash[i] = u8(255 * max(0, 1 - distance / DISTANCE_WASH_RANGE) + 0.5)
+		}
+	}
+	if mode == .Distance {
+		resize(&frame.wash, RENDER_TERRAIN_CELLS)
+		for &wash, i in frame.wash {
+			distance := field_sample_nearest(&game.focus_distance, cell_center(grid_pos(i, MAP_SIZE)))
+			wash = u8(255 * max(0, 1 - distance / DISTANCE_WASH_RANGE) + 0.5)
+		}
 	}
 }
 
@@ -869,7 +933,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			left := piece.this_turn.movement_left
 			per_turn := piece.movement_per_turn
 			movement_change: Maybe(f32)
-			if predicting && reachable && per_turn > 0 do movement_change = predicted.movement_left / per_turn
+			if predicting && reachable && per_turn > 0 do movement_change = predicted.arrival.movement_left / per_turn
 			append(
 				&card.fields,
 				Card_Field {
@@ -1075,7 +1139,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				)
 				// Percentages: the bar is out of 100
 				// A predicted march, else its turn end
-				readiness_change := (predicting && reachable ? predicted.readiness : army.turn_end_readiness) / 100
+				readiness_change := (predicting && reachable ? predicted.arrival.readiness : army.turn_end_readiness) / 100
 				percents := [?]struct {
 					label:  string,
 					value:  f32,
@@ -1112,7 +1176,7 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.supply_source)})
 
 				// A predicted march's, else its turn end's
-				coming := predicting && reachable ? predicted.statuses : army.turn_end_statuses
+				coming := predicting && reachable ? predicted.arrival.statuses : army.turn_end_statuses
 				for each in army.statuses + coming {
 					change := each not_in army.statuses ? Card_Change.Coming : each not_in coming ? .Going : .None
 					append(&card.statuses, Card_Part{text = fmt.tprint(each), change = change})

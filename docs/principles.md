@@ -11,10 +11,11 @@
 ## The step
 
 - **`game_step` is a list of `// Step:` blocks, each doing one job.**
-- **Order:** orders first, reading the facts stored at the end of the last step. Then battle and removals, movement, the derived steps, the turn-end steps, and the turn change.
+- **Order follows what steps read.** Orders come first, reading the facts stored at the end of the last step. Every other step comes after the steps whose facts it reads.
 - **Orders only apply.** They check stored facts and change state; they derive nothing.
 - **Derived steps rebuild from the sources every step.** They also reconcile records that follow from others: titles are created and destroyed from buildings and owners.
 - **One thing per step.** For example, pieces are removed in a single step, fed by a list.
+- **Compact the execution paths.** Different cases run through the same path, told apart by their data: the hover's forecast and the AI's questions are more entries in the battle loop. This isn't about less code or about factoring out shared behaviour, which is what procs are for.
 - **Loading is the start step.** Parse records, take a start step (`game.step == 0`), query the world, write the scenario's links, then take one more step to settle. Don't extract derive procs to share between load and step.
 - **A one-step lag is fine** when a fact is read before the step that writes it.
 

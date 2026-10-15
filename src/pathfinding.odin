@@ -375,6 +375,50 @@ pathfind_spread :: proc(
 	}
 }
 
+// Out: distance; nearest, when given. Multi-source Dijkstra over the whole map: per cell, the cost from the cheapest
+// source, INF where none reaches it within cap, and that source's index
+pathfind_distance :: proc(
+	pathfind: ^Pathfind,
+	domain: Pathfind_Domain,
+	sources: [][2]f32,
+	cap: f32,
+	distance: []f32,
+	nearest: []u8,
+) {
+	assert(len(distance) == MAP_CELLS && (nearest == nil || len(nearest) == MAP_CELLS && len(sources) <= 256))
+	grid := pathfind.grids[domain][:]
+	slice.fill(distance, math.INF_F32)
+	queue := make([dynamic]Heap_Entry, context.temp_allocator)
+	for source, s in sources {
+		cell := cell_of(source)
+		if !grid_contains(cell, MAP_SIZE) do continue
+		index := grid_index(cell, MAP_SIZE)
+		if grid[index] == 0 || distance[index] == 0 do continue
+		distance[index] = 0
+		if nearest != nil do nearest[index] = u8(s)
+		append(&queue, Heap_Entry{0, u32(index)})
+		heap.push(queue[:], heap_entry_less)
+	}
+	for len(queue) > 0 {
+		heap.pop(queue[:], heap_entry_less)
+		entry := pop(&queue)
+		// Skip stale heap entries
+		if entry.priority > distance[entry.index] do continue
+		at := grid_pos(int(entry.index), MAP_SIZE)
+		for dir in Dir {
+			move := step_cost(grid, at, dir)
+			if move == 0 do continue
+			next := grid_index(at + DIR_OFFSET[dir], MAP_SIZE)
+			cost := entry.priority + move
+			if cost >= distance[next] || cost > cap do continue
+			distance[next] = cost
+			if nearest != nil do nearest[next] = nearest[entry.index]
+			append(&queue, Heap_Entry{cost, u32(next)})
+			heap.push(queue[:], heap_entry_less)
+		}
+	}
+}
+
 @(private = "file")
 flood_push :: proc(pathfind: ^Pathfind, entry: Heap_Entry) {
 	assert(len(pathfind.queue) < cap(pathfind.queue), "Pathfinding heap full")

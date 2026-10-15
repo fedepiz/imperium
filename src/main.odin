@@ -11,6 +11,8 @@ GLOBAL: struct {
 	camera:      Camera,
 	game:        Game,
 	game_events: [dynamic; GAME_EVENTS_MAX]Game_Event,
+	// The UI's: the hover, drawn
+	questions:   Game_Questions,
 	render_data: Render_Data,
 	pawns:       Map_Pawns,
 	pawn_pieces: [dynamic; MAP_PAWNS_MAX]Piece_Id,
@@ -126,7 +128,7 @@ run_headless :: proc(options: Options) {
 		steps := command_apply(&GLOBAL.game, command, &input, &GLOBAL.camera)
 		for _ in 0 ..< steps {
 			clear(&GLOBAL.game_events)
-			game_step(&GLOBAL.game, {}, {}, input, &GLOBAL.game_events)
+			game_step(&GLOBAL.game, {}, input, nil, &GLOBAL.game_events)
 			input = {}
 			if options.rules_log != "" do rules_log_events(&GLOBAL.game, GLOBAL.game_events[:])
 			free_all(context.temp_allocator)
@@ -394,13 +396,15 @@ run_windowed :: proc(options: Options) {
 			if found do hover.target = GLOBAL.pawn_pieces[index]
 		}
 		if order_click && hover.piece != {} do game_input = hover
+		clear(&GLOBAL.questions.moves)
+		if hover.piece != {} do append(&GLOBAL.questions.moves, Move_Question{order = hover, drawn = true})
 
 		unstepped = min(unstepped + dt, STEPS_PER_FRAME_MAX * STEP_SECONDS)
 		steps := int(unstepped / STEP_SECONDS)
 		unstepped -= f32(steps) * STEP_SECONDS
 		for _ in 0 ..< steps {
 			clear(&GLOBAL.game_events)
-			game_step(&GLOBAL.game, focus, hover, game_input, &GLOBAL.game_events)
+			game_step(&GLOBAL.game, focus, game_input, &GLOBAL.questions, &GLOBAL.game_events)
 			game_input = {}
 			commands_waiting = max(0, commands_waiting - 1)
 			if options.rules_log != "" do rules_log_events(&GLOBAL.game, GLOBAL.game_events[:])
