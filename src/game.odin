@@ -96,6 +96,7 @@ ARMY_AGILITY_DEFAULT :: 2
 
 Game :: struct {
 	terrain:            Terrain,
+	pathfind:           Pathfind,
 	regions:            [REGIONS_MAX]Region,
 	pieces:             Slot_Map(Piece_Data, PIECE_MAX, Piece_Id),
 	step:               int,
@@ -875,13 +876,13 @@ game_load :: proc(
 	// Pathfinding: the cost of entering each cell, by land and by sea
 	{
 		// Land: by cover, or along a road. Water is impassable
-		land := pathfind_grid(.Land)
+		land := &game.pathfind.grids[.Land]
 		for cell, i in geo_out.cover {
 			land[i] =
 				geo_out.water[i] ? 0 : game.terrain.road[i] ? ROAD_COST : MOVE_COSTS[cell.kind]
 		}
 
-		sea := pathfind_grid(.Sea)
+		sea := &game.pathfind.grids[.Sea]
 		for water, i in geo_out.water do sea[i] = water ? 1 : 0
 	}
 

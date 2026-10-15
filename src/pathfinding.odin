@@ -6,8 +6,8 @@ import "core:math/linalg"
 import "core:slice"
 import "core:slice/heap"
 
-// Pathfinding over the map's cells, for each domain: a cost grid per cell, filled by the caller through
-// pathfind_grid. Then: flood within a budget, or spread a value
+// Pathfinding over the map's cells, for each domain: a cost grid per cell, filled by the caller into Pathfind.grids.
+// Then: flood within a budget, or spread a value
 
 Pathfind_Domain :: enum {
 	Land,
@@ -87,15 +87,12 @@ heap_entry_less :: proc(a, b: Heap_Entry) -> bool {
 	return a.priority > b.priority
 }
 
-@(private = "file")
-GRIDS: [Pathfind_Domain][MAP_CELLS]f32
-
-@(private = "file")
-FLOOD_HEAP: [dynamic; len(Dir) * PATHFIND_FLOOD_CELLS]Heap_Entry
-
-// The domain's cost of entering each cell, 0 = impassable, for the caller to fill
-pathfind_grid :: proc(domain: Pathfind_Domain) -> []f32 {
-	return GRIDS[domain][:]
+// One per world: each copy of the game pathfinds on its own
+Pathfind :: struct {
+	// Per domain, the cost of entering each cell, 0 = impassable. Filled at load
+	grids: [Pathfind_Domain][MAP_CELLS]f32,
+	// The flood's, between its calls
+	queue: [dynamic; len(Dir) * PATHFIND_FLOOD_CELLS]Heap_Entry,
 }
 
 // Cost of the entered cell * step length. 0 if out of bounds, impassable, or cutting a corner.
@@ -135,6 +132,7 @@ Pathfind_Flood :: struct {
 
 // Dijkstra within budget over the square. Empty if src is out of bounds or impassable.
 pathfind_flood :: proc(
+	pathfind: ^Pathfind,
 	src: [2]f32,
 	domain: Pathfind_Domain,
 	budget: f32,
@@ -142,7 +140,7 @@ pathfind_flood :: proc(
 	no_stop: []Disc,
 	flood: ^Pathfind_Flood,
 ) {
-	grid := GRIDS[domain][:]
+	grid := pathfind.grids[domain][:]
 	flood.src = src
 	flood.domain = domain
 	flood.budget = budget
@@ -155,13 +153,13 @@ pathfind_flood :: proc(
 	for disc in no_stop do stamp(flood, flood.no_stop[:], disc, true)
 	if !grid_contains(flood.start, MAP_SIZE) || grid[grid_index(flood.start, MAP_SIZE)] == 0 do return
 
-	clear(&FLOOD_HEAP)
+	clear(&pathfind.queue)
 	start := grid_index(flood.start - flood.corner, FLOOD_SQUARE)
 	flood.cost[start] = 0
-	flood_push({0, u32(start)})
-	for len(FLOOD_HEAP) > 0 {
-		heap.pop(FLOOD_HEAP[:], heap_entry_less)
-		entry := pop(&FLOOD_HEAP)
+	flood_push(pathfind, {0, u32(start)})
+	for len(pathfind.queue) > 0 {
+		heap.pop(pathfind.queue[:], heap_entry_less)
+		entry := pop(&pathfind.queue)
 		// Skip stale heap entries
 		if entry.priority > flood.cost[entry.index] do continue
 		at := grid_pos(int(entry.index), FLOOD_SQUARE)
@@ -177,7 +175,7 @@ pathfind_flood :: proc(
 			if cost > budget || cost >= flood.cost[next_index] do continue
 			flood.cost[next_index] = cost
 			flood.back[next_index] = DIR_OPPOSITE[dir]
-			flood_push({cost, u32(next_index)})
+			flood_push(pathfind, {cost, u32(next_index)})
 		}
 	}
 }
@@ -305,6 +303,7 @@ Pathfind_Link :: struct {
 // Out: out. Multi-source decaying spread: per cell, the max or sum over sources of value − decay × path cost.
 // Blocked cells are never reached; a source in one still holds its own cell
 pathfind_spread :: proc(
+	pathfind: ^Pathfind,
 	domain: Pathfind_Domain,
 	sources: []Pathfind_Source,
 	blocked: []bool,
@@ -315,7 +314,7 @@ pathfind_spread :: proc(
 ) {
 	assert(len(out) == MAP_CELLS && decay > 0)
 	assert(blocked == nil || len(blocked) == MAP_CELLS)
-	grid := GRIDS[domain][:]
+	grid := pathfind.grids[domain][:]
 	slice.fill(out, 0)
 	linked := make([]bool, len(links) > 0 ? MAP_CELLS : 0, context.temp_allocator)
 	for link in links do for cell in link.cells do linked[grid_index(cell, MAP_SIZE)] = true
@@ -377,8 +376,8 @@ pathfind_spread :: proc(
 }
 
 @(private = "file")
-flood_push :: proc(entry: Heap_Entry) {
-	assert(len(FLOOD_HEAP) < cap(FLOOD_HEAP), "Pathfinding heap full")
-	append(&FLOOD_HEAP, entry)
-	heap.push(FLOOD_HEAP[:], heap_entry_less)
+flood_push :: proc(pathfind: ^Pathfind, entry: Heap_Entry) {
+	assert(len(pathfind.queue) < cap(pathfind.queue), "Pathfinding heap full")
+	append(&pathfind.queue, entry)
+	heap.push(pathfind.queue[:], heap_entry_less)
 }

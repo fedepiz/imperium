@@ -534,7 +534,7 @@ game_networks_build :: proc(game: ^Game) {
 				}
 			}
 		}
-		pathfind_spread(.Land, sources[:], blocked, nil, SUPPLY_DECAY, .Max, spread)
+		pathfind_spread(&game.pathfind, .Land, sources[:], blocked, nil, SUPPLY_DECAY, .Max, spread)
 		for value, i in spread do game.supply_network[i] = u8(clamp(value, 0, 100) + 0.5)
 	}
 
@@ -557,7 +557,7 @@ game_networks_build :: proc(game: ^Game) {
 			for kind_id in piece.town.buildings do strength += game.building_kinds[kind_id].control
 			if strength > 0 do append(&sources, Pathfind_Source{piece.pos, strength})
 		}
-		pathfind_spread(.Land, sources[:], blocked, lanes[:], CONTROL_DECAY, .Max, spread)
+		pathfind_spread(&game.pathfind, .Land, sources[:], blocked, lanes[:], CONTROL_DECAY, .Max, spread)
 		if owner == game.player {
 			for value, i in spread do game.control_network[i] = u8(clamp(value, 0, 100) + 0.5)
 		}
@@ -660,7 +660,7 @@ game_step :: proc(
 					mobilised.flags += {.Has_Army}
 					// Next to the town: the first land cell around it
 					mobilised.pos = at.pos
-					land := pathfind_grid(.Land)
+					land := &game.pathfind.grids[.Land]
 					reach := at.body_radius + mobilised.body_radius + 1
 					for i in 0 ..< 8 {
 						angle := f32(i) * math.TAU / 8
@@ -1139,7 +1139,7 @@ game_step :: proc(
 		key = hash.fnv64a(mem.slice_to_bytes(movement.enemy_zones[:]), key)
 		key = hash.fnv64a(mem.slice_to_bytes(movement.bodies[:]), key)
 		if key != movement.flood_key {
-			pathfind_flood(marcher.pos, domain, budget, movement.enemy_zones[:], movement.bodies[:], &movement.flood)
+			pathfind_flood(&game.pathfind, marcher.pos, domain, budget, movement.enemy_zones[:], movement.bodies[:], &movement.flood)
 			movement.flooded = order.piece
 			movement.flood_key = key
 		}
