@@ -141,7 +141,7 @@ commands_next :: proc(command: ^Command) -> bool {
 }
 
 command_apply :: proc(
-	game: ^Game,
+	presentation: ^Presentation,
 	command: Command,
 	input: ^Game_Order,
 	camera: ^Camera,
@@ -172,12 +172,11 @@ command_apply :: proc(
 		input^ = End_Turn_Order{}
 	case .Appoint:
 		// The vacancy being filled, to its top candidate. One a step: the next is ready after it
-		if len(game.appointment.candidates) > 0 {
-			input^ = Appoint_Order{game.appointment.office, game.appointment.candidates[0].character}
-		}
+		if candidates := presentation.cards.court.vacancy.candidates[:]; len(candidates) > 0 do input^ = candidates[0].order
 	case .Camera_Focus_On_Piece:
-		if piece := slot_map_get(&game.pieces, command.piece); piece != nil {
-			camera.target.center = piece.pos
+		for piece, i in presentation.pawn_pieces {
+			if piece != command.piece do continue
+			camera.target.center = presentation.pawns[i].pos
 			camera.ease = camera.move_ease
 		}
 	case .Camera_Focus_On_Location:

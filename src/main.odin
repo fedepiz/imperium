@@ -4,18 +4,121 @@ import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:os"
+import "core:sync"
+import "core:thread"
+import "core:time"
 
 import sdl "vendor:sdl3"
 
 GLOBAL: struct {
-	camera:      Camera,
-	game:        Game,
-	game_events: [dynamic; GAME_EVENTS_MAX]Game_Event,
-	// The UI's: the hover, drawn
-	questions:   Game_Questions,
-	render_data: Render_Data,
-	pawns:       Map_Pawns,
+	// The main thread's
+	camera:        Camera,
+	render_data:   Render_Data,
+	pawns:         Map_Pawns,
+	// The game thread's
+	game:          Game,
+	game_events:   [dynamic; GAME_EVENTS_MAX]Game_Event,
+	questions:     Game_Questions,
+	// Each held by one thread at a time, handed over by index
+	presentations: [3]Presentation,
+	// Between the two, under its mutex
+	game_thread:   Game_Thread,
+}
+
+PRESENTATION_TEXT_BYTES :: 4 << 20
+
+Game_Thread :: struct {
+	mutex:   sync.Mutex,
+	running: bool,
+	inputs:  Game_Inputs,
+	// Published and not yet taken
+	ready:   int,
+	fresh:   bool,
+}
+
+// All the game side reads from the main thread
+Game_Inputs :: struct {
+	focus:    Piece_Id,
+	hover:    Move_Order,
+	// Nil: over the UI
+	pointer:  Maybe([2]f32),
+	map_mode: Map_Mode,
+	tab:      Card_Tab,
+	// Taken by the next step; a new one waits until it is
+	order:    Game_Order,
+}
+
+// Everything the main thread draws. Nothing in it points into the game
+Presentation :: struct {
+	terrain:     Render_Terrain_Frame,
+	pawns:       [dynamic; MAP_PAWNS_MAX]Map_Pawn,
 	pawn_pieces: [dynamic; MAP_PAWNS_MAX]Piece_Id,
+	cards:       Cards,
+	// The game's when presented, and the orders it had taken
+	step:        int,
+	orders:      int,
+	arena:       mem.Arena,
+	text:        [PRESENTATION_TEXT_BYTES]u8,
+}
+
+@(private = "file")
+present :: proc(game: ^Game, inputs: Game_Inputs, orders: int, presentation: ^Presentation) {
+	mem.arena_free_all(&presentation.arena)
+	context.temp_allocator = mem.arena_allocator(&presentation.arena)
+	presentation.terrain = {}
+	clear(&presentation.pawns)
+	clear(&presentation.pawn_pieces)
+	game_present_map(game, inputs.focus, inputs.pointer, inputs.map_mode, &presentation.terrain)
+	game_present_pawns(game, inputs.focus, &presentation.pawns, &presentation.pawn_pieces)
+	game_cards(game, inputs.focus, inputs.tab, &presentation.cards)
+	presentation.step = game.step
+	presentation.orders = orders
+}
+
+// Steps on its own clock, presents into the presentation it holds, and publishes it
+@(private = "file")
+game_thread_run :: proc(logs_rules: bool) {
+	context.allocator = mem.panic_allocator()
+	shared := &GLOBAL.game_thread
+	holding := 1
+	orders := 0
+	unstepped: f32
+	ticks := time.tick_now()
+	for {
+		free_all(context.temp_allocator)
+		now := time.tick_now()
+		unstepped = min(unstepped + f32(time.duration_seconds(time.tick_diff(ticks, now))), STEPS_AT_ONCE_MAX * STEP_SECONDS)
+		ticks = now
+		steps := int(unstepped / STEP_SECONDS)
+		if steps == 0 {
+			time.sleep(time.Duration(f64(STEP_SECONDS - unstepped) * f64(time.Second)))
+			continue
+		}
+		unstepped -= f32(steps) * STEP_SECONDS
+
+		sync.mutex_lock(&shared.mutex)
+		running := shared.running
+		inputs := shared.inputs
+		shared.inputs.order = nil
+		sync.mutex_unlock(&shared.mutex)
+		if !running do return
+		if inputs.order != nil do orders += 1
+
+		clear(&GLOBAL.questions.moves)
+		if inputs.hover.piece != {} do append(&GLOBAL.questions.moves, Move_Question{order = inputs.hover, drawn = true})
+		for _ in 0 ..< steps {
+			clear(&GLOBAL.game_events)
+			game_step(&GLOBAL.game, inputs.focus, inputs.order, &GLOBAL.questions, &GLOBAL.game_events)
+			inputs.order = nil
+			if logs_rules do rules_log_events(&GLOBAL.game, GLOBAL.game_events[:])
+		}
+		present(&GLOBAL.game, inputs, orders, &GLOBAL.presentations[holding])
+
+		sync.mutex_lock(&shared.mutex)
+		holding, shared.ready = shared.ready, holding
+		shared.fresh = true
+		sync.mutex_unlock(&shared.mutex)
+	}
 }
 
 // Asset budgets must fit the renderer's: one write per image
@@ -38,7 +141,7 @@ GLOBAL: struct {
 
 CLICK_MOVE_SNAP :: 9
 
-STEPS_PER_FRAME_MAX :: 4
+STEPS_AT_ONCE_MAX :: 4
 
 FPS_PERIOD :: 0.5
 
@@ -122,10 +225,13 @@ run_headless :: proc(options: Options) {
 	free_all(context.temp_allocator)
 	if options.rules_log != "" do rules_log_begin(&GLOBAL.game)
 
+	presentation := &GLOBAL.presentations[0]
+	mem.arena_init(&presentation.arena, presentation.text[:])
 	input: Game_Order
 	command: Command
 	for commands_next(&command) {
-		steps := command_apply(&GLOBAL.game, command, &input, &GLOBAL.camera)
+		present(&GLOBAL.game, {}, 0, presentation)
+		steps := command_apply(presentation, command, &input, &GLOBAL.camera)
 		for _ in 0 ..< steps {
 			clear(&GLOBAL.game_events)
 			game_step(&GLOBAL.game, {}, input, nil, &GLOBAL.game_events)
@@ -227,12 +333,32 @@ run_windowed :: proc(options: Options) {
 	// A left drag that started on the map, not on the UI, pans the camera
 	map_drag := false
 
+	for &each in GLOBAL.presentations do mem.arena_init(&each.arena, each.text[:])
+	reading := 0
+	present(&GLOBAL.game, {}, 0, &GLOBAL.presentations[reading])
+	GLOBAL.game_thread.running = true
+	GLOBAL.game_thread.ready = 2
+	if THREAD_ARENA.data == nil do mem.arena_init(&THREAD_ARENA, THREAD_MEMORY[:])
+	game_thread: ^thread.Thread
+	{
+		context.allocator = mem.arena_allocator(&THREAD_ARENA)
+		game_thread = thread.create_and_start_with_poly_data(options.rules_log != "", game_thread_run)
+	}
+	defer {
+		sync.mutex_lock(&GLOBAL.game_thread.mutex)
+		GLOBAL.game_thread.running = false
+		sync.mutex_unlock(&GLOBAL.game_thread.mutex)
+		thread.join(game_thread)
+		context.allocator = mem.arena_allocator(&THREAD_ARENA)
+		thread.destroy(game_thread)
+	}
+
 	focus: Piece_Id
 	cards_view: Cards_View
 	game_input: Game_Order
-	unstepped: f32
+	orders_given := 0
 	commands_active := options.commands != ""
-	commands_waiting := 0
+	commands_until := 0
 
 	fps_frames: int
 	fps_time: f32
@@ -356,13 +482,23 @@ run_windowed :: proc(options: Options) {
 			camera.drag_ease = tweak_slider("Camera/Drag ease", camera.drag_ease, CAMERA_EASE_MIN, CAMERA_EASE_MAX)
 		}
 
-		for commands_active && commands_waiting == 0 {
+		sync.mutex_lock(&GLOBAL.game_thread.mutex)
+		if GLOBAL.game_thread.fresh {
+			reading, GLOBAL.game_thread.ready = GLOBAL.game_thread.ready, reading
+			GLOBAL.game_thread.fresh = false
+		}
+		sync.mutex_unlock(&GLOBAL.game_thread.mutex)
+		presentation := &GLOBAL.presentations[reading]
+		GLOBAL.pawns.scene = presentation.pawns
+
+		// One order at a time: the next command waits until the game has taken and presented the last
+		for commands_active && game_input == nil && presentation.orders == orders_given && presentation.step >= commands_until {
 			command: Command
 			if !commands_next(&command) {
 				commands_active = false
 				break
 			}
-			commands_waiting = command_apply(&GLOBAL.game, command, &game_input, &GLOBAL.camera)
+			commands_until = presentation.step + command_apply(presentation, command, &game_input, &GLOBAL.camera)
 		}
 
 		camera_tick(&GLOBAL.camera, dt)
@@ -371,16 +507,16 @@ run_windowed :: proc(options: Options) {
 
 		if select_click {
 			index, found := map_pawns_pick(&GLOBAL.pawns, view, window_size, input.cursor, -1)
-			focus = found ? GLOBAL.pawn_pieces[index] : {}
+			focus = found ? presentation.pawn_pieces[index] : {}
 			cards_view.menu = nil
 		}
 		// The move a right click gives. None over the selected pawn
 		hover: Move_Order
 		under, over_pawn := map_pawns_pick(&GLOBAL.pawns, view, window_size, input.cursor, -1)
-		over_focus := over_pawn && GLOBAL.pawn_pieces[under] == focus
+		over_focus := over_pawn && presentation.pawn_pieces[under] == focus
 		if focus != {} && !over_focus && input.cursor_valid && !ui_hovered_any() {
 			focus_index := -1
-			for piece, index in GLOBAL.pawn_pieces do if piece == focus do focus_index = index
+			for piece, index in presentation.pawn_pieces do if piece == focus do focus_index = index
 			hover = {
 				piece       = focus,
 				destination = cursor_cell,
@@ -393,38 +529,33 @@ run_windowed :: proc(options: Options) {
 				input.cursor,
 				focus_index,
 			)
-			if found do hover.target = GLOBAL.pawn_pieces[index]
+			if found do hover.target = presentation.pawn_pieces[index]
 		}
 		if order_click && hover.piece != {} do game_input = hover
-		clear(&GLOBAL.questions.moves)
-		if hover.piece != {} do append(&GLOBAL.questions.moves, Move_Question{order = hover, drawn = true})
 
-		unstepped = min(unstepped + dt, STEPS_PER_FRAME_MAX * STEP_SECONDS)
-		steps := int(unstepped / STEP_SECONDS)
-		unstepped -= f32(steps) * STEP_SECONDS
-		for _ in 0 ..< steps {
-			clear(&GLOBAL.game_events)
-			game_step(&GLOBAL.game, focus, game_input, &GLOBAL.questions, &GLOBAL.game_events)
-			game_input = {}
-			commands_waiting = max(0, commands_waiting - 1)
-			if options.rules_log != "" do rules_log_events(&GLOBAL.game, GLOBAL.game_events[:])
+		sync.mutex_lock(&GLOBAL.game_thread.mutex)
+		{
+			inputs := &GLOBAL.game_thread.inputs
+			inputs.focus = focus
+			inputs.hover = hover
+			inputs.pointer = nil
+			if !ui_hovered_any() do inputs.pointer = cursor_cell
+			inputs.map_mode = cards_view.map_mode
+			inputs.tab = cards_view.tab
+			if game_input != nil && inputs.order == nil {
+				inputs.order = game_input
+				game_input = nil
+				orders_given += 1
+			}
 		}
+		sync.mutex_unlock(&GLOBAL.game_thread.mutex)
 
+		// Draw
 		render_data_clear(&GLOBAL.render_data)
 		GLOBAL.render_data.view = view
+		GLOBAL.render_data.terrain = presentation.terrain
+		GLOBAL.render_data.terrain.dt = dt
 		text_reset()
-		map_pawns_clear(&GLOBAL.pawns)
-		clear(&GLOBAL.pawn_pieces)
-
-		// Terrain: every region in its color, the one under the cursor highlighted
-		{
-			pointer: Maybe([2]f32)
-			if !ui_hovered_any() do pointer = cursor_cell
-			game_present_map(&GLOBAL.game, focus, pointer, cards_view.map_mode, &GLOBAL.render_data.terrain)
-			GLOBAL.render_data.terrain.dt = dt
-		}
-
-		game_present_pawns(&GLOBAL.game, focus, &GLOBAL.pawns, &GLOBAL.pawn_pieces)
 		map_pawns_quads(
 			&GLOBAL.pawns,
 			view,
@@ -435,13 +566,10 @@ run_windowed :: proc(options: Options) {
 			&GLOBAL.render_data.quads[.Screen],
 		)
 
-		cards := new(Cards, context.temp_allocator)
-		game_cards(&GLOBAL.game, focus, cards_view.tab, cards)
-
 		// UI, over everything
 		ui_begin(window_size)
 		cards_ui(
-			cards,
+			&presentation.cards,
 			FONT_MAP,
 			FONT_CARD_TITLE,
 			map_style.paper,

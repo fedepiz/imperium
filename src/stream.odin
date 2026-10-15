@@ -20,8 +20,8 @@ RECORD_ALIGN :: 16
 WRAP_TAG :: max(u32)
 @(private = "file")
 FLUSH_AT :: JSON_BUFFER_MAX / 2
-@(private = "file")
-THREAD_MEMORY_BYTES :: 4096
+// The threads' records: the streams' and the game thread's
+THREAD_MEMORY_BYTES :: 16384
 
 @(private = "file")
 Record_Header :: struct {
@@ -49,9 +49,7 @@ Stream :: struct #align (RECORD_ALIGN) {
 @(private = "file")
 STREAMS: [Stream_Kind]Stream
 
-@(private = "file")
 THREAD_MEMORY: [THREAD_MEMORY_BYTES]u8
-@(private = "file")
 THREAD_ARENA: mem.Arena
 
 stream_open :: proc(kind: Stream_Kind, path: string, format: Stream_Format) -> bool {

@@ -97,7 +97,7 @@ report_text :: proc(report: ^Report, text: string, args: ..Report_Arg) -> Span {
 }
 
 report_string :: proc(report: ^Report, span: Span) -> string {
-	return string(span_slice(report.text[:], span))
+	return strings.clone(string(span_slice(report.text[:], span)), context.temp_allocator)
 }
 
 report_because :: proc(

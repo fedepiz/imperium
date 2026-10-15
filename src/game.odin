@@ -587,8 +587,9 @@ name_from_string :: proc(txt: string) -> (name: Name, ok: bool) #optional_ok {
 	return
 }
 
+// A copy: nothing presented may point into the game
 name_to_string :: proc(name: ^Name) -> string {
-	return strings.truncate_to_byte(string(name.buffer[:]), 0)
+	return strings.clone(strings.truncate_to_byte(string(name.buffer[:]), 0), context.temp_allocator)
 }
 
 Description :: struct {
@@ -602,7 +603,7 @@ description_from_string :: proc(txt: string) -> (description: Description, ok: b
 }
 
 description_to_string :: proc(description: ^Description) -> string {
-	return strings.truncate_to_byte(string(description.buffer[:]), 0)
+	return strings.clone(strings.truncate_to_byte(string(description.buffer[:]), 0), context.temp_allocator)
 }
 
 Region :: struct {

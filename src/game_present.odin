@@ -488,7 +488,7 @@ game_present_map :: proc(
 game_present_pawns :: proc(
 	game: ^Game,
 	focus: Piece_Id,
-	pawns: ^Map_Pawns,
+	pawns: ^[dynamic; MAP_PAWNS_MAX]Map_Pawn,
 	pawn_pieces: ^[dynamic; MAP_PAWNS_MAX]Piece_Id,
 ) {
 	it := slot_map_iterator(&game.pieces)
@@ -504,7 +504,7 @@ game_present_pawns :: proc(
 			pulsing     = id == focus,
 			label       = name_to_string(&piece.name),
 		}
-		append(&pawns.scene, pawn)
+		append(pawns, pawn)
 		append(pawn_pieces, id)
 	}
 }
@@ -535,7 +535,7 @@ card_breakdown :: proc(card: ^Card, tally: ^Report_Tally, total: string) -> Mayb
 			value = fmt.tprintf("%.0f%%", 100 * factor.value)
 		}
 		if factor.op == .Scale do value = fmt.tprintf("x %s", value)
-		append(&breakdown.terms, Card_Term{string(factor.label[:]), value})
+		append(&breakdown.terms, Card_Term{strings.clone(string(factor.label[:]), context.temp_allocator), value})
 	}
 	if append(&card.breakdowns, breakdown) == 0 do return nil
 	return len(card.breakdowns) - 1
