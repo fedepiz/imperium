@@ -98,6 +98,28 @@ SITE_SHADE_STEP :: 97
 DISTANCE_WASH_RANGE :: 150
 
 @(private = "file", rodata)
+AI_TEMPLATE_TITLES := [AI_Template]string {
+	.Take = "Take",
+}
+
+@(private = "file", rodata)
+AI_PLAN_RULE_TITLES := [AI_Plan_Rule]string {
+	.Give_Up  = "give up",
+	.Strike   = "strike",
+	.Approach = "approach",
+}
+
+@(private = "file", rodata)
+AI_RULE_TITLES := [AI_Rule]string {
+	.None        = "Starting",
+	.Read_Report = "Reads the report",
+	.Appoint     = "Appoints",
+	.Ask         = "Thinks",
+	.Act         = "Acts",
+	.Wait        = "Waits",
+}
+
+@(private = "file", rodata)
 FORECAST_TITLES := [Battle_Forecast]string {
 	.Clear_Win    = "Clear win",
 	.Close_Win    = "Close win",
@@ -142,6 +164,8 @@ COLUMN_TITLES := [2]string{"Attacker", "Defender"}
 
 Game_Ask :: enum u8 {
 	Court,
+	AI_Turn,
+	AI_Report,
 }
 
 COURT_ROWS_MAX :: FACTION_CHARACTERS_MAX
@@ -149,41 +173,41 @@ COURT_OFFICES_MAX :: FACTION_OFFICES_MAX
 COURT_BREAKDOWNS_MAX :: 512
 
 Court_Row :: struct {
-	name:        string,
-	rank:        int,
-	influence:   f32,
-	age:         int,
-	temperament: string,
-	background:  string,
-	disposition: string,
+	name:              string,
+	rank:              int,
+	influence:         f32,
+	age:               int,
+	temperament:       string,
+	background:        string,
+	disposition:       string,
 	// Empty: none
-	office:      string,
-	office_id:   Office_Id,
+	office:            string,
+	office_id:         Office_Id,
 	// Wealth, Influence and Loyalty
-	stats:       [3]Card_Field,
+	stats:             [3]Card_Field,
 	// Empty army: none
-	army:        string,
-	men:         Card_Field,
-	base:        string,
-	dismiss:     Maybe(Dismiss_Order),
-	undismissable: string,
-	character:   Character_Id,
-	rank_breakdown:      Maybe(int),
-	dismiss_breakdown:   Maybe(int),
+	army:              string,
+	men:               Card_Field,
+	base:              string,
+	dismiss:           Maybe(Dismiss_Order),
+	undismissable:     string,
+	character:         Character_Id,
+	rank_breakdown:    Maybe(int),
+	dismiss_breakdown: Maybe(int),
 }
 
 Court_Office :: struct {
-	title:     string,
-	rank:      int,
+	title:       string,
+	rank:        int,
 	// 0: vacant
 	holder:      Character_Id,
 	holder_name: string,
 	// The vacancy being filled
-	filling:   bool,
+	filling:     bool,
 	// Its flags beyond the usual. Empty: none
-	traits:    string,
-	id:        Office_Id,
-	breakdown: Maybe(int),
+	traits:      string,
+	id:          Office_Id,
+	breakdown:   Maybe(int),
 }
 
 Court_Candidate :: struct {
@@ -195,22 +219,22 @@ Court_Candidate :: struct {
 
 // No office: none
 Court_Vacancy :: struct {
-	office:     Office_Id,
-	title:      string,
-	rank:       int,
-	army:       string,
-	candidates: [dynamic; CANDIDATES_MAX]Court_Candidate,
+	office:      Office_Id,
+	title:       string,
+	rank:        int,
+	army:        string,
+	candidates:  [dynamic; CANDIDATES_MAX]Court_Candidate,
 	can_appoint: bool,
 }
 
 Court :: struct {
-	title:         string,
-	rows:          [dynamic; COURT_ROWS_MAX]Court_Row,
-	offices:       [dynamic; COURT_OFFICES_MAX]Court_Office,
-	breakdowns:    [dynamic; COURT_BREAKDOWNS_MAX]Card_Breakdown,
+	title:      string,
+	rows:       [dynamic; COURT_ROWS_MAX]Court_Row,
+	offices:    [dynamic; COURT_OFFICES_MAX]Court_Office,
+	breakdowns: [dynamic; COURT_BREAKDOWNS_MAX]Card_Breakdown,
 	// The rank shown in full
-	rank_max:      int,
-	vacancy:       Court_Vacancy,
+	rank_max:   int,
+	vacancy:    Court_Vacancy,
 }
 
 Card_Change :: enum u8 {
@@ -226,9 +250,9 @@ Card_Part :: struct {
 }
 
 Card_Field :: struct {
-	label:     string,
-	value:     string,
-	breakdown: Maybe(int),
+	label:       string,
+	value:       string,
+	breakdown:   Maybe(int),
 	// 0..1: a bar after the value, filled from fill_origin. An origin above 0: a balance
 	fill:        Maybe(f32),
 	fill_origin: f32,
@@ -241,7 +265,6 @@ Card_Field :: struct {
 	// Nil: a plain value
 	click:       Card_Click,
 }
-
 
 
 Card_Term :: struct {
@@ -269,6 +292,8 @@ Card_Action :: struct {
 	label:   string,
 	click:   Card_Click,
 	enabled: bool,
+	// Actions on one row sit side by side
+	row:     int,
 }
 
 // No name: empty
@@ -297,25 +322,25 @@ Card_Menu_Action :: struct {
 }
 
 Card :: struct {
-	title:      string,
-	lines:      [dynamic; CARD_LINES_MAX]Span,
-	parts:      [dynamic; CARD_PARTS_MAX]Card_Part,
-	breakdowns: [dynamic; CARD_BREAKDOWNS_MAX]Card_Breakdown,
-	fields:     [dynamic; CARD_FIELDS_MAX]Card_Field,
-	stats:      [dynamic; CARD_FIELDS_MAX]Card_Field,
-	statuses:   [dynamic; len(Army_Status) + 2]Card_Part,
-	traits:     [dynamic; ARMY_TRAITS_MAX]Card_Part,
-	tiles:      [dynamic; CARD_TILES_MAX]Card_Tile,
-	menus:      [dynamic; CARD_MENUS_MAX]Card_Menu,
+	title:       string,
+	lines:       [dynamic; CARD_LINES_MAX]Span,
+	parts:       [dynamic; CARD_PARTS_MAX]Card_Part,
+	breakdowns:  [dynamic; CARD_BREAKDOWNS_MAX]Card_Breakdown,
+	fields:      [dynamic; CARD_FIELDS_MAX]Card_Field,
+	stats:       [dynamic; CARD_FIELDS_MAX]Card_Field,
+	statuses:    [dynamic; len(Army_Status) + 2]Card_Part,
+	traits:      [dynamic; ARMY_TRAITS_MAX]Card_Part,
+	tiles:       [dynamic; CARD_TILES_MAX]Card_Tile,
+	menus:       [dynamic; CARD_MENUS_MAX]Card_Menu,
 	// Under its fields, and at its bottom
-	buttons:    [dynamic; CARD_ACTIONS_MAX]Card_Action,
-	actions:    [dynamic; CARD_ACTIONS_MAX]Card_Action,
+	buttons:     [dynamic; CARD_ACTIONS_MAX]Card_Action,
+	actions:     [dynamic; CARD_ACTIONS_MAX]Card_Action,
 	// About what the piece is aimed at. Empty title: nothing
 	aimed_title: string,
-	aimed:      [dynamic; CARD_FIELDS_MAX]Card_Field,
-	tabs:       bit_set[Card_Tab],
-	tab:        Card_Tab,
-	map_modes:  bool,
+	aimed:       [dynamic; CARD_FIELDS_MAX]Card_Field,
+	tabs:        bit_set[Card_Tab],
+	tab:         Card_Tab,
+	map_modes:   bool,
 }
 
 Cards :: struct {
@@ -325,6 +350,33 @@ Cards :: struct {
 	focus_shown:       bool,
 	interaction_shown: bool,
 	court:             Court,
+	ai_report:         AI_Report,
+}
+
+AI_REPORT_ROWS_MAX :: AI_PLANS_MAX
+
+AI_Order_State :: enum u8 {
+	Not_Chosen,
+	Pending,
+	Under_Way,
+	Done,
+}
+
+// A plan: its goal, its army, its order, what became of it, and its score. Given up: no score
+AI_Report_Row :: struct {
+	goal:   string,
+	army:   string,
+	order:  AI_Order_State,
+	status: string,
+	score:  Card_Field,
+	chosen: bool,
+}
+
+AI_Report :: struct {
+	title:      string,
+	decision:   string,
+	rows:       [dynamic; AI_REPORT_ROWS_MAX]AI_Report_Row,
+	breakdowns: [dynamic; AI_REPORT_ROWS_MAX]Card_Breakdown,
 }
 
 game_present_map :: proc(
@@ -360,7 +412,8 @@ game_present_map :: proc(
 		if mode == .Political && region.owner != 0 do color = game.factions[region.owner].color
 		frame.regions[id] = {
 			color       = color,
-			highlighted = frame.region_display != .Hidden && !reach_shown && Region_Id(id) == pointed,
+			highlighted = frame.region_display !=
+				.Hidden && !reach_shown && Region_Id(id) == pointed,
 		}
 	}
 
@@ -435,7 +488,8 @@ game_present_map :: proc(
 	frame.arrow_opacity = 1
 	predicted := &movement.prediction.march
 	if movement.predicted.piece == focus && predicted.piece != {} && leader_march.piece == {} {
-		if arrow, reserved := polylines_reserve(len(predicted.path.points), false, &frame.arrows); reserved {
+		if arrow, reserved := polylines_reserve(len(predicted.path.points), false, &frame.arrows);
+		   reserved {
 			copy(arrow, predicted.path.points[:])
 			frame.arrow_opacity = PREDICTION_ARROW_OPACITY
 		}
@@ -448,7 +502,9 @@ game_present_map :: proc(
 	if mode == .Fertility {
 		resize(&frame.wash, RENDER_TERRAIN_CELLS)
 		for region, i in game.terrain.regions {
-			frame.wash[i] = u8(clamp(game.regions[region].fertility / FERTILITY_MAX, 0, 1) * 255 + 0.5)
+			frame.wash[i] = u8(
+				clamp(game.regions[region].fertility / FERTILITY_MAX, 0, 1) * 255 + 0.5,
+			)
 		}
 	}
 	if mode == .Control {
@@ -479,7 +535,10 @@ game_present_map :: proc(
 	if mode == .Distance {
 		resize(&frame.wash, RENDER_TERRAIN_CELLS)
 		for &wash, i in frame.wash {
-			distance := field_sample_nearest(&game.focus_distance, cell_center(grid_pos(i, MAP_SIZE)))
+			distance := field_sample_nearest(
+				&game.focus_distance,
+				cell_center(grid_pos(i, MAP_SIZE)),
+			)
 			wash = u8(255 * max(0, 1 - distance / DISTANCE_WASH_RANGE) + 0.5)
 		}
 	}
@@ -535,7 +594,10 @@ card_breakdown :: proc(card: ^Card, tally: ^Report_Tally, total: string) -> Mayb
 			value = fmt.tprintf("%.0f%%", 100 * factor.value)
 		}
 		if factor.op == .Scale do value = fmt.tprintf("x %s", value)
-		append(&breakdown.terms, Card_Term{strings.clone(string(factor.label[:]), context.temp_allocator), value})
+		append(
+			&breakdown.terms,
+			Card_Term{strings.clone(string(factor.label[:]), context.temp_allocator), value},
+		)
 	}
 	if append(&card.breakdowns, breakdown) == 0 do return nil
 	return len(card.breakdowns) - 1
@@ -543,7 +605,14 @@ card_breakdown :: proc(card: ^Card, tally: ^Report_Tally, total: string) -> Mayb
 
 // A slot's tile, its menu added to the card
 @(private = "file")
-card_slot_tile :: proc(game: ^Game, card: ^Card, town_id: Piece_Id, slot: int) -> (tile: Card_Tile) {
+card_slot_tile :: proc(
+	game: ^Game,
+	card: ^Card,
+	town_id: Piece_Id,
+	slot: int,
+) -> (
+	tile: Card_Tile,
+) {
 	piece := slot_map_get(&game.pieces, town_id)
 	town := &piece.town
 	allows := town.building_orders[slot]
@@ -565,7 +634,11 @@ card_slot_tile :: proc(game: ^Game, card: ^Card, town_id: Piece_Id, slot: int) -
 			tile.project = "Demolishing"
 		} else {
 			target := &game.building_kinds[project.kind]
-			tile.project = fmt.tprintf("%s (%.0f)", name_to_string(&target.name), math.ceil(project.turns_left))
+			tile.project = fmt.tprintf(
+				"%s (%.0f)",
+				name_to_string(&target.name),
+				math.ceil(project.turns_left),
+			)
 		}
 		append(
 			&menu.actions,
@@ -587,8 +660,18 @@ card_slot_tile :: proc(game: ^Game, card: ^Card, town_id: Piece_Id, slot: int) -
 					label = label,
 					detail = cost_of(kind),
 					enabled = k in allows.buildable,
-					breakdown = card_building_breakdown(game, card, kind, kind.food + kind.food_fertility * town.fertility),
-					order = Town_Order{town = town_id, slot = slot, action = .Build, kind = Building_Kind_Id(k)},
+					breakdown = card_building_breakdown(
+						game,
+						card,
+						kind,
+						kind.food + kind.food_fertility * town.fertility,
+					),
+					order = Town_Order {
+						town = town_id,
+						slot = slot,
+						action = .Build,
+						kind = Building_Kind_Id(k),
+					},
 				},
 			)
 		}
@@ -611,7 +694,12 @@ card_slot_tile :: proc(game: ^Game, card: ^Card, town_id: Piece_Id, slot: int) -
 
 // Food is given: it depends on the town
 @(private = "file")
-card_building_breakdown :: proc(game: ^Game, card: ^Card, kind: ^Building_Kind, food: f32) -> Maybe(int) {
+card_building_breakdown :: proc(
+	game: ^Game,
+	card: ^Card,
+	kind: ^Building_Kind,
+	food: f32,
+) -> Maybe(int) {
 	breakdown := Card_Breakdown {
 		description = description_to_string(&kind.description),
 	}
@@ -639,7 +727,12 @@ card_building_breakdown :: proc(game: ^Game, card: ^Card, kind: ^Building_Kind, 
 }
 
 @(private = "file")
-tally_add :: proc(breakdowns: ^[dynamic; $N]Card_Breakdown, terms: []Card_Term, total := "", note := "") -> Maybe(int) {
+tally_add :: proc(
+	breakdowns: ^[dynamic; $N]Card_Breakdown,
+	terms: []Card_Term,
+	total := "",
+	note := "",
+) -> Maybe(int) {
 	breakdown := Card_Breakdown {
 		note  = note,
 		total = total,
@@ -656,7 +749,12 @@ card_note :: proc(card: ^Card, note: string) -> Maybe(int) {
 }
 
 @(private = "file")
-card_tally_field :: proc(card: ^Card, label: string, tally: ^Report_Tally, total: string) -> Card_Field {
+card_tally_field :: proc(
+	card: ^Card,
+	label: string,
+	tally: ^Report_Tally,
+	total: string,
+) -> Card_Field {
 	if len(tally.factors) == 0 do return {label = label, value = total}
 	return {label = label, value = total, breakdown = card_breakdown(card, tally, total)}
 }
@@ -680,7 +778,15 @@ card_report :: proc(card: ^Card, report: ^Report) {
 	}
 }
 
-game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
+// Reporting: the AI report is shown
+game_cards :: proc(
+	game: ^Game,
+	ai: ^Game_AI,
+	focus: Piece_Id,
+	tab: Card_Tab,
+	reporting: bool,
+	cards: ^Cards,
+) {
 	cards^ = {}
 
 	status := &cards.status
@@ -689,7 +795,10 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 	append(&status.fields, Card_Field{label = "Playing", value = faction_title(game, game.player)})
 	{
 		faction := &game.factions[game.player]
-		append(&status.fields, Card_Field{label = "Treasury", value = compact_number(f64(faction.treasury))})
+		append(
+			&status.fields,
+			Card_Field{label = "Treasury", value = compact_number(f64(faction.treasury))},
+		)
 		net := faction.income - faction.upkeep
 		append(
 			&status.fields,
@@ -700,12 +809,18 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				fill_origin = 0.5,
 				breakdown = tally_add(
 					&status.breakdowns,
-					{{"Income", fmt.tprintf("%.1f", faction.income)}, {"Upkeep", fmt.tprintf("%+.1f", -faction.upkeep)}},
+					{
+						{"Income", fmt.tprintf("%.1f", faction.income)},
+						{"Upkeep", fmt.tprintf("%+.1f", -faction.upkeep)},
+					},
 					fmt.tprintf("%+.1f", net),
 				),
 			},
 		)
-		append(&status.fields, Card_Field{label = "Food store", value = compact_number(f64(faction.food_store))})
+		append(
+			&status.fields,
+			Card_Field{label = "Food store", value = compact_number(f64(faction.food_store))},
+		)
 		food_net := faction.food_sent - faction.food_taken
 		append(
 			&status.fields,
@@ -716,7 +831,10 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				fill_origin = 0.5,
 				breakdown = tally_add(
 					&status.breakdowns,
-					{{"Sent", fmt.tprintf("%.1f", faction.food_sent)}, {"Taken", fmt.tprintf("%+.1f", -faction.food_taken)}},
+					{
+						{"Sent", fmt.tprintf("%.1f", faction.food_sent)},
+						{"Taken", fmt.tprintf("%+.1f", -faction.food_taken)},
+					},
 					fmt.tprintf("%+.1f", food_net),
 				),
 			},
@@ -731,12 +849,102 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				value = fmt.tprintf("%.0f%%", stability),
 				fill = stability / 100,
 				graded = true,
-				breakdown = card_note(status, "Its characters' loyalty, weighted by their influence"),
+				breakdown = card_note(
+					status,
+					"Its characters' loyalty, weighted by their influence",
+				),
 			},
 		)
 	}
-	append(&status.actions, Card_Action{"End turn", Game_Order(End_Turn_Order{}), game.endable})
-	append(&status.actions, Card_Action{"Court", Game_Ask.Court, true})
+	playing := ai.side == game.player
+	append(&status.actions, Card_Action{"End turn", Game_Order(End_Turn_Order{}), game.endable, 0})
+	append(
+		&status.actions,
+		Card_Action{playing ? "Stop AI" : "AI turn", Game_Ask.AI_Turn, true, 0},
+	)
+	append(&status.actions, Card_Action{"Court", Game_Ask.Court, true, 1})
+	append(
+		&status.fields,
+		Card_Field{label = "AI", value = playing ? AI_RULE_TITLES[ai.rule] : "Off"},
+	)
+	append(&status.actions, Card_Action{"AI report", Game_Ask.AI_Report, true, 1})
+
+	// The AI report: every plan of its last think, the chosen first, then by score, those given up last
+	if reporting {
+		think := &ai.thinks[ai.decided]
+		report := &cards.ai_report
+		report.title = fmt.tprintf("AI plans of %s", faction_title(game, think.asked_for))
+		report.decision = AI_RULE_TITLES[ai.rule]
+		Listed :: struct {
+			group: int,
+			score: f32,
+			plan:  int,
+		}
+		listed := make([dynamic]Listed, 0, len(think.plans), context.temp_allocator)
+		for plan, p in think.plans {
+			group := plan.selection == .Chosen ? 0 : plan.selection == .Given_Up ? 2 : 1
+			append(&listed, Listed{group, plan.score, p})
+		}
+		slice.sort_by(
+			listed[:],
+			proc(a, b: Listed) -> bool {return(
+					a.group != b.group ? a.group < b.group : a.score > b.score \
+				)},
+		)
+		for entry in listed {
+			plan := &think.plans[entry.plan]
+			goal := &think.goals[plan.goal]
+			target := slot_map_get(&game.pieces, goal.target)
+			army := slot_map_get(&game.pieces, think.armies[plan.army].piece)
+			if target == nil || army == nil do continue
+			row := AI_Report_Row {
+				goal   = fmt.tprintf(
+					"%s %s",
+					AI_TEMPLATE_TITLES[goal.template],
+					game_piece_title(target),
+				),
+				army   = game_piece_title(army),
+				chosen = plan.selection == .Chosen,
+			}
+			switch {
+			case slice.contains(
+				     ai.ordered[:],
+				     AI_Plan_Key{goal.template, goal.target, think.armies[plan.army].piece},
+			     ):
+				row.order = entry.plan == think.acting && game.under_way != {} ? .Under_Way : .Done
+			case row.chosen:
+				row.order = .Pending
+			}
+			switch plan.selection {
+			case .Chosen:
+				row.status = fmt.tprintf("Chosen, %s", AI_PLAN_RULE_TITLES[plan.rule])
+			case .Given_Up:
+				row.status =
+					plan.distance == math.INF_F32 ? "Given up: no way there" : fmt.tprintf("Given up: rested odds %.0f%%", 100 * plan.rested_odds)
+			case .Not_Worth:
+				row.status = "Not worth it"
+			case .Goal_Taken:
+				row.status = "Target already chosen"
+			case .Army_Taken:
+				row.status = "Army busy on a better plan"
+			}
+			if plan.selection != .Given_Up {
+				terms := [?]Card_Term {
+					{"Coin", fmt.tprintf("%.1f", goal.value_terms[.Coin])},
+					{"Food", fmt.tprintf("%+.1f", goal.value_terms[.Food])},
+					{"Odds", fmt.tprintf("%+.1f", plan.terms[.Odds])},
+					{"Distance", fmt.tprintf("%+.1f", plan.terms[.Distance])},
+					{"Continuity", fmt.tprintf("%+.1f", plan.terms[.Continuity])},
+				}
+				score := fmt.tprintf("%.1f", plan.score)
+				row.score = {
+					value     = score,
+					breakdown = tally_add(&report.breakdowns, terms[:], score),
+				}
+			}
+			append(&report.rows, row)
+		}
+	}
 
 	// The court
 	{
@@ -763,12 +971,15 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				disposition = fmt.tprint(character.disposition),
 				character   = Character_Id(c),
 			}
-			row.rank_breakdown = tally_add(&court.breakdowns, {{"Rank", fmt.tprint(character.rank)}})
+			row.rank_breakdown = tally_add(
+				&court.breakdowns,
+				{{"Rank", fmt.tprint(character.rank)}},
+			)
 			wealth: f32
 			row.stats[1] = {
-				label  = "Influence",
-				value  = fmt.tprintf("%.0f", character.influence),
-				fill   = character.influence / influence_max,
+				label = "Influence",
+				value = fmt.tprintf("%.0f", character.influence),
+				fill  = character.influence / influence_max,
 			}
 			row.stats[2] = {
 				label  = "Loyalty",
@@ -782,16 +993,27 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				row.office_id = character.office
 				wealth = office.wealth
 				// Wealth only when it adds
-				target := [2]Card_Term{{"Office", fmt.tprintf("%.0f", kind.influence)}, {"Wealth", fmt.tprintf("%+.0f", character.influence_target - kind.influence)}}
+				target := [2]Card_Term {
+					{"Office", fmt.tprintf("%.0f", kind.influence)},
+					{"Wealth", fmt.tprintf("%+.0f", character.influence_target - kind.influence)},
+				}
 				terms := target[:math.round(character.influence_target - kind.influence) > 0 ? 2 : 1]
-				row.stats[1].breakdown = tally_add(&court.breakdowns, terms, fmt.tprintf("%.0f", character.influence_target))
+				row.stats[1].breakdown = tally_add(
+					&court.breakdowns,
+					terms,
+					fmt.tprintf("%.0f", character.influence_target),
+				)
 				switch office.dismissal {
 				case .For_Life:
 					row.undismissable = "Held for life"
 				case .Not_Dismissable:
 					row.undismissable = "Not dismissable"
 				case .In_Term:
-					row.undismissable = fmt.tprintf("Term: %d %s left", office.term_left, office.term_left == 1 ? "turn" : "turns")
+					row.undismissable = fmt.tprintf(
+						"Term: %d %s left",
+						office.term_left,
+						office.term_left == 1 ? "turn" : "turns",
+					)
 				case .Not_Now:
 					row.undismissable = "Not now"
 				case .Allowed:
@@ -799,7 +1021,12 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					if .Feudal in kind.flags {
 						row.dismiss_breakdown = tally_add(
 							&court.breakdowns,
-							{{"Each feudal holder", fmt.tprintf("-%d loyalty", FEUDAL_DISMISSAL_LOYALTY)}},
+							{
+								{
+									"Each feudal holder",
+									fmt.tprintf("-%d loyalty", FEUDAL_DISMISSAL_LOYALTY),
+								},
+							},
 						)
 					}
 				}
@@ -835,7 +1062,8 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			court.rank_max = max(court.rank_max, kind.rank)
 			traits := make([dynamic]string, context.temp_allocator)
 			for flag in kind.flags do if flag != .Dismissable do append(&traits, fmt.tprint(flag))
-			holder_name := office.holder != 0 ? name_to_string(&game.characters[office.holder].name) : ""
+			holder_name :=
+				office.holder != 0 ? name_to_string(&game.characters[office.holder].name) : ""
 			terms := [3]Card_Term {
 				{"Rank", fmt.tprint(kind.rank)},
 				{"Influence", fmt.tprintf("%.0f", kind.influence)},
@@ -851,7 +1079,11 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					filling = office_id == game.appointment.office,
 					traits = strings.join(traits[:], ", ", context.temp_allocator),
 					id = office_id,
-					breakdown = tally_add(&court.breakdowns, terms[:], note = name_to_string(&office.title)),
+					breakdown = tally_add(
+						&court.breakdowns,
+						terms[:],
+						note = name_to_string(&office.title),
+					),
 				},
 			)
 		}
@@ -867,15 +1099,26 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				character := &game.characters[candidate.character]
 				office_title := "None"
 				if office := slot_map_get(&game.offices, character.office); office != nil do office_title = name_to_string(&office.title)
-				passes := fmt.tprintf("%d, -%d loyalty each", candidate.passed_over, PASSED_OVER_LOYALTY)
-				terms := [3]Card_Term{{"Office", office_title}, {"Rank", fmt.tprint(character.rank)}, {"Passes over", passes}}
+				passes := fmt.tprintf(
+					"%d, -%d loyalty each",
+					candidate.passed_over,
+					PASSED_OVER_LOYALTY,
+				)
+				terms := [3]Card_Term {
+					{"Office", office_title},
+					{"Rank", fmt.tprint(character.rank)},
+					{"Passes over", passes},
+				}
 				append(
 					&court.vacancy.candidates,
 					Court_Candidate {
 						character = candidate.character,
 						name = name_to_string(&character.name),
 						order = {game.appointment.office, candidate.character},
-						breakdown = tally_add(&court.breakdowns, terms[:candidate.passed_over > 0 ? 3 : 2]),
+						breakdown = tally_add(
+							&court.breakdowns,
+							terms[:candidate.passed_over > 0 ? 3 : 2],
+						),
 					},
 				)
 			}
@@ -919,11 +1162,29 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 			type_field.click = main.click
 		}
 		append(&card.fields, type_field)
-		append(&card.fields, Card_Field{label = "Faction", value = faction_title(game, piece.owner)})
-		append(&card.fields, Card_Field{label = "Culture", value = name_to_string(&game.cultures[piece.culture].name)})
-		if title := slot_map_get(&game.offices, army.title); is_army && title != nil && title.army == focus {
+		append(
+			&card.fields,
+			Card_Field{label = "Faction", value = faction_title(game, piece.owner)},
+		)
+		append(
+			&card.fields,
+			Card_Field {
+				label = "Culture",
+				value = name_to_string(&game.cultures[piece.culture].name),
+			},
+		)
+		if title := slot_map_get(&game.offices, army.title);
+		   is_army && title != nil && title.army == focus {
 			if piece.owner == game.player {
-				append(&card.buttons, Card_Action{"Demobilise", Game_Order(Title_Order{army.title, .Demobilise}), true})
+				append(
+					&card.buttons,
+					Card_Action {
+						"Demobilise",
+						Game_Order(Title_Order{army.title, .Demobilise}),
+						true,
+						0,
+					},
+				)
 			}
 		}
 		predicted := &game.movement.prediction
@@ -988,26 +1249,47 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				append(&breakdown.terms, Card_Term{"Scope", fmt.tprint(army_type.scope)})
 				append(
 					&breakdown.terms,
-					Card_Term{"Men", fmt.tprintf("%s of %s", men, compact_number(f64(office.men_max)))},
+					Card_Term {
+						"Men",
+						fmt.tprintf("%s of %s", men, compact_number(f64(office.men_max))),
+					},
 				)
-				append(&breakdown.terms, Card_Term{"Pay", fmt.tprintf("%.1f a turn", office.wealth)})
-				append(&breakdown.terms, Card_Term{"Proficiency", fmt.tprintf("%.0f%%", army_type.proficiency)})
-				append(&breakdown.terms, Card_Term{"Foraging", fmt.tprintf("%.0f%%", army_type.foraging)})
-				append(&breakdown.terms, Card_Term{"Agility", fmt.tprintf("%.0f", army_type.agility)})
+				append(
+					&breakdown.terms,
+					Card_Term{"Pay", fmt.tprintf("%.1f a turn", office.wealth)},
+				)
+				append(
+					&breakdown.terms,
+					Card_Term{"Proficiency", fmt.tprintf("%.0f%%", army_type.proficiency)},
+				)
+				append(
+					&breakdown.terms,
+					Card_Term{"Foraging", fmt.tprintf("%.0f%%", army_type.foraging)},
+				)
+				append(
+					&breakdown.terms,
+					Card_Term{"Agility", fmt.tprintf("%.0f", army_type.agility)},
+				)
 				for trait in army_type.traits {
-					append(&breakdown.terms, Card_Term{"Trait", name_to_string(&game.army_traits[trait].name)})
+					append(
+						&breakdown.terms,
+						Card_Term{"Trait", name_to_string(&game.army_traits[trait].name)},
+					)
 				}
 				action := Card_Menu_Action {
-					label   = name_to_string(&kind.name),
-					detail  = detail,
+					label = name_to_string(&kind.name),
+					detail = detail,
 					enabled = office.can_mobilise,
-					order   = Title_Order{office = office_id, action = .Mobilise},
+					order = Title_Order{office = office_id, action = .Mobilise},
 				}
 				if append(&card.breakdowns, breakdown) > 0 do action.breakdown = len(card.breakdowns) - 1
 				append(&mobilise.actions, action)
 			}
 			if len(mobilise.actions) > 0 && append(&card.menus, mobilise) > 0 {
-				append(&card.buttons, Card_Action{"Mobilise", Card_Menu_Id(len(card.menus) - 1), true})
+				append(
+					&card.buttons,
+					Card_Action{"Mobilise", Card_Menu_Id(len(card.menus) - 1), true, 0},
+				)
 			}
 		}
 
@@ -1044,7 +1326,10 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					"Food",
 					town.food,
 					town.food_eaten,
-					{{"Produced", fmt.tprintf("%.1f", town.food)}, {"Eaten", fmt.tprintf("%+.1f", -town.food_eaten)}},
+					{
+						{"Produced", fmt.tprintf("%.1f", town.food)},
+						{"Eaten", fmt.tprintf("%+.1f", -town.food_eaten)},
+					},
 				},
 				{
 					"Income",
@@ -1060,7 +1345,10 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					"Public order",
 					town.public_order,
 					town.unrest,
-					{{"Order", fmt.tprintf("%.1f", town.public_order)}, {"Unrest", fmt.tprintf("%+.1f", -town.unrest)}},
+					{
+						{"Order", fmt.tprintf("%.1f", town.public_order)},
+						{"Unrest", fmt.tprintf("%+.1f", -town.unrest)},
+					},
 				},
 			}
 			for balance in balances {
@@ -1072,7 +1360,11 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 						value = fmt.tprintf("%+.1f", net),
 						fill = 0.5 + 0.5 * net / max(balance.supply, balance.demand, 1e-6),
 						fill_origin = 0.5,
-						breakdown = tally_add(&card.breakdowns, balance.terms, fmt.tprintf("%+.1f", net)),
+						breakdown = tally_add(
+							&card.breakdowns,
+							balance.terms,
+							fmt.tprintf("%+.1f", net),
+						),
 					},
 				)
 			}
@@ -1133,13 +1425,18 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 						graded = true,
 						breakdown = tally_add(
 							&card.breakdowns,
-							{{"Men", compact_number(f64(army.men))}, {"Full strength", compact_number(f64(army.men_max))}},
+							{
+								{"Men", compact_number(f64(army.men))},
+								{"Full strength", compact_number(f64(army.men_max))},
+							},
 						),
 					},
 				)
 				// Percentages: the bar is out of 100
 				// A predicted march, else its turn end
-				readiness_change := (predicting && reachable ? predicted.arrival.readiness : army.turn_end_readiness) / 100
+				readiness_change :=
+					(predicting && reachable ? predicted.arrival.readiness : army.turn_end_readiness) /
+					100
 				percents := [?]struct {
 					label:  string,
 					value:  f32,
@@ -1173,12 +1470,17 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 						graded = true,
 					},
 				)
-				append(&card.stats, Card_Field{label = "Source", value = fmt.tprint(army.supply_source)})
+				append(
+					&card.stats,
+					Card_Field{label = "Source", value = fmt.tprint(army.supply_source)},
+				)
 
 				// A predicted march's, else its turn end's
-				coming := predicting && reachable ? predicted.arrival.statuses : army.turn_end_statuses
+				coming :=
+					predicting && reachable ? predicted.arrival.statuses : army.turn_end_statuses
 				for each in army.statuses + coming {
-					change := each not_in army.statuses ? Card_Change.Coming : each not_in coming ? .Going : .None
+					change :=
+						each not_in army.statuses ? Card_Change.Coming : each not_in coming ? .Going : .None
 					append(&card.statuses, Card_Part{text = fmt.tprint(each), change = change})
 				}
 				if piece.inside != {} do append(&card.statuses, Card_Part{text = "Garrisoning"})
@@ -1192,7 +1494,13 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 					if modifiers.agility != 0 do append(&described.terms, Card_Term{"Agility", fmt.tprintf("%+.0f", modifiers.agility)})
 					if modifiers.movement != 0 do append(&described.terms, Card_Term{"Movement", fmt.tprintf("%+.0f", modifiers.movement)})
 					if modifiers.readiness_recovery != 0 {
-						append(&described.terms, Card_Term{"Readiness recovery", fmt.tprintf("%+.0f", modifiers.readiness_recovery)})
+						append(
+							&described.terms,
+							Card_Term {
+								"Readiness recovery",
+								fmt.tprintf("%+.0f", modifiers.readiness_recovery),
+							},
+						)
 					}
 					for prevented in modifiers.prevent_status do append(&described.terms, Card_Term{"Prevents", fmt.tprint(prevented)})
 					part := Card_Part {
@@ -1212,7 +1520,11 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 	if predicting.marcher == focus && predicting.runs > 0 && marcher != nil && target != nil {
 		card := &cards.focus
 		card.aimed_title = fmt.tprintf("Against %s", game_piece_title(target))
-		power := fmt.tprintf("%.1f against %.1f", predicting.power[0].total, predicting.power[1].total)
+		power := fmt.tprintf(
+			"%.1f against %.1f",
+			predicting.power[0].total,
+			predicting.power[1].total,
+		)
 		append(&card.aimed, Card_Field{label = "Power", value = power})
 		for share, forecast in predicting.outcomes {
 			if share == 0 do continue
@@ -1231,8 +1543,14 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 
 	result := &open.result
 	report := &result.report
-	names := [2]string{report_string(report, result.names[0]), report_string(report, result.names[1])}
-	pieces := [2]^Piece_Data{slot_map_get(&game.pieces, open.actor), slot_map_get(&game.pieces, open.target)}
+	names := [2]string {
+		report_string(report, result.names[0]),
+		report_string(report, result.names[1]),
+	}
+	pieces := [2]^Piece_Data {
+		slot_map_get(&game.pieces, open.actor),
+		slot_map_get(&game.pieces, open.target),
+	}
 	attacker := result.attacker
 	defender := 1 - attacker
 	kind := report_string(report, result.kind_title)
@@ -1277,23 +1595,55 @@ game_cards :: proc(game: ^Game, focus: Piece_Id, tab: Card_Tab, cards: ^Cards) {
 				}
 				append(fields, Card_Field{label = "Commander", value = fmt.tprint(temperament)})
 				append(fields, men)
-				append(fields, Card_Field{label = "Proficiency", value = fmt.tprintf("%.0f%%", army.proficiency)})
-				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)})
+				append(
+					fields,
+					Card_Field {
+						label = "Proficiency",
+						value = fmt.tprintf("%.0f%%", army.proficiency),
+					},
+				)
+				append(
+					fields,
+					Card_Field{label = "Readiness", value = fmt.tprintf("%.0f%%", army.readiness)},
+				)
 				append(fields, card_tally_field(card, "Power", &side.power, power))
 			case .Fall_Back:
 				if !result.caught || side_index == result.winner do continue
 				men := compact_number(f64(side.pursuit_men.total))
 				append(fields, card_tally_field(card, "Men", &side.pursuit_men, men))
-				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f%%", side.pursuit_readiness)})
+				append(
+					fields,
+					Card_Field {
+						label = "Readiness",
+						value = fmt.tprintf("%+.0f%%", side.pursuit_readiness),
+					},
+				)
 			case:
 				men := compact_number(f64(side.men.total))
-				append(fields, Card_Field{label = "Posture", value = report_string(report, side.posture)})
+				append(
+					fields,
+					Card_Field{label = "Posture", value = report_string(report, side.posture)},
+				)
 				append(fields, card_tally_field(card, "Men", &side.men, men))
-				append(fields, Card_Field{label = "Readiness", value = fmt.tprintf("%+.0f%%", side.readiness)})
+				append(
+					fields,
+					Card_Field {
+						label = "Readiness",
+						value = fmt.tprintf("%+.0f%%", side.readiness),
+					},
+				)
 				if side.dissolved do append(fields, Card_Field{label = "Fate", value = "Dissolved"})
 			}
 		}
 	}
 
-	append(&card.actions, Card_Action{"Next", Game_Order(Next_Order{}), game.movement.marches[.Leader].piece == {}})
+	append(
+		&card.actions,
+		Card_Action {
+			"Next",
+			Game_Order(Next_Order{}),
+			game.movement.marches[.Leader].piece == {},
+			0,
+		},
+	)
 }

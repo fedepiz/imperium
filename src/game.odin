@@ -1473,7 +1473,6 @@ game_load :: proc(
 }
 
 // Parsed, with its path for errors
-@(private = "file")
 scenario_file :: proc(scenario_name, file: string) -> (root: tbl.Row, path: string) {
 	path = fmt.tprintf("assets/scenarios/%s/%s", scenario_name, file)
 	source, _ := os.read_entire_file_from_path(path, context.temp_allocator)
@@ -1482,7 +1481,6 @@ scenario_file :: proc(scenario_name, file: string) -> (root: tbl.Row, path: stri
 }
 
 // Every key one of T's fields or an extra, as a mistyped key would read as 0, and every required key given
-@(private = "file")
 row_check :: proc(row: tbl.Row, $T: typeid, path: string, extra: []string = {}, required: []string = {}) {
 	for key in row.children {
 		known := reflect.struct_field_by_name(T, key.key).type != nil || slice.contains(extra, key.key)

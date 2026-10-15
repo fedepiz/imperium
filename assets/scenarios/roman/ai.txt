@@ -1,0 +1,21 @@
+# How the AI weighs its plans. One record, every key in order:
+#
+# ai = {
+#   coin = 1           required. Value per coin a target makes a turn, treasury and local wealth
+#   food = 0.5         required. Value per food a target makes a turn
+#   distance = 0.05    required. Score lost per movement to the target
+#   continuity = 2     required. Score added to a plan chosen at the last think
+#   give_up = 0.2      required. Rested odds of winning below which a plan is given up, 0..1
+#   strike = 0.6       required. Odds of winning on arrival from which an army strikes, 0..1
+#   runs = 32          required. Battles fought for each of those odds
+# }
+
+ai = {
+	coin = 1
+	food = 0.5
+	distance = 0.05
+	continuity = 2
+	give_up = 0.2
+	strike = 0.6
+	runs = 32
+}

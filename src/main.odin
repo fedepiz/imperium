@@ -19,6 +19,7 @@ GLOBAL: struct {
 	game:          Game,
 	game_events:   [dynamic; GAME_EVENTS_MAX]Game_Event,
 	questions:     Game_Questions,
+	ai:            Game_AI,
 	// Each held by one thread at a time, handed over by index
 	presentations: [3]Presentation,
 	// Between the two, under its mutex
@@ -46,6 +47,10 @@ Game_Inputs :: struct {
 	tab:      Card_Tab,
 	// Taken by the next step; a new one waits until it is
 	order:    Game_Order,
+	// Taken by the next step: starts or stops the AI on the side to move
+	ai_turn:   bool,
+	// Shown: worth presenting
+	ai_report: bool,
 }
 
 // Everything the main thread draws. Nothing in it points into the game
@@ -62,7 +67,7 @@ Presentation :: struct {
 }
 
 @(private = "file")
-present :: proc(game: ^Game, inputs: Game_Inputs, orders: int, presentation: ^Presentation) {
+present :: proc(game: ^Game, ai: ^Game_AI, inputs: Game_Inputs, orders: int, presentation: ^Presentation) {
 	mem.arena_free_all(&presentation.arena)
 	context.temp_allocator = mem.arena_allocator(&presentation.arena)
 	presentation.terrain = {}
@@ -70,7 +75,7 @@ present :: proc(game: ^Game, inputs: Game_Inputs, orders: int, presentation: ^Pr
 	clear(&presentation.pawn_pieces)
 	game_present_map(game, inputs.focus, inputs.pointer, inputs.map_mode, &presentation.terrain)
 	game_present_pawns(game, inputs.focus, &presentation.pawns, &presentation.pawn_pieces)
-	game_cards(game, inputs.focus, inputs.tab, &presentation.cards)
+	game_cards(game, ai, inputs.focus, inputs.tab, inputs.ai_report, &presentation.cards)
 	presentation.step = game.step
 	presentation.orders = orders
 }
@@ -100,19 +105,44 @@ game_thread_run :: proc(logs_rules: bool) {
 		running := shared.running
 		inputs := shared.inputs
 		shared.inputs.order = nil
+		shared.inputs.ai_turn = false
 		sync.mutex_unlock(&shared.mutex)
 		if !running do return
 		if inputs.order != nil do orders += 1
 
+		// While the AI plays, its orders replace the player's. It decides from the last batch's answers, and may ask in this one
+		ai := &GLOBAL.ai
+		game := &GLOBAL.game
+		if inputs.ai_turn {
+			ai.side = ai.side == 0 ? game.player : 0
+			ai.rule = .None
+			clear(&ai.ordered)
+		}
+		if ai.side != game.player do ai.side = 0
+		awaiting := game.under_way == {} || game.under_way & {.March, .Ending} == {} && .Battle in game.under_way
+		if ai.side != 0 {
+			player_order := inputs.order
+			inputs.order = nil
+			if awaiting {
+				ai_decide(ai, game, &GLOBAL.questions)
+				inputs.order = ai.order
+			}
+			// Once it waits, the turn is the player's to end
+			if ai.rule == .Wait do inputs.order = player_order
+		}
+
 		clear(&GLOBAL.questions.moves)
+		clear(&GLOBAL.questions.battles)
+		clear(&GLOBAL.questions.floods)
 		if inputs.hover.piece != {} do append(&GLOBAL.questions.moves, Move_Question{order = inputs.hover, drawn = true})
+		if ai.side != 0 && awaiting && ai.rule == .Ask do ai_ask(ai, game, &GLOBAL.questions)
 		for _ in 0 ..< steps {
 			clear(&GLOBAL.game_events)
 			game_step(&GLOBAL.game, inputs.focus, inputs.order, &GLOBAL.questions, &GLOBAL.game_events)
 			inputs.order = nil
 			if logs_rules do rules_log_events(&GLOBAL.game, GLOBAL.game_events[:])
 		}
-		present(&GLOBAL.game, inputs, orders, &GLOBAL.presentations[holding])
+		present(game, ai, inputs, orders, &GLOBAL.presentations[holding])
 
 		sync.mutex_lock(&shared.mutex)
 		holding, shared.ready = shared.ready, holding
@@ -222,6 +252,7 @@ run_headless :: proc(options: Options) {
 		fmt.eprintln("Failed to load game")
 		return
 	}
+	ai_load(&GLOBAL.ai, "roman")
 	free_all(context.temp_allocator)
 	if options.rules_log != "" do rules_log_begin(&GLOBAL.game)
 
@@ -230,7 +261,7 @@ run_headless :: proc(options: Options) {
 	input: Game_Order
 	command: Command
 	for commands_next(&command) {
-		present(&GLOBAL.game, {}, 0, presentation)
+		present(&GLOBAL.game, &GLOBAL.ai, {}, 0, presentation)
 		steps := command_apply(presentation, command, &input, &GLOBAL.camera)
 		for _ in 0 ..< steps {
 			clear(&GLOBAL.game_events)
@@ -313,6 +344,7 @@ run_windowed :: proc(options: Options) {
 			fmt.eprintln("Failed to load game")
 			return
 		}
+		ai_load(&GLOBAL.ai, "roman")
 
 		renderer_terrain_build(&renderer, geography, map_style, marks)
 	}
@@ -335,7 +367,7 @@ run_windowed :: proc(options: Options) {
 
 	for &each in GLOBAL.presentations do mem.arena_init(&each.arena, each.text[:])
 	reading := 0
-	present(&GLOBAL.game, {}, 0, &GLOBAL.presentations[reading])
+	present(&GLOBAL.game, &GLOBAL.ai, {}, 0, &GLOBAL.presentations[reading])
 	GLOBAL.game_thread.running = true
 	GLOBAL.game_thread.ready = 2
 	if THREAD_ARENA.data == nil do mem.arena_init(&THREAD_ARENA, THREAD_MEMORY[:])
@@ -356,6 +388,7 @@ run_windowed :: proc(options: Options) {
 	focus: Piece_Id
 	cards_view: Cards_View
 	game_input: Game_Order
+	ui_seconds: f32
 	orders_given := 0
 	commands_active := options.commands != ""
 	commands_until := 0
@@ -547,6 +580,9 @@ run_windowed :: proc(options: Options) {
 				game_input = nil
 				orders_given += 1
 			}
+			if cards_view.ai_turn do inputs.ai_turn = true
+			cards_view.ai_turn = false
+			inputs.ai_report = cards_view.ai_report
 		}
 		sync.mutex_unlock(&GLOBAL.game_thread.mutex)
 
@@ -568,12 +604,14 @@ run_windowed :: proc(options: Options) {
 
 		// UI, over everything
 		ui_begin(window_size)
+		ui_seconds += dt
 		cards_ui(
 			&presentation.cards,
 			FONT_MAP,
 			FONT_CARD_TITLE,
 			map_style.paper,
 			map_style.ink,
+			ui_seconds,
 			&cards_view,
 			&game_input,
 		)

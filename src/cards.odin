@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:math"
 
 @(private = "file")
 HOT_PAPER_SHADE :: 0.9
@@ -50,6 +51,14 @@ Court_View :: struct {
 COURT_MARGIN :: [2]f32{60, 40}
 @(private = "file")
 COURT_GAP :: 24
+@(private = "file")
+AI_REPORT_GOAL_EM :: 16
+@(private = "file")
+AI_REPORT_ARMY_EM :: 11
+@(private = "file")
+AI_REPORT_ORDER_SQUARE :: 10
+@(private = "file")
+AI_REPORT_BLINK_HZ :: 2
 @(private = "file")
 COURT_ENTRY_LINES :: 3
 @(private = "file")
@@ -139,6 +148,10 @@ Cards_View :: struct {
 	tab:      Card_Tab,
 	menu:     Maybe(Card_Menu_Id),
 	court:    Court_View,
+	// Asked this frame
+	ai_turn:   bool,
+	// Shown
+	ai_report: bool,
 }
 
 @(private = "file")
@@ -151,6 +164,8 @@ Card_Theme :: struct {
 	tooltip:     UI_Style,
 	// The padding keeps the fill inside the border; its focus border is the fill
 	meter:       UI_Style,
+	// Over the map: the court, the AI report
+	window:      UI_Style,
 }
 
 @(private = "file")
@@ -168,6 +183,7 @@ cards_ui :: proc(
 	title_font: Text_Font_Id,
 	paper: [3]f32,
 	ink: [3]f32,
+	seconds: f32,
 	view: ^Cards_View,
 	input: ^Game_Order,
 ) {
@@ -220,6 +236,16 @@ cards_ui :: proc(
 			radius = 1,
 			focus_border = colors.faded_ink,
 		},
+		window = {
+			width = ui_grow(),
+			height = ui_grow(),
+			padding = [2]f32{24, 18},
+			gap = 10,
+			background = colors.paper,
+			border = colors.ink,
+			thickness = 1.5,
+			radius = 3,
+		},
 	}
 
 	asks: bit_set[Game_Ask]
@@ -240,12 +266,15 @@ cards_ui :: proc(
 
 	court := &view.court
 	if court.open do court_ui(&cards.court, theme, court, &order)
+	if view.ai_report do ai_report_ui(&cards.ai_report, theme, seconds, view)
 	if order != nil do input^ = order
 	if .Court in asks {
 		court.open = !court.open
 		court.selected = 0
 		court.office = {}
 	}
+	if .AI_Turn in asks do view.ai_turn = true
+	if .AI_Report in asks do view.ai_report = !view.ai_report
 }
 
 @(private = "file")
@@ -523,10 +552,17 @@ card_ui :: proc(
 			}
 		}
 
-		for card_action in card.actions {
-			style := action
-			style.disabled = !card_action.enabled
-			if ui_button(card_action.label, style).pressed do take(card_action.click, &asks, order, menu, court_view)
+		rows := 0
+		for card_action in card.actions do rows = max(rows, card_action.row + 1)
+		for row in 0 ..< rows {
+			if ui_row({width = ui_fit(), height = ui_fit()}) {
+				for card_action in card.actions {
+					if card_action.row != row do continue
+					style := action
+					style.disabled = !card_action.enabled
+					if ui_button(card_action.label, style).pressed do take(card_action.click, &asks, order, menu, court_view)
+				}
+			}
 		}
 
 		if card.map_modes {
@@ -638,6 +674,73 @@ graded_ink :: proc(t: f32) -> [4]f32 {
 	return t < 0.5 ? BAD_INK + (MIDDLE_INK - BAD_INK) * (2 * t) : MIDDLE_INK + (GOOD_INK - MIDDLE_INK) * (2 * t - 1)
 }
 
+// A row per plan: its goal, its army, what became of it, its score with its terms when hovered
+@(private = "file")
+ai_report_ui :: proc(report: ^AI_Report, theme: Card_Theme, seconds: f32, view: ^Cards_View) {
+	colors := theme.colors
+	// Its order: red, not chosen; empty, not ordered yet; blinking, under way; green, done
+	order_box := UI_Style {
+		width     = ui_px(AI_REPORT_ORDER_SQUARE),
+		height    = ui_px(AI_REPORT_ORDER_SQUARE),
+		border    = colors.ink,
+		thickness = 1,
+		radius    = 1,
+	}
+	blink_on := math.mod(seconds * AI_REPORT_BLINK_HZ, 1) < 0.5
+	if ui_overlay() {
+		if ui_column({width = ui_grow(), height = ui_grow(), padding = COURT_MARGIN}) {
+			if ui_panel("ai report", theme.window) {
+				if ui_row({width = ui_grow(), height = ui_fit()}) {
+					ui_label(report.title, {font = theme.title_font})
+					ui_spacer(ui_grow())
+					if ui_button("Close###ai report close", theme.button).pressed do view.ai_report = false
+				}
+				ui_label(report.decision, {text_color = colors.faded_ink})
+				// The bar's track and thumb in paper and ink
+				ui_style_push({background = colors.active_paper, border = colors.ink})
+				list := UI_Style {
+					width      = ui_grow(),
+					height     = ui_grow(),
+					gap        = FIELD_GAP,
+					background = colors.paper,
+					border     = colors.paper,
+				}
+				if ui_scroll_panel("ai report rows", list) {
+					if len(report.rows) == 0 do ui_label("No plans yet", {text_color = colors.faded_ink})
+					for &row, i in report.rows {
+						text := row.chosen ? colors.ink : colors.faded_ink
+						if ui_row({width = ui_grow(), height = ui_fit(), gap = COURT_GAP}) {
+							ui_label(row.goal, {width = ui_em(AI_REPORT_GOAL_EM), text_color = text})
+							ui_label(row.army, {width = ui_em(AI_REPORT_ARMY_EM), text_color = text})
+							box := order_box
+							switch row.order {
+							case .Not_Chosen:
+								box.background = BAD_INK
+							case .Pending:
+								box.background = colors.paper
+							case .Under_Way:
+								box.background = blink_on ? GOOD_INK : colors.paper
+							case .Done:
+								box.background = GOOD_INK
+							}
+							if ui_panel(fmt.tprintf("ai report order %d", i), box) {}
+							ui_label(row.status, {width = ui_grow(), text_color = text})
+							index, tipped := row.score.breakdown.?
+							key := tipped ? fmt.tprintf("ai report score %d", i) : ""
+							field_ui(&row.score, theme, STAT_VALUE_EM, key, "")
+							if !tipped do continue
+							if ui_tooltip(fmt.tprintf("ai report tip %d", i), ui_signal(key).hovered, theme.tooltip) {
+								breakdown_ui(&report.breakdowns[index], colors)
+							}
+						}
+					}
+				}
+				ui_style_pop()
+			}
+		}
+	}
+}
+
 @(private = "file")
 court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Game_Order) {
 	colors := theme.colors
@@ -645,16 +748,6 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 	// Hovered this frame, highlighted next
 	hovered: Character_Id
 	defer view.hovered = hovered
-	panel := UI_Style {
-		width      = ui_grow(),
-		height     = ui_grow(),
-		padding    = [2]f32{24, 18},
-		gap        = 10,
-		background = colors.paper,
-		border     = colors.ink,
-		thickness  = 1.5,
-		radius     = 3,
-	}
 	button := theme.button
 	tooltip := theme.tooltip
 	// The portrait as tall as the entry's lines
@@ -703,7 +796,7 @@ court_ui :: proc(court: ^Court, theme: Card_Theme, view: ^Court_View, order: ^Ga
 
 	if ui_overlay() {
 		if ui_column({width = ui_grow(), height = ui_grow(), padding = COURT_MARGIN}) {
-			if ui_panel("court", panel) {
+			if ui_panel("court", theme.window) {
 				if ui_row({width = ui_grow(), height = ui_fit()}) {
 					ui_label(court.title, {font = title_font})
 					ui_spacer(ui_grow())
